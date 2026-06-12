@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# -------------------------------------------------------------------
+# Generated datasets — large files produced by gerador.py.
+# Re-generate with:  python gerador.py
+# -------------------------------------------------------------------
+*.jsonl
+
+# -------------------------------------------------------------------
+# Trained weights — produced by training_loop.py.
+# Re-generate with:  python training_loop.py
+# To track a specific checkpoint, pin it explicitly:
+#   git add -f pesos_domino_sl.npz
+# -------------------------------------------------------------------
+*.npz
+
+# Logs / profiling
+*.log
+*.prof

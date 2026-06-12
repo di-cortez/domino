@@ -1,0 +1,96 @@
+import random
+
+# ==========================================
+# 1. MIDDLEWARE / INTERFACES
+# ==========================================
+class Agente:
+    """Interface base para todos os jogadores."""
+    def escolher_jogada(self, estado, jogadas_legais):
+        raise NotImplementedError("Todos os agentes devem implementar este método.")
+
+class GerenciadorPartida:
+    """Controla o fluxo do jogo entre o Motor e os Agentes."""
+    def __init__(self, motor, agentes):
+        if len(agentes) != motor.num_jogadores:
+            raise ValueError("O número de agentes deve ser igual ao número de jogadores.")
+        self.motor = motor
+        self.agentes = agentes
+
+    def jogar_turno(self):
+        estado = self.motor._obter_estado()
+        jogador_atual = estado["jogador_atual"]
+        jogadas_legais = self.motor.acoes_validas(jogador_atual)
+        
+        agente_da_vez = self.agentes[jogador_atual]
+        acao_escolhida = agente_da_vez.escolher_jogada(estado, jogadas_legais)
+        
+        novo_estado, fim_de_jogo, info = self.motor.step(acao_escolhida)
+        return fim_de_jogo, info
+
+    def jogar_partida_completa(self):
+        fim_de_jogo = False
+        info = {}
+        while not fim_de_jogo:
+            fim_de_jogo, info = self.jogar_turno()
+        return info
+
+# ==========================================
+# 2. AGENTES HEURÍSTICOS
+# ==========================================
+class AgenteAleatorio(Agente):
+    """Escolhe uma jogada válida de forma puramente aleatória."""
+    def escolher_jogada(self, estado, jogadas_legais):
+        # Se a única ação for passar (None) ou comprar, random.choice lidará com isso
+        return random.choice(jogadas_legais)
+
+class AgenteGuloso(Agente):
+    """Escolhe a peça com a maior soma de pontos (pips) para esvaziar a mão pesada."""
+    def escolher_jogada(self, estado, jogadas_legais):
+        # Se não há jogadas de colocação de peça, retorna a ação obrigatória
+        if jogadas_legais == [None] or jogadas_legais == [("COMPRAR", None)]:
+            return jogadas_legais[0]
+        
+        melhor_jogada = None
+        maior_pontuacao = -1
+        
+        for jogada in jogadas_legais:
+            peca = jogada[0]
+            pontuacao = peca[0] + peca[1]
+            if pontuacao > maior_pontuacao:
+                maior_pontuacao = pontuacao
+                melhor_jogada = jogada
+                
+        return melhor_jogada
+
+# ==========================================
+# 3. EXECUÇÃO DA PARTIDA
+# ==========================================
+if __name__ == "__main__":
+    from middleware.motor_domino import MotorDomino
+    
+    print("Iniciando MotorDomino...")
+    motor = MotorDomino(num_jogadores=2)
+    
+    print("Instanciando Agentes (Guloso vs Aleatório)...")
+    agente0 = AgenteGuloso()
+    agente1 = AgenteAleatorio()
+    
+    print("Configurando Gerenciador de Partida (Middleware)...")
+    gerenciador = GerenciadorPartida(motor, [agente0, agente1])
+    
+    print("Executando partida completa de forma automatizada...")
+    gerenciador.jogar_partida_completa()
+    
+    # Extraindo o dicionário final (agora seguro e serializável)
+    estado_final = motor.to_dict()
+    
+    print("\n--- Resultado da Partida ---")
+    if estado_final["vencedor"] == -1:
+        print("Resultado: Empate (Jogo Trancado resolutamente empatado)")
+    else:
+        print(f"Resultado: Jogador {estado_final['vencedor']} Venceu!")
+        
+    print(f"Total de turnos processados: {estado_final['turno']}")
+    print(f"Peças restantes no monte: {len(estado_final['monte'])}")
+    print(f"Tamanho final da mão do Jogador 0: {len(estado_final['maos'][0])}")
+    print(f"Tamanho final da mão do Jogador 1: {len(estado_final['maos'][1])}")

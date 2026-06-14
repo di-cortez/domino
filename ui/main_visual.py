@@ -1,3 +1,11 @@
+"""
+Ponto de entrada da interface visual.
+
+Este arquivo monta a janela, cria motor/agentes/controlador e mantém o laço de
+renderização. A regra de jogo fica no middleware/motor; a regra de interação
+fica em `ControladorPartida`.
+"""
+
 import pygame
 from pygame.locals import *
 from OpenGL.GL import *
@@ -5,10 +13,9 @@ from OpenGL.GLU import *
 
 # Módulos da arquitetura
 from middleware.motor_domino import MotorDomino
-from agents.heuristic_agent import AgenteEstrategico
-from agents.agent_neural import AgenteNeuralNumPy
 from middleware.middleware import GerenciadorPartida
-from ui.interface import RenderizadorEspacial, renderizar_cena
+from ui.agentes_ui import criar_agente_por_tipo
+from ui.interface import renderizar_cena
 from ui.hud import HudRenderer
 from ui.controle_partida import ControladorPartida
 
@@ -25,21 +32,23 @@ def main():
     gluPerspective(45, (display[0] / display[1]), 0.1, 50.0)
     glMatrixMode(GL_MODELVIEW)
 
-    # 2. Backend (motor, agentes, renderizador)
+    # 2. Backend (motor, agentes, renderizador).
+    # A fábrica de agentes fica em `agentes_ui.py`, para o menu e o main
+    # usarem os mesmos nomes/tipos.
     motor = MotorDomino(num_jogadores=2)
 
     # print(motor._obter_estado())
 
     tipos_agentes = ['neural', 'heuristico']
-    agente_neural     = AgenteNeuralNumPy.carregar("models/pesos_domino_sl.npz")
-    agente_heuristico = AgenteEstrategico()
-    agentes = [agente_neural, agente_heuristico]
+    agentes = [
+        criar_agente_por_tipo(tipo)
+        for tipo in tipos_agentes
+    ]
 
     gerenciador = GerenciadorPartida(motor, agentes)
-    renderizador = RenderizadorEspacial(limite_x=8.0)
     hud = HudRenderer()
 
-    # 3. Controle: toda a lógica de teclado / avanço / retrocesso vive aqui.
+    # 3. Controle: teclado, avanço, retrocesso, pausa, menu e humanos.
     controlador = ControladorPartida(gerenciador, motor,
                                      intervalo_ms=1000,
                                      tipos_agentes=tipos_agentes)
@@ -59,7 +68,7 @@ def main():
         controlador.atualizar(dt_ms)
 
         # Renderiza o estado escolhido pelo controlador (pode ser do passado).
-        renderizar_cena(controlador.estado_atual(), renderizador)
+        renderizar_cena(controlador.estado_atual())
         hud.renderizar(controlador.estado_atual(), controlador, display)
         pygame.display.flip()
 

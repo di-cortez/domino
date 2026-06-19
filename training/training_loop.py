@@ -1,4 +1,5 @@
 import json
+import os
 import numpy as np
 from agents.codificador import CodificadorDomino
 from agents.nn import RedeNeuralSupervisionada
@@ -103,6 +104,12 @@ def main():
     
     # Issue 5 Fix: Salvamento nativo e seguro com np.savez [cite: 870]
     print(f"\nTreinamento concluído. Salvando modelo em {arquivo_pesos}...")
+
+    # Garante que a pasta de destino (ex.: models/) exista antes de salvar.
+    pasta_pesos = os.path.dirname(arquivo_pesos)
+    if pasta_pesos:
+        os.makedirs(pasta_pesos, exist_ok=True)
+
     np.savez(
         arquivo_pesos,
         W1=convert_to_np(rede.W1), b1=convert_to_np(rede.b1),

@@ -43,13 +43,28 @@ partidas + treinador) e os artefatos de dados (`dataset/`, `models/`).
                                               └────────────────────────────┘
 ```
 
-### Pipeline de treinamento
+### Pipeline de treinamento (SL — imitação do heurístico)
 
 ```
 training/gerador.py ──▶ dataset/dataset_*.jsonl ──▶ training/training_loop.py ──▶ models/pesos_domino_sl.npz
    (simula partidas               (carrega, codifica,                (pesos da rede
     com agentes heurísticos)        treina a rede neural)              salva em disco)
 ```
+
+### Pipeline de treinamento (RL — refinamento por self-play)
+
+```
+models/pesos_domino_sl.npz ──▶ training/self_play.py ──▶ models/pesos_domino_rl.npz
+  (warm-start: ponto de         (self-play + partidas         (pesos da política
+   partida da política RL)       vs AgenteEstrategico;          RL salvos em disco,
+                                  REINFORCE + baseline)          checkpoints periódicos)
+```
+
+`agents/rl_nn.py` (`RedeNeuralPolitica`) usa a mesma arquitetura 79→256→128→58
+de `agents/nn.py`, então qualquer checkpoint de `pesos_domino_sl.npz` carrega
+direto como ponto de partida. O pipeline de SL não é alterado por isso: os
+dois fluxos de treinamento — e os dois arquivos de pesos — são independentes
+e podem ser regenerados/rodados sem afetar um ao outro.
 
 ---
 
@@ -88,12 +103,15 @@ training/gerador.py ──▶ dataset/dataset_*.jsonl ──▶ training/trainin
 | `agents/agent_neural.py` | `AgenteNeuralNumPy` — forward pass + action masking; carrega pesos de `.npz` |
 | `agents/codificador.py` | `CodificadorDomino` — converte estado ↔ vetor de 79 dimensões e ação ↔ índice em espaço de 58 ações |
 | `agents/nn.py` | `RedeNeuralSupervisionada` — rede 79→256→128→58 (ReLU + Softmax), forward e backprop em NumPy/CuPy |
+| `agents/rl_nn.py` | `RedeNeuralPolitica` — mesma arquitetura 79→256→128→58; atualizada por REINFORCE + baseline em vez de cross-entropy |
+| `agents/agent_rl.py` | `AgenteRL` — joga amostrando da política (treino) ou greedy (avaliação/UI); registra a trajetória do episódio |
 | `middleware/middleware.py` | `GerenciadorPartida` — orquestra motor ↔ agentes por turno; registra pares (estado, ação) para SL |
 | `ui/controle_partida.py` | `ControladorPartida` — lógica de pausa, avanço/retrocesso no histórico, menu de configuração, notificações |
 | `ui/interface.py` | `RenderizadorEspacial` — layout snake das peças em OpenGL; funções de desenho de peças e pips |
 | `ui/hud.py` | `HudRenderer` — overlay 2D em OpenGL: barra de turno, contagem de peças, notificações, menu |
 | `training/gerador.py` | Gera dataset JSONL simulando partidas entre dois agentes heurísticos |
 | `training/training_loop.py` | Carrega dataset, codifica estados/ações, treina a rede e salva os pesos |
+| `training/self_play.py` | Treina `AgenteRL` por self-play (REINFORCE + currículo misto com `AgenteEstrategico`); salva checkpoints e avalia periodicamente |
 | `ui/main_visual.py` | Ponto de entrada: inicializa Pygame/OpenGL, instancia todos os componentes, executa o loop principal |
 
 ---
@@ -131,7 +149,7 @@ Todos os comandos abaixo devem ser executados a partir da raiz do projeto
 python -m ui.main_visual
 ```
 
-Abre uma janela 1024×768 com a partida em andamento. Por padrão: **Jogador 0 = Neural**, **Jogador 1 = Heurístico**.
+Abre uma janela 1024×768 com a partida em andamento. Por padrão: **Jogador 0 = Neural**, **Jogador 1 = Heurístico**. Pelo menu (`M`), cada posição também pode ser trocada para **RL (self-play)**, além de Aleatório e Humano.
 
 ### Gerar dataset de treinamento
 
@@ -148,6 +166,18 @@ python -m training.training_loop
 ```
 
 Lê o dataset, treina por múltiplos épocas e salva `models/pesos_domino_sl.npz`.
+
+### Refinar a política por self-play (RL)
+
+```bash
+python -m training.self_play
+```
+
+Carrega `models/pesos_domino_rl.npz` se já existir (retomando o treinamento)
+ou faz warm-start a partir de `models/pesos_domino_sl.npz`. Joga lotes de
+partidas — self-play e contra o `AgenteEstrategico`, na proporção configurada
+— e atualiza a política via REINFORCE com baseline a cada lote. Salva
+checkpoints e imprime o win-rate contra o heurístico periodicamente.
 
 ---
 
@@ -216,6 +246,8 @@ O menu recalcula suas dimensões dinamicamente para acomodar o texto mais largo 
 | Arquivo | Descrição |
 |---|---|
 | `dataset/dataset_2.jsonl` | Dataset gerado pelo `training/gerador.py` |
-| `models/pesos_domino_sl.npz` | Pesos da rede neural treinada |
+| `models/pesos_domino_sl.npz` | Pesos da rede neural treinada por SL (imitação) |
+| `models/pesos_domino_rl.npz` | Pesos da política RL refinada por self-play (`training/self_play.py`) |
 
-Para reproduzir o modelo do zero: execute `python -m training.gerador` e depois `python -m training.training_loop`.
+Para reproduzir o modelo de SL do zero: execute `python -m training.gerador` e depois `python -m training.training_loop`.
+Para refinar a política de RL a partir dele: execute `python -m training.self_play`.

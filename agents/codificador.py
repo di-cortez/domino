@@ -62,24 +62,48 @@ class CodificadorDomino:
         
         return vetor
 
+    def _indice_da_jogada(self, jogada):
+        """Resolve o índice (0-57) de uma jogada, aceitando peça como tupla ou lista."""
+        if jogada is None:
+            return 57
+        if jogada[0] != "COMPRAR" and isinstance(jogada[0], list):
+            jogada = (tuple(jogada[0]), jogada[1])
+        return self.acao_para_indice[jogada]
+
     def decode_saida(self, logits, jogadas_legais):
         """
-        Recebe a saída (58, 1) da rede e aplica a máscara 
+        Recebe a saída (58, 1) da rede e aplica a máscara
         para retornar a jogada legal de maior probabilidade.
         """
         q_valores_mascarados = np.full(58, -np.inf)
-        
+
         for jogada in jogadas_legais:
-            if jogada is None:
-                idx = 57
-            else:
-                if jogada[0] != "COMPRAR" and isinstance(jogada[0], list):
-                    jogada_formatada = (tuple(jogada[0]), jogada[1])
-                else:
-                    jogada_formatada = jogada
-                idx = self.acao_para_indice[jogada_formatada]
-                
+            idx = self._indice_da_jogada(jogada)
             q_valores_mascarados[idx] = logits[idx, 0]
-            
+
         melhor_indice = np.argmax(q_valores_mascarados)
         return self.todas_acoes[melhor_indice]
+
+    def amostrar_acao(self, probabilidades, jogadas_legais):
+        """
+        Versão estocástica de decode_saida: amostra uma jogada entre as legais
+        proporcionalmente à probabilidade que a rede atribuiu a cada uma
+        (renormalizada só sobre a máscara de jogadas legais).
+
+        Usada pelo AgenteRL durante o self-play (exploração); decode_saida
+        (argmax) continua sendo a política de inferência determinística usada
+        pelo AgenteNeuralNumPy e pelo AgenteRL em modo de avaliação.
+
+        :return: (jogada_escolhida, indice_da_jogada_escolhida)
+        """
+        indices_legais = [self._indice_da_jogada(jogada) for jogada in jogadas_legais]
+
+        probs_legais = probabilidades[indices_legais, 0]
+        soma = probs_legais.sum()
+        if soma <= 0:
+            probs_legais = np.ones(len(indices_legais)) / len(indices_legais)
+        else:
+            probs_legais = probs_legais / soma
+
+        posicao_escolhida = np.random.choice(len(indices_legais), p=probs_legais)
+        return jogadas_legais[posicao_escolhida], indices_legais[posicao_escolhida]

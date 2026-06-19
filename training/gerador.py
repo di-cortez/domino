@@ -1,4 +1,5 @@
 import json
+import os
 import time
 
 # Certifique-se de importar suas classes dos arquivos corretos
@@ -13,9 +14,14 @@ def gerar_dataset(num_partidas, arquivo_saida):
     """
     print(f"Iniciando geração de {num_partidas} partidas...")
     inicio = time.time()
-    
+
     total_turnos_salvos = 0
-    
+
+    # Garante que a pasta de destino (ex.: dataset/) exista antes de escrever.
+    pasta_saida = os.path.dirname(arquivo_saida)
+    if pasta_saida:
+        os.makedirs(pasta_saida, exist_ok=True)
+
     # Abrimos o arquivo em modo 'w' para iniciar um dataset limpo
     with open(arquivo_saida, 'w', encoding='utf-8') as f:
         for i in range(num_partidas):

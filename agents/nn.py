@@ -110,7 +110,7 @@ class RedeNeuralSupervisionada:
             custo_medio = custo_epoch / num_batches
             historico_custo.append(custo_medio)
             
-            if epoch % 100 == 0:
+            if epoch % 10 == 0:
                 val_str = ""
                 # Avaliação do conjunto de validação
                 if X_val is not None and Y_val is not None:

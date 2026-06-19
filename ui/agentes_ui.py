@@ -5,7 +5,7 @@ Pequena camada de adaptação entre a interface visual e os agentes do projeto.
 
 O restante da aplicação conhece os jogadores por strings simples:
 
-    "neural", "heuristico", "aleatorio", "humano"
+    "neural", "heuristico", "aleatorio", "humano", "rl"
 
 Este módulo é o único lugar que traduz essas strings para objetos de agente
 compatíveis com o `GerenciadorPartida`. Isso deixa o controlador visual livre
@@ -16,7 +16,7 @@ nome/apresentação pela HUD.
 import random
 
 
-TIPOS_AGENTE = ('neural', 'heuristico', 'aleatorio', 'humano')
+TIPOS_AGENTE = ('neural', 'heuristico', 'aleatorio', 'humano', 'rl')
 
 
 class AgenteAleatorioUI:
@@ -46,6 +46,7 @@ def nome_tipo_agente(tipo):
         'heuristico': 'Heurístico',
         'aleatorio': 'Aleatório',
         'humano': 'Humano',
+        'rl': 'RL (self-play)',
     }
     return nomes.get(tipo, tipo.capitalize())
 
@@ -70,5 +71,19 @@ def criar_agente_por_tipo(tipo):
 
     if tipo == 'humano':
         return AgenteHumanoBloqueado()
+
+    if tipo == 'rl':
+        from agents.agent_rl import AgenteRL
+        from agents.rl_nn import RedeNeuralPolitica
+
+        # Joga sempre greedy (modo="avaliacao") na UI: exploração estocástica
+        # é só para o treinamento por self-play em training/self_play.py.
+        try:
+            rede = RedeNeuralPolitica.carregar("models/pesos_domino_rl.npz")
+        except FileNotFoundError:
+            # Ainda não treinado por self-play: cai de volta no SL como ponto
+            # de partida, para a opção do menu nunca travar a aplicação.
+            rede = RedeNeuralPolitica.carregar_de_sl("models/pesos_domino_sl.npz")
+        return AgenteRL(rede, modo="avaliacao")
 
     raise ValueError(f"Tipo de agente inválido: {tipo}")

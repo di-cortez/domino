@@ -6,13 +6,9 @@ versionado** (veja `.gitignore`) — regenere localmente quando precisar.
 
 ## Arquivos
 
------------------------------------------------------------------------------------
-|     Arquivo     |                           Conteúdo                            |
-|-----------------|---------------------------------------------------------------|
-|`dataset_2.jsonl`|Dataset JSON Lines gerado por `training/gerador.py`: uma linha |
-|                 |por par (estado, ação) `{"estado": {...}, "acao_alvo": ...}`   |
-|                 |observado em partidas heurístico vs. heurístico.               |
------------------------------------------------------------------------------------
+| Arquivo | Conteúdo |
+|---|---|
+| `dataset_2.jsonl` | Dataset JSON Lines gerado por `training/gerador.py`: uma linha por par (estado, ação) `{"estado": {...}, "acao_alvo": ...}` observado em partidas heurístico vs. heurístico. |
 
 `estado` é o dicionário de `MotorDomino._obter_estado()` (sem o campo
 `cadeia_visual`, que é metadado de renderização) e `acao_alvo` é a jogada

@@ -7,26 +7,12 @@ cada pipeline.
 
 ## Arquivos
 
-------------------------------------------------------------------------------------
-|     Arquivo      |                       Responsabilidade                        |
-|------------------|---------------------------------------------------------------|
-|   `gerador.py`   |`gerar_dataset(...)` simula partidas heurístico vs. heurístico |
-|                  |via `GerenciadorPartida` e grava cada par (estado, ação) como  |
-|                  |uma linha JSON em `dataset/dataset_2.jsonl`. Executar com      |
-|                  |`python -m training.gerador`.                                  |
-------------------------------------------------------------------------------------
-|`training_loop.py`|Lê o dataset JSONL, codifica com `CodificadorDomino`, separa   |
-|                  |85%/15% treino/validação, treina a `RedeNeuralSupervisionada` e|
-|                  |salva `models/pesos_domino_sl.npz`. Executar com `python -m    |
-|                  |training.training_loop`.                                       |
-------------------------------------------------------------------------------------
-|  `self_play.py`  |Loop de RL por self-play (`treinar`). Currículo misto self-    |
-|                  |play/vs. heurístico, REINFORCE + baseline + entropia,          |
-|                  |checkpoints periódicos e avaliação contra o heurístico.        |
-|                  |Executar com `python -m training.self_play`.                   |
-------------------------------------------------------------------------------------
-|  `__init__.py`   |Marca `training` como pacote Python; sem conteúdo.             |
-------------------------------------------------------------------------------------
+| Arquivo | Responsabilidade |
+|---|---|
+| `gerador.py` | `gerar_dataset(...)` simula partidas heurístico vs. heurístico via `GerenciadorPartida` e grava cada par (estado, ação) como uma linha JSON em `dataset/dataset_2.jsonl`. Executar com `python -m training.gerador`. |
+| `training_loop.py` | Lê o dataset JSONL, codifica com `CodificadorDomino`, separa 85%/15% treino/validação, treina a `RedeNeuralSupervisionada` e salva `models/pesos_domino_sl.npz`. Executar com `python -m training.training_loop`. |
+| `self_play.py` | Loop de RL por self-play (`treinar`). Currículo misto self-play/vs. heurístico, REINFORCE + baseline + entropia, checkpoints periódicos e avaliação contra o heurístico. Executar com `python -m training.self_play`. |
+| `__init__.py` | Marca `training` como pacote Python; sem conteúdo. |
 
 ## Ordem recomendada de execução
 

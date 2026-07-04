@@ -46,18 +46,13 @@ python3 -m diagnostico.avaliar --agente rl --pesos models/pesos_domino_rl.npz \
 
 Agentes disponíveis para `--agente` e `--oponente`:
 
-|----------------------------------------------------------------------------------|
-|     Nome     |        Classe       |                  Descrição                  |
-|--------------|---------------------|---------------------------------------------|
-| `rl`         | `AgenteRL`          | política REINFORCE (modo avaliação, greedy) |
-|--------------|---------------------|---------------------------------------------|
-| `sl`         | `AgenteNeuralNumPy` | rede supervisionada (imitação do heurístico)|
-|--------------|---------------------|---------------------------------------------|
-| `heuristico` | `AgenteEstrategico` | agente de regras                            |
-|--------------|---------------------|---------------------------------------------|
-| `guloso`     | `AgenteGuloso`      | joga a peça de maior soma de pips           |
-| `aleatorio`  | `AgenteAleatorio`   | jogada válida uniforme                      |
-------------------------------------------------------------------------------------
+| Nome | Classe | Descrição |
+|---|---|---|
+| `rl` | `AgenteRL` | política REINFORCE (modo avaliação, greedy) |
+| `sl` | `AgenteNeuralNumPy` | rede supervisionada (imitação do heurístico) |
+| `heuristico` | `AgenteEstrategico` | agente de regras |
+| `guloso` | `AgenteGuloso` | joga a peça de maior soma de pips |
+| `aleatorio` | `AgenteAleatorio` | jogada válida uniforme |
 
 A posição inicial do agente avaliado é alternada a cada partida, para o
 resultado não ser contaminado por vantagem de quem começa.

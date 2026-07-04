@@ -6,21 +6,11 @@ Nenhum arquivo aqui decide estratégia de jogo — isso é responsabilidade dos
 
 ## Arquivos
 
------------------------------------------------------------------------------------
-|     Arquivo     |                       Responsabilidade                        |
-|-----------------|---------------------------------------------------------------|
-|`motor_domino.py`|`MotorDomino` — regras completas do dominó: embaralhamento e   |
-|                 |distribuição (`reset`), jogadas legais (`acoes_validas`),      |
-|                 |transição de turno (`step`), detecção de fim de jogo/empate e  |
-|                 |estado serializado (`_obter_estado`, `to_dict`).               |
------------------------------------------------------------------------------------
-| `middleware.py` |`Agente` (interface) e `GerenciadorPartida` — orquestrador     |
-|                 |usado pelo projeto. `jogar_turno` liga motor e agentes e       |
-|                 |registra pares (estado, ação) em `historico_treinamento`, a    |
-|                 |fonte do dataset de SL.                                        |
------------------------------------------------------------------------------------
-|  `__init__.py`  |Marca `middleware` como pacote Python; sem conteúdo.           |
------------------------------------------------------------------------------------
+| Arquivo | Responsabilidade |
+|---|---|
+| `motor_domino.py` | `MotorDomino` — regras completas do dominó: embaralhamento e distribuição (`reset`), jogadas legais (`acoes_validas`), transição de turno (`step`), detecção de fim de jogo/empate e estado serializado (`_obter_estado`, `to_dict`). |
+| `middleware.py` | `Agente` (interface) e `GerenciadorPartida` — orquestrador usado pelo projeto. `jogar_turno` liga motor e agentes e registra pares (estado, ação) em `historico_treinamento`, a fonte do dataset de SL. |
+| `__init__.py` | Marca `middleware` como pacote Python; sem conteúdo. |
 
 ## Formato de uma ação
 

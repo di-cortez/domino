@@ -46,3 +46,12 @@ Thumbs.db
 # Logs / profiling
 *.log
 *.prof
+
+
+diagnostico/resultados/
+
+dataset/*
+!dataset/README.md
+
+models/*
+!models/README.md

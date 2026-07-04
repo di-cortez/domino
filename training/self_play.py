@@ -78,7 +78,7 @@ def avaliar_contra_heuristico(rede, num_partidas=200):
 
 
 def treinar(
-    iteracoes=2000,
+    iteracoes=500,
     partidas_por_iteracao=20,
     proporcao_self_play=0.8,
     taxa_aprendizado=0.001,

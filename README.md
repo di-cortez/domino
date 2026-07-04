@@ -16,7 +16,7 @@ partidas + treinador) e os artefatos de dados (`dataset/`, `models/`).
 ```
  ┌────────────────────────────────────────────────────────────┐
  │   ui/main_visual.py  ← ponto de entrada da simulação visual│
- └──────────────────────────┬───────────────────────────────--┘
+ └──────────────────────────┬─────────────────────────────────┘
                             │ instancia e conecta
        ┌────────────────────┴─────────────────────┐
        ▼                                          ▼
@@ -86,35 +86,76 @@ e podem ser regenerados/rodados sem afetar um ao outro.
 │   ├── agent_neural.py
 │   ├── codificador.py
 │   └── nn.py
-├── training/              # Gerador de partidas + Treinador de modelos
+├── training/              # Gerador de partidas + Treinador de modelos (SL e RL)
 │   ├── gerador.py
-│   └── training_loop.py
+│   ├── training_loop.py
+│   └── self_play.py
+├── diagnostico/           # Avaliação de agentes: métricas + gráficos
+│   ├── avaliar.py
+│   └── gera_graficos.py
 ├── dataset/               # Dataset de partidas (gerado, não versionado)
 └── models/                # Modelo treinado (pesos .npz, gerado, não versionado)
 ```
 
 ## Estrutura dos módulos
-
-| Arquivo | Responsabilidade |
-|---|---|
-| `middleware/motor_domino.py` | Regras completas do dominó: embaralhamento, distribuição, `step()`, `reset()`, estado serializado |
-| `agents/agent.py` | Classe-base abstrata `Agente` (protocolo único `escolher_jogada`) |
-| `agents/heuristic_agent.py` | `AgenteEstrategico` — decisões por função de utilidade (diversidade de mão, cobertura de pontas, urgência) |
-| `agents/agent_neural.py` | `AgenteNeuralNumPy` — forward pass + action masking; carrega pesos de `.npz` |
-| `agents/codificador.py` | `CodificadorDomino` — converte estado ↔ vetor de 79 dimensões e ação ↔ índice em espaço de 58 ações |
-| `agents/nn.py` | `RedeNeuralSupervisionada` — rede 79→256→128→58 (ReLU + Softmax), forward e backprop em NumPy/CuPy |
-| `agents/rl_nn.py` | `RedeNeuralPolitica` — mesma arquitetura 79→256→128→58; atualizada por REINFORCE + baseline em vez de cross-entropy |
-| `agents/agent_rl.py` | `AgenteRL` — joga amostrando da política (treino) ou greedy (avaliação/UI); registra a trajetória do episódio |
-| `middleware/middleware.py` | `GerenciadorPartida` — orquestra motor ↔ agentes por turno; registra pares (estado, ação) para SL |
-| `ui/controle_partida.py` | `ControladorPartida` — lógica de pausa, avanço/retrocesso no histórico, menu de configuração, notificações |
-| `ui/interface.py` | `RenderizadorEspacial` — layout snake das peças em OpenGL; funções de desenho de peças e pips |
-| `ui/hud.py` | `HudRenderer` — overlay 2D em OpenGL: barra de turno, contagem de peças, notificações, menu |
-| `training/gerador.py` | Gera dataset JSONL simulando partidas entre dois agentes heurísticos |
-| `training/training_loop.py` | Carrega dataset, codifica estados/ações, treina a rede e salva os pesos |
-| `training/self_play.py` | Treina `AgenteRL` por self-play (REINFORCE + currículo misto com `AgenteEstrategico`); salva checkpoints e avalia periodicamente |
-| `ui/main_visual.py` | Ponto de entrada: inicializa Pygame/OpenGL, instancia todos os componentes, executa o loop principal |
-
----
+-------------------------------------------------------------------------------------------------
+|            Arquivo            |                       Responsabilidade                        |
+|-------------------------------|---------------------------------------------------------------|
+| `middleware/motor_domino.py`  | Regras completas do dominó: embaralhamento, distribuição,     |
+|                               | `step()`, `reset()`, estado serializado                       |
+|-----------------------------------------------------------------------------------------------|
+|      `agents/agent.py`        | Classe-base abstrata `Agente`                                 |
+|                               | (protocolo único `escolher_jogada`)                           |
+|-----------------------------------------------------------------------------------------------|
+| `agents/heuristic_agent.py`   | `AgenteEstrategico` — decisões por função de utilidade        |
+|                               |   (diversidade de mão, cobertura de pontas, urgência)         |
+|-----------------------------------------------------------------------------------------------|
+|  `agents/agent_neural.py`     | `AgenteNeuralNumPy` — forward pass + action masking;          |
+|                               |   carrega pesos de `.npz`                                     |
+|-----------------------------------------------------------------------------------------------|
+|    `agents/codificador.py`    | `CodificadorDomino` — converte estado ↔ vetor de 79 dimensões |
+|                               |   e ação ↔ índice em espaço de 58 ações                       |
+|-----------------------------------------------------------------------------------------------|
+|        `agents/nn.py`         | `RedeNeuralSupervisionada` — rede 79→256→128→58               |
+|                               |  (ReLU + Softmax), forward e backprop em NumPy/CuPy           |
+|-----------------------------------------------------------------------------------------------|
+|      `agents/rl_nn.py`        | `RedeNeuralPolitica` — mesma arquitetura 79→256→128→58;       |
+|                               |  atualizada por REINFORCE + baseline em vez de cross-entropy  |
+|-----------------------------------------------------------------------------------------------|
+|    `agents/agent_rl.py`       | `AgenteRL` — joga amostrando da política (treino) ou          |
+|                               |  greedy (avaliação/UI); registra a trajetória do episódio     |
+|-----------------------------------------------------------------------------------------------|
+| `middleware/middleware.py`    | `GerenciadorPartida` — orquestra motor ↔ agentes por turno;   |
+|                               |  registra pares (estado, ação) para SL                        |
+|-----------------------------------------------------------------------------------------------|
+|   `ui/controle_partida.py`    | `ControladorPartida` — lógica de pausa, avanço/retrocesso no  |
+|                               |  histórico, menu de configuração, notificações                |
+|-----------------------------------------------------------------------------------------------|
+|       `ui/interface.py`       | `RenderizadorEspacial` — layout snake das peças em OpenGL;    |
+|                               |  funções de desenho de peças e pips                           |
+|-----------------------------------------------------------------------------------------------|
+|          `ui/hud.py`          | `HudRenderer` — overlay 2D em OpenGL: barra de turno,         |
+|                               |  contagem de peças, notificações, menu                        |
+|-----------------------------------------------------------------------------------------------|
+|     `training/gerador.py`     | Gera dataset JSONL simulando partidas entre dois agentes      |
+|                               | heurísticos                                                   |
+|-----------------------------------------------------------------------------------------------|
+| `training/training_loop.py`   | Carrega dataset, codifica estados/ações, treina a rede e      |
+|                               | salva os pesos                                                |
+|-----------------------------------------------------------------------------------------------|
+|    `training/self_play.py`    | Treina `AgenteRL` por self-play (REINFORCE + currículo misto  |
+|                               | com `AgenteEstrategico`); salva checkpoints e avalia          |
+|                               | periodicamente                                                |
+|-----------------------------------------------------------------------------------------------|
+|      `ui/main_visual.py`      | Ponto de entrada: inicializa Pygame/OpenGL, instancia todos   |
+|                               | os componentes, executa o loop principal                      |
+|-----------------------------------------------------------------------------------------------|
+|   `diagnostico/avaliar.py`    | Configura e simula N partidas de um agente contra um oponente;|
+|                               | salva `resumo.json`/`partidas.csv`                            |
+|-----------------------------------------------------------------------------------------------|
+| `diagnostico/gera_graficos.py`| Métricas (IC de Wilson, desempenho por posição) e os PNGs     |
+|                               | de diagnóstico                                                |
+-----------------------------------------------------------------------------------------------
 
 ## Pré-requisitos
 
@@ -183,18 +224,53 @@ checkpoints e imprime o win-rate contra o heurístico periodicamente.
 
 ## Controles da simulação visual
 
-| Tecla | Ação |
-|---|---|
-| `Espaço` | Pausa / retoma o avanço automático |
-| `→` | Avança um turno (e pausa) |
-| `←` | Retrocede ao turno anterior (e pausa) |
-| `M` | Abre / fecha o menu de configuração |
-| `ESC` | Fecha o menu (se aberto) ou encerra a aplicação |
+---------------------------------------------------------------------------------------
+|     Tecla    |                                  Ação                                |
+|-------------------------------------------------------------------------------------|
+|   `Espaço`   | Pausa / retoma o avanço automático                                   |
+|-------------------------------------------------------------------------------------|
+|     `→`      | Avança um turno (e pausa)                                            |
+|-------------------------------------------------------------------------------------|
+|     `←`      | Retrocede ao turno anterior (e pausa)                                |
+|-------------------------------------------------------------------------------------|
+|  `+` / `-`   | Muda a velocidade do avanço automático entre 1/4x, 1/2x, 1x, 2x e 4x |
+|-------------------------------------------------------------------------------------|
+|   `J` / `K`  | Alterna a visibilidade da mão do Jogador 0 / Jogador 1 (quando o     |
+|              | modo permite)                                                        |
+|-------------------------------------------------------------------------------------|
+|     `R`      | Reinício rápido: pede confirmação (aperte `R` de novo em até 2s) se  |
+|              |  a partida ainda não acabou; reinicia direto se já tiver terminado   |
+|-------------------------------------------------------------------------------------|
+|     `M`      | Abre / fecha o menu de configuração                                  |
+|-------------------------------------------------------------------------------------|
+|    `ESC`     | Fecha o menu (se aberto) ou encerra a aplicação                      |
+---------------------------------------------------------------------------------------
+
+Uma notificação centralizada confirma a mudança de velocidade, o pedido de confirmação do `R` e as compras de peça do estoque.
+
+### Controles do jogador humano
+
+Quando a posição de um jogador está configurada como **Humano** (pelo menu `M`) e é a vez dele:
+
+-----------------------------------------------------------------------------
+|       Tecla       |                          Ação                         |
+|---------------------------------------------------------------------------|
+|     `←` / `→`     | Navega entre as peças da mão                          |
+|---------------------------------------------------------------------------|
+| `↑` / `↓` / `Tab` | Alterna a ponta da mesa escolhida (esquerda/direita), |
+|                   | quando a jogada permite                               |
+|---------------------------------------------------------------------------|
+|      `Enter`      | Joga a peça selecionada na ponta escolhida            |
+|---------------------------------------------------------------------------|
+|        `C`        | Compra uma peça do estoque                            |
+|---------------------------------------------------------------------------|
+|        `P`        | Passa a vez                                           |
+-----------------------------------------------------------------------------
 
 ### Menu de configuração (`M`)
 
-- **Setas ↑↓** — navega entre os itens
-- **Enter / Espaço** — alterna o tipo de agente de cada jogador (`Neural` ↔ `Heurístico`) ou reinicia a partida
+- **Setas ↑↓** — navega entre os itens: Jogador 0, Jogador 1 e Reiniciar
+- **Enter / Espaço** — alterna o tipo de agente do jogador selecionado (`Neural` → `Heurístico` → `Aleatório` → `Humano` → `RL`, em ciclo) ou executa o reinício
 - **M / ESC** — fecha o menu sem alterar nada
 
 O menu recalcula suas dimensões dinamicamente para acomodar o texto mais largo de cada opção.
@@ -215,14 +291,21 @@ O menu recalcula suas dimensões dinamicamente para acomodar o texto mais largo 
 
 ## Rede neural
 
-| Parâmetro | Valor |
-|---|---|
-| Arquitetura | 79 → 256 → 128 → 58 |
-| Ativação oculta | ReLU |
-| Ativação de saída | Softmax |
-| Inicialização | He (camadas ocultas), Xavier (saída) |
-| Treinamento | Supervisionado por imitação do agente heurístico |
-| Backend | NumPy (CPU) ou CuPy (GPU, automático) |
+------------------------------------------------------------------------
+|     Parâmetro     |                       Valor                      |
+|----------------------------------------------------------------------|
+|    Arquitetura    | 79 → 256 → 128 → 58                              |
+|----------------------------------------------------------------------|
+| Ativação oculta   | ReLU                                             |
+|----------------------------------------------------------------------|
+| Ativação de saída | Softmax                                          |
+|----------------------------------------------------------------------|
+|   Inicialização   | He (camadas ocultas), Xavier (saída)             |
+|----------------------------------------------------------------------|
+|    Treinamento    | Supervisionado por imitação do agente heurístico |
+|----------------------------------------------------------------------|
+|     Backend       | NumPy (CPU) ou CuPy (GPU, automático)            |
+------------------------------------------------------------------------
 
 **Vetor de estado (79 dims):**
 - Peças na mão do jogador atual (28 bits)
@@ -239,15 +322,94 @@ O menu recalcula suas dimensões dinamicamente para acomodar o texto mais largo 
 - Comprar do estoque
 - Passar a vez
 
+### Treinamento por reforço (RL — self-play)
+
+`agents/agent_rl.py` (`AgenteRL`) usa a mesma rede (via `agents/rl_nn.py`), mas
+troca o treinamento supervisionado por REINFORCE com baseline:
+
+---------------------------------------------------------------------------------------------------------|
+|       Parâmetro       |            Valor padrão          |                    Descrição                |
+|--------------------------------------------------------------------------------------------------------|
+|       Algoritmo       | REINFORCE + baseline             | Baseline = média dos retornos do lote       |
+|                       |                                  | (reduz variância)                           |
+|--------------------------------------------------------------------------------------------------------|
+|       Recompensa      | +1 vitória / -1 derrota /        | Esparsa: só ao fim da partida, propagada    |
+|                       | 0 empate                         | (γ = 1) a todas as jogadas do               |
+|                       |                                  | agente no episódio (Monte Carlo)            |
+|--------------------------------------------------------------------------------------------------------|
+|     Regularização     | Bônus de entropia                | Evita colapso prematuro da política para    |
+|                       | (`entropia_coef=0.01`)           | determinística                              |
+|                       |                                  |                                             |
+|--------------------------------------------------------------------------------------------------------|
+|      Currículo        | 80% self-play / 20% vs.          | `proporcao_self_play` em                    |  
+|                       |`AgenteEstrategico`               | `training/self_play.py`                     |
+|--------------------------------------------------------------------------------------------------------|
+| Partidas por iteração | 20                               | `partidas_por_iteracao`                     |
+|--------------------------------------------------------------------------------------------------------|
+|       Iterações       | 500                              | `iteracoes`                                 |
+|--------------------------------------------------------------------------------------------------------|
+|   Taxa de aprendizado | 0.001                            | `taxa_aprendizado`                          |
+|--------------------------------------------------------------------------------------------------------|
+|        Checkpoints    | a cada 50 iterações              | salva `models/pesos_domino_rl.npz` e avalia |
+|                       |                                  | 200 partidas(greedy) vs. `AgenteEstrategico`|
+|--------------------------------------------------------------------------------------------------------|
+
+**Modos do `AgenteRL`:**
+- `treino` — amostra a jogada estocasticamente a partir da distribuição softmax e registra (estado, ação) da trajetória do episódio, para o cálculo do gradiente ao final da partida.
+- `avaliacao` — joga greedy (argmax), igual ao `AgenteNeuralNumPy`; usado nos benchmarks e como agente final na UI/menu (opção `RL`).
+
+---
+
+## Avaliação de modelos (`diagnostico/`)
+
+Módulo para comparar qualquer agente do projeto contra qualquer oponente em N
+partidas e gerar métricas + gráficos — útil para verificar se o RL está de
+fato superando o SL/heurístico ao longo do treinamento.
+
+```bash
+python3 -m diagnostico.avaliar --agente rl --oponente heuristico -n 1000
+```
+
+Agentes disponíveis (`--agente` / `--oponente`): `rl`, `sl`, `heuristico`,
+`guloso` (joga sempre a peça de maior soma de pips) e `aleatorio`. A posição
+inicial do agente avaliado é alternada a cada partida para não contaminar o
+resultado com vantagem de quem começa.
+
+Saídas em `diagnostico/resultados/<agente>_vs_<oponente>/` (ou `--saida`):
+
+|------------------------------------------------------------------------------------------|
+|            Arquivo            |                         Conteúdo                         |
+|------------------------------------------------------------------------------------------|
+|          `resumo.json`        | Taxas de vitória/empate/derrota, IC 95% (Wilson),        |
+|                               |  desempenho por posição, duração média, pips restantes   |
+|------------------------------------------------------------------------------------------|
+|         `partidas.csv`        | Uma linha por partida (posição, resultado, turnos, pips) |
+|------------------------------------------------------------------------------------------|
+|     `taxas_acumuladas.png`    | Convergência das taxas ao longo das partidas             |
+|------------------------------------------------------------------------------------------|
+| `distribuicao_resultados.png` | Contagem final de vitórias/empates/derrotas              |
+|------------------------------------------------------------------------------------------|
+|  `vitorias_por_posicao.png`   | Taxa de vitória como jogador 0 vs. jogador 1, com IC 95% |
+|------------------------------------------------------------------------------------------|
+|     `duracao_partidas.png`    | Histograma de turnos por partida                         |
+|------------------------------------------------------------------------------------------|
+
+Configuração padrão (agente, oponente, número de partidas, seed) fica editável
+no topo de `diagnostico/avaliar.py`; qualquer valor pode ser sobrescrito por
+linha de comando (`--help` lista todas as opções). Detalhes completos e mais
+exemplos em `diagnostico/README.md`.
+
 ---
 
 ## Arquivos gerados (não versionados)
 
-| Arquivo | Descrição |
-|---|---|
-| `dataset/dataset_2.jsonl` | Dataset gerado pelo `training/gerador.py` |
-| `models/pesos_domino_sl.npz` | Pesos da rede neural treinada por SL (imitação) |
+|------------------------------------------------------------------------------------------------------|
+|           Arquivo            |                                Descrição                              |
+|------------------------------------------------------------------------------------------------------|
+|   `dataset/dataset_2.jsonl`  | Dataset gerado pelo `training/gerador.py`                             |
+| `models/pesos_domino_sl.npz` | Pesos da rede neural treinada por SL (imitação)                       |
 | `models/pesos_domino_rl.npz` | Pesos da política RL refinada por self-play (`training/self_play.py`) |
+|------------------------------------------------------------------------------------------------------|
 
 Para reproduzir o modelo de SL do zero: execute `python -m training.gerador` e depois `python -m training.training_loop`.
 Para refinar a política de RL a partir dele: execute `python -m training.self_play`.

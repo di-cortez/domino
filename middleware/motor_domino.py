@@ -1,6 +1,54 @@
 import random
 import copy
 
+
+def _eh_compra(acao):
+    return acao is not None and acao[0] == "COMPRAR"
+
+
+def inferir_naipes_mortos(historico_mesa, tamanhos_maos, jogador_atual):
+    """
+    Reconstrói do histórico da mesa os "naipes mortos" de cada jogador: quem
+    passa ou compra revela que não possuía nenhuma peça com os valores das
+    pontas naquele momento.
+
+    Mesma lógica matemática usada por
+    agents.heuristic_agent.AgenteEstrategico._inferir_ausencias_oponentes
+    (que delega para esta função, para as duas não divergirem).
+
+    O ator de cada ação é recuperado sem ambiguidade: toda ação avança o
+    jogador, EXCETO comprar (o motor mantém a vez após COMPRAR), logo
+    ator_inicial = (jogador_atual - nº de ações que avançam) mod n.
+    """
+    num_jogadores = len(tamanhos_maos)
+    ausencias = {i: set() for i in range(num_jogadores)}
+    if not historico_mesa:
+        return ausencias
+
+    avancos = sum(1 for acao in historico_mesa if not _eh_compra(acao))
+    ator = (jogador_atual - avancos) % num_jogadores
+
+    pontas = None
+    for acao in historico_mesa:
+        if acao is None or _eh_compra(acao):
+            if pontas:
+                ausencias[ator].update(pontas)
+            if acao is None:
+                ator = (ator + 1) % num_jogadores
+            continue
+
+        peca = tuple(acao[0])
+        lado = acao[1]
+        if pontas is None:
+            pontas = [peca[0], peca[1]]
+        else:
+            conectado = pontas[lado]
+            pontas[lado] = peca[1] if peca[0] == conectado else peca[0]
+        ator = (ator + 1) % num_jogadores
+
+    return ausencias
+
+
 class MotorDomino:
     def __init__(self, num_jogadores=2):
         self.num_jogadores = num_jogadores
@@ -209,7 +257,15 @@ class MotorDomino:
         Retorna o dicionário de estado enriquecido.
         """
         tamanhos_maos = [len(m) for m in self.maos]
-        
+
+        # Naipes mortos: valores (0-6) que os oponentes já provaram não ter,
+        # inferidos do histórico de passes/compras (ver inferir_naipes_mortos).
+        ausencias = inferir_naipes_mortos(self.mesa, tamanhos_maos, self.jogador_atual)
+        naipes_mortos_oponente = set()
+        for jogador, mortos in ausencias.items():
+            if jogador != self.jogador_atual:
+                naipes_mortos_oponente |= mortos
+
         return {
             "pontas": list(self.pontas),
             "mao_jogador": [list(p) for p in self.maos[self.jogador_atual]], # FIX 3: Tuple purging
@@ -218,7 +274,8 @@ class MotorDomino:
             "tamanhos_maos": tamanhos_maos,
             "historico_mesa": [self._serializar_acao(a) for a in self.mesa], # FIX 2: Tuple purging
             "cadeia_visual": copy.deepcopy(self.cadeia_mesa),
-            "monte_tamanho": len(self.monte)
+            "monte_tamanho": len(self.monte),
+            "naipes_mortos_oponente": sorted(naipes_mortos_oponente), # Lista p/ compatibilidade JSON
         }
 
     def _serializar_acao(self, acao):

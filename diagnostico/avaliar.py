@@ -37,7 +37,7 @@ from pathlib import Path
 # ============================================================================
 AGENTE = "rl"
 OPONENTE = "heuristico"
-NUM_PARTIDAS = 10000
+NUM_PARTIDAS = 20000
 
 SEED = None            # um inteiro (ex.: 42) repete exatamente o mesmo sorteio
 PESOS_AGENTE = None    # caminho de um .npz específico (None = pesos padrão)

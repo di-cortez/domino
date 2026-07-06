@@ -6,9 +6,9 @@ except ImportError:
     _GPU_ATIVA = False
 
 class RedeNeuralSupervisionada:
-    def __init__(self, tamanho_entrada=79, tamanho_oculto1=256, tamanho_oculto2=128, tamanho_saida=58, taxa_aprendizado=0.01):
+    def __init__(self, tamanho_entrada=86, tamanho_oculto1=256, tamanho_oculto2=128, tamanho_saida=58, taxa_aprendizado=0.01):
         """
-        Arquitetura profunda otimizada: 79 -> 256 -> 128 -> 58
+        Arquitetura profunda otimizada: 86 -> 256 -> 128 -> 58
         """
         self.lr = taxa_aprendizado
         
@@ -81,10 +81,14 @@ class RedeNeuralSupervisionada:
 
         return - (1. / m) * np.sum(Y_target * np.log(A3 + 1e-8))
 
-    def treinar(self, X_train, Y_train, X_val=None, Y_val=None, epochs=1500, batch_size=128):
+    def treinar(self, X_train, Y_train, X_val=None, Y_val=None, epochs=1500, batch_size=128, ao_validar=None):
         """
         Executa o loop de treinamento sobre o dataset particionado em mini-batches,
         avaliando contra um conjunto de validação para detectar overfitting.
+
+        ao_validar (opcional): callback(epoch, custo_val, rede) chamado a cada
+        avaliação de validação. Usado por training_loop.py para guardar em
+        memória os pesos da época com o menor Val Custo da execução.
         """
         historico_custo = []
         m = X_train.shape[1]
@@ -119,7 +123,10 @@ class RedeNeuralSupervisionada:
                     m_val = X_val.shape[1]
                     custo_val = - (1. / m_val) * np.sum(Y_val * np.log(A3_val + 1e-8))
                     val_str = f" | Val Custo: {custo_val:.4f}"
-                    
+
+                    if ao_validar is not None:
+                        ao_validar(epoch, custo_val, self)
+
                 print(f"Epoch {epoch} | Treino Custo: {custo_medio:.4f}{val_str}")
                 
         return historico_custo

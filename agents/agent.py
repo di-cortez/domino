@@ -3,36 +3,10 @@ import random
 # ==========================================
 # 1. MIDDLEWARE / INTERFACES
 # ==========================================
-class Agente:
-    """Interface base para todos os jogadores."""
-    def escolher_jogada(self, estado, jogadas_legais):
-        raise NotImplementedError("Todos os agentes devem implementar este método.")
-
-class GerenciadorPartida:
-    """Controla o fluxo do jogo entre o Motor e os Agentes."""
-    def __init__(self, motor, agentes):
-        if len(agentes) != motor.num_jogadores:
-            raise ValueError("O número de agentes deve ser igual ao número de jogadores.")
-        self.motor = motor
-        self.agentes = agentes
-
-    def jogar_turno(self):
-        estado = self.motor._obter_estado()
-        jogador_atual = estado["jogador_atual"]
-        jogadas_legais = self.motor.acoes_validas(jogador_atual)
-        
-        agente_da_vez = self.agentes[jogador_atual]
-        acao_escolhida = agente_da_vez.escolher_jogada(estado, jogadas_legais)
-        
-        novo_estado, fim_de_jogo, info = self.motor.step(acao_escolhida)
-        return fim_de_jogo, info
-
-    def jogar_partida_completa(self):
-        fim_de_jogo = False
-        info = {}
-        while not fim_de_jogo:
-            fim_de_jogo, info = self.jogar_turno()
-        return info
+# Fonte única da verdade: as definições vivem em middleware/middleware.py e
+# são reexportadas aqui para manter os imports existentes
+# (`from agents.agent import Agente`) funcionando sem duplicar a lógica.
+from middleware.middleware import Agente, GerenciadorPartida  # noqa: F401
 
 # ==========================================
 # 2. AGENTES HEURÍSTICOS

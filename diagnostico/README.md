@@ -84,3 +84,10 @@ Ficam em `diagnostico/resultados/<agente>_vs_<oponente>/` (ou em `--saida`):
   estrutural de quem começa; compare sempre com o mesmo protocolo alternado.
 - **Empates**: em dominó fechado, empate alto contra oponentes fortes é normal;
   acompanhe a soma vitória + meio empate como score, se preferir.
+
+## Comparando regimes de treino de RL
+
+Para comparar dois checkpoints de RL treinados por regimes diferentes de
+`training/self_play.py` (`oponente_treino="self_play"` vs. `"heuristico"`)
+— entre si e contra o heurístico, com os mesmos artefatos deste módulo —
+veja `diagnostico/avalia_self-play/README.md`.

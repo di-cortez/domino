@@ -1,7 +1,7 @@
 import numpy as np
 
 class CodificadorDomino:
-    TAMANHO_VETOR = 79 
+    TAMANHO_VETOR = 86
 
     def __init__(self):
         self.todas_pecas = [(i, j) for i in range(7) for j in range(i, 7)]
@@ -18,7 +18,7 @@ class CodificadorDomino:
         self.acao_para_indice = {acao: idx for idx, acao in enumerate(self.todas_acoes)}
 
     def encode_estado(self, estado):
-        """Converte o estado do jogo em um vetor rígido (79, 1)"""
+        """Converte o estado do jogo em um vetor rígido (86, 1)"""
         vetor = np.zeros((self.TAMANHO_VETOR, 1))
         
         # 1. Mão do Jogador (Índices 0-27)
@@ -59,7 +59,13 @@ class CodificadorDomino:
             
         # Adiciona a contagem de compras no último índice (Normalizado por 14, limite do jogo de 2 jogadores)
         vetor[78, 0] = draws / 14.0
-        
+
+        # 7. Naipes Mortos do Oponente (Índices 79-85)
+        # Um bit por valor (0-6) que o oponente já provou não ter (ver
+        # middleware.motor_domino.inferir_naipes_mortos).
+        for valor in estado.get("naipes_mortos_oponente", []):
+            vetor[79 + valor, 0] = 1.0
+
         return vetor
 
     def _indice_da_jogada(self, jogada):

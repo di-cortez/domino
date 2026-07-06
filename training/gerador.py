@@ -53,4 +53,4 @@ def gerar_dataset(num_partidas, arquivo_saida):
 if __name__ == "__main__":
     # 10.000 partidas costumam gerar entre 150.000 e 200.000 turnos de dominó,
     # o que é um tamanho excelente para o primeiro treinamento da rede profunda.
-    gerar_dataset(num_partidas=10000, arquivo_saida="dataset/dataset_2.jsonl")
+    gerar_dataset(num_partidas=30000, arquivo_saida="dataset/dataset_2.jsonl")

@@ -95,7 +95,7 @@ class AgenteNeuralNumPy(Agente):
             return random.choice(jogadas_legais)
     
 
-        # estado -> vetor (79,1); leva ao device dos pesos quando em GPU.
+        # estado -> vetor (TAMANHO_VETOR,1); leva ao device dos pesos quando em GPU.
         X = self.codificador.encode_estado(estado)
         if _GPU_ATIVA:
             X = xp.array(X)

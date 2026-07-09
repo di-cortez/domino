@@ -1,529 +1,495 @@
 """
-HUD 2D desenhada por cima da mesa OpenGL.
+2D HUD drawn above the OpenGL board.
 
-Este módulo só lê o estado do controlador. Ele não executa jogadas nem altera
-o motor; toda mudança de partida passa por `ControladorPartida`.
+This module only reads controller state. It never executes moves or mutates the
+engine; all game changes go through `GameController`.
 """
 
 import pygame
 
-from ui.primitivas import (
-    desenhar_domino_2d,
-    desenhar_texto,
-    finalizar_2d,
-    iniciar_2d,
-    retangulo,
-    triangulo,
+from ui.primitives import (
+    begin_2d,
+    draw_domino_2d,
+    draw_text,
+    end_2d,
+    rectangle,
+    triangle,
 )
-from ui.agentes_ui import nome_tipo_agente
+from ui.ui_agents import agent_type_name
 
 
 class HudRenderer:
-    """Renderiza turno, mãos, monte, notificações, fim de jogo e menu."""
+    """Render turns, hands, stock, notifications, game over, and menu layers."""
 
-    _NOTIF_DURACAO_MS = 3000
-    _NOTIF_FADE_MS    = 1000
+    _NOTIFICATION_DURATION_MS = 3000
+    _NOTIFICATION_FADE_MS = 1000
 
-    _BAR_H            = 38
-    _MAOS_H           = 74
+    _BAR_H = 38
+    _HANDS_H = 74
 
-    _DOMINO_W         = 22
-    _DOMINO_H         = 42
-    _DOMINO_GAP       = 4
+    _DOMINO_W = 22
+    _DOMINO_H = 42
+    _DOMINO_GAP = 4
 
-    _MENU_PADDING     = 44
-    _MENU_ITEM_H      = 50
-    _MENU_HEADER_H    = 68
-    _MENU_FOOTER_H    = 30
+    _MENU_PADDING = 44
+    _MENU_ITEM_H = 50
+    _MENU_HEADER_H = 68
+    _MENU_FOOTER_H = 30
 
     def __init__(self):
-        self._fontes_prontas = False
-        self._f_titulo = None
-        self._f_normal = None
-        self._f_dica   = None
+        self._fonts_ready = False
+        self._title_font = None
+        self._normal_font = None
+        self._hint_font = None
 
-    # ------------------------------------------------------------------ #
-    # Fontes
-    # ------------------------------------------------------------------ #
-
-    def _init_fontes(self):
-        if self._fontes_prontas:
+    def _init_fonts(self):
+        if self._fonts_ready:
             return
 
         pygame.font.init()
 
-        self._f_titulo = pygame.font.SysFont("monospace", 26, bold=True)
-        self._f_normal = pygame.font.SysFont("monospace", 20)
-        self._f_dica   = pygame.font.SysFont("monospace", 14)
+        self._title_font = pygame.font.SysFont("monospace", 26, bold=True)
+        self._normal_font = pygame.font.SysFont("monospace", 20)
+        self._hint_font = pygame.font.SysFont("monospace", 14)
 
-        self._fontes_prontas = True
+        self._fonts_ready = True
 
-    # ------------------------------------------------------------------ #
-    # Entrada pública da HUD
-    # ------------------------------------------------------------------ #
-
-    def renderizar(self, estado, controlador, display):
-        self._init_fontes()
+    def render(self, state, controller, display):
+        self._init_fonts()
 
         sw, sh = display
 
-        iniciar_2d(sw, sh)
+        begin_2d(sw, sh)
 
-        jogador_atual = estado.get("jogador_atual", 0)
-        turno = estado.get("turno", 0)
+        current_player = state.get("current_player", 0)
+        turn = state.get("turn", 0)
 
-        nomes = [
-            nome_tipo_agente(tipo)
-            for tipo in controlador.tipos_agentes
+        names = [
+            agent_type_name(agent_type)
+            for agent_type in controller.agent_types
         ]
 
-        self._renderizar_barra_superior(jogador_atual, turno, nomes, display)
-        self._renderizar_barra_maos(estado, controlador, display)
-        self._renderizar_barra_inferior(display, controlador.jogador_humano_ativo())
+        self._render_top_bar(current_player, turn, names, display)
+        self._render_hands_bar(state, controller, display)
+        self._render_bottom_bar(display, controller.active_human_player())
 
-        if controlador.notificacao:
-            self._renderizar_notificacao(controlador.notificacao, display)
+        if controller.notification:
+            self._render_notification(controller.notification, display)
 
-        if controlador.fim_de_jogo and controlador.info_final:
-            self._renderizar_fim_de_jogo(controlador, nomes, display)
+        if controller.game_over and controller.final_info:
+            self._render_game_over(controller, names, display)
 
-        if controlador.menu_aberto:
-            self._renderizar_menu(controlador, display)
+        if controller.menu_open:
+            self._render_menu(controller, display)
 
-        finalizar_2d()
+        end_2d()
 
-    # ------------------------------------------------------------------ #
-    # Barra superior
-    # ------------------------------------------------------------------ #
-
-    def _renderizar_barra_superior(self, jogador_atual, turno, nomes, display):
+    def _render_top_bar(self, current_player, turn, names, display):
         sw, _sh = display
 
-        retangulo(0, 0, sw, self._BAR_H, (0, 0, 0), 0.78)
+        rectangle(0, 0, sw, self._BAR_H, (0, 0, 0), 0.78)
 
-        # Jogador 0
-        cor0 = (80, 200, 255) if jogador_atual == 0 else (110, 110, 110)
-        lbl0 = f"J0 ({nomes[0]})"
+        player0_color = (80, 200, 255) if current_player == 0 else (110, 110, 110)
+        player0_label = f"P0 ({names[0]})"
 
-        if jogador_atual == 0:
-            lbl0 += "  [VEZ]"
-            lw0, _ = self._f_normal.size(lbl0)
-            retangulo(5, 4, lw0 + 10, 30, (0.1, 0.4, 0.7), 0.8)
+        if current_player == 0:
+            player0_label += "  [TURN]"
+            label_width, _ = self._normal_font.size(player0_label)
+            rectangle(5, 4, label_width + 10, 30, (0.1, 0.4, 0.7), 0.8)
 
-        desenhar_texto(lbl0, self._f_normal, cor0, 12, 9)
+        draw_text(player0_label, self._normal_font, player0_color, 12, 9)
 
-        # Turno
-        turno_txt = f"Turno {turno}"
-        tw, _ = self._f_normal.size(turno_txt)
+        turn_text = f"Turn {turn}"
+        turn_width, _ = self._normal_font.size(turn_text)
 
-        desenhar_texto(
-            turno_txt,
-            self._f_normal,
+        draw_text(
+            turn_text,
+            self._normal_font,
             (220, 220, 170),
-            sw // 2 - tw // 2,
+            sw // 2 - turn_width // 2,
             9,
         )
 
-        # Jogador 1
-        cor1 = (255, 185, 55) if jogador_atual == 1 else (110, 110, 110)
-        lbl1 = f"J1 ({nomes[1]})"
+        player1_color = (255, 185, 55) if current_player == 1 else (110, 110, 110)
+        player1_label = f"P1 ({names[1]})"
 
-        if jogador_atual == 1:
-            lbl1 = "[VEZ]  " + lbl1
+        if current_player == 1:
+            player1_label = "[TURN]  " + player1_label
 
-        lw1, _ = self._f_normal.size(lbl1)
+        label_width, _ = self._normal_font.size(player1_label)
 
-        if jogador_atual == 1:
-            retangulo(sw - lw1 - 15, 4, lw1 + 10, 30, (0.5, 0.28, 0.05), 0.8)
+        if current_player == 1:
+            rectangle(sw - label_width - 15, 4, label_width + 10, 30, (0.5, 0.28, 0.05), 0.8)
 
-        desenhar_texto(lbl1, self._f_normal, cor1, sw - lw1 - 10, 9)
+        draw_text(player1_label, self._normal_font, player1_color, sw - label_width - 10, 9)
 
-    # ------------------------------------------------------------------ #
-    # Barra inferior
-    # ------------------------------------------------------------------ #
-
-    def _renderizar_barra_inferior(self, display, humano_ativo):
+    def _render_bottom_bar(self, display, human_active):
         sw, sh = display
 
-        if humano_ativo:
-            dica = (
-                "Esq/Dir: peça | Cima/Baixo: ponta | Enter: jogar | "
-                "C: comprar | P: passar | M: menu | ESC: sair"
+        if human_active:
+            hint = (
+                "Left/Right: tile | Up/Down: end | Enter: play | "
+                "C: draw | P: pass | M: menu | ESC: quit"
             )
         else:
-            dica = "M: Menu | R:Reiniciar | Espaco: Pausa | Setas:Passo | +-:velocidade | ESC: Sair"
+            hint = "M: Menu | R: Restart | Space: Pause | Arrows: Step | +/-: speed | ESC: Quit"
 
-        dw, dh = self._f_dica.size(dica)
+        hint_width, hint_height = self._hint_font.size(hint)
 
-        retangulo(0, sh - dh - 6, sw, dh + 6, (0, 0, 0), 0.6)
+        rectangle(0, sh - hint_height - 6, sw, hint_height + 6, (0, 0, 0), 0.6)
 
-        desenhar_texto(
-            dica,
-            self._f_dica,
+        draw_text(
+            hint,
+            self._hint_font,
             (150, 150, 150),
-            sw // 2 - dw // 2,
-            sh - dh - 3,
+            sw // 2 - hint_width // 2,
+            sh - hint_height - 3,
         )
 
-    # ------------------------------------------------------------------ #
-    # Mãos e monte
-    # ------------------------------------------------------------------ #
+    def _draw_selection_arrow(self, x, y, w, h, position):
+        center_x = x + w / 2.0
 
-    def _desenhar_seta_selecao(self, x, y, w, h, posicao):
-        cx = x + w / 2.0
-
-        if posicao == "cima":
-            ponta_y = y - 4
+        if position == "above":
+            tip_y = y - 4
             base_y = y - 14
 
-            triangulo(
-                cx,
-                ponta_y,
-                cx - 7,
+            triangle(
+                center_x,
+                tip_y,
+                center_x - 7,
                 base_y,
-                cx + 7,
+                center_x + 7,
                 base_y,
                 (1.0, 0.82, 0.08),
                 1.0,
             )
             return
 
-        topo = y + h + 4
-        base = topo + 10
+        tip_y = y + h + 4
+        base_y = tip_y + 10
 
-        triangulo(
-            cx,
-            topo,
-            cx - 7,
-            base,
-            cx + 7,
-            base,
+        triangle(
+            center_x,
+            tip_y,
+            center_x - 7,
+            base_y,
+            center_x + 7,
+            base_y,
             (1.0, 0.82, 0.08),
             1.0,
         )
 
-    def _renderizar_mao(
+    def _render_hand(
         self,
-        pecas,
+        tiles,
         x,
         y,
         max_w,
         max_h,
         align="left",
-        indice_selecionado=None,
-        posicao_seta=None,
-        oculta=False,
+        selected_index=None,
+        arrow_position=None,
+        hidden=False,
     ):
-        if not pecas:
+        if not tiles:
             return
 
-        # A mão é desenhada em miniatura e com limite de espaço. Se houver
-        # mais peças do que cabem, mostramos as primeiras e um contador "+N".
-        count = len(pecas)
+        # Hands are rendered in miniature and clipped to the available width.
+        # If more tiles exist than fit, the HUD shows the first tiles plus "+N".
+        count = len(tiles)
 
-        w = self._DOMINO_W
-        h = self._DOMINO_H
+        tile_width = self._DOMINO_W
+        tile_height = self._DOMINO_H
         gap = self._DOMINO_GAP
 
-        if h > max_h:
-            escala = max(0.72, max_h / h)
-            w = int(self._DOMINO_W * escala)
-            h = int(self._DOMINO_H * escala)
-            gap = max(3, int(self._DOMINO_GAP * escala))
+        if tile_height > max_h:
+            scale = max(0.72, max_h / tile_height)
+            tile_width = int(self._DOMINO_W * scale)
+            tile_height = int(self._DOMINO_H * scale)
+            gap = max(3, int(self._DOMINO_GAP * scale))
 
-        cols = max(1, int((max_w + gap) // (w + gap)))
-        capacidade = min(count, cols)
+        columns = max(1, int((max_w + gap) // (tile_width + gap)))
+        capacity = min(count, columns)
 
-        visiveis = pecas[:capacidade]
-        ocultas = count - len(visiveis)
+        visible_tiles = tiles[:capacity]
+        hidden_count = count - len(visible_tiles)
 
-        total_w = len(visiveis) * w + max(0, len(visiveis) - 1) * gap
+        total_width = len(visible_tiles) * tile_width + max(0, len(visible_tiles) - 1) * gap
 
         if align == "left":
             start_x = x
         else:
-            start_x = x + max_w - total_w
+            start_x = x + max_w - total_width
 
-        for idx, peca in enumerate(visiveis):
-            px = start_x + idx * (w + gap)
-            py = y
+        for index, tile in enumerate(visible_tiles):
+            tile_x = start_x + index * (tile_width + gap)
+            tile_y = y
 
-            if oculta:
-                desenhar_domino_2d(px, py, w, h, verso=True)
+            if hidden:
+                draw_domino_2d(tile_x, tile_y, tile_width, tile_height, back=True)
             else:
-                desenhar_domino_2d(px, py, w, h, peca=tuple(peca))
+                draw_domino_2d(tile_x, tile_y, tile_width, tile_height, tile=tuple(tile))
 
-            # A seta só aparece para mão visível; se a mão está oculta, a HUD
-            # não deve revelar qual peça o humano selecionou.
-            if not oculta and indice_selecionado == idx:
-                self._desenhar_seta_selecao(px, py, w, h, posicao_seta)
+            # The arrow only appears on visible hands; hidden hands must not
+            # reveal which tile a human player selected.
+            if not hidden and selected_index == index:
+                self._draw_selection_arrow(tile_x, tile_y, tile_width, tile_height, arrow_position)
 
-        if ocultas > 0:
-            txt = f"+{ocultas}"
-            tw, th = self._f_dica.size(txt)
+        if hidden_count > 0:
+            text = f"+{hidden_count}"
+            text_width, text_height = self._hint_font.size(text)
 
-            tx = start_x + total_w - tw
-            ty = y + max_h - th
+            text_x = start_x + total_width - text_width
+            text_y = y + max_h - text_height
 
-            desenhar_texto(txt, self._f_dica, (230, 230, 230), tx, ty)
+            draw_text(text, self._hint_font, (230, 230, 230), text_x, text_y)
 
-    def _renderizar_barra_maos(self, estado, controlador, display):
+    def _render_hands_bar(self, state, controller, display):
         sw, _sh = display
 
         y = self._BAR_H
 
-        retangulo(0, y, sw, self._MAOS_H, (0.02, 0.08, 0.05), 0.82)
-        retangulo(0, y + self._MAOS_H - 1, sw, 1, (0.05, 0.20, 0.12), 0.9)
+        rectangle(0, y, sw, self._HANDS_H, (0.02, 0.08, 0.05), 0.82)
+        rectangle(0, y + self._HANDS_H - 1, sw, 1, (0.05, 0.20, 0.12), 0.9)
 
-        maos = estado.get("maos") or []
+        hands = state.get("hands") or []
 
-        mao0 = maos[0] if len(maos) > 0 else []
-        mao1 = maos[1] if len(maos) > 1 else []
+        hand0 = hands[0] if len(hands) > 0 else []
+        hand1 = hands[1] if len(hands) > 1 else []
 
-        margem = 12
-        centro_w = 184
+        margin = 12
+        center_width = 184
 
-        area_w = max(210, (sw - centro_w - margem * 4) // 2)
+        hand_area_width = max(210, (sw - center_width - margin * 4) // 2)
 
-        mao_y = y + 13
-        mao_h = self._MAOS_H - 18
+        hand_y = y + 13
+        hand_h = self._HANDS_H - 18
 
-        jogador_atual = estado.get("jogador_atual", 0)
-        humano_ativo = controlador.jogador_humano_ativo()
+        current_player = state.get("current_player", 0)
+        human_active = controller.active_human_player()
 
-        sel0 = None
-        sel1 = None
+        selected0 = None
+        selected1 = None
 
-        if humano_ativo and jogador_atual == 0:
-            sel0 = controlador.indice_peca_selecionada
-        elif humano_ativo and jogador_atual == 1:
-            sel1 = controlador.indice_peca_selecionada
+        if human_active and current_player == 0:
+            selected0 = controller.selected_tile_index
+        elif human_active and current_player == 1:
+            selected1 = controller.selected_tile_index
 
-        # O controlador informa se a seta fica acima ou abaixo da peça. A HUD
-        # só cuida do desenho, não da regra de encaixe.
-        posicao_seta = controlador.posicao_seta_peca_selecionada()
-        oculta0 = controlador.mao_oculta(0)
-        oculta1 = controlador.mao_oculta(1)
+        # The controller decides whether the arrow belongs above or below the
+        # tile. The HUD only draws that choice.
+        arrow_position = controller.selected_tile_arrow_position()
+        hidden0 = controller.is_hand_hidden(0)
+        hidden1 = controller.is_hand_hidden(1)
 
-        self._renderizar_mao(
-            mao0,
-            margem,
-            mao_y,
-            area_w,
-            mao_h,
+        self._render_hand(
+            hand0,
+            margin,
+            hand_y,
+            hand_area_width,
+            hand_h,
             align="left",
-            indice_selecionado=sel0,
-            posicao_seta=posicao_seta,
-            oculta=oculta0,
+            selected_index=selected0,
+            arrow_position=arrow_position,
+            hidden=hidden0,
         )
-        self._renderizar_mao(
-            mao1,
-            sw - margem - area_w,
-            mao_y,
-            area_w,
-            mao_h,
+        self._render_hand(
+            hand1,
+            sw - margin - hand_area_width,
+            hand_y,
+            hand_area_width,
+            hand_h,
             align="right",
-            indice_selecionado=sel1,
-            posicao_seta=posicao_seta,
-            oculta=oculta1,
+            selected_index=selected1,
+            arrow_position=arrow_position,
+            hidden=hidden1,
         )
 
-        self._renderizar_monte(estado, display)
+        self._render_stock(state, display)
 
-    def _renderizar_monte(self, estado, display):
+    def _render_stock(self, state, display):
         sw, _sh = display
 
         y = self._BAR_H
 
-        monte_n = estado.get("monte_tamanho", len(estado.get("monte", [])))
+        stock_count = state.get("stock_size", len(state.get("stock", [])))
 
-        label = "Monte"
-        count_txt = f"x {monte_n}"
+        label = "Stock"
+        count_text = f"x {stock_count}"
 
-        tile_w = 40
-        tile_h = 22
+        tile_width = 40
+        tile_height = 22
         gap = 10
 
-        label_w, label_h = self._f_dica.size(label)
-        count_w, count_h = self._f_normal.size(count_txt)
+        label_width, label_height = self._hint_font.size(label)
+        count_width, count_height = self._normal_font.size(count_text)
 
-        total_w = label_w + gap + tile_w + gap + count_w
+        total_width = label_width + gap + tile_width + gap + count_width
 
-        start_x = sw // 2 - total_w // 2
+        start_x = sw // 2 - total_width // 2
 
-        tile_x = start_x + label_w + gap
-        tile_y = y + self._MAOS_H // 2 - tile_h // 2 + 2
+        tile_x = start_x + label_width + gap
+        tile_y = y + self._HANDS_H // 2 - tile_height // 2 + 2
 
-        text_y = tile_y + tile_h // 2 - label_h // 2
-        count_y = tile_y + tile_h // 2 - count_h // 2
+        text_y = tile_y + tile_height // 2 - label_height // 2
+        count_y = tile_y + tile_height // 2 - count_height // 2
 
-        desenhar_texto(
+        draw_text(
             label,
-            self._f_dica,
+            self._hint_font,
             (190, 215, 190),
             start_x,
             text_y,
         )
 
-        desenhar_domino_2d(tile_x, tile_y, tile_w, tile_h, verso=True)
+        draw_domino_2d(tile_x, tile_y, tile_width, tile_height, back=True)
 
-        desenhar_texto(
-            count_txt,
-            self._f_normal,
+        draw_text(
+            count_text,
+            self._normal_font,
             (220, 230, 210),
-            tile_x + tile_w + gap,
+            tile_x + tile_width + gap,
             count_y,
         )
 
-    # ------------------------------------------------------------------ #
-    # Notificação
-    # ------------------------------------------------------------------ #
-
-    def _renderizar_notificacao(self, notif, display):
+    def _render_notification(self, notification, display):
         sw, _sh = display
 
-        texto = notif["texto"]
-        tempo = notif["tempo_ms"]
+        message = notification["message"]
+        remaining_ms = notification["duration_ms"]
 
-        alpha = min(1.0, tempo / self._NOTIF_FADE_MS)
+        alpha = min(1.0, remaining_ms / self._NOTIFICATION_FADE_MS)
 
-        tw, th = self._f_normal.size(texto)
+        text_width, text_height = self._normal_font.size(message)
 
         pad_x = 16
         pad_y = 7
 
-        bx = sw // 2 - tw // 2 - pad_x
-        by = self._BAR_H + self._MAOS_H + 8
+        box_x = sw // 2 - text_width // 2 - pad_x
+        box_y = self._BAR_H + self._HANDS_H + 8
 
-        bw = tw + pad_x * 2
-        bh = th + pad_y * 2
+        box_w = text_width + pad_x * 2
+        box_h = text_height + pad_y * 2
 
-        retangulo(bx, by, bw, bh, (0.04, 0.04, 0.04), 0.85 * alpha)
-        retangulo(bx, by, bw, 2, (0.9, 0.55, 0.1), alpha)
+        rectangle(box_x, box_y, box_w, box_h, (0.04, 0.04, 0.04), 0.85 * alpha)
+        rectangle(box_x, box_y, box_w, 2, (0.9, 0.55, 0.1), alpha)
 
-        desenhar_texto(
-            texto,
-            self._f_normal,
+        draw_text(
+            message,
+            self._normal_font,
             (255, 200, 80),
-            bx + pad_x,
-            by + pad_y,
+            box_x + pad_x,
+            box_y + pad_y,
             alpha,
         )
 
-    # ------------------------------------------------------------------ #
-    # Fim de jogo
-    # ------------------------------------------------------------------ #
-
-    def _renderizar_fim_de_jogo(self, controlador, nomes, display):
+    def _render_game_over(self, controller, names, display):
         sw, sh = display
 
-        v = controlador.info_final.get("vencedor")
+        winner = controller.final_info.get("winner")
 
-        if v == -1:
-            msg = "EMPATE!"
-        elif v is not None:
-            msg = f"Fim! Vencedor: J{v} ({nomes[v]})"
+        if winner == -1:
+            message = "DRAW!"
+        elif winner is not None:
+            message = f"Game over! Winner: P{winner} ({names[winner]})"
         else:
-            msg = "Fim de jogo"
+            message = "Game over"
 
-        mw, mh = self._f_titulo.size(msg)
+        message_width, message_height = self._title_font.size(message)
 
-        bx = sw // 2 - mw // 2 - 14
-        by = sh // 2 - mh // 2 - 10
+        box_x = sw // 2 - message_width // 2 - 14
+        box_y = sh // 2 - message_height // 2 - 10
 
-        retangulo(bx, by, mw + 28, mh + 20, (0, 0, 0), 0.88)
-        retangulo(bx, by, mw + 28, 3, (0.85, 0.6, 0.1), 1.0)
+        rectangle(box_x, box_y, message_width + 28, message_height + 20, (0, 0, 0), 0.88)
+        rectangle(box_x, box_y, message_width + 28, 3, (0.85, 0.6, 0.1), 1.0)
 
-        desenhar_texto(
-            msg,
-            self._f_titulo,
+        draw_text(
+            message,
+            self._title_font,
             (255, 220, 50),
-            sw // 2 - mw // 2,
-            sh // 2 - mh // 2,
+            sw // 2 - message_width // 2,
+            sh // 2 - message_height // 2,
         )
 
-        sub = "Pressione M > Reiniciar para nova partida"
-        sw2, _ = self._f_dica.size(sub)
+        subtitle = "Press M > Restart for a new game"
+        subtitle_width, _ = self._hint_font.size(subtitle)
 
-        desenhar_texto(
-            sub,
-            self._f_dica,
+        draw_text(
+            subtitle,
+            self._hint_font,
             (170, 170, 170),
-            sw // 2 - sw2 // 2,
-            sh // 2 + mh // 2 + 8,
+            sw // 2 - subtitle_width // 2,
+            sh // 2 + message_height // 2 + 8,
         )
 
-    # ------------------------------------------------------------------ #
-    # Menu
-    # ------------------------------------------------------------------ #
-
-    def _renderizar_menu(self, controlador, display):
+    def _render_menu(self, controller, display):
         sw, sh = display
 
-        def lbl_tipo(tipo):
-            return f"[ {tipo.capitalize()} ]"
+        def type_label(agent_type):
+            return f"[ {agent_type_name(agent_type)} ]"
 
-        itens = [
-            f"Jogador 0:  {lbl_tipo(controlador.tipos_agentes[0])}  (Enter: alternar)",
-            f"Jogador 1:  {lbl_tipo(controlador.tipos_agentes[1])}  (Enter: alternar)",
-            "Reiniciar Partida",
+        items = [
+            f"Player 0:  {type_label(controller.agent_types[0])}  (Enter: change)",
+            f"Player 1:  {type_label(controller.agent_types[1])}  (Enter: change)",
+            "Restart Game",
         ]
 
-        footer = "Setas: navegar  |  Enter/Espaco: selecionar  |  M / ESC: fechar"
+        footer = "Arrows: navigate  |  Enter/Space: select  |  M / ESC: close"
 
-        item_ws = [
-            self._f_normal.size("> " + item)[0]
-            for item in itens
+        item_widths = [
+            self._normal_font.size("> " + item)[0]
+            for item in items
         ]
 
-        title_w = self._f_titulo.size("CONFIGURACAO")[0]
-        footer_w = self._f_dica.size(footer)[0]
+        title = "SETTINGS"
+        title_width = self._title_font.size(title)[0]
+        footer_width = self._hint_font.size(footer)[0]
 
-        mw = max(*item_ws, title_w, footer_w) + self._MENU_PADDING
-        mh = self._MENU_HEADER_H + len(itens) * self._MENU_ITEM_H + self._MENU_FOOTER_H
+        menu_width = max(*item_widths, title_width, footer_width) + self._MENU_PADDING
+        menu_height = self._MENU_HEADER_H + len(items) * self._MENU_ITEM_H + self._MENU_FOOTER_H
 
-        mx = (sw - mw) // 2
-        my = (sh - mh) // 2
+        menu_x = (sw - menu_width) // 2
+        menu_y = (sh - menu_height) // 2
 
-        retangulo(0, 0, sw, sh, (0, 0, 0), 0.55)
+        rectangle(0, 0, sw, sh, (0, 0, 0), 0.55)
 
-        retangulo(mx, my, mw, mh, (0.07, 0.07, 0.12), 0.97)
-        retangulo(mx, my, mw, 3, (0.25, 0.5, 1.0), 1.0)
-        retangulo(mx, my + mh - 3, mw, 3, (0.25, 0.5, 1.0), 1.0)
+        rectangle(menu_x, menu_y, menu_width, menu_height, (0.07, 0.07, 0.12), 0.97)
+        rectangle(menu_x, menu_y, menu_width, 3, (0.25, 0.5, 1.0), 1.0)
+        rectangle(menu_x, menu_y + menu_height - 3, menu_width, 3, (0.25, 0.5, 1.0), 1.0)
 
-        desenhar_texto(
-            "CONFIGURACAO",
-            self._f_titulo,
+        draw_text(
+            title,
+            self._title_font,
             (180, 210, 255),
-            mx + 16,
-            my + 14,
+            menu_x + 16,
+            menu_y + 14,
         )
 
-        for i, item in enumerate(itens):
-            iy = my + self._MENU_HEADER_H + i * self._MENU_ITEM_H
+        for index, item in enumerate(items):
+            item_y = menu_y + self._MENU_HEADER_H + index * self._MENU_ITEM_H
 
-            selecionado = i == controlador.menu_cursor
+            selected = index == controller.menu_cursor
 
-            if selecionado:
-                retangulo(mx + 8, iy - 5, mw - 16, 34, (0.15, 0.35, 0.75), 0.85)
+            if selected:
+                rectangle(menu_x + 8, item_y - 5, menu_width - 16, 34, (0.15, 0.35, 0.75), 0.85)
 
-            cor = (255, 255, 110) if selecionado else (200, 200, 210)
-            prefixo = "> " if selecionado else "  "
+            color = (255, 255, 110) if selected else (200, 200, 210)
+            prefix = "> " if selected else "  "
 
-            desenhar_texto(
-                prefixo + item,
-                self._f_normal,
-                cor,
-                mx + 16,
-                iy,
+            draw_text(
+                prefix + item,
+                self._normal_font,
+                color,
+                menu_x + 16,
+                item_y,
             )
 
-        fw, _ = self._f_dica.size(footer)
+        footer_draw_width, _ = self._hint_font.size(footer)
 
-        desenhar_texto(
+        draw_text(
             footer,
-            self._f_dica,
+            self._hint_font,
             (120, 120, 145),
-            mx + mw // 2 - fw // 2,
-            my + mh - 22,
+            menu_x + menu_width // 2 - footer_draw_width // 2,
+            menu_y + menu_height - 22,
         )

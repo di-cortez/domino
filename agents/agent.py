@@ -1,70 +1,43 @@
+"""Small baseline agents and compatibility exports for the agent package."""
+
 import random
 
-# ==========================================
-# 1. MIDDLEWARE / INTERFACES
-# ==========================================
-# Fonte única da verdade: as definições vivem em middleware/middleware.py e
-# são reexportadas aqui para manter os imports existentes
-# (`from agents.agent import Agente`) funcionando sem duplicar a lógica.
-from middleware.middleware import Agente, GerenciadorPartida  # noqa: F401
+from middleware.middleware import Agent, GameManager  # noqa: F401
 
-# ==========================================
-# 2. AGENTES HEURÍSTICOS
-# ==========================================
-class AgenteAleatorio(Agente):
-    """Escolhe uma jogada válida de forma puramente aleatória."""
-    def escolher_jogada(self, estado, jogadas_legais):
-        # Se a única ação for passar (None) ou comprar, random.choice lidará com isso
-        return random.choice(jogadas_legais)
 
-class AgenteGuloso(Agente):
-    """Escolhe a peça com a maior soma de pontos (pips) para esvaziar a mão pesada."""
-    def escolher_jogada(self, estado, jogadas_legais):
-        # Se não há jogadas de colocação de peça, retorna a ação obrigatória
-        if jogadas_legais == [None] or jogadas_legais == [("COMPRAR", None)]:
-            return jogadas_legais[0]
-        
-        melhor_jogada = None
-        maior_pontuacao = -1
-        
-        for jogada in jogadas_legais:
-            peca = jogada[0]
-            pontuacao = peca[0] + peca[1]
-            if pontuacao > maior_pontuacao:
-                maior_pontuacao = pontuacao
-                melhor_jogada = jogada
-                
-        return melhor_jogada
+class RandomAgent(Agent):
+    """Choose uniformly from the legal action list."""
 
-# ==========================================
-# 3. EXECUÇÃO DA PARTIDA
-# ==========================================
+    def choose_move(self, state, legal_actions):
+        return random.choice(legal_actions)
+
+
+class GreedyAgent(Agent):
+    """Play the legal tile with the largest pip sum."""
+
+    def choose_move(self, state, legal_actions):
+        tile_moves = [action for action in legal_actions if action is not None and action[0] != "DRAW"]
+        if not tile_moves:
+            return legal_actions[0]
+
+        return max(tile_moves, key=lambda action: action[0][0] + action[0][1])
+
+
 if __name__ == "__main__":
-    from middleware.motor_domino import MotorDomino
-    
-    print("Iniciando MotorDomino...")
-    motor = MotorDomino(num_jogadores=2)
-    
-    print("Instanciando Agentes (Guloso vs Aleatório)...")
-    agente0 = AgenteGuloso()
-    agente1 = AgenteAleatorio()
-    
-    print("Configurando Gerenciador de Partida (Middleware)...")
-    gerenciador = GerenciadorPartida(motor, [agente0, agente1])
-    
-    print("Executando partida completa de forma automatizada...")
-    gerenciador.jogar_partida_completa()
-    
-    # Extraindo o dicionário final (agora seguro e serializável)
-    estado_final = motor.to_dict()
-    
-    print("\n--- Resultado da Partida ---")
-    if estado_final["vencedor"] == -1:
-        print("Resultado: Empate (Jogo Trancado resolutamente empatado)")
+    from middleware.domino_engine import DominoEngine
+
+    engine = DominoEngine(player_count=2)
+    manager = GameManager(engine, [GreedyAgent(), RandomAgent()])
+    manager.play_full_game()
+
+    final_state = engine.to_dict()
+    print("\n--- Game Result ---")
+    if final_state["winner"] == -1:
+        print("Result: draw")
     else:
-        print(f"Resultado: Jogador {estado_final['vencedor']} Venceu!")
-        
-    print(f"Total de turnos processados: {estado_final['turno']}")
-    print(f"Peças restantes no monte: {len(estado_final['monte'])}")
-    print(f"Tamanho final da mão do Jogador 0: {len(estado_final['maos'][0])}")
-    print(f"Tamanho final da mão do Jogador 1: {len(estado_final['maos'][1])}")
+        print(f"Result: player {final_state['winner']} won")
+
+    print(f"Turns processed: {final_state['turn']}")
+    print(f"Tiles left in stock: {len(final_state['stock'])}")
+    print(f"Player 0 final hand size: {len(final_state['hands'][0])}")
+    print(f"Player 1 final hand size: {len(final_state['hands'][1])}")

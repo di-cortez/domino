@@ -1,52 +1,47 @@
-class Agente:
-    """
-    Classe base (Interface) para todos os jogadores (Humano, Heurístico, Neural).
-    """
-    def escolher_jogada(self, estado, jogadas_legais):
-        """
-        Recebe o estado atual e a lista de jogadas válidas.
-        Deve retornar uma jogada presente em 'jogadas_legais'.
-        """
-        raise NotImplementedError("Todos os agentes devem implementar este método.")
+"""Glue layer between the rules engine and interchangeable agents."""
 
 
-class GerenciadorPartida:
-    """Controla o fluxo do jogo entre o Motor e os Agentes, registrando dados para SL."""
-    def __init__(self, motor, agentes):
-        if len(agentes) != motor.num_jogadores:
-            raise ValueError("O número de agentes deve ser igual ao número de jogadores.")
-        self.motor = motor
-        self.agentes = agentes
-        self.historico_treinamento = [] # Armazena os pares (Estado, Ação)
+class Agent:
+    """Minimal protocol implemented by every automatic player."""
 
-    def jogar_turno(self):
-        estado = self.motor._obter_estado()
-        jogador_atual = estado["jogador_atual"]
-        jogadas_legais = self.motor.acoes_validas(jogador_atual)
-        
-        agente_da_vez = self.agentes[jogador_atual]
-        acao_escolhida = agente_da_vez.escolher_jogada(estado, jogadas_legais)
-        
-        # LOGGING PARA SUPERVISED LEARNING
-        # Salvamos o estado exato e a ação que o agente "Professor" decidiu tomar.
-        # cadeia_visual é excluída pois é metadata de renderização, nunca usada pelo encoder.
-        estado_treino = {k: v for k, v in estado.items() if k != "cadeia_visual"}
-        self.historico_treinamento.append({
-            "estado": estado_treino,
-            "acao_alvo": acao_escolhida
+    def choose_move(self, state, legal_actions):
+        """Return one action from ``legal_actions`` for the current state."""
+        raise NotImplementedError("Agents must implement choose_move().")
+
+
+class GameManager:
+    """Advance a game by asking the current agent for one legal action."""
+
+    def __init__(self, engine, agents):
+        if len(agents) != engine.player_count:
+            raise ValueError("The number of agents must match the number of players.")
+        self.engine = engine
+        self.agents = agents
+        self.training_history = []
+
+    def play_turn(self):
+        state = self.engine._get_state()
+        current_player = state["current_player"]
+        legal_actions = self.engine.valid_actions(current_player)
+        chosen_action = self.agents[current_player].choose_move(state, legal_actions)
+
+        training_state = {key: value for key, value in state.items() if key != "visual_chain"}
+        self.training_history.append({
+            "state": training_state,
+            "target_action": chosen_action,
         })
-        
-        estado_atualizado, fim_de_jogo, info = self.motor.step(acao_escolhida)
-        info["acao"]         = acao_escolhida
-        info["jogador_acao"] = jogador_atual
-        return fim_de_jogo, info
 
-    def jogar_partida_completa(self):
-        self.historico_treinamento = [] # Reseta o log para a nova partida
-        fim_de_jogo = False
+        _, game_over, info = self.engine.step(chosen_action)
+        info["action"] = chosen_action
+        info["acting_player"] = current_player
+        return game_over, info
+
+    def play_full_game(self):
+        self.training_history = []
+        game_over = False
         info = {}
-        
-        while not fim_de_jogo:
-            fim_de_jogo, info = self.jogar_turno()
-            
-        return info, self.historico_treinamento
+
+        while not game_over:
+            game_over, info = self.play_turn()
+
+        return info, self.training_history

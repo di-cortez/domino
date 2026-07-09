@@ -1,0 +1,87 @@
+# Diagnostics
+
+Diagnostics compare agents over many two-player domino games and write compact
+metrics, CSV data, and plots. The default diagnostic now runs the complete
+ordered matrix of supported agents, so every agent is evaluated against every
+other agent, including itself.
+
+## Supported Agents
+
+| Name | Implementation |
+|---|---|
+| `rl` | `RLAgent` loaded from the RL self-play checkpoint and used in evaluation mode. |
+| `neural` | `NeuralAgent` loaded from supervised-learning weights. |
+| `heuristic` | `StrategicAgent`, the handcrafted rule-based agent. |
+| `random` | Uniform random legal move. |
+
+The old `greedy` baseline is no longer available in diagnostics. The pairwise
+helper still accepts the legacy alias `sl` for `neural`, but new commands and
+reports use `neural`.
+
+## Full All-Pairs Diagnostic
+
+Run the full matrix with the default 1,000 games per ordered matchup:
+
+```bash
+python -m diagnostics.evaluate
+```
+
+Change the number of games when needed:
+
+```bash
+python -m diagnostics.evaluate -n 5000
+```
+
+Useful options:
+
+```bash
+python -m diagnostics.evaluate --help
+python -m diagnostics.evaluate --seed 123
+python -m diagnostics.evaluate --no-pair-plots
+python -m diagnostics.evaluate --output /tmp/domino_all_pairs
+python -m diagnostics.evaluate --neural-weights models/domino_sl_weights.npz
+python -m diagnostics.evaluate --rl-weights models/domino_rl_weights.npz
+```
+
+The output folder defaults to `diagnostics/results/all_pairs/`.
+
+| File or folder | Contents |
+|---|---|
+| `all_pairs_table.png` | Image table with win/draw/loss counts and win rate for every ordered matchup. |
+| `all_pairs_matrix.csv` | One row per ordered matchup. |
+| `all_pairs_summary.json` | Full aggregate report with all pairwise summaries. |
+| `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
+
+## Pairwise Helper
+
+Use the helper directly when only one matchup is needed:
+
+```bash
+python -m diagnostics.pairwise --agent heuristic --opponent random -n 1000
+python -m diagnostics.pairwise --agent rl --opponent neural -n 1000
+```
+
+The evaluated agent alternates between player 0 and player 1 to reduce
+first-player bias.
+
+By default, pairwise files are written under
+`diagnostics/results/pairwise/<agent>_vs_<opponent>/`:
+
+| File | Contents |
+|---|---|
+| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips. |
+| `games.csv` | One row per game with position, result, turns, and pip counts. |
+| `cumulative_rates.png` | Win/draw/loss rates over time. |
+| `result_distribution.png` | Final result counts. |
+| `wins_by_position.png` | Win rate as player 0 vs. player 1. |
+| `game_lengths.png` | Turn-count histogram. |
+
+## Interpretation
+
+Small samples are noisy. Prefer at least several hundred games when comparing
+two checkpoints. If confidence intervals overlap heavily, the result should be
+treated as inconclusive.
+
+The `self_play_evaluation/` subfolder contains a helper script for comparing
+two RL training regimes: pure self-play and direct training against the
+heuristic agent.

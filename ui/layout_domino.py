@@ -1,624 +1,544 @@
 """
-Geometria da cadeia de dominós na mesa.
+Geometry for the domino chain on the board.
 
-Este módulo não desenha. Ele recebe a cadeia visual do motor e calcula posições,
-ângulos e ordem dos valores para cada peça, respeitando limites da mesa e
-virando os ramos quando a linha chega perto das bordas.
+This module does not draw anything. It receives the engine's `visual_chain` and
+calculates positions, angles, and pip order for each tile while respecting the
+board limits and turning branches near the edges.
 """
 
-from ui.config_visual import (
-    GAP_ENTRE_PECAS,
-    LIMITE_X,
-    LIMITE_Y_INFERIOR,
-    LIMITE_Y_SUPERIOR,
-    LARGURA_PECA_DEITADA,
-    ALTURA_PECA_DEITADA,
-    LARGURA_PECA_EM_PE,
-    ALTURA_PECA_EM_PE,
+from ui.visual_config import (
+    HORIZONTAL_TILE_HEIGHT,
+    HORIZONTAL_TILE_WIDTH,
+    LOWER_Y_LIMIT,
+    TILE_GAP,
+    UPPER_Y_LIMIT,
+    VERTICAL_TILE_HEIGHT,
+    VERTICAL_TILE_WIDTH,
+    X_LIMIT,
 )
 
 
-# ============================================================
-# Percursos dos ramos
-# ============================================================
-
-PERCURSO_DIREITA = [
-    {"nome": "topo_direita", "dx": 1, "dy": 0},
-    {"nome": "desce_direita", "dx": 0, "dy": -1},
-    {"nome": "fundo_esquerda", "dx": -1, "dy": 0},
-    {"nome": "sobe_esquerda", "dx": 0, "dy": 1},
-    {"nome": "topo_direita_2", "dx": 1, "dy": 0},
+RIGHT_PATH = [
+    {"name": "top_right", "dx": 1, "dy": 0},
+    {"name": "down_right", "dx": 0, "dy": -1},
+    {"name": "bottom_left", "dx": -1, "dy": 0},
+    {"name": "up_left", "dx": 0, "dy": 1},
+    {"name": "top_right_2", "dx": 1, "dy": 0},
 ]
 
-PERCURSO_ESQUERDA = [
-    {"nome": "topo_esquerda", "dx": -1, "dy": 0},
-    {"nome": "desce_esquerda", "dx": 0, "dy": -1},
-    {"nome": "fundo_direita", "dx": 1, "dy": 0},
-    {"nome": "sobe_direita", "dx": 0, "dy": 1},
-    {"nome": "topo_esquerda_2", "dx": -1, "dy": 0},
+LEFT_PATH = [
+    {"name": "top_left", "dx": -1, "dy": 0},
+    {"name": "down_left", "dx": 0, "dy": -1},
+    {"name": "bottom_right", "dx": 1, "dy": 0},
+    {"name": "up_right", "dx": 0, "dy": 1},
+    {"name": "top_left_2", "dx": -1, "dy": 0},
 ]
 
 
-def obter_percurso(direcao):
-    if direcao == 1:
-        return PERCURSO_DIREITA
+def get_path(direction):
+    if direction == 1:
+        return RIGHT_PATH
 
-    if direcao == -1:
-        return PERCURSO_ESQUERDA
+    if direction == -1:
+        return LEFT_PATH
 
-    raise ValueError(f"Direção de ramo inválida: {direcao}")
-
-
-# ============================================================
-# Peças e valores
-# ============================================================
-
-def eh_bucha(info):
-    a, b = info["peca"]
-    return a == b
+    raise ValueError(f"Invalid branch direction: {direction}")
 
 
-def valores_peca(info):
-    return tuple(info["peca"])
+def is_double(info):
+    first, second = info["tile"]
+    return first == second
 
 
-def valor_comum(info_anterior, info_atual):
+def tile_values(info):
+    return tuple(info["tile"])
+
+
+def common_value(previous_info, current_info):
     """
-    Valor pelo qual info_atual encosta em info_anterior.
+    Value by which `current_info` touches `previous_info`.
 
-    Primeiro tenta usar valor_conectado, se o motor tiver enviado.
-    Caso contrário, calcula pela interseção dos valores das duas peças.
+    The engine usually sends `connected_value`. If it does not, the value is
+    inferred from the intersection between the two tiles.
     """
-    if "valor_conectado" in info_atual:
-        return info_atual["valor_conectado"]
+    if "connected_value" in current_info:
+        return current_info["connected_value"]
 
-    a1, b1 = valores_peca(info_anterior)
-    a2, b2 = valores_peca(info_atual)
+    previous_a, previous_b = tile_values(previous_info)
+    current_a, current_b = tile_values(current_info)
 
-    valores_anteriores = {a1, b1}
+    previous_values = {previous_a, previous_b}
 
-    if a2 in valores_anteriores:
-        return a2
+    if current_a in previous_values:
+        return current_a
 
-    if b2 in valores_anteriores:
-        return b2
+    if current_b in previous_values:
+        return current_b
 
     raise ValueError(
-        f"Peças consecutivas sem valor comum: "
-        f"{info_anterior['peca']} e {info_atual['peca']}"
+        "Consecutive tiles do not share a value: "
+        f"{previous_info['tile']} and {current_info['tile']}"
     )
 
 
-def outro_valor(info, conectado):
-    """
-    Dada uma peça e o valor conectado, devolve o outro valor da peça.
-    """
-    a, b = valores_peca(info)
+def other_value(info, connected_value):
+    """Return the value on the tile that is not connected to the previous tile."""
+    first, second = tile_values(info)
 
-    if a == conectado:
-        return b
+    if first == connected_value:
+        return second
 
-    if b == conectado:
-        return a
+    if second == connected_value:
+        return first
 
     raise ValueError(
-        f"Valor conectado {conectado} não aparece na peça {info['peca']}"
+        f"Connected value {connected_value} does not appear in tile {info['tile']}"
     )
 
 
-# ============================================================
-# Direções, ângulos e dimensões
-# ============================================================
-
-def movimento_horizontal(dx, dy):
+def is_horizontal_move(dx, dy):
     return dx != 0 and dy == 0
 
 
-def movimento_vertical(dx, dy):
+def is_vertical_move(dx, dy):
     return dx == 0 and dy != 0
 
 
-def angulo_para_direcao(info, dx, dy):
+def angle_for_direction(info, dx, dy):
     """
-    Regra geral:
+    General orientation rule.
 
-    Movimento horizontal:
-        - não-bucha: deitada;
-        - bucha: em pé.
+    Horizontal movement:
+    - non-double tiles lie horizontally;
+    - doubles stand vertically.
 
-    Movimento vertical:
-        - não-bucha: em pé;
-        - bucha: deitada.
+    Vertical movement:
+    - non-double tiles stand vertically;
+    - doubles lie horizontally.
     """
-    if movimento_horizontal(dx, dy):
-        if eh_bucha(info):
+    if is_horizontal_move(dx, dy):
+        if is_double(info):
             return 90.0
 
         return 0.0
 
-    if movimento_vertical(dx, dy):
-        if eh_bucha(info):
+    if is_vertical_move(dx, dy):
+        if is_double(info):
             return 0.0
 
         return 90.0
 
-    raise ValueError(f"Direção inválida: dx={dx}, dy={dy}")
+    raise ValueError(f"Invalid direction: dx={dx}, dy={dy}")
 
 
-def angulo_em_linha(info):
+def inline_angle(info):
+    """Default horizontal angle used by the pivot tile."""
+    return angle_for_direction(info, dx=1, dy=0)
+
+
+def descending_angle(info):
+    """Compatibility angle for a downward vertical segment."""
+    return angle_for_direction(info, dx=0, dy=-1)
+
+
+def corner_angle(info, old_segment, new_segment):
     """
-    Compatibilidade com o desenho do pivô:
-    linha horizontal padrão.
+    Angle for the tile that enters a corner.
+
+    Non-doubles use the new direction. Doubles use the old direction so the
+    first double after a corner remains visually crossed relative to the
+    previous segment.
     """
-    return angulo_para_direcao(info, dx=1, dy=0)
-
-
-def angulo_descendo(info):
-    """
-    Compatibilidade com versões anteriores:
-    trecho vertical descendo.
-    """
-    return angulo_para_direcao(info, dx=0, dy=-1)
-
-
-def angulo_para_corner(info, segmento_antigo, segmento_novo):
-    """
-    Ângulo da peça que entra no corner.
-
-    Regra prática:
-    - peça comum usa a direção nova;
-    - bucha usa a direção antiga.
-
-    Isso preserva o comportamento que já funcionou:
-    quando a primeira peça depois do corner é bucha, ela fica atravessada
-    em relação ao trecho anterior.
-    """
-    if eh_bucha(info):
-        return angulo_para_direcao(
+    if is_double(info):
+        return angle_for_direction(
             info,
-            segmento_antigo["dx"],
-            segmento_antigo["dy"],
+            old_segment["dx"],
+            old_segment["dy"],
         )
 
-    return angulo_para_direcao(
+    return angle_for_direction(
         info,
-        segmento_novo["dx"],
-        segmento_novo["dy"],
+        new_segment["dx"],
+        new_segment["dy"],
     )
 
 
-def largura_por_angulo(angulo):
-    if angulo in (90.0, -90.0):
-        return LARGURA_PECA_EM_PE
+def width_for_angle(angle):
+    if angle in (90.0, -90.0):
+        return VERTICAL_TILE_WIDTH
 
-    return LARGURA_PECA_DEITADA
-
-
-def altura_por_angulo(angulo):
-    if angulo in (90.0, -90.0):
-        return ALTURA_PECA_EM_PE
-
-    return ALTURA_PECA_DEITADA
+    return HORIZONTAL_TILE_WIDTH
 
 
-def dimensoes_por_angulo(angulo):
-    return largura_por_angulo(angulo), altura_por_angulo(angulo)
+def height_for_angle(angle):
+    if angle in (90.0, -90.0):
+        return VERTICAL_TILE_HEIGHT
+
+    return HORIZONTAL_TILE_HEIGHT
 
 
-def extensao_no_eixo(angulo, dx, dy):
+def dimensions_for_angle(angle):
+    return width_for_angle(angle), height_for_angle(angle)
+
+
+def axis_extent(angle, dx, dy):
     """
-    Devolve o tamanho da peça no eixo em que ela vai andar.
+    Return tile size along the movement axis.
 
-    Se anda horizontalmente, usa largura.
-    Se anda verticalmente, usa altura.
+    Horizontal movement uses width; vertical movement uses height.
     """
-    largura, altura = dimensoes_por_angulo(angulo)
+    width, height = dimensions_for_angle(angle)
 
-    if movimento_horizontal(dx, dy):
-        return largura
+    if is_horizontal_move(dx, dy):
+        return width
 
-    if movimento_vertical(dx, dy):
-        return altura
+    if is_vertical_move(dx, dy):
+        return height
 
-    raise ValueError(f"Direção inválida: dx={dx}, dy={dy}")
+    raise ValueError(f"Invalid direction: dx={dx}, dy={dy}")
 
 
-# ============================================================
-# Ordem dos valores desenhados
-# ============================================================
-
-def valores_para_direcao(info_anterior, info_atual, dx, dy):
+def values_for_direction(previous_info, current_info, dx, dy):
     """
-    Escolhe a ordem dos valores de info_atual para que o valor conectado
-    fique do lado de entrada da peça.
+    Choose pip order so the connected value stays on the input side.
 
-    dx =  1, dy =  0: anda para direita
-        conectado fica à esquerda.
-
-    dx = -1, dy =  0: anda para esquerda
-        conectado fica à direita.
-
-    dx =  0, dy = -1: desce
-        conectado fica em cima.
-
-    dx =  0, dy =  1: sobe
-        conectado fica embaixo.
+    dx =  1, dy =  0: moving right, connected value stays left.
+    dx = -1, dy =  0: moving left, connected value stays right.
+    dx =  0, dy = -1: moving down, connected value stays above.
+    dx =  0, dy =  1: moving up, connected value stays below.
     """
-    conectado = valor_comum(info_anterior, info_atual)
-    outro = outro_valor(info_atual, conectado)
+    connected_value = common_value(previous_info, current_info)
+    free_value = other_value(current_info, connected_value)
 
     if dx == 1 and dy == 0:
-        return conectado, outro
+        return connected_value, free_value
 
     if dx == -1 and dy == 0:
-        return outro, conectado
+        return free_value, connected_value
 
     if dx == 0 and dy == -1:
-        # Com rotação de 90 graus:
-        # primeiro valor fica embaixo;
-        # segundo valor fica em cima.
-        return outro, conectado
+        # With a 90-degree rotation, the first rendered value appears below and
+        # the second rendered value appears above.
+        return free_value, connected_value
 
     if dx == 0 and dy == 1:
-        # Subindo:
-        # conectado precisa ficar embaixo.
-        return conectado, outro
+        return connected_value, free_value
 
-    raise ValueError(f"Direção inválida: dx={dx}, dy={dy}")
+    raise ValueError(f"Invalid direction: dx={dx}, dy={dy}")
 
 
-# ============================================================
-# Caixas e limites
-# ============================================================
+def fits_in_area(x_pos, y_pos, angle):
+    """Return whether the oriented tile bounding box fits inside board limits."""
+    width, height = dimensions_for_angle(angle)
 
-def cabe_na_area(pos_x, pos_y, angulo):
-    """
-    Verifica se a caixa ocupada pela peça cabe nos limites da mesa.
+    left = x_pos - width / 2.0
+    right = x_pos + width / 2.0
+    bottom = y_pos - height / 2.0
+    top = y_pos + height / 2.0
 
-    Usa largura e altura reais da peça depois da orientação.
-    """
-    largura, altura = dimensoes_por_angulo(angulo)
-
-    esquerda = pos_x - largura / 2.0
-    direita = pos_x + largura / 2.0
-    baixo = pos_y - altura / 2.0
-    cima = pos_y + altura / 2.0
-
-    if esquerda < -LIMITE_X:
+    if left < -X_LIMIT:
         return False
 
-    if direita > LIMITE_X:
+    if right > X_LIMIT:
         return False
 
-    if baixo < LIMITE_Y_INFERIOR:
+    if bottom < LOWER_Y_LIMIT:
         return False
 
-    if cima > LIMITE_Y_SUPERIOR:
+    if top > UPPER_Y_LIMIT:
         return False
 
     return True
 
 
-# ============================================================
-# Posição da próxima peça
-# ============================================================
-
-def posicao_em_linha(
-    pos_x_atual,
-    pos_y_atual,
-    segmento,
-    angulo_anterior,
-    angulo_atual,
+def inline_position(
+    current_x,
+    current_y,
+    segment,
+    previous_angle,
+    current_angle,
 ):
-    """
-    Calcula a posição da próxima peça continuando no mesmo segmento.
-    """
-    dx = segmento["dx"]
-    dy = segmento["dy"]
+    """Calculate the next tile position while staying on the same segment."""
+    dx = segment["dx"]
+    dy = segment["dy"]
 
-    passo = (
-        extensao_no_eixo(angulo_anterior, dx, dy) / 2.0
-        + extensao_no_eixo(angulo_atual, dx, dy) / 2.0
-        + GAP_ENTRE_PECAS
+    step = (
+        axis_extent(previous_angle, dx, dy) / 2.0
+        + axis_extent(current_angle, dx, dy) / 2.0
+        + TILE_GAP
     )
 
     return (
-        pos_x_atual + dx * passo,
-        pos_y_atual + dy * passo,
+        current_x + dx * step,
+        current_y + dy * step,
     )
 
 
-def deslocamento_saida_corner(info_anterior, angulo_anterior, segmento_antigo):
+def corner_exit_offset(previous_info, previous_angle, old_segment):
     """
-    Ajuste fino para o ponto de saída no corner.
+    Fine-tune the exit pip position at a corner.
 
-    Se a peça anterior não é bucha, a conexão sai aproximadamente do centro
-    da metade externa da peça, não do centro da peça inteira.
-
-    Se é bucha, usamos o centro.
+    For non-doubles, the connection leaves from the center of the outer half
+    instead of the center of the full tile. Doubles use the center.
     """
-    if eh_bucha(info_anterior):
+    if is_double(previous_info):
         return 0.0
 
-    dx = segmento_antigo["dx"]
-    dy = segmento_antigo["dy"]
+    dx = old_segment["dx"]
+    dy = old_segment["dy"]
 
-    if movimento_horizontal(dx, dy):
-        return largura_por_angulo(angulo_anterior) / 4.0
+    if is_horizontal_move(dx, dy):
+        return width_for_angle(previous_angle) / 4.0
 
-    if movimento_vertical(dx, dy):
-        return altura_por_angulo(angulo_anterior) / 4.0
+    if is_vertical_move(dx, dy):
+        return height_for_angle(previous_angle) / 4.0
 
-    raise ValueError(f"Segmento inválido: {segmento_antigo}")
+    raise ValueError(f"Invalid segment: {old_segment}")
 
 
-def posicao_em_corner(
-    pos_x_atual,
-    pos_y_atual,
-    info_anterior,
-    segmento_antigo,
-    segmento_novo,
-    angulo_anterior,
-    angulo_atual,
+def corner_position(
+    current_x,
+    current_y,
+    previous_info,
+    old_segment,
+    new_segment,
+    previous_angle,
+    current_angle,
 ):
     """
-    Calcula a posição da primeira peça depois de virar o corner.
+    Calculate the first tile position after turning a corner.
 
-    Casos:
-    - horizontal -> vertical:
-        ajusta x pela metade externa da peça anterior;
-        desce/sobe conforme o novo segmento.
-
-    - vertical -> horizontal:
-        ajusta y pela metade externa da peça anterior;
-        anda para o lado conforme o novo segmento.
+    Horizontal-to-vertical turns adjust x by the previous tile's outer half and
+    move y along the new segment. Vertical-to-horizontal turns do the inverse.
     """
-    dx_antigo = segmento_antigo["dx"]
-    dy_antigo = segmento_antigo["dy"]
+    old_dx = old_segment["dx"]
+    old_dy = old_segment["dy"]
 
-    dx_novo = segmento_novo["dx"]
-    dy_novo = segmento_novo["dy"]
+    new_dx = new_segment["dx"]
+    new_dy = new_segment["dy"]
 
-    largura_atual, altura_atual = dimensoes_por_angulo(angulo_atual)
+    current_width, current_height = dimensions_for_angle(current_angle)
 
-    saida = deslocamento_saida_corner(
-        info_anterior,
-        angulo_anterior,
-        segmento_antigo,
+    exit_offset = corner_exit_offset(
+        previous_info,
+        previous_angle,
+        old_segment,
     )
 
-    # Horizontal -> vertical.
-    if movimento_horizontal(dx_antigo, dy_antigo) and movimento_vertical(dx_novo, dy_novo):
-        novo_x = pos_x_atual + dx_antigo * saida
+    if is_horizontal_move(old_dx, old_dy) and is_vertical_move(new_dx, new_dy):
+        new_x = current_x + old_dx * exit_offset
 
-        passo_y = (
-            altura_por_angulo(angulo_anterior) / 2.0
-            + altura_atual / 2.0
-            + GAP_ENTRE_PECAS
+        y_step = (
+            height_for_angle(previous_angle) / 2.0
+            + current_height / 2.0
+            + TILE_GAP
         )
 
-        novo_y = pos_y_atual + dy_novo * passo_y
+        new_y = current_y + new_dy * y_step
 
-        return novo_x, novo_y
+        return new_x, new_y
 
-    # Vertical -> horizontal.
-    if movimento_vertical(dx_antigo, dy_antigo) and movimento_horizontal(dx_novo, dy_novo):
-        passo_x = (
-            largura_por_angulo(angulo_anterior) / 2.0
-            + largura_atual / 2.0
-            + GAP_ENTRE_PECAS
+    if is_vertical_move(old_dx, old_dy) and is_horizontal_move(new_dx, new_dy):
+        x_step = (
+            width_for_angle(previous_angle) / 2.0
+            + current_width / 2.0
+            + TILE_GAP
         )
 
-        novo_x = pos_x_atual + dx_novo * passo_x
-        novo_y = pos_y_atual + dy_antigo * saida
+        new_x = current_x + new_dx * x_step
+        new_y = current_y + old_dy * exit_offset
 
-        return novo_x, novo_y
+        return new_x, new_y
 
-    # Fallback: se por algum motivo o percurso virar de modo estranho,
-    # usa a regra simples de linha no segmento novo.
-    return posicao_em_linha(
-        pos_x_atual,
-        pos_y_atual,
-        segmento_novo,
-        angulo_anterior,
-        angulo_atual,
+    # Fallback for unexpected path shapes: continue on the new segment.
+    return inline_position(
+        current_x,
+        current_y,
+        new_segment,
+        previous_angle,
+        current_angle,
     )
 
 
-# ============================================================
-# Slots
-# ============================================================
-
-def criar_slot(
-    pos_x,
-    pos_y,
-    info_anterior,
-    info_atual,
-    segmento,
-    indice_segmento,
-    tipo,
-    subtipo,
-    angulo,
+def create_slot(
+    x_pos,
+    y_pos,
+    previous_info,
+    current_info,
+    segment,
+    segment_index,
+    slot_type,
+    subtype,
+    angle,
 ):
-    dx = segmento["dx"]
-    dy = segmento["dy"]
+    dx = segment["dx"]
+    dy = segment["dy"]
 
     return {
-        "tipo": tipo,
-        "subtipo": subtipo,
-        "segmento": segmento["nome"],
-        "indice_segmento": indice_segmento,
+        "slot_type": slot_type,
+        "subtype": subtype,
+        "segment": segment["name"],
+        "segment_index": segment_index,
         "dx": dx,
         "dy": dy,
-        "pos_x": pos_x,
-        "pos_y": pos_y,
-        "angulo": angulo,
-        "valores": valores_para_direcao(info_anterior, info_atual, dx, dy),
-        "proximo_segmento": indice_segmento,
+        "x_pos": x_pos,
+        "y_pos": y_pos,
+        "angle": angle,
+        "values": values_for_direction(previous_info, current_info, dx, dy),
+        "next_segment_index": segment_index,
     }
 
 
-def tipo_slot_para_segmento(segmento):
-    if movimento_vertical(segmento["dx"], segmento["dy"]):
+def slot_type_for_segment(segment):
+    if is_vertical_move(segment["dx"], segment["dy"]):
         return "vertical"
 
-    return "linha"
+    return "line"
 
 
-def calcular_proximo_slot(
-    pos_x_atual,
-    pos_y_atual,
-    info_anterior,
-    info_atual,
-    angulo_anterior,
-    percurso,
-    indice_segmento_atual,
+def calculate_next_slot(
+    current_x,
+    current_y,
+    previous_info,
+    current_info,
+    previous_angle,
+    path,
+    current_segment_index,
 ):
     """
-    Tenta colocar a peça no segmento atual.
+    Try to place the tile on the current segment.
 
-    Se a caixa da nova peça extrapola os limites da mesa,
-    avança para o próximo segmento e cria um corner.
+    If the new tile would exceed board limits, move to the next segment and
+    create a corner slot.
     """
-    segmento_atual = percurso[indice_segmento_atual]
+    current_segment = path[current_segment_index]
 
-    angulo_atual = angulo_para_direcao(
-        info_atual,
-        segmento_atual["dx"],
-        segmento_atual["dy"],
+    current_angle = angle_for_direction(
+        current_info,
+        current_segment["dx"],
+        current_segment["dy"],
     )
 
-    candidato_x, candidato_y = posicao_em_linha(
-        pos_x_atual,
-        pos_y_atual,
-        segmento_atual,
-        angulo_anterior,
-        angulo_atual,
+    candidate_x, candidate_y = inline_position(
+        current_x,
+        current_y,
+        current_segment,
+        previous_angle,
+        current_angle,
     )
 
-    if cabe_na_area(candidato_x, candidato_y, angulo_atual):
-        tipo = tipo_slot_para_segmento(segmento_atual)
+    if fits_in_area(candidate_x, candidate_y, current_angle):
+        slot_type = slot_type_for_segment(current_segment)
 
-        return criar_slot(
-            candidato_x,
-            candidato_y,
-            info_anterior,
-            info_atual,
-            segmento_atual,
-            indice_segmento_atual,
-            tipo=tipo,
-            subtipo=None,
-            angulo=angulo_atual,
+        return create_slot(
+            candidate_x,
+            candidate_y,
+            previous_info,
+            current_info,
+            current_segment,
+            current_segment_index,
+            slot_type=slot_type,
+            subtype=None,
+            angle=current_angle,
         )
 
-    # Não coube no segmento atual: vira para o próximo segmento.
-    proximo_indice = min(
-        indice_segmento_atual + 1,
-        len(percurso) - 1,
+    next_index = min(
+        current_segment_index + 1,
+        len(path) - 1,
     )
 
-    segmento_novo = percurso[proximo_indice]
+    new_segment = path[next_index]
 
-    angulo_corner = angulo_para_corner(
-        info_atual,
-        segmento_atual,
-        segmento_novo,
+    turn_angle = corner_angle(
+        current_info,
+        current_segment,
+        new_segment,
     )
 
-    corner_x, corner_y = posicao_em_corner(
-        pos_x_atual,
-        pos_y_atual,
-        info_anterior,
-        segmento_atual,
-        segmento_novo,
-        angulo_anterior,
-        angulo_corner,
+    corner_x, corner_y = corner_position(
+        current_x,
+        current_y,
+        previous_info,
+        current_segment,
+        new_segment,
+        previous_angle,
+        turn_angle,
     )
 
-    return criar_slot(
+    return create_slot(
         corner_x,
         corner_y,
-        info_anterior,
-        info_atual,
-        segmento_novo,
-        proximo_indice,
-        tipo="corner",
-        subtipo=f"{segmento_atual['nome']}_para_{segmento_novo['nome']}",
-        angulo=angulo_corner,
+        previous_info,
+        current_info,
+        new_segment,
+        next_index,
+        slot_type="corner",
+        subtype=f"{current_segment['name']}_to_{new_segment['name']}",
+        angle=turn_angle,
     )
 
 
-# ============================================================
-# Cadeia e ramos
-# ============================================================
-
-def quebrar_cadeia_no_pivo(cadeia_visual, indice_pivo):
+def split_chain_at_pivot(visual_chain, pivot_index):
     """
-    cadeia_visual vem na ordem esquerda -> direita.
+    Split `visual_chain`, which arrives in left-to-right order.
 
-    Antes do pivô: lado esquerdo.
-    Depois do pivô: lado direito.
-
-    Para desenhar a partir do pivô para fora:
-    - lado esquerdo precisa ser invertido;
-    - lado direito já está na ordem correta.
+    Before the pivot is the left side; after the pivot is the right side. To draw
+    outward from the pivot, the left side must be reversed while the right side
+    is already in the correct order.
     """
-    pivo = cadeia_visual[indice_pivo]
+    pivot = visual_chain[pivot_index]
 
-    lado_esquerdo = list(reversed(cadeia_visual[:indice_pivo]))
-    lado_direito = cadeia_visual[indice_pivo + 1:]
+    left_side = list(reversed(visual_chain[:pivot_index]))
+    right_side = visual_chain[pivot_index + 1:]
 
-    return lado_esquerdo, pivo, lado_direito
+    return left_side, pivot, right_side
 
 
-def calcular_slots_ramo(
-    pecas,
-    peca_anterior,
-    direcao,
-    pos_x_inicial,
-    pos_y_inicial,
+def calculate_branch_slots(
+    tiles,
+    previous_tile_info,
+    direction,
+    initial_x,
+    initial_y,
 ):
     """
-    Calcula os slots de um ramo a partir do pivô.
+    Calculate slots for one branch starting from the pivot.
 
-    Não desenha nada.
+    Returns a list of `(tile_info, slot)` pairs.
 
-    Retorna lista de pares:
-        (info_da_peca, slot)
-
-    direcao =  1 -> lado direito
-    direcao = -1 -> lado esquerdo.
+    direction =  1 -> right side.
+    direction = -1 -> left side.
     """
-    resultado = []
+    result = []
 
-    percurso = obter_percurso(direcao)
+    path = get_path(direction)
 
-    pos_x_atual = pos_x_inicial
-    pos_y_atual = pos_y_inicial
+    current_x = initial_x
+    current_y = initial_y
 
-    info_anterior = peca_anterior
-    angulo_anterior = angulo_em_linha(peca_anterior)
+    previous_info = previous_tile_info
+    previous_angle = inline_angle(previous_tile_info)
 
-    indice_segmento_atual = 0
+    current_segment_index = 0
 
-    for info_atual in pecas:
-        slot = calcular_proximo_slot(
-            pos_x_atual,
-            pos_y_atual,
-            info_anterior,
-            info_atual,
-            angulo_anterior,
-            percurso,
-            indice_segmento_atual,
+    for current_info in tiles:
+        slot = calculate_next_slot(
+            current_x,
+            current_y,
+            previous_info,
+            current_info,
+            previous_angle,
+            path,
+            current_segment_index,
         )
 
-        resultado.append((info_atual, slot))
+        result.append((current_info, slot))
 
-        pos_x_atual = slot["pos_x"]
-        pos_y_atual = slot["pos_y"]
-        angulo_anterior = slot["angulo"]
-        indice_segmento_atual = slot["proximo_segmento"]
+        current_x = slot["x_pos"]
+        current_y = slot["y_pos"]
+        previous_angle = slot["angle"]
+        current_segment_index = slot["next_segment_index"]
 
-        info_anterior = info_atual
+        previous_info = current_info
 
-    return resultado
+    return result

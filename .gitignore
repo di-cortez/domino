@@ -30,16 +30,16 @@ build/
 Thumbs.db
 
 # -------------------------------------------------------------------
-# Generated datasets — large files produced by gerador.py.
-# Re-generate with:  python gerador.py
+# Generated datasets: large files produced by training/dataset_generator.py.
+# Regenerate with:  python -m training.dataset_generator
 # -------------------------------------------------------------------
 *.jsonl
 
 # -------------------------------------------------------------------
-# Trained weights — produced by training_loop.py.
-# Re-generate with:  python training_loop.py
+# Trained weights: produced by training/training_loop.py and training/self_play.py.
+# Regenerate with:  python -m training.training_loop
 # To track a specific checkpoint, pin it explicitly:
-#   git add -f pesos_domino_sl.npz
+#   git add -f models/domino_sl_weights.npz
 # -------------------------------------------------------------------
 *.npz
 
@@ -48,7 +48,7 @@ Thumbs.db
 *.prof
 
 
-diagnostico/resultados/
+diagnostics/results/
 
 dataset/*
 !dataset/README.md
@@ -58,4 +58,4 @@ models/*
 
 references/*
 
-melhorias.txt
+improvements.txt

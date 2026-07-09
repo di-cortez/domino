@@ -1,167 +1,132 @@
+"""Rule-based teacher agent used for supervised data generation."""
+
 import random
 
-from agents.agent import Agente
-from middleware.motor_domino import inferir_naipes_mortos
+from agents.agent import Agent
+from middleware.domino_engine import infer_dead_suits
 
 
-class AgenteEstrategico(Agente):
+class StrategicAgent(Agent):
     """
-    Agente 'Professor' baseado em heurísticas de utilidade.
+    Score every legal tile move with a handcrafted utility function.
 
-    Avalia cada jogada legal por uma função de utilidade que combina:
-      - descarte de peso (pips), com bônus para duplos (peças inflexíveis);
-      - diversidade da mão restante e cobertura da ponta recém-criada;
-      - BLOQUEIO: bônus para jogadas que deixam pontas em "naipes mortos"
-        do oponente — valores que ele demonstrou não ter ao passar ou
-        comprar (inferidos do histórico da mesa);
-      - urgência quando algum oponente está prestes a bater (<= 2 peças),
-        que amplifica tanto o descarte de peso quanto o bloqueio.
-
-    Determinístico por padrão (rótulos estáveis para o dataset de SL);
-    `ruido_desempate` > 0 sorteia entre jogadas de utilidade quase igual,
-    útil para diversificar os estados visitados na geração de dataset.
-
-    Os pesos são parâmetros do construtor para permitir calibração empírica
-    (ex.: busca em grade jogando partidas contra a configuração atual).
+    The utility rewards pip disposal, early double disposal, remaining hand
+    flexibility, coverage of the newly exposed end, and blocking values that an
+    opponent has already shown they likely cannot play. The agent is
+    deterministic by default so supervised-learning labels are stable.
     """
 
     def __init__(
         self,
-        peso_duplo=3.5,
-        peso_diversidade=3.0,
-        peso_cobertura=2.0,
-        peso_bloqueio=8.0,
-        ruido_desempate=0.0,
+        double_weight=3.5,
+        diversity_weight=3.0,
+        coverage_weight=2.0,
+        blocking_weight=8.0,
+        tie_break_noise=0.0,
     ):
-        self.peso_duplo = peso_duplo
-        self.peso_diversidade = peso_diversidade
-        self.peso_cobertura = peso_cobertura
-        self.peso_bloqueio = peso_bloqueio
-        self.ruido_desempate = ruido_desempate
+        self.double_weight = double_weight
+        self.diversity_weight = diversity_weight
+        self.coverage_weight = coverage_weight
+        self.blocking_weight = blocking_weight
+        self.tie_break_noise = tie_break_noise
 
-    def _inferir_ausencias_oponentes(self, estado):
-        """
-        Reconstrói do histórico os "naipes mortos" de cada jogador via
-        middleware.motor_domino.inferir_naipes_mortos (mesmo motor usa essa
-        lógica para preencher a chave "naipes_mortos_oponente" do estado).
-
-        Aproximação consciente: a ausência é tratada como permanente, mas o
-        oponente pode vir a comprar uma peça do naipe morto depois. Com 2
-        jogadores o erro é pequeno e rastrear a incerteza custaria muito.
-        """
-        return inferir_naipes_mortos(
-            estado.get("historico_mesa", []),
-            estado["tamanhos_maos"],
-            estado["jogador_atual"],
+    def _infer_opponent_absences(self, state):
+        """Delegate dead-suit inference to the same helper used by the engine."""
+        return infer_dead_suits(
+            state.get("board_history", []),
+            state["hand_sizes"],
+            state["current_player"],
         )
 
-    def escolher_jogada(self, estado, jogadas_legais):
-        if not jogadas_legais:
+    def choose_move(self, state, legal_actions):
+        if not legal_actions:
             return None
 
-        # Ações forçadas (passar/comprar) não têm o formato (peça, lado);
-        # o guarda é por tipo de ação, não por igualdade exata com a lista,
-        # para não quebrar se o motor um dia misturar as opções.
-        jogadas_de_peca = [
-            j for j in jogadas_legais if j is not None and j[0] != "COMPRAR"
-        ]
-        if not jogadas_de_peca:
-            return jogadas_legais[0]
+        tile_moves = [move for move in legal_actions if move is not None and move[0] != "DRAW"]
+        if not tile_moves:
+            return legal_actions[0]
 
-        # Normaliza para tuplas: desacopla do formato de serialização do
-        # estado (o motor envia a mão como listas via _obter_estado).
-        mao = [tuple(p) for p in estado["mao_jogador"]]
-        pontas_atuais = estado["pontas"]
-        jogador_atual = estado["jogador_atual"]
-        tamanhos = estado["tamanhos_maos"]
+        hand = [tuple(tile) for tile in state["current_player_hand"]]
+        current_ends = state["ends"]
+        current_player = state["current_player"]
+        hand_sizes = state["hand_sizes"]
 
-        oponentes = [t for i, t in enumerate(tamanhos) if i != jogador_atual]
-        fator_urgencia = 2.0 if oponentes and min(oponentes) <= 2 else 1.0
+        opponents = [size for i, size in enumerate(hand_sizes) if i != current_player]
+        urgency_factor = 2.0 if opponents and min(opponents) <= 2 else 1.0
 
-        ausencias = self._inferir_ausencias_oponentes(estado)
-        valores_mortos = set()
-        for jogador, mortos in ausencias.items():
-            if jogador != jogador_atual:
-                valores_mortos |= mortos
+        absences = self._infer_opponent_absences(state)
+        dead_suit_values = set()
+        for player, missing_values in absences.items():
+            if player != current_player:
+                dead_suit_values |= missing_values
 
-        avaliacoes = []
+        evaluations = []
+        for move in tile_moves:
+            tile, side = move
+            tile = tuple(tile)
 
-        for jogada in jogadas_de_peca:
-            peca, lado = jogada
-            peca = tuple(peca)
+            remaining_hand = list(hand)
+            remaining_hand.remove(tile)
 
-            mao_restante = list(mao)
-            mao_restante.remove(peca)
-
-            # Duplos são inflexíveis (só conectam a um valor): descartá-los
-            # cedo tem bônus próprio, sem contar o peso em dobro.
-            eh_duplo = (peca[0] == peca[1])
-            if eh_duplo:
-                peso = 0
-                bonus_duplo = peca[0] * self.peso_duplo
+            if tile[0] == tile[1]:
+                pip_weight = 0
+                double_bonus = tile[0] * self.double_weight
             else:
-                peso = peca[0] + peca[1]
-                bonus_duplo = 0
+                pip_weight = tile[0] + tile[1]
+                double_bonus = 0
 
-            diversidade = 0
-            cobertura_ponta = 0
-            bloqueio = 0
+            diversity = 0
+            end_coverage = 0
+            blocking = 0
 
-            if pontas_atuais:
-                valor_conectado = pontas_atuais[lado]
-
-                if peca[0] == valor_conectado:
-                    nova_ponta = peca[1]
-                elif peca[1] == valor_conectado:
-                    nova_ponta = peca[0]
+            if current_ends:
+                connected_value = current_ends[side]
+                if tile[0] == connected_value:
+                    new_end = tile[1]
+                elif tile[1] == connected_value:
+                    new_end = tile[0]
                 else:
-                    nova_ponta = None
+                    new_end = None
 
-                if nova_ponta is not None:
-                    pontas_apos = list(pontas_atuais)
-                    pontas_apos[lado] = nova_ponta
+                if new_end is not None:
+                    ends_after_move = list(current_ends)
+                    ends_after_move[side] = new_end
 
-                    # Intencional: uma peça que casa com a nova_ponta conta
-                    # na diversidade E na cobertura — a ponta recém-criada
-                    # vale mais porque é a que a jogada acabou de definir.
-                    diversidade = sum(
-                        1 for p in mao_restante
-                        if (p[0] in pontas_apos or p[1] in pontas_apos)
-                    ) * self.peso_diversidade
-                    cobertura_ponta = sum(
-                        1 for p in mao_restante if nova_ponta in p
-                    ) * self.peso_cobertura
-
-                    # Bloqueio: cada ponta resultante num naipe morto do
-                    # oponente é uma ponta que ele (provavelmente) não cobre.
-                    bloqueio = sum(
-                        1 for v in pontas_apos if v in valores_mortos
-                    ) * self.peso_bloqueio
+                    diversity = sum(
+                        1 for candidate in remaining_hand
+                        if candidate[0] in ends_after_move or candidate[1] in ends_after_move
+                    ) * self.diversity_weight
+                    end_coverage = sum(
+                        1 for candidate in remaining_hand if new_end in candidate
+                    ) * self.coverage_weight
+                    blocking = sum(
+                        1 for value in ends_after_move if value in dead_suit_values
+                    ) * self.blocking_weight
             else:
-                numeros_restantes = set()
-                for p in mao_restante:
-                    numeros_restantes.add(p[0])
-                    numeros_restantes.add(p[1])
-                diversidade = len(numeros_restantes) * 2
+                remaining_numbers = set()
+                for candidate in remaining_hand:
+                    remaining_numbers.add(candidate[0])
+                    remaining_numbers.add(candidate[1])
+                diversity = len(remaining_numbers) * 2
 
-            # Urgência amplifica o descarte (minimiza pips num eventual jogo
-            # travado) E o bloqueio (reduz a mobilidade de quem vai bater).
-            utilidade_total = (
-                (peso + bonus_duplo + bloqueio) * fator_urgencia
-                + diversidade
-                + cobertura_ponta
+            total_utility = (
+                (pip_weight + double_bonus + blocking) * urgency_factor
+                + diversity
+                + end_coverage
             )
-            avaliacoes.append((utilidade_total, jogada))
+            evaluations.append((total_utility, move))
 
-        maior_utilidade = max(u for u, _ in avaliacoes)
+        best_utility = max(utility for utility, _ in evaluations)
 
-        if self.ruido_desempate > 0:
-            quase_empatadas = [
-                j for u, j in avaliacoes
-                if u >= maior_utilidade - self.ruido_desempate
+        if self.tie_break_noise > 0:
+            near_ties = [
+                move for utility, move in evaluations
+                if utility >= best_utility - self.tie_break_noise
             ]
-            return random.choice(quase_empatadas)
+            return random.choice(near_ties)
 
-        for utilidade, jogada in avaliacoes:
-            if utilidade == maior_utilidade:
-                return jogada
+        for utility, move in evaluations:
+            if utility == best_utility:
+                return move
+
+        return tile_moves[0]

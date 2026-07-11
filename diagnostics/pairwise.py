@@ -196,6 +196,7 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         result = "loss"
 
     pips = [sum(tile[0] + tile[1] for tile in hand) for hand in final_state["hands"]]
+    initial_hands = final_state["initial_hands"]
 
     return {
         "game": None,
@@ -203,6 +204,8 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         "result": result,
         "turns": final_state["turn"],
         "first_stock_draw_turn": first_stock_draw_turn,
+        "agent_initial_hand": initial_hands[agent_position],
+        "opponent_initial_hand": initial_hands[1 - agent_position],
         "agent_remaining_pips": pips[agent_position],
         "opponent_remaining_pips": pips[1 - agent_position],
         **choice_stats,
@@ -257,13 +260,25 @@ def save_csv(games, path):
         "result",
         "turns",
         "first_stock_draw_turn",
+        "agent_initial_hand",
+        "opponent_initial_hand",
         "agent_remaining_pips",
         "opponent_remaining_pips",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
-        writer.writerows({field: game[field] for field in fields} for game in games)
+        writer.writerows(
+            {
+                field: (
+                    json.dumps(game[field], separators=(",", ":"))
+                    if field in {"agent_initial_hand", "opponent_initial_hand"}
+                    else game[field]
+                )
+                for field in fields
+            }
+            for game in games
+        )
 
 
 def add_choice_summary(summary, games):

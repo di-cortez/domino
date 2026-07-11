@@ -75,7 +75,7 @@ By default, pairwise files are written under
 | File | Contents |
 |---|---|
 | `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, first-stock-draw totals, and `duration_s`. |
-| `games.csv` | Compact one-row-per-game data with position, result, turns, first stock-draw turn, and pip counts. |
+| `games.csv` | Compact one-row-per-game data with position, result, turns, first stock-draw turn, initial hands as JSON arrays, and pip counts. |
 | `cumulative_rates.png` | Win/draw/loss rates over time. |
 | `result_distribution.png` | Final result counts. |
 | `wins_by_position.png` | Win rate as player 0 vs. player 1. |

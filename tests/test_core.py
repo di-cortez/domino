@@ -6,7 +6,10 @@ Run from the repository root with:
     python tests/test_core.py
 """
 
+import csv
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as host_np
@@ -20,7 +23,7 @@ from agents.heuristic_agent import StrategicAgent
 from agents.nn import GPU_ENABLED
 from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
-from diagnostics.pairwise import summarize_first_stock_draw_turns
+from diagnostics.pairwise import save_csv, summarize_first_stock_draw_turns
 from middleware.domino_engine import DominoEngine, infer_dead_suits
 from middleware.middleware import GameManager
 from middleware.opponent_model import (
@@ -360,6 +363,32 @@ def test_first_stock_draw_summary_ignores_games_without_draws():
     assert summary["turn_histogram"] == {"2": 1, "5": 2}
 
 
+def test_pairwise_csv_writes_initial_hands_as_json_arrays():
+    games = [
+        {
+            "game": 1,
+            "agent_position": 0,
+            "result": "win",
+            "turns": 12,
+            "first_stock_draw_turn": 4,
+            "agent_initial_hand": [[6, 6], [0, 1]],
+            "opponent_initial_hand": [[5, 5], [2, 3]],
+            "agent_remaining_pips": 0,
+            "opponent_remaining_pips": 10,
+        }
+    ]
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "games.csv"
+        save_csv(games, path)
+
+        with open(path, newline="") as f:
+            row = next(csv.DictReader(f))
+
+    assert json.loads(row["agent_initial_hand"]) == [[6, 6], [0, 1]]
+    assert json.loads(row["opponent_initial_hand"]) == [[5, 5], [2, 3]]
+
+
 def main():
     tests = [
         ("encoder action space", test_encoder_action_space_excludes_forced_actions),
@@ -390,6 +419,7 @@ def main():
         ("masked policy gradient", test_policy_gradient_updates_only_legal_policy_biases),
         ("invalid policy mask", test_policy_gradient_rejects_single_action_mask),
         ("first stock draw summary", test_first_stock_draw_summary_ignores_games_without_draws),
+        ("pairwise CSV initial hands", test_pairwise_csv_writes_initial_hands_as_json_arrays),
     ]
 
     for name, fn in tests:

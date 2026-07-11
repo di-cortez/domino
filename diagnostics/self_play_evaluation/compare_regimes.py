@@ -20,7 +20,7 @@ from diagnostics.plots import generate_plots, summarize  # noqa: E402
 
 SELF_PLAY_WEIGHTS = ROOT / "models" / "domino_rl_self_play_weights.npz"
 HEURISTIC_WEIGHTS = ROOT / "models" / "domino_rl_heuristic_weights.npz"
-DEFAULT_GAME_COUNT = 1000
+DEFAULT_GAME_COUNT = 10000
 DEFAULT_SEED = 7
 DEFAULT_OUTPUT_DIR = ROOT / "diagnostics" / "results" / "self_play_vs_heuristic_regimes"
 
@@ -57,7 +57,13 @@ def main():
     )
     parser.add_argument("--self-play-weights", type=Path, default=SELF_PLAY_WEIGHTS)
     parser.add_argument("--heuristic-weights", type=Path, default=HEURISTIC_WEIGHTS)
-    parser.add_argument("-n", "--games", type=int, default=DEFAULT_GAME_COUNT)
+    parser.add_argument(
+        "-n",
+        "--games",
+        type=int,
+        default=DEFAULT_GAME_COUNT,
+        help="Number of games per regime-comparison matchup.",
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args()

@@ -11,14 +11,14 @@ except ImportError:
 
 
 class SupervisedNeuralNetwork:
-    """Three-layer MLP: 86 -> 256 -> 128 -> 58."""
+    """Three-layer MLP: 168 -> 256 -> 128 -> 56."""
 
     def __init__(
         self,
-        input_size=86,
+        input_size=168,
         hidden1_size=256,
         hidden2_size=128,
-        output_size=58,
+        output_size=56,
         learning_rate=0.01,
     ):
         self.lr = learning_rate

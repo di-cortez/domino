@@ -7,6 +7,7 @@ import numpy as np
 from agents.agent import Agent
 from agents.encoder import DominoEncoder
 from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
+from middleware.opponent_model import ExactOpponentModel
 
 if GPU_ENABLED:
     import cupy as xp
@@ -15,12 +16,13 @@ else:
 
 
 class NeuralAgent(Agent):
-    """Load an SL checkpoint and choose moves with legal-action masking."""
+    """Load an SL checkpoint and choose tile plays with legal-action masking."""
 
     def __init__(self, network, epsilon=0.0):
         self.network = network
         self.epsilon = epsilon
         self.encoder = DominoEncoder()
+        self.opponent_model = ExactOpponentModel()
 
     @classmethod
     def load(cls, weights_path="models/domino_sl_weights.npz", epsilon=0.0):
@@ -58,9 +60,14 @@ class NeuralAgent(Agent):
         if not legal_actions:
             return None
 
-        if self.epsilon > 0.0 and np.random.rand() < self.epsilon:
-            return random.choice(legal_actions)
+        policy_actions = [move for move in legal_actions if self.encoder.is_policy_action(move)]
+        if not policy_actions:
+            return legal_actions[0]
 
+        if self.epsilon > 0.0 and np.random.rand() < self.epsilon:
+            return random.choice(policy_actions)
+
+        state["opponent_suit_probabilities"] = self.opponent_model.update(state)
         x = self.encoder.encode_state(state)
         if GPU_ENABLED:
             x = xp.array(x)
@@ -69,5 +76,4 @@ class NeuralAgent(Agent):
         if hasattr(probabilities, "get"):
             probabilities = probabilities.get()
 
-        print(f"Possible neural moves: {legal_actions}")
-        return self.encoder.decode_output(probabilities, legal_actions)
+        return self.encoder.decode_output(probabilities, policy_actions)

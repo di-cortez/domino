@@ -59,7 +59,7 @@ When the current player is human:
 3. the HUD shows the hand and selection arrow;
 4. Left/Right change the selected tile;
 5. Up/Down/Tab switch the target end when both ends are legal;
-6. Enter, C, or P submits play/draw/pass;
+6. Enter, D, or P submits play/draw/pass;
 7. the engine validates and applies the action;
 8. if the next player is AI, automatic advancement resumes.
 
@@ -80,8 +80,9 @@ of silently ignoring the key.
 
 ## Board Rendering
 
-`scene_renderer.py` receives `visual_chain`, asks `StateRenderer` for a stable
-pivot, and splits the chain into left and right branches.
+`scene_renderer.py` rebuilds a left-to-right tile chain from `board_history`,
+asks `StateRenderer` for a stable pivot, and splits the chain into left and
+right branches.
 
 `layout_domino.py` calculates each branch without drawing:
 

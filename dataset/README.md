@@ -7,11 +7,21 @@ ignored by Git.
 | File | Contents |
 |---|---|
 | `supervised_dataset.jsonl` | JSON Lines file with one `{"state": ..., "target_action": ...}` training example per line. |
+| `supervised_dataset_encoded.npz` | Auto-generated cache with encoded `X/Y` arrays used by `training.training_loop`. |
 
 `state` is the compact dictionary returned by `DominoEngine._get_state()`.
-`visual_chain` is intentionally removed because it is rendering metadata, not
-agent input. `target_action` uses the same action format accepted by
-`DominoEngine.step`.
+Rendering metadata is not part of the engine state or the dataset. `target_action`
+uses the same action format accepted by `DominoEngine.step`.
+
+Current states include private observer fields needed by the exact two-player
+opponent model:
+
+- `current_player_initial_hand`;
+- `current_player_drawn_tiles`;
+- `opponent_suit_probabilities`.
+
+The probability vector has direct presence semantics: `0.0` means known absence
+of that suit in the opponent hand, and `1.0` means known presence.
 
 Generate the default dataset:
 
@@ -21,3 +31,6 @@ python -m training.dataset_generator
 
 Change `game_count` or `output_file` in `training/dataset_generator.py` when a
 smaller test dataset or a larger training dataset is needed.
+
+The encoded cache is rebuilt automatically when the JSONL source file changes,
+the encoder dimensions change, or the feature-version tag changes.

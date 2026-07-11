@@ -6,31 +6,68 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 | File | Purpose |
 |---|---|
 | `agent.py` | Baseline `RandomAgent` and `GreedyAgent`, plus a small runnable demo. |
-| `encoder.py` | Single source of truth for state-to-vector and action-to-index encoding. |
-| `heuristic_agent.py` | `StrategicAgent`, the rule-based teacher used for supervised labels and benchmarks. |
+| `encoder.py` | Single source of truth for state-to-vector and tile-play action encoding. |
+| `heuristic_agent.py` | `StrategicAgent`, the exact-probability rule-based teacher used for supervised labels and benchmarks. |
 | `nn.py` | Supervised MLP backend. Uses CuPy automatically when installed, otherwise NumPy. |
 | `neural_agent.py` | Loads `models/domino_sl_weights.npz` and plays the supervised policy. |
 | `rl_nn.py` | Policy network with REINFORCE gradients, entropy regularization, and value baseline. |
-| `rl_agent.py` | Wraps `PolicyNetwork` for training trajectories or greedy evaluation play. |
+| `rl_agent.py` | Wraps `PolicyNetwork` for training trajectories or deterministic evaluation play. |
 
-## State And Action Encoding
+The opponent belief model lives in `middleware/opponent_model.py` because it is
+shared by agents, training, diagnostics, and the UI.
 
-`DominoEncoder` produces an 86-dimensional input vector:
+## State Encoding
 
-- current player hand, 28 bits;
-- board ends, 14 bits;
-- stock size, 1 value;
-- both hand sizes, 2 values;
-- normalized turn count, 1 value;
-- opponent dead suits inferred from draw/pass history, 7 bits;
-- additional board/action context features used by the neural agents.
+`DominoEncoder` produces a 168-dimensional input vector:
 
-The output space has 58 actions:
+| Slice | Meaning |
+|---|---|
+| `my_hand[28]` | Tiles currently held by the acting player. |
+| `played[28]` | Tiles already played on the board. |
+| `played_turn[28]` | Normalized turn when each tile was played, using `MAX_TURN = 52`; zero means unplayed. |
+| `played_by_me[28]` | Tiles played by the acting player. |
+| `played_by_opponent[28]` | Tiles played by the opponent. |
+| `left_end[7]` | One-hot encoding of the current left end. |
+| `right_end[7]` | One-hot encoding of the current right end. |
+| `hand_sizes[2]` | Player hand sizes divided by 7. |
+| `stock_size[1]` | Stock size divided by 14. |
+| `draw_count_by_player[2]` | Draw counts for players 0 and 1 divided by 14. |
+| `pass_count_by_player[2]` | Pass counts for players 0 and 1 divided by `MAX_TURN`. |
+| `opponent_suit_probabilities[7]` | Probability that the opponent currently holds at least one tile of each suit/value. |
+
+The opponent probability feature is bounded in `[0, 1]`: `0.0` means the
+opponent is known not to hold that suit, and `1.0` means the opponent is known
+to hold it. For two-player games, the model replays public history with the
+observer's private initial hand and draw history. Older states without those
+private observer fields use a snapshot combinatorial fallback.
+
+`StrategicAgent` uses those probabilities as marginal presence estimates. It
+filters moves by lowest approximate opponent response chance, then by near-best
+normalized mobility, then by highest pip sum, with deterministic legal-action
+order as the final tie-breaker.
+
+## Action Encoding
+
+The neural output space now has 56 actions:
 
 - 28 tile actions on the left end;
-- 28 tile actions on the right end;
-- one draw action;
-- one pass action.
+- 28 tile actions on the right end.
 
-All neural and RL code uses this encoder, which keeps training, inference, and
-diagnostics aligned.
+Draw, pass, and single-option tile plays are forced by the current rules
+engine. They are not learned RL decisions. If a turn has fewer than two legal
+tile-play actions, `RLAgent` returns the forced action directly without calling
+the network or saving a trajectory step.
+
+RL trajectory steps store the encoded state, sampled action index, legal-action
+mask, and shaped reward. The policy-gradient backward pass uses that mask to
+renormalize the softmax over legal actions only, so illegal actions receive no
+direct policy or entropy gradient.
+
+Because the input/output shapes changed from the old 86/58 encoder to the new
+168/56 encoder, old `domino_sl_weights.npz` and `domino_rl_weights.npz`
+checkpoints are not compatible. Regenerate the supervised dataset, retrain SL,
+and then retrain RL.
+
+Weights trained with the older absence-confidence feature also load by shape,
+but they are semantically stale. Archive them and retrain after regenerating the
+dataset with the current opponent-suit probability feature.

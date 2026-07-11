@@ -1,9 +1,9 @@
 # Diagnostics
 
 Diagnostics compare agents over many two-player domino games and write compact
-metrics, CSV data, and plots. The default diagnostic now runs the complete
-ordered matrix of supported agents, so every agent is evaluated against every
-other agent, including itself.
+metrics, CSV data, and plots. The default diagnostic now runs the upper-triangle
+matrix of supported agents, so each unordered pair is evaluated once while
+same-agent controls are still included.
 
 ## Supported Agents
 
@@ -20,7 +20,7 @@ reports use `neural`.
 
 ## Full All-Pairs Diagnostic
 
-Run the full matrix with the default 1,000 games per ordered matchup:
+Run the full matrix with the default 10,000 games per matchup:
 
 ```bash
 python -m diagnostics.evaluate
@@ -31,6 +31,9 @@ Change the number of games when needed:
 ```bash
 python -m diagnostics.evaluate -n 5000
 ```
+
+Each matchup displays a `tqdm` progress bar. The command also prints a startup
+RAM/GPU memory snapshot and writes elapsed seconds as `duration_s`.
 
 Useful options:
 
@@ -47,9 +50,11 @@ The output folder defaults to `diagnostics/results/all_pairs/`.
 
 | File or folder | Contents |
 |---|---|
-| `all_pairs_table.png` | Image table with win/draw/loss counts and win rate for every ordered matchup. |
-| `all_pairs_matrix.csv` | One row per ordered matchup. |
-| `all_pairs_summary.json` | Full aggregate report with all pairwise summaries. |
+| `all_pairs_table.png` | Triangular image table with one win-rate number per evaluated matchup. |
+| `choice_opportunities.png` | Aggregate histogram of draw/pass/choice opportunities across all evaluated matchups. |
+| `first_stock_draw_turns.png` | Aggregate histogram of the first stock-draw turn across all evaluated matchups. |
+| `all_pairs_matrix.csv` | One row per evaluated matchup. |
+| `all_pairs_summary.json` | Full aggregate report with accumulated choice-opportunity stats, accumulated first-stock-draw stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
 
 ## Pairwise Helper
@@ -57,8 +62,8 @@ The output folder defaults to `diagnostics/results/all_pairs/`.
 Use the helper directly when only one matchup is needed:
 
 ```bash
-python -m diagnostics.pairwise --agent heuristic --opponent random -n 1000
-python -m diagnostics.pairwise --agent rl --opponent neural -n 1000
+python -m diagnostics.pairwise --agent heuristic --opponent random
+python -m diagnostics.pairwise --agent rl --opponent neural
 ```
 
 The evaluated agent alternates between player 0 and player 1 to reduce
@@ -69,12 +74,14 @@ By default, pairwise files are written under
 
 | File | Contents |
 |---|---|
-| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips. |
-| `games.csv` | One row per game with position, result, turns, and pip counts. |
+| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, first-stock-draw totals, and `duration_s`. |
+| `games.csv` | Compact one-row-per-game data with position, result, turns, first stock-draw turn, initial hands as JSON arrays, and pip counts. |
 | `cumulative_rates.png` | Win/draw/loss rates over time. |
 | `result_distribution.png` | Final result counts. |
 | `wins_by_position.png` | Win rate as player 0 vs. player 1. |
 | `game_lengths.png` | Turn-count histogram. |
+| `choice_opportunities.png` | Histogram of draw/pass/choice opportunities for the evaluated agent. |
+| `first_stock_draw_turns.png` | Histogram of the first turn where any player drew from the stock. |
 
 ## Interpretation
 

@@ -27,7 +27,7 @@ Main keys:
     ESC            -> quit, or close the menu
 
 When a human is playing, Left/Right select a hand tile, Up/Down switch the
-target end when legal, Enter plays, C draws, and P passes.
+target end when legal, Enter plays, D draws, and P passes.
 """
 
 import contextlib
@@ -121,6 +121,8 @@ class GameController(HandVisibilityMixin, HumanControlMixin):
 
         full_state = self.engine.to_dict()
         state["hands"] = copy.deepcopy(full_state.get("hands", []))
+        state["initial_hands"] = copy.deepcopy(full_state.get("initial_hands", []))
+        state["drawn_tiles_by_player"] = copy.deepcopy(full_state.get("drawn_tiles_by_player", []))
         state["stock"] = copy.deepcopy(full_state.get("stock", []))
 
         self.history.append(state)
@@ -459,7 +461,7 @@ class GameController(HandVisibilityMixin, HumanControlMixin):
             self._toggle_human_end()
         elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             self._play_human_tile()
-        elif key == pygame.K_c:
+        elif key == pygame.K_d:
             self._human_draw()
         elif key == pygame.K_p:
             self._human_pass()

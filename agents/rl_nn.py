@@ -19,9 +19,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
     """
     Supervised policy architecture extended with a linear value head.
 
-    The policy head is the inherited 58-action softmax. The value head predicts
-    ``V(s)`` from the second hidden layer and is used as a state-dependent
-    baseline for REINFORCE updates.
+    The policy head is the inherited 56-action softmax over tile-play actions.
+    Policy-gradient updates rebuild the softmax over each state's legal actions
+    only, matching the masked distribution used during sampling. The value head
+    predicts ``V(s)`` from the second hidden layer and is used as a
+    state-dependent baseline for REINFORCE updates.
     """
 
     def __init__(self, *args, **kwargs):
@@ -97,29 +99,61 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         self,
         action_indices,
         advantages,
+        legal_masks,
         returns=None,
         entropy_coef=0.01,
         value_coef=0.5,
         clip_grad_norm=5.0,
     ):
-        """Apply one actor-critic policy-gradient update."""
-        a3 = self.cache["A3"]
+        """Apply one actor-critic policy-gradient update on legal actions only."""
+        z3 = self.cache["Z3"]
         a2 = self.cache["A2"]
         a1 = self.cache["A1"]
         x = self.cache["X"]
-        m = a3.shape[1]
+        m = z3.shape[1]
 
-        action_indices = xp.asarray(action_indices)
+        action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
         advantages = xp.asarray(advantages).reshape(1, m)
+        legal_masks = (xp.asarray(legal_masks) > 0).astype(z3.dtype)
 
-        sampled_y = xp.zeros_like(a3)
+        if action_indices.shape[0] != m:
+            raise ValueError(
+                "action_indices must contain one action per cached sample: "
+                f"expected {m}, got {action_indices.shape[0]}."
+            )
+
+        if legal_masks.shape != z3.shape:
+            raise ValueError(
+                "legal_masks must have the same shape as the policy logits: "
+                f"expected {z3.shape}, got {legal_masks.shape}."
+            )
+
+        legal_counts = xp.sum(legal_masks, axis=0)
+        if self._as_float(xp.any(legal_counts < 2)):
+            raise ValueError(
+                "Every saved RL decision must have at least two legal policy actions."
+            )
+
+        chosen_action_is_legal = legal_masks[action_indices, xp.arange(m)]
+        if self._as_float(xp.any(chosen_action_is_legal < 0.5)):
+            raise ValueError(
+                "A sampled action is not marked as legal in its action mask."
+            )
+
+        masked_logits = xp.where(legal_masks > 0, z3, -xp.inf)
+        max_legal_logits = xp.max(masked_logits, axis=0, keepdims=True)
+        shifted_logits = masked_logits - max_legal_logits
+        exp_logits = xp.exp(shifted_logits)
+        masked_policy = exp_logits / xp.sum(exp_logits, axis=0, keepdims=True)
+
+        sampled_y = xp.zeros_like(masked_policy)
         sampled_y[action_indices, xp.arange(m)] = 1.0
 
-        dz3_policy = (a3 - sampled_y) * advantages
+        dz3_policy = (masked_policy - sampled_y) * advantages
 
-        log_a3 = xp.log(a3 + 1e-8)
-        entropy = -xp.sum(a3 * log_a3, axis=0, keepdims=True)
-        dz3_entropy = a3 * (log_a3 + entropy)
+        log_masked_policy = xp.log(masked_policy + 1e-8)
+        entropy = -xp.sum(masked_policy * log_masked_policy, axis=0, keepdims=True)
+        dz3_entropy = masked_policy * (log_masked_policy + entropy)
         dz3 = dz3_policy + entropy_coef * dz3_entropy
 
         dW3 = (1.0 / m) * xp.dot(dz3, a2.T)

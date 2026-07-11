@@ -25,9 +25,8 @@ class GameManager:
         legal_actions = self.engine.valid_actions(current_player)
         chosen_action = self.agents[current_player].choose_move(state, legal_actions)
 
-        training_state = {key: value for key, value in state.items() if key != "visual_chain"}
         self.training_history.append({
-            "state": training_state,
+            "state": state,
             "target_action": chosen_action,
         })
 

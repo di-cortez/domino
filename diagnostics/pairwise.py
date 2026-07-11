@@ -31,6 +31,7 @@ import numpy as np
 
 from diagnostics.plots import LABEL, generate_plots as write_diagnostic_plots, summarize
 from middleware.domino_engine import DominoEngine
+from middleware.opponent_model import ExactOpponentModel
 from utils.runtime_status import format_duration, print_memory_report
 
 try:
@@ -156,6 +157,40 @@ def update_choice_stats(stats, legal_actions):
         stats["agent_forced_tile_turns"] += 1
 
 
+def observer_state_from_engine(engine, observer_player):
+    """Build an opponent-model observer state for a fixed player."""
+    return {
+        "game_id": engine.game_id,
+        "ends": list(engine.ends),
+        "current_player_hand": [
+            list(tile) for tile in engine.hands[observer_player]
+        ],
+        "current_player_initial_hand": [
+            list(tile) for tile in engine.initial_hands[observer_player]
+        ],
+        "current_player_drawn_tiles": [
+            list(tile) for tile in engine.drawn_tiles_by_player[observer_player]
+        ],
+        "current_player": observer_player,
+        "observer_player": observer_player,
+        "history_current_player": engine.current_player,
+        "turn": engine.turn,
+        "hand_sizes": [len(hand) for hand in engine.hands],
+        "board_history": [
+            engine._serialize_action(action) for action in engine.board_history
+        ],
+        "stock_size": len(engine.stock),
+    }
+
+
+def compact_hidden_draw_final_state_count(observer_model, action_turn):
+    """Return the compact hidden-draw expansion count for ``action_turn``."""
+    for record in observer_model.compact_hidden_draw_state_records:
+        if record["turn"] == action_turn:
+            return int(record["final_state_count"])
+    return None
+
+
 def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     """Play one game and return the outcome from the evaluated agent's view."""
     agents = [None, None]
@@ -163,8 +198,10 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     agents[1 - agent_position] = opponent
 
     engine = DominoEngine(player_count=2)
+    diagnostic_observer_models = [ExactOpponentModel(), ExactOpponentModel()]
     choice_stats = empty_choice_stats()
     first_stock_draw_turn = None
+    first_stock_draw_final_state_count = None
 
     while not engine.game_over:
         state = engine._get_state()
@@ -180,10 +217,21 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         else:
             action = agents[current_player].choose_move(state, legal_actions)
 
-        if action == ("DRAW", None) and first_stock_draw_turn is None:
-            first_stock_draw_turn = engine.turn + 1
-
         engine.step(action)
+
+        if first_stock_draw_turn is None and (
+            action == ("DRAW", None) or not engine.game_over
+        ):
+            for observer_player, observer_model in enumerate(diagnostic_observer_models):
+                observer_model.update(observer_state_from_engine(engine, observer_player))
+
+            if action == ("DRAW", None):
+                first_stock_draw_turn = engine.turn
+                observer_player = 1 - current_player
+                first_stock_draw_final_state_count = compact_hidden_draw_final_state_count(
+                    diagnostic_observer_models[observer_player],
+                    first_stock_draw_turn,
+                )
 
     final_state = engine.to_dict()
     winner = final_state["winner"]
@@ -204,6 +252,7 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         "result": result,
         "turns": final_state["turn"],
         "first_stock_draw_turn": first_stock_draw_turn,
+        "first_stock_draw_final_state_count": first_stock_draw_final_state_count,
         "agent_initial_hand": initial_hands[agent_position],
         "opponent_initial_hand": initial_hands[1 - agent_position],
         "agent_remaining_pips": pips[agent_position],
@@ -260,6 +309,7 @@ def save_csv(games, path):
         "result",
         "turns",
         "first_stock_draw_turn",
+        "first_stock_draw_final_state_count",
         "agent_initial_hand",
         "opponent_initial_hand",
         "agent_remaining_pips",
@@ -345,6 +395,42 @@ def add_first_stock_draw_summary(summary, games):
     return summary
 
 
+def summarize_first_stock_draw_expansions(games):
+    """Summarize final-state counts computed at the first stock draw."""
+    values = []
+    histogram = {}
+    for game in games:
+        value = game.get("first_stock_draw_final_state_count")
+        if value is None:
+            continue
+        value = int(value)
+        values.append(value)
+        key = str(value)
+        histogram[key] = histogram.get(key, 0) + 1
+
+    game_count = len(games)
+    games_with_count = len(values)
+    return {
+        "games": game_count,
+        "games_with_count": games_with_count,
+        "games_without_count": game_count - games_with_count,
+        "count_rate": games_with_count / game_count if game_count else 0.0,
+        "mean_final_state_count": float(np.mean(values)) if values else None,
+        "median_final_state_count": float(np.median(values)) if values else None,
+        "min_final_state_count": int(min(values)) if values else None,
+        "max_final_state_count": int(max(values)) if values else None,
+        "final_state_count_histogram": dict(
+            sorted(histogram.items(), key=lambda item: int(item[0]))
+        ),
+    }
+
+
+def add_first_stock_draw_expansion_summary(summary, games):
+    """Attach first-stock-draw expansion statistics to a summary."""
+    summary["first_stock_draw_expansion"] = summarize_first_stock_draw_expansions(games)
+    return summary
+
+
 def print_summary(summary, duration_s):
     """Print the main pairwise metrics in a compact console format."""
     game_count = summary["game_count"]
@@ -398,6 +484,20 @@ def print_summary(summary, duration_s):
             )
         else:
             print("  First stock draw: none recorded")
+    expansion_info = summary.get("first_stock_draw_expansion")
+    if expansion_info:
+        if expansion_info["games_with_count"]:
+            print(
+                "  First draw final_state_count: "
+                f"{expansion_info['games_with_count']}/"
+                f"{expansion_info['games']} games "
+                f"({expansion_info['count_rate']:.1%}) | "
+                f"mean final_state_count "
+                f"{expansion_info['mean_final_state_count']:.1f} | "
+                f"median {expansion_info['median_final_state_count']:.1f}"
+            )
+        else:
+            print("  First draw final_state_count: none recorded")
 
 
 def run_pairwise(
@@ -461,6 +561,7 @@ def run_pairwise(
     summary = summarize(games, agent_name, opponent_name, seed)
     summary = add_choice_summary(summary, games)
     summary = add_first_stock_draw_summary(summary, games)
+    summary = add_first_stock_draw_expansion_summary(summary, games)
     summary["duration_s"] = duration
     if print_console_summary:
         print_summary(summary, duration)
@@ -477,7 +578,8 @@ def run_pairwise(
         if generate_plots:
             print(
                 "  cumulative_rates.png, result_distribution.png, wins_by_position.png, "
-                "game_lengths.png, choice_opportunities.png, first_stock_draw_turns.png"
+                "game_lengths.png, choice_opportunities.png, first_stock_draw_turns.png, "
+                "first_stock_draw_final_state_counts.png"
             )
         print("  games.csv, summary.json")
 

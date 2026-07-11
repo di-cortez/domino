@@ -335,8 +335,14 @@ class CompactOpponentBelief:
         final_state_count = inside_only_count + one_outside_count
 
         if final_state_count <= self.max_enumerated_hands:
-            return EnumeratedOpponentBelief.from_compact_hidden_draw(self)
-        return ParticleOpponentBelief.from_compact_hidden_draw(self)
+            return EnumeratedOpponentBelief.from_compact_hidden_draw(
+                self,
+                final_state_count=final_state_count,
+            )
+        return ParticleOpponentBelief.from_compact_hidden_draw(
+            self,
+            final_state_count=final_state_count,
+        )
 
     def suit_probabilities(self) -> list[float]:
         if self._probability_cache is None:
@@ -369,6 +375,7 @@ class EnumeratedOpponentBelief:
         rng: random.Random,
         max_enumerated_hands: int,
         particle_count: int,
+        compact_hidden_draw_final_state_count: int | None = None,
     ):
         self.unknown_mask = int(unknown_mask)
         self.opponent_hand_size = int(opponent_hand_size)
@@ -376,11 +383,17 @@ class EnumeratedOpponentBelief:
         self.rng = rng
         self.max_enumerated_hands = int(max_enumerated_hands)
         self.particle_count = int(particle_count)
+        self.compact_hidden_draw_final_state_count = compact_hidden_draw_final_state_count
         self._probability_cache: list[float] | None = None
         self._assert_consistent()
 
     @classmethod
-    def from_compact_hidden_draw(cls, compact: CompactOpponentBelief):
+    def from_compact_hidden_draw(
+        cls,
+        compact: CompactOpponentBelief,
+        *,
+        final_state_count: int | None = None,
+    ):
         candidate_indices = list(_indices_from_mask(compact.candidate_mask))
         outside_mask = compact.unknown_mask & ~compact.candidate_mask
         outside_indices = list(_indices_from_mask(outside_mask))
@@ -408,6 +421,7 @@ class EnumeratedOpponentBelief:
             rng=compact.rng,
             max_enumerated_hands=compact.max_enumerated_hands,
             particle_count=compact.particle_count,
+            compact_hidden_draw_final_state_count=final_state_count,
         )
 
     def _invalidate_cache(self) -> None:
@@ -537,6 +551,7 @@ class ParticleOpponentBelief:
         rng: random.Random,
         max_enumerated_hands: int,
         particle_count: int,
+        compact_hidden_draw_final_state_count: int | None = None,
     ):
         self.unknown_mask = int(unknown_mask)
         self.opponent_hand_size = int(opponent_hand_size)
@@ -544,11 +559,17 @@ class ParticleOpponentBelief:
         self.rng = rng
         self.max_enumerated_hands = int(max_enumerated_hands)
         self.particle_count = int(particle_count)
+        self.compact_hidden_draw_final_state_count = compact_hidden_draw_final_state_count
         self._probability_cache: list[float] | None = None
         self._assert_consistent()
 
     @classmethod
-    def from_compact_hidden_draw(cls, compact: CompactOpponentBelief):
+    def from_compact_hidden_draw(
+        cls,
+        compact: CompactOpponentBelief,
+        *,
+        final_state_count: int | None = None,
+    ):
         candidate_indices = list(_indices_from_mask(compact.candidate_mask))
         particles: list[int] = []
 
@@ -572,6 +593,7 @@ class ParticleOpponentBelief:
             rng=compact.rng,
             max_enumerated_hands=compact.max_enumerated_hands,
             particle_count=compact.particle_count,
+            compact_hidden_draw_final_state_count=final_state_count,
         )
 
     @classmethod
@@ -842,6 +864,8 @@ class ExactOpponentModel:
         self._processed_history_length = 0
         self._own_draws_consumed = 0
         self._last_action_by_player: dict[int, object] = {}
+        self._compact_to_enumerated_state_counts: list[int] = []
+        self._compact_hidden_draw_state_records: list[dict] = []
 
     def reset(self) -> None:
         self._belief = None
@@ -850,6 +874,8 @@ class ExactOpponentModel:
         self._processed_history_length = 0
         self._own_draws_consumed = 0
         self._last_action_by_player = {}
+        self._compact_to_enumerated_state_counts = []
+        self._compact_hidden_draw_state_records = []
 
     def update(self, state: dict) -> list[float]:
         """Process new actions and return opponent suit-presence probabilities."""
@@ -879,7 +905,8 @@ class ExactOpponentModel:
         ]
 
         for entry in history[self._processed_history_length:]:
-            self._process_entry(entry, observer_player, own_draws)
+            action_turn = self._processed_history_length + 1
+            self._process_entry(entry, observer_player, own_draws, action_turn)
             self._processed_history_length += 1
 
         probabilities = self.suit_probabilities()
@@ -931,12 +958,15 @@ class ExactOpponentModel:
         self._processed_history_length = 0
         self._own_draws_consumed = 0
         self._last_action_by_player = {}
+        self._compact_to_enumerated_state_counts = []
+        self._compact_hidden_draw_state_records = []
 
     def _process_entry(
         self,
         entry: PublicAction,
         observer_player: int,
         own_draws: Sequence[tuple[int, int]],
+        action_turn: int,
     ) -> None:
         if self._belief is None:
             raise RuntimeError("Opponent belief is not initialized.")
@@ -959,7 +989,22 @@ class ExactOpponentModel:
             if _is_draw(action):
                 if entry.ends_before is not None:
                     self._belief.condition_no_legal(*entry.ends_before)
+                previous_mode = self._belief.mode
                 self._belief = self._belief.opponent_hidden_draw()
+                transition_count = getattr(
+                    self._belief,
+                    "compact_hidden_draw_final_state_count",
+                    None,
+                )
+                if previous_mode == "compact_exact" and transition_count is not None:
+                    transition_count = int(transition_count)
+                    self._compact_hidden_draw_state_records.append({
+                        "turn": int(action_turn),
+                        "final_state_count": transition_count,
+                        "resulting_mode": self._belief.mode,
+                    })
+                    if self._belief.mode == "enumerated_exact":
+                        self._compact_to_enumerated_state_counts.append(transition_count)
             elif _is_pass(action):
                 if (
                     previous_actor_action != ("DRAW", None)
@@ -980,6 +1025,16 @@ class ExactOpponentModel:
         if self._belief is None:
             return 1.0
         return self._belief.probability_can_play(ends)
+
+    @property
+    def compact_to_enumerated_state_counts(self) -> list[int]:
+        """Return final-state counts for compact-to-enumerated transitions."""
+        return list(self._compact_to_enumerated_state_counts)
+
+    @property
+    def compact_hidden_draw_state_records(self) -> list[dict]:
+        """Return compact hidden-draw expansion records with turn metadata."""
+        return [dict(record) for record in self._compact_hidden_draw_state_records]
 
     @property
     def mode(self) -> str:

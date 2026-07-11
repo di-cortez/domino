@@ -341,6 +341,65 @@ def plot_first_stock_draw_turns(summary, path, subtitle):
     _save_figure(fig, path)
 
 
+def plot_first_stock_draw_final_state_counts(summary, path, subtitle):
+    """Plot final-state counts computed at the first stock draw."""
+    expansion_info = summary.get("first_stock_draw_expansion", summary)
+    histogram = expansion_info.get("final_state_count_histogram", {})
+
+    fig, ax = _new_figure(width=8.0, height=4.0)
+    _prepare_axis(ax, f"First draw final_state_count - {subtitle}")
+
+    if not histogram:
+        ax.grid(visible=False)
+        ax.text(
+            0.5,
+            0.5,
+            "No first-draw expansion count recorded",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            color=SECONDARY_INK,
+            fontsize=11,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        _save_figure(fig, path)
+        return
+
+    values = np.array([int(value) for value in sorted(histogram, key=int)])
+    weights = np.array([histogram[str(value)] for value in values])
+
+    if len(values) == 1:
+        ax.bar(values, weights, color=COLOR["draw"], edgecolor=SURFACE, linewidth=1, width=8)
+        ax.set_xlim(values[0] - 12, values[0] + 12)
+    else:
+        bins = min(30, max(5, len(values)))
+        ax.hist(
+            values,
+            bins=bins,
+            weights=weights,
+            color=COLOR["draw"],
+            edgecolor=SURFACE,
+            linewidth=1,
+        )
+
+    mean_count = expansion_info.get("mean_final_state_count")
+    if mean_count is not None:
+        ax.axvline(mean_count, color=SECONDARY_INK, linewidth=1, linestyle="--")
+        ax.annotate(
+            f"mean {mean_count:.1f}",
+            xy=(mean_count, ax.get_ylim()[1]),
+            xytext=(6, -12),
+            textcoords="offset points",
+            color=SECONDARY_INK,
+            fontsize=9,
+        )
+
+    ax.set_xlabel("final_state_count at first stock draw")
+    ax.set_ylabel("Games")
+    _save_figure(fig, path)
+
+
 def generate_plots(games, summary, folder):
     """Generate all diagnostic PNGs in the target folder."""
     import matplotlib
@@ -354,6 +413,11 @@ def generate_plots(games, summary, folder):
     plot_game_lengths(games, folder / "game_lengths.png", subtitle)
     plot_choice_opportunities(summary, folder / "choice_opportunities.png", subtitle)
     plot_first_stock_draw_turns(summary, folder / "first_stock_draw_turns.png", subtitle)
+    plot_first_stock_draw_final_state_counts(
+        summary,
+        folder / "first_stock_draw_final_state_counts.png",
+        subtitle,
+    )
 
 
 def plot_all_pairs_table(summaries, agents, path):
@@ -452,3 +516,8 @@ def plot_aggregate_choice_opportunities(choice_info, path):
 def plot_aggregate_first_stock_draws(first_draw_info, path):
     """Plot the aggregate first-stock-draw histogram for all evaluated pairs."""
     plot_first_stock_draw_turns(first_draw_info, path, "all evaluated pairs")
+
+
+def plot_aggregate_first_stock_draw_final_state_counts(expansion_info, path):
+    """Plot aggregate first-stock-draw final-state counts."""
+    plot_first_stock_draw_final_state_counts(expansion_info, path, "all evaluated pairs")

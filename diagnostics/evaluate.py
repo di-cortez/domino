@@ -22,6 +22,7 @@ from diagnostics.pairwise import CANONICAL_AGENTS, DEFAULT_GAME_COUNT, run_pairw
 from diagnostics.plots import (
     plot_aggregate_choice_opportunities,
     plot_aggregate_first_stock_draws,
+    plot_aggregate_first_stock_draw_final_state_counts,
     plot_all_pairs_table,
 )
 from utils.runtime_status import format_duration, print_memory_report
@@ -45,6 +46,7 @@ def _matrix_rows(summaries):
         counts = summary["counts"]
         rates = summary["rates"]
         first_draw = summary.get("first_stock_draw", {})
+        first_draw_expansion = summary.get("first_stock_draw_expansion", {})
         rows.append({
             "agent": summary["agent"],
             "opponent": summary["opponent"],
@@ -60,6 +62,20 @@ def _matrix_rows(summaries):
             "stock_draw_rate": first_draw.get("stock_draw_rate", 0.0),
             "mean_first_stock_draw_turn": first_draw.get("mean_turn"),
             "median_first_stock_draw_turn": first_draw.get("median_turn"),
+            "first_stock_draw_final_state_count_games": first_draw_expansion.get(
+                "games_with_count",
+                0,
+            ),
+            "first_stock_draw_final_state_count_rate": first_draw_expansion.get(
+                "count_rate",
+                0.0,
+            ),
+            "mean_first_stock_draw_final_state_count": (
+                first_draw_expansion.get("mean_final_state_count")
+            ),
+            "median_first_stock_draw_final_state_count": (
+                first_draw_expansion.get("median_final_state_count")
+            ),
         })
     return rows
 
@@ -81,6 +97,10 @@ def _save_matrix_csv(rows, path):
         "stock_draw_rate",
         "mean_first_stock_draw_turn",
         "median_first_stock_draw_turn",
+        "first_stock_draw_final_state_count_games",
+        "first_stock_draw_final_state_count_rate",
+        "mean_first_stock_draw_final_state_count",
+        "median_first_stock_draw_final_state_count",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -197,6 +217,60 @@ def _aggregate_first_stock_draws(summaries):
     return totals
 
 
+def _aggregate_first_stock_draw_expansions(summaries):
+    """Accumulate first-stock-draw final-state counts across matchups."""
+    totals = {
+        "matchups": len(summaries),
+        "games": 0,
+        "games_with_count": 0,
+        "games_without_count": 0,
+        "count_rate": 0.0,
+        "mean_final_state_count": None,
+        "median_final_state_count": None,
+        "min_final_state_count": None,
+        "max_final_state_count": None,
+        "final_state_count_histogram": {},
+    }
+
+    for summary in summaries:
+        expansion_info = summary.get("first_stock_draw_expansion", {})
+        totals["games"] += expansion_info.get("games", summary.get("game_count", 0))
+        totals["games_with_count"] += expansion_info.get("games_with_count", 0)
+        totals["games_without_count"] += expansion_info.get(
+            "games_without_count",
+            0,
+        )
+
+        for value, count in expansion_info.get("final_state_count_histogram", {}).items():
+            histogram = totals["final_state_count_histogram"]
+            histogram[value] = histogram.get(value, 0) + count
+
+    if totals["games"]:
+        totals["count_rate"] = totals["games_with_count"] / totals["games"]
+
+    histogram = dict(
+        sorted(
+            totals["final_state_count_histogram"].items(),
+            key=lambda item: int(item[0]),
+        )
+    )
+    totals["final_state_count_histogram"] = histogram
+    expansion_count = totals["games_with_count"]
+    if expansion_count:
+        totals["mean_final_state_count"] = (
+            sum(int(value) * count for value, count in histogram.items())
+            / expansion_count
+        )
+        totals["median_final_state_count"] = _median_from_histogram(
+            histogram,
+            expansion_count,
+        )
+        totals["min_final_state_count"] = int(next(iter(histogram)))
+        totals["max_final_state_count"] = int(next(reversed(histogram)))
+
+    return totals
+
+
 def run_all_pairs(
     agents=CANONICAL_AGENTS,
     game_count=DEFAULT_GAME_COUNT,
@@ -244,10 +318,12 @@ def run_all_pairs(
     _save_matrix_csv(rows, output_dir / "all_pairs_matrix.csv")
     choice_opportunities = _aggregate_choice_opportunities(summaries)
     first_stock_draw = _aggregate_first_stock_draws(summaries)
+    first_stock_draw_expansion = _aggregate_first_stock_draw_expansions(summaries)
 
     report = {
         "choice_opportunities": choice_opportunities,
         "first_stock_draw": first_stock_draw,
+        "first_stock_draw_expansion": first_stock_draw_expansion,
         "agents": list(agents),
         "game_count_per_matchup": game_count,
         "evaluated_matchups": total_pairs,
@@ -267,6 +343,10 @@ def run_all_pairs(
     plot_aggregate_first_stock_draws(
         first_stock_draw,
         output_dir / "first_stock_draw_turns.png",
+    )
+    plot_aggregate_first_stock_draw_final_state_counts(
+        first_stock_draw_expansion,
+        output_dir / "first_stock_draw_final_state_counts.png",
     )
     return report
 
@@ -313,6 +393,7 @@ def main():
     print("  all_pairs_table.png")
     print("  choice_opportunities.png")
     print("  first_stock_draw_turns.png")
+    print("  first_stock_draw_final_state_counts.png")
     print("  all_pairs_matrix.csv")
     print("  all_pairs_summary.json")
     print("  pairs/<agent>_vs_<opponent>/...")

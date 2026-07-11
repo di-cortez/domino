@@ -8,6 +8,7 @@ Run from the repository root with:
 
 import csv
 import json
+import random
 import sys
 import tempfile
 from pathlib import Path
@@ -23,11 +24,16 @@ from agents.heuristic_agent import StrategicAgent
 from agents.nn import GPU_ENABLED
 from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
-from diagnostics.pairwise import save_csv, summarize_first_stock_draw_turns
+from diagnostics.pairwise import (
+    save_csv,
+    summarize_first_stock_draw_expansions,
+    summarize_first_stock_draw_turns,
+)
 from middleware.domino_engine import DominoEngine, infer_dead_suits
 from middleware.middleware import GameManager
 from middleware.opponent_model import (
     ALL_TILES,
+    CompactOpponentBelief,
     compute_opponent_suit_probabilities,
 )
 
@@ -363,6 +369,57 @@ def test_first_stock_draw_summary_ignores_games_without_draws():
     assert summary["turn_histogram"] == {"2": 1, "5": 2}
 
 
+def test_compact_hidden_draw_records_expansion_count():
+    belief = CompactOpponentBelief(
+        observer_initial_hand=ALL_TILES[:7],
+        opponent_hand_size=1,
+        rng=random.Random(0),
+        max_enumerated_hands=1000,
+        particle_count=100,
+    )
+
+    next_belief = belief.opponent_hidden_draw()
+
+    assert next_belief.mode == "enumerated_exact"
+    assert next_belief.compact_hidden_draw_final_state_count == 210
+
+
+def test_compact_hidden_draw_records_particle_expansion_count():
+    belief = CompactOpponentBelief(
+        observer_initial_hand=ALL_TILES[:7],
+        opponent_hand_size=1,
+        rng=random.Random(0),
+        max_enumerated_hands=1,
+        particle_count=100,
+    )
+
+    next_belief = belief.opponent_hidden_draw()
+
+    assert next_belief.mode == "particle_approximate"
+    assert next_belief.compact_hidden_draw_final_state_count == 210
+
+
+def test_first_stock_draw_expansion_summary_ignores_games_without_counts():
+    games = [
+        {"first_stock_draw_final_state_count": None},
+        {"first_stock_draw_final_state_count": 210},
+        {"first_stock_draw_final_state_count": 210},
+        {"first_stock_draw_final_state_count": 840},
+    ]
+
+    summary = summarize_first_stock_draw_expansions(games)
+
+    assert summary["games"] == 4
+    assert summary["games_with_count"] == 3
+    assert summary["games_without_count"] == 1
+    assert summary["count_rate"] == 0.75
+    assert summary["mean_final_state_count"] == 420.0
+    assert summary["median_final_state_count"] == 210.0
+    assert summary["min_final_state_count"] == 210
+    assert summary["max_final_state_count"] == 840
+    assert summary["final_state_count_histogram"] == {"210": 2, "840": 1}
+
+
 def test_pairwise_csv_writes_initial_hands_as_json_arrays():
     games = [
         {
@@ -371,6 +428,7 @@ def test_pairwise_csv_writes_initial_hands_as_json_arrays():
             "result": "win",
             "turns": 12,
             "first_stock_draw_turn": 4,
+            "first_stock_draw_final_state_count": 210,
             "agent_initial_hand": [[6, 6], [0, 1]],
             "opponent_initial_hand": [[5, 5], [2, 3]],
             "agent_remaining_pips": 0,
@@ -387,6 +445,7 @@ def test_pairwise_csv_writes_initial_hands_as_json_arrays():
 
     assert json.loads(row["agent_initial_hand"]) == [[6, 6], [0, 1]]
     assert json.loads(row["opponent_initial_hand"]) == [[5, 5], [2, 3]]
+    assert row["first_stock_draw_final_state_count"] == "210"
 
 
 def main():
@@ -419,6 +478,18 @@ def main():
         ("masked policy gradient", test_policy_gradient_updates_only_legal_policy_biases),
         ("invalid policy mask", test_policy_gradient_rejects_single_action_mask),
         ("first stock draw summary", test_first_stock_draw_summary_ignores_games_without_draws),
+        (
+            "compact hidden draw expansion",
+            test_compact_hidden_draw_records_expansion_count,
+        ),
+        (
+            "compact hidden draw particle expansion",
+            test_compact_hidden_draw_records_particle_expansion_count,
+        ),
+        (
+            "first stock draw expansion summary",
+            test_first_stock_draw_expansion_summary_ignores_games_without_counts,
+        ),
         ("pairwise CSV initial hands", test_pairwise_csv_writes_initial_hands_as_json_arrays),
     ]
 

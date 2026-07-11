@@ -19,7 +19,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diagnostics.pairwise import CANONICAL_AGENTS, DEFAULT_GAME_COUNT, run_pairwise
-from diagnostics.plots import plot_aggregate_choice_opportunities, plot_all_pairs_table
+from diagnostics.plots import (
+    plot_aggregate_choice_opportunities,
+    plot_aggregate_first_stock_draws,
+    plot_all_pairs_table,
+)
 from utils.runtime_status import format_duration, print_memory_report
 
 DEFAULT_OUTPUT_DIR = ROOT / "diagnostics" / "results" / "all_pairs"
@@ -40,6 +44,7 @@ def _matrix_rows(summaries):
     for summary in summaries:
         counts = summary["counts"]
         rates = summary["rates"]
+        first_draw = summary.get("first_stock_draw", {})
         rows.append({
             "agent": summary["agent"],
             "opponent": summary["opponent"],
@@ -51,6 +56,10 @@ def _matrix_rows(summaries):
             "draw_rate": rates["draw"],
             "loss_rate": rates["loss"],
             "mean_turns": summary["mean_turns"],
+            "games_with_stock_draw": first_draw.get("games_with_stock_draw", 0),
+            "stock_draw_rate": first_draw.get("stock_draw_rate", 0.0),
+            "mean_first_stock_draw_turn": first_draw.get("mean_turn"),
+            "median_first_stock_draw_turn": first_draw.get("median_turn"),
         })
     return rows
 
@@ -68,6 +77,10 @@ def _save_matrix_csv(rows, path):
         "draw_rate",
         "loss_rate",
         "mean_turns",
+        "games_with_stock_draw",
+        "stock_draw_rate",
+        "mean_first_stock_draw_turn",
+        "median_first_stock_draw_turn",
     ]
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -120,6 +133,70 @@ def _aggregate_choice_opportunities(summaries):
     return totals
 
 
+def _histogram_value_at_rank(histogram, rank):
+    """Return the turn value at a 1-based cumulative histogram rank."""
+    cumulative = 0
+    for turn, count in sorted(histogram.items(), key=lambda item: int(item[0])):
+        cumulative += count
+        if cumulative >= rank:
+            return int(turn)
+    return None
+
+
+def _median_from_histogram(histogram, count):
+    """Return the median turn represented by a sparse integer histogram."""
+    if count == 0:
+        return None
+    if count % 2:
+        return float(_histogram_value_at_rank(histogram, count // 2 + 1))
+
+    left = _histogram_value_at_rank(histogram, count // 2)
+    right = _histogram_value_at_rank(histogram, count // 2 + 1)
+    return (left + right) / 2.0
+
+
+def _aggregate_first_stock_draws(summaries):
+    """Accumulate first-stock-draw stats across all evaluated matchups."""
+    totals = {
+        "matchups": len(summaries),
+        "games": 0,
+        "games_with_stock_draw": 0,
+        "games_without_stock_draw": 0,
+        "stock_draw_rate": 0.0,
+        "mean_turn": None,
+        "median_turn": None,
+        "min_turn": None,
+        "max_turn": None,
+        "turn_histogram": {},
+    }
+
+    for summary in summaries:
+        first_draw = summary.get("first_stock_draw", {})
+        totals["games"] += first_draw.get("games", summary.get("game_count", 0))
+        totals["games_with_stock_draw"] += first_draw.get("games_with_stock_draw", 0)
+        totals["games_without_stock_draw"] += first_draw.get("games_without_stock_draw", 0)
+
+        for turn, count in first_draw.get("turn_histogram", {}).items():
+            histogram = totals["turn_histogram"]
+            histogram[turn] = histogram.get(turn, 0) + count
+
+    if totals["games"]:
+        totals["stock_draw_rate"] = totals["games_with_stock_draw"] / totals["games"]
+
+    histogram = dict(sorted(totals["turn_histogram"].items(), key=lambda item: int(item[0])))
+    totals["turn_histogram"] = histogram
+    drawn_games = totals["games_with_stock_draw"]
+    if drawn_games:
+        totals["mean_turn"] = (
+            sum(int(turn) * count for turn, count in histogram.items()) / drawn_games
+        )
+        totals["median_turn"] = _median_from_histogram(histogram, drawn_games)
+        totals["min_turn"] = int(next(iter(histogram)))
+        totals["max_turn"] = int(next(reversed(histogram)))
+
+    return totals
+
+
 def run_all_pairs(
     agents=CANONICAL_AGENTS,
     game_count=DEFAULT_GAME_COUNT,
@@ -166,9 +243,11 @@ def run_all_pairs(
     rows = _matrix_rows(summaries)
     _save_matrix_csv(rows, output_dir / "all_pairs_matrix.csv")
     choice_opportunities = _aggregate_choice_opportunities(summaries)
+    first_stock_draw = _aggregate_first_stock_draws(summaries)
 
     report = {
         "choice_opportunities": choice_opportunities,
+        "first_stock_draw": first_stock_draw,
         "agents": list(agents),
         "game_count_per_matchup": game_count,
         "evaluated_matchups": total_pairs,
@@ -184,6 +263,10 @@ def run_all_pairs(
     plot_aggregate_choice_opportunities(
         choice_opportunities,
         output_dir / "choice_opportunities.png",
+    )
+    plot_aggregate_first_stock_draws(
+        first_stock_draw,
+        output_dir / "first_stock_draw_turns.png",
     )
     return report
 
@@ -229,6 +312,7 @@ def main():
     print(f"Results saved in {Path(args.output)}/")
     print("  all_pairs_table.png")
     print("  choice_opportunities.png")
+    print("  first_stock_draw_turns.png")
     print("  all_pairs_matrix.csv")
     print("  all_pairs_summary.json")
     print("  pairs/<agent>_vs_<opponent>/...")

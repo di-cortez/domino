@@ -20,6 +20,7 @@ from agents.heuristic_agent import StrategicAgent
 from agents.nn import GPU_ENABLED
 from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
+from diagnostics.pairwise import summarize_first_stock_draw_turns
 from middleware.domino_engine import DominoEngine, infer_dead_suits
 from middleware.middleware import GameManager
 from middleware.opponent_model import (
@@ -338,6 +339,27 @@ def test_policy_gradient_rejects_single_action_mask():
         raise AssertionError("Expected ValueError for a single-action legal mask.")
 
 
+def test_first_stock_draw_summary_ignores_games_without_draws():
+    games = [
+        {"first_stock_draw_turn": None},
+        {"first_stock_draw_turn": 2},
+        {"first_stock_draw_turn": 5},
+        {"first_stock_draw_turn": 5},
+    ]
+
+    summary = summarize_first_stock_draw_turns(games)
+
+    assert summary["games"] == 4
+    assert summary["games_with_stock_draw"] == 3
+    assert summary["games_without_stock_draw"] == 1
+    assert summary["stock_draw_rate"] == 0.75
+    assert summary["mean_turn"] == 4.0
+    assert summary["median_turn"] == 5.0
+    assert summary["min_turn"] == 2
+    assert summary["max_turn"] == 5
+    assert summary["turn_histogram"] == {"2": 1, "5": 2}
+
+
 def main():
     tests = [
         ("encoder action space", test_encoder_action_space_excludes_forced_actions),
@@ -367,6 +389,7 @@ def main():
         ("RL trajectory legal mask", test_rl_agent_saves_legal_mask_for_real_decision),
         ("masked policy gradient", test_policy_gradient_updates_only_legal_policy_biases),
         ("invalid policy mask", test_policy_gradient_rejects_single_action_mask),
+        ("first stock draw summary", test_first_stock_draw_summary_ignores_games_without_draws),
     ]
 
     for name, fn in tests:

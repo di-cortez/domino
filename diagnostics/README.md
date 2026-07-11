@@ -52,8 +52,9 @@ The output folder defaults to `diagnostics/results/all_pairs/`.
 |---|---|
 | `all_pairs_table.png` | Triangular image table with one win-rate number per evaluated matchup. |
 | `choice_opportunities.png` | Aggregate histogram of draw/pass/choice opportunities across all evaluated matchups. |
+| `first_stock_draw_turns.png` | Aggregate histogram of the first stock-draw turn across all evaluated matchups. |
 | `all_pairs_matrix.csv` | One row per evaluated matchup. |
-| `all_pairs_summary.json` | Full aggregate report with accumulated choice-opportunity stats, `duration_s`, and all pairwise summaries. |
+| `all_pairs_summary.json` | Full aggregate report with accumulated choice-opportunity stats, accumulated first-stock-draw stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
 
 ## Pairwise Helper
@@ -73,13 +74,14 @@ By default, pairwise files are written under
 
 | File | Contents |
 |---|---|
-| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, and `duration_s`. |
-| `games.csv` | Compact one-row-per-game data with position, result, turns, and pip counts. |
+| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, first-stock-draw totals, and `duration_s`. |
+| `games.csv` | Compact one-row-per-game data with position, result, turns, first stock-draw turn, and pip counts. |
 | `cumulative_rates.png` | Win/draw/loss rates over time. |
 | `result_distribution.png` | Final result counts. |
 | `wins_by_position.png` | Win rate as player 0 vs. player 1. |
 | `game_lengths.png` | Turn-count histogram. |
 | `choice_opportunities.png` | Histogram of draw/pass/choice opportunities for the evaluated agent. |
+| `first_stock_draw_turns.png` | Histogram of the first turn where any player drew from the stock. |
 
 ## Interpretation
 

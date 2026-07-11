@@ -164,6 +164,7 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
 
     engine = DominoEngine(player_count=2)
     choice_stats = empty_choice_stats()
+    first_stock_draw_turn = None
 
     while not engine.game_over:
         state = engine._get_state()
@@ -178,6 +179,9 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
                 action = agents[current_player].choose_move(state, legal_actions)
         else:
             action = agents[current_player].choose_move(state, legal_actions)
+
+        if action == ("DRAW", None) and first_stock_draw_turn is None:
+            first_stock_draw_turn = engine.turn + 1
 
         engine.step(action)
 
@@ -198,6 +202,7 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         "agent_position": agent_position,
         "result": result,
         "turns": final_state["turn"],
+        "first_stock_draw_turn": first_stock_draw_turn,
         "agent_remaining_pips": pips[agent_position],
         "opponent_remaining_pips": pips[1 - agent_position],
         **choice_stats,
@@ -251,6 +256,7 @@ def save_csv(games, path):
         "agent_position",
         "result",
         "turns",
+        "first_stock_draw_turn",
         "agent_remaining_pips",
         "opponent_remaining_pips",
     ]
@@ -286,6 +292,41 @@ def add_choice_summary(summary, games):
         "forced_passes": sum(game["agent_forced_passes"] for game in games),
         "choice_histogram": dict(sorted(histogram.items(), key=lambda item: int(item[0]))),
     }
+    return summary
+
+
+def summarize_first_stock_draw_turns(games):
+    """Summarize the first stock-draw turn across a set of game records."""
+    values = []
+    histogram = {}
+    for game in games:
+        turn = game.get("first_stock_draw_turn")
+        if turn is None:
+            continue
+        turn = int(turn)
+        values.append(turn)
+        key = str(turn)
+        histogram[key] = histogram.get(key, 0) + 1
+
+    game_count = len(games)
+    games_with_stock_draw = len(values)
+    summary = {
+        "games": game_count,
+        "games_with_stock_draw": games_with_stock_draw,
+        "games_without_stock_draw": game_count - games_with_stock_draw,
+        "stock_draw_rate": games_with_stock_draw / game_count if game_count else 0.0,
+        "mean_turn": float(np.mean(values)) if values else None,
+        "median_turn": float(np.median(values)) if values else None,
+        "min_turn": int(min(values)) if values else None,
+        "max_turn": int(max(values)) if values else None,
+        "turn_histogram": dict(sorted(histogram.items(), key=lambda item: int(item[0]))),
+    }
+    return summary
+
+
+def add_first_stock_draw_summary(summary, games):
+    """Attach first-stock-draw statistics to a pairwise summary."""
+    summary["first_stock_draw"] = summarize_first_stock_draw_turns(games)
     return summary
 
 
@@ -330,6 +371,18 @@ def print_summary(summary, duration_s):
             f"pass {choice_info['forced_passes']}"
         )
         print(f"  Choice histogram: {choice_info['choice_histogram']}")
+    first_draw = summary.get("first_stock_draw")
+    if first_draw:
+        if first_draw["games_with_stock_draw"]:
+            print(
+                "  First stock draw: "
+                f"{first_draw['games_with_stock_draw']}/{first_draw['games']} games "
+                f"({first_draw['stock_draw_rate']:.1%}) | "
+                f"mean turn {first_draw['mean_turn']:.1f} | "
+                f"median turn {first_draw['median_turn']:.1f}"
+            )
+        else:
+            print("  First stock draw: none recorded")
 
 
 def run_pairwise(
@@ -392,6 +445,7 @@ def run_pairwise(
 
     summary = summarize(games, agent_name, opponent_name, seed)
     summary = add_choice_summary(summary, games)
+    summary = add_first_stock_draw_summary(summary, games)
     summary["duration_s"] = duration
     if print_console_summary:
         print_summary(summary, duration)
@@ -408,7 +462,7 @@ def run_pairwise(
         if generate_plots:
             print(
                 "  cumulative_rates.png, result_distribution.png, wins_by_position.png, "
-                "game_lengths.png, choice_opportunities.png"
+                "game_lengths.png, choice_opportunities.png, first_stock_draw_turns.png"
             )
         print("  games.csv, summary.json")
 

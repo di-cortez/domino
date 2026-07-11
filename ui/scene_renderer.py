@@ -24,6 +24,49 @@ def draw_table():
     rectangle(-20.0, -20.0, 40.0, 40.0, TABLE_COLOR)
 
 
+def _normalize_action(action):
+    """Return a tuple-based action from JSON-style snapshot data."""
+    if action is None:
+        return None
+    if action == ["DRAW", None] or action == ("DRAW", None):
+        return ("DRAW", None)
+
+    tile, side = action
+    return (tuple(tile), side)
+
+
+def visual_chain_from_state(state):
+    """Build a left-to-right visual chain from the logical board history.
+
+    The engine no longer stores UI-only `visual_chain` data. The renderer
+    reconstructs it from the public action history so training snapshots stay
+    compact while the board still has the order needed for layout.
+    """
+    history = state.get("board_history") or state.get("logical_board") or []
+    visual_chain = []
+
+    for index, raw_action in enumerate(history):
+        action = _normalize_action(raw_action)
+
+        if action is None or action == ("DRAW", None):
+            continue
+
+        tile, side = action
+        info = {
+            "id": index,
+            "tile": list(tile),
+        }
+
+        if not visual_chain:
+            visual_chain.append(info)
+        elif side == 0:
+            visual_chain.insert(0, info)
+        else:
+            visual_chain.append(info)
+
+    return visual_chain
+
+
 def render_scene(state):
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glLoadIdentity()
@@ -32,7 +75,7 @@ def render_scene(state):
 
     draw_table()
 
-    visual_chain = state.get("visual_chain", [])
+    visual_chain = state.get("visual_chain") or visual_chain_from_state(state)
 
     if not visual_chain:
         return

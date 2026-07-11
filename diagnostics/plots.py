@@ -234,6 +234,66 @@ def plot_game_lengths(games, path, subtitle):
     _save_figure(fig, path)
 
 
+def _choice_plot_rows(choice_info):
+    """Return labels and counts for a choice-opportunity histogram."""
+    histogram = choice_info.get("choice_histogram", {})
+    rows = [
+        ("Draw", choice_info.get("forced_draws", 0)),
+        ("Pass", choice_info.get("forced_passes", 0)),
+    ]
+
+    for option_count, count in sorted(histogram.items(), key=lambda item: int(item[0])):
+        label = f"{option_count} tile" if int(option_count) == 1 else f"{option_count} tiles"
+        rows.append((label, count))
+
+    return [(label, count) for label, count in rows if count > 0]
+
+
+def plot_choice_opportunities(summary, path, subtitle):
+    """Plot draw/pass/option-count frequencies from choice-opportunity stats."""
+    choice_info = summary.get("choice_opportunities", {})
+    rows = _choice_plot_rows(choice_info)
+    if not rows:
+        return
+
+    fig, ax = _new_figure(width=8.0, height=4.2)
+    _prepare_axis(ax, f"Choice opportunities - {subtitle}")
+    ax.grid(axis="x", color=GRID, linewidth=0.8)
+    ax.grid(axis="y", visible=False)
+
+    labels = [label for label, _count in rows]
+    values = [count for _label, count in rows]
+    colors = []
+    for label in labels:
+        if label == "Draw":
+            colors.append("#a9a6a0")
+        elif label == "Pass":
+            colors.append("#c6c2b8")
+        elif label.startswith("1 "):
+            colors.append("#eda100")
+        else:
+            colors.append(COLOR["win"])
+
+    ax.barh(labels, values, color=colors, height=0.62)
+
+    total = sum(values)
+    for index, value in enumerate(values):
+        ax.annotate(
+            f"{value} ({100 * value / total:.1f}%)",
+            xy=(value, index),
+            xytext=(6, 0),
+            textcoords="offset points",
+            va="center",
+            color=SECONDARY_INK,
+            fontsize=9,
+        )
+
+    ax.set_xlim(0, max(values) * 1.24 if max(values) else 1)
+    ax.set_xlabel("Turns")
+    ax.tick_params(axis="y", labelcolor=INK)
+    _save_figure(fig, path)
+
+
 def generate_plots(games, summary, folder):
     """Generate all diagnostic PNGs in the target folder."""
     import matplotlib
@@ -245,15 +305,11 @@ def generate_plots(games, summary, folder):
     plot_distribution(summary, folder / "result_distribution.png", subtitle)
     plot_by_position(summary, folder / "wins_by_position.png", subtitle)
     plot_game_lengths(games, folder / "game_lengths.png", subtitle)
-
+    plot_choice_opportunities(summary, folder / "choice_opportunities.png", subtitle)
 
 
 def plot_all_pairs_table(summaries, agents, path):
-    """Render the ordered all-pairs result matrix as a PNG table.
-
-    Each cell is read as "row agent evaluated against column opponent" and shows
-    win/draw/loss counts plus the row agent's win rate.
-    """
+    """Render a triangular all-pairs win-rate matrix as a clean PNG table."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -261,24 +317,29 @@ def plot_all_pairs_table(summaries, agents, path):
 
     summary_by_pair = {(summary["agent"], summary["opponent"]): summary for summary in summaries}
     cell_text = []
+    cell_rates = []
     for agent in agents:
         row = []
+        rate_row = []
         for opponent in agents:
-            summary = summary_by_pair[(agent, opponent)]
-            counts = summary["counts"]
-            row.append(
-                f"W/D/L: {counts['win']}/{counts['draw']}/{counts['loss']}\n"
-                f"Win rate: {100 * summary['rates']['win']:.1f}%"
-            )
+            summary = summary_by_pair.get((agent, opponent))
+            if summary is None:
+                row.append("")
+                rate_row.append(None)
+                continue
+            win_rate = 100 * summary["rates"]["win"]
+            row.append(f"{win_rate:.1f}")
+            rate_row.append(win_rate)
         cell_text.append(row)
+        cell_rates.append(rate_row)
 
-    width = max(9.0, 2.25 * (len(agents) + 1))
-    height = max(4.0, 0.95 * (len(agents) + 2))
+    width = max(9.0, 2.15 * (len(agents) + 1))
+    height = max(3.2, 0.58 * (len(agents) + 2))
     fig, ax = plt.subplots(figsize=(width, height), facecolor=SURFACE, dpi=160)
     ax.set_facecolor(SURFACE)
     ax.axis("off")
     ax.set_title(
-        "All-pairs diagnostics matrix",
+        "All-pairs win-rate matrix (%)",
         color=INK,
         fontsize=14,
         loc="left",
@@ -289,13 +350,14 @@ def plot_all_pairs_table(summaries, agents, path):
         cellText=cell_text,
         rowLabels=agents,
         colLabels=agents,
+        bbox=[0, 0.24, 1, 0.58],
         cellLoc="center",
         rowLoc="center",
         loc="center",
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1.0, 1.8)
+    table.set_fontsize(10)
+    table.scale(1.0, 1.55)
 
     for (row, col), cell in table.get_celld().items():
         cell.set_edgecolor(AXIS)
@@ -303,17 +365,37 @@ def plot_all_pairs_table(summaries, agents, path):
         if row == 0 or col == -1:
             cell.set_facecolor("#efeee8")
             cell.set_text_props(color=INK, weight="bold")
+        elif not cell.get_text().get_text():
+            cell.set_facecolor("#f4f3ee")
+            cell.set_text_props(color="#c9c6bd")
         else:
-            cell.set_facecolor(SURFACE)
-            cell.set_text_props(color=SECONDARY_INK)
+            rate = cell_rates[row - 1][col]
+            if rate >= 60:
+                cell.set_facecolor("#e6f1fb")
+            elif rate <= 40:
+                cell.set_facecolor("#f9ead9")
+            else:
+                cell.set_facecolor(SURFACE)
+            cell.set_text_props(color=INK, weight="bold")
 
     ax.text(
         0.0,
-        -0.08,
-        "Rows are evaluated agents; columns are opponents. W/D/L counts are from the row agent's perspective.",
+        0.06,
+        "Rows are evaluated agents; columns are opponents. Blank cells are skipped reverse matchups.",
         transform=ax.transAxes,
         color=SECONDARY_INK,
         fontsize=9,
         va="top",
     )
     _save_figure(fig, path)
+
+
+def plot_aggregate_choice_opportunities(choice_info, path):
+    """Plot the aggregate choice-opportunity histogram for all evaluated pairs."""
+    summary = {
+        "choice_opportunities": choice_info,
+        "agent": "all",
+        "opponent": "pairs",
+        "game_count": choice_info.get("matchups", 0),
+    }
+    plot_choice_opportunities(summary, path, "all evaluated pairs")

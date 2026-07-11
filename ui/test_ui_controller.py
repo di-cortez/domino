@@ -9,6 +9,8 @@ window and focus on deterministic controller behavior.
 import sys
 from pathlib import Path
 
+import pygame
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -17,6 +19,7 @@ from agents.heuristic_agent import StrategicAgent
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
 from ui.game_controller import GameController
+from ui.scene_renderer import visual_chain_from_state
 
 
 def _new_controller(agent_types=None, interval_ms=1000):
@@ -260,6 +263,23 @@ def test_human_draw_rejects_when_a_tile_can_play():
     assert controller.notification["message"] == "Draw is not allowed now"
 
 
+def test_d_key_executes_human_draw_when_legal():
+    engine, controller = _new_controller()
+    _prepare_human_state(
+        controller,
+        engine,
+        ends=[2, 3],
+        hand=[(4, 5)],
+        stock=[(0, 0)],
+    )
+
+    controller._process_human_key(pygame.K_d)
+
+    assert engine.turn == 1
+    assert engine.board_history[-1] == ("DRAW", None)
+    assert len(engine.hands[0]) == 2
+
+
 def test_human_pass_rejects_when_draw_is_available():
     engine, controller = _new_controller()
     _prepare_human_state(
@@ -291,6 +311,28 @@ def test_draw_notification_follows_history_cursor():
     controller.step_forward()
 
     assert controller.notification["message"] == "Player 0 (Heuristic) drew from the stock"
+
+
+def test_visual_chain_is_rebuilt_from_board_history():
+    state = {
+        "board_history": [
+            [[6, 6], 0],
+            [[4, 6], 0],
+            [[5, 6], 1],
+            ["DRAW", None],
+            None,
+            [[4, 4], 0],
+        ],
+    }
+
+    chain = visual_chain_from_state(state)
+
+    assert [item["tile"] for item in chain] == [
+        [4, 4],
+        [4, 6],
+        [6, 6],
+        [5, 6],
+    ]
 
 
 def test_menu_cycle_updates_manager_agent():
@@ -440,8 +482,10 @@ def main():
         ("arrow uses selected end value", test_arrow_uses_selected_end_for_two_sided_tile),
         ("Enter executes valid human move", test_enter_executes_valid_human_move),
         ("human draw rejection", test_human_draw_rejects_when_a_tile_can_play),
+        ("D key executes draw", test_d_key_executes_human_draw_when_legal),
         ("human pass rejection", test_human_pass_rejects_when_draw_is_available),
         ("draw notification history", test_draw_notification_follows_history_cursor),
+        ("visual chain rebuild", test_visual_chain_is_rebuilt_from_board_history),
         ("menu updates manager agent", test_menu_cycle_updates_manager_agent),
         ("speed bounds", test_speed_has_bounds),
         ("restart asks and expires", test_restart_requires_confirmation_and_expires),

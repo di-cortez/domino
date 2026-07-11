@@ -28,7 +28,7 @@ fair comparison.
 ## Run The Comparison
 
 ```bash
-python diagnostics/self_play_evaluation/compare_regimes.py -n 1000
+python diagnostics/self_play_evaluation/compare_regimes.py
 ```
 
 Useful options:

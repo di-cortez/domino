@@ -1,8 +1,8 @@
 """
 Geometry for the domino chain on the board.
 
-This module does not draw anything. It receives the engine's `visual_chain` and
-calculates positions, angles, and pip order for each tile while respecting the
+This module does not draw anything. It receives the renderer's left-to-right
+tile chain and calculates positions, angles, and pip order while respecting the
 board limits and turning branches near the edges.
 """
 

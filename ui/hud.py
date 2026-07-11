@@ -7,6 +7,7 @@ engine; all game changes go through `GameController`.
 
 import pygame
 
+from middleware.opponent_model import compute_opponent_suit_probabilities
 from ui.primitives import (
     begin_2d,
     draw_domino_2d,
@@ -41,6 +42,7 @@ class HudRenderer:
         self._title_font = None
         self._normal_font = None
         self._hint_font = None
+        self._probability_cache = {}
 
     def _init_fonts(self):
         if self._fonts_ready:
@@ -71,6 +73,7 @@ class HudRenderer:
 
         self._render_top_bar(current_player, turn, names, display)
         self._render_hands_bar(state, controller, display)
+        self._render_suit_probabilities(state, display)
         self._render_bottom_bar(display, controller.active_human_player())
 
         if controller.notification:
@@ -129,7 +132,7 @@ class HudRenderer:
         if human_active:
             hint = (
                 "Left/Right: tile | Up/Down: end | Enter: play | "
-                "C: draw | P: pass | M: menu | ESC: quit"
+                "D: draw | P: pass | M: menu | ESC: quit"
             )
         else:
             hint = "M: Menu | R: Restart | Space: Pause | Arrows: Step | +/-: speed | ESC: Quit"
@@ -145,6 +148,135 @@ class HudRenderer:
             sw // 2 - hint_width // 2,
             sh - hint_height - 3,
         )
+
+    def _render_suit_probabilities(self, state, display):
+        """Draw opponent suit-presence probabilities from both perspectives."""
+        sw, sh = display
+        hands = state.get("hands") or []
+        if len(hands) < 2:
+            return
+
+        box_w = 38
+        box_h = 20
+        gap = 4
+        label_h = 16
+        panel_w = 7 * box_w + 6 * gap + 12
+        panel_h = label_h + box_h + 12
+        bottom_bar_clearance = 28
+        y = sh - panel_h - bottom_bar_clearance
+
+        self._render_probability_panel(
+            player=0,
+            probabilities=self._cached_probabilities_for_player(state, 0),
+            x=8,
+            y=y,
+            panel_w=panel_w,
+            panel_h=panel_h,
+            box_w=box_w,
+            box_h=box_h,
+            gap=gap,
+            align="left",
+        )
+        self._render_probability_panel(
+            player=1,
+            probabilities=self._cached_probabilities_for_player(state, 1),
+            x=sw - panel_w - 8,
+            y=y,
+            panel_w=panel_w,
+            panel_h=panel_h,
+            box_w=box_w,
+            box_h=box_h,
+            gap=gap,
+            align="right",
+        )
+
+    def _render_probability_panel(
+        self,
+        player,
+        probabilities,
+        x,
+        y,
+        panel_w,
+        panel_h,
+        box_w,
+        box_h,
+        gap,
+        align,
+    ):
+        """Draw one player's opponent-suit probability panel."""
+        color = (80, 200, 255) if player == 0 else (255, 185, 55)
+        label = f"P{player} opp"
+        label_w, _ = self._hint_font.size(label)
+
+        rectangle(x, y, panel_w, panel_h, (0, 0, 0), 0.58)
+        rectangle(x, y, panel_w, 1, (0.25, 0.45, 0.50), 0.75)
+
+        label_x = x + 6 if align == "left" else x + panel_w - label_w - 6
+        draw_text(label, self._hint_font, color, label_x, y + 4)
+
+        row_x = x + 6
+        row_y = y + 22
+        for suit, probability in enumerate(probabilities):
+            box_x = row_x + suit * (box_w + gap)
+            rectangle(box_x, row_y, box_w, box_h, (0.05, 0.08, 0.10), 0.85)
+
+            text = f"{float(probability):.2f}"
+            text_w, text_h = self._hint_font.size(text)
+            draw_text(
+                text,
+                self._hint_font,
+                (220, 230, 220),
+                box_x + box_w // 2 - text_w // 2,
+                row_y + box_h // 2 - text_h // 2,
+            )
+
+    def _probability_state_for_player(self, state, player):
+        """Build a private observer view for probability rendering."""
+        hands = state.get("hands") or []
+        initial_hands = state.get("initial_hands") or []
+        drawn_tiles = state.get("drawn_tiles_by_player") or []
+
+        return {
+            "game_id": state.get("game_id"),
+            "history_current_player": state.get("current_player", 0),
+            "observer_player": player,
+            "current_player": player,
+            "ends": state.get("ends", []),
+            "current_player_hand": hands[player],
+            "current_player_initial_hand": (
+                initial_hands[player] if player < len(initial_hands) else None
+            ),
+            "current_player_drawn_tiles": (
+                drawn_tiles[player] if player < len(drawn_tiles) else []
+            ),
+            "turn": state.get("turn", 0),
+            "hand_sizes": state.get("hand_sizes", [len(hand) for hand in hands]),
+            "board_history": state.get("board_history", []),
+            "stock_size": state.get("stock_size", len(state.get("stock", []))),
+        }
+
+    def _cached_probabilities_for_player(self, state, player):
+        """Return HUD probabilities without recomputing unchanged snapshots."""
+        key = (
+            state.get("game_id"),
+            state.get("turn"),
+            len(state.get("board_history", [])),
+            player,
+            tuple(tuple(tile) for tile in (state.get("hands") or [[], []])[player]),
+        )
+        if key in self._probability_cache:
+            return self._probability_cache[key]
+
+        try:
+            perspective_state = self._probability_state_for_player(state, player)
+            probabilities = compute_opponent_suit_probabilities(perspective_state)
+        except (KeyError, ValueError, IndexError, TypeError):
+            probabilities = [0.0] * 7
+
+        if len(self._probability_cache) > 64:
+            self._probability_cache.clear()
+        self._probability_cache[key] = probabilities
+        return probabilities
 
     def _draw_selection_arrow(self, x, y, w, h, position):
         center_x = x + w / 2.0

@@ -6,7 +6,7 @@ This module is the pairwise diagnostics helper. The high-level entry point
 all-pairs matrix, but this file can still be executed directly when only one
 matchup is needed:
 
-    python -m diagnostics.pairwise --agent heuristic --opponent random -n 1000
+    python -m diagnostics.pairwise --agent heuristic --opponent random
 
 The evaluated agent alternates between player 0 and player 1 so the result is
 not dominated by first-player advantage. Outputs are written to a dedicated
@@ -31,11 +31,16 @@ import numpy as np
 
 from diagnostics.plots import LABEL, generate_plots as write_diagnostic_plots, summarize
 from middleware.domino_engine import DominoEngine
-from middleware.middleware import GameManager
+from utils.runtime_status import format_duration, print_memory_report
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
 
 DEFAULT_AGENT = "rl"
 DEFAULT_OPPONENT = "heuristic"
-DEFAULT_GAME_COUNT = 1000
+DEFAULT_GAME_COUNT = 10000
 DEFAULT_SEED = None
 DEFAULT_AGENT_WEIGHTS = None
 DEFAULT_OPPONENT_WEIGHTS = None
@@ -100,6 +105,57 @@ def create_agent(agent_name, weights_path=None):
     raise ValueError(f"Unknown agent {agent_name!r}. Options: {CANONICAL_AGENTS}")
 
 
+def is_forced_draw(legal_actions):
+    """Return True when the only legal action is drawing from the stock."""
+    return len(legal_actions) == 1 and legal_actions[0] == ("DRAW", None)
+
+
+def is_forced_pass(legal_actions):
+    """Return True when the only legal action is passing."""
+    return len(legal_actions) == 1 and legal_actions[0] is None
+
+
+def count_tile_play_options(legal_actions):
+    """Count voluntary tile-play options, excluding forced draw/pass."""
+    return sum(
+        1
+        for action in legal_actions
+        if action is not None and action != ("DRAW", None)
+    )
+
+
+def empty_choice_stats():
+    """Return counters for how often the evaluated agent really had a choice."""
+    return {
+        "agent_real_decision_turns": 0,
+        "agent_forced_tile_turns": 0,
+        "agent_forced_draws": 0,
+        "agent_forced_passes": 0,
+        "agent_choice_histogram": {},
+    }
+
+
+def update_choice_stats(stats, legal_actions):
+    """Update choice counters from the evaluated agent's legal actions."""
+    if is_forced_draw(legal_actions):
+        stats["agent_forced_draws"] += 1
+        return
+
+    if is_forced_pass(legal_actions):
+        stats["agent_forced_passes"] += 1
+        return
+
+    option_count = count_tile_play_options(legal_actions)
+    stats["agent_choice_histogram"][str(option_count)] = (
+        stats["agent_choice_histogram"].get(str(option_count), 0) + 1
+    )
+
+    if option_count >= 2:
+        stats["agent_real_decision_turns"] += 1
+    else:
+        stats["agent_forced_tile_turns"] += 1
+
+
 def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     """Play one game and return the outcome from the evaluated agent's view."""
     agents = [None, None]
@@ -107,15 +163,27 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     agents[1 - agent_position] = opponent
 
     engine = DominoEngine(player_count=2)
-    manager = GameManager(engine, agents)
+    choice_stats = empty_choice_stats()
 
-    if suppress_agent_output:
-        with contextlib.redirect_stdout(io.StringIO()):
-            info, _ = manager.play_full_game()
-    else:
-        info, _ = manager.play_full_game()
+    while not engine.game_over:
+        state = engine._get_state()
+        current_player = state["current_player"]
+        legal_actions = engine.valid_actions(current_player)
 
-    winner = info["winner"]
+        if current_player == agent_position:
+            update_choice_stats(choice_stats, legal_actions)
+
+        if suppress_agent_output:
+            with contextlib.redirect_stdout(io.StringIO()):
+                action = agents[current_player].choose_move(state, legal_actions)
+        else:
+            action = agents[current_player].choose_move(state, legal_actions)
+
+        engine.step(action)
+
+    final_state = engine.to_dict()
+    winner = final_state["winner"]
+
     if winner == -1:
         result = "draw"
     elif winner == agent_position:
@@ -123,8 +191,8 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     else:
         result = "loss"
 
-    final_state = engine.to_dict()
     pips = [sum(tile[0] + tile[1] for tile in hand) for hand in final_state["hands"]]
+
     return {
         "game": None,
         "agent_position": agent_position,
@@ -132,6 +200,7 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         "turns": final_state["turn"],
         "agent_remaining_pips": pips[agent_position],
         "opponent_remaining_pips": pips[1 - agent_position],
+        **choice_stats,
     }
 
 
@@ -176,7 +245,7 @@ evaluate = evaluate_pair
 
 
 def save_csv(games, path):
-    """Write per-game records to CSV."""
+    """Write compact per-game records to CSV."""
     fields = [
         "game",
         "agent_position",
@@ -191,12 +260,44 @@ def save_csv(games, path):
         writer.writerows({field: game[field] for field in fields} for game in games)
 
 
+def add_choice_summary(summary, games):
+    """Attach aggregate choice-opportunity statistics to a pairwise summary."""
+    histogram = {}
+    for game in games:
+        for option_count, count in game["agent_choice_histogram"].items():
+            histogram[option_count] = histogram.get(option_count, 0) + count
+
+    evaluated_turns = sum(
+        game["agent_real_decision_turns"]
+        + game["agent_forced_tile_turns"]
+        + game["agent_forced_draws"]
+        + game["agent_forced_passes"]
+        for game in games
+    )
+
+    real_decisions = sum(game["agent_real_decision_turns"] for game in games)
+
+    summary["choice_opportunities"] = {
+        "evaluated_agent_turns": evaluated_turns,
+        "real_decision_turns": real_decisions,
+        "real_decision_rate": real_decisions / evaluated_turns if evaluated_turns else 0.0,
+        "forced_tile_turns": sum(game["agent_forced_tile_turns"] for game in games),
+        "forced_draws": sum(game["agent_forced_draws"] for game in games),
+        "forced_passes": sum(game["agent_forced_passes"] for game in games),
+        "choice_histogram": dict(sorted(histogram.items(), key=lambda item: int(item[0]))),
+    }
+    return summary
+
+
 def print_summary(summary, duration_s):
     """Print the main pairwise metrics in a compact console format."""
     game_count = summary["game_count"]
     games_per_second = game_count / duration_s if duration_s else float("inf")
     print(f"\n===== Diagnostics: {summary['agent']} vs {summary['opponent']} =====")
-    print(f"Games: {game_count} | time: {duration_s:.1f}s ({games_per_second:.1f} games/s)")
+    print(
+        f"Games: {game_count} | time: {format_duration(duration_s)} "
+        f"({games_per_second:.1f} games/s)"
+    )
     for key in ("win", "draw", "loss"):
         rate = summary["rates"][key]
         print(f"  {LABEL[key]:<8} {summary['counts'][key]:>5}  ({rate:6.1%})")
@@ -214,6 +315,21 @@ def print_summary(summary, duration_s):
         f"agent {summary['mean_agent_remaining_pips']:.1f} | "
         f"opponent {summary['mean_opponent_remaining_pips']:.1f}"
     )
+    choice_info = summary.get("choice_opportunities")
+    if choice_info:
+        print(
+            "  Choice opportunities: "
+            f"{choice_info['real_decision_turns']}/"
+            f"{choice_info['evaluated_agent_turns']} turns "
+            f"({choice_info['real_decision_rate']:.1%})"
+        )
+        print(
+            "  Forced turns: "
+            f"tile {choice_info['forced_tile_turns']}, "
+            f"draw {choice_info['forced_draws']}, "
+            f"pass {choice_info['forced_passes']}"
+        )
+        print(f"  Choice histogram: {choice_info['choice_histogram']}")
 
 
 def run_pairwise(
@@ -227,6 +343,7 @@ def run_pairwise(
     generate_plots=DEFAULT_GENERATE_PLOTS,
     print_console_summary=True,
     suppress_agent_output=True,
+    print_memory_summary=True,
 ):
     """Run one matchup and write the standard pairwise artifacts."""
     agent_name = normalize_agent_name(agent_name)
@@ -235,30 +352,47 @@ def run_pairwise(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    progress_step = max(1, game_count // 10)
-
-    def progress(done, total):
-        if print_console_summary and (done % progress_step == 0 or done == total):
-            print(f"  {done}/{total} games...", flush=True)
-
     print(
         f"Evaluating {agent_name} vs {opponent_name} over {game_count} games "
         "(starting position alternates every game)"
     )
+    if print_console_summary and print_memory_summary:
+        print_memory_report("Diagnostics startup memory")
+
+    progress_bar = None
+    if print_console_summary and tqdm is not None:
+        progress_bar = tqdm(
+            total=game_count,
+            desc=f"{agent_name} vs {opponent_name}",
+            unit="game",
+            leave=True,
+        )
+
+    def progress(_done, _total):
+        if progress_bar is not None:
+            progress_bar.update(1)
+
     start_time = time.time()
-    games = evaluate_pair(
-        agent_name,
-        opponent_name,
-        game_count,
-        weights=weights,
-        opponent_weights=opponent_weights,
-        seed=seed,
-        progress_callback=progress,
-        suppress_agent_output=suppress_agent_output,
-    )
+    try:
+        games = evaluate_pair(
+            agent_name,
+            opponent_name,
+            game_count,
+            weights=weights,
+            opponent_weights=opponent_weights,
+            seed=seed,
+            progress_callback=progress,
+            suppress_agent_output=suppress_agent_output,
+        )
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
+
     duration = time.time() - start_time
 
     summary = summarize(games, agent_name, opponent_name, seed)
+    summary = add_choice_summary(summary, games)
+    summary["duration_s"] = duration
     if print_console_summary:
         print_summary(summary, duration)
 
@@ -272,7 +406,10 @@ def run_pairwise(
     if print_console_summary:
         print(f"\nResults saved in {output_dir}/")
         if generate_plots:
-            print("  cumulative_rates.png, result_distribution.png, wins_by_position.png, game_lengths.png")
+            print(
+                "  cumulative_rates.png, result_distribution.png, wins_by_position.png, "
+                "game_lengths.png, choice_opportunities.png"
+            )
         print("  games.csv, summary.json")
 
     return {
@@ -290,7 +427,13 @@ def main():
     )
     parser.add_argument("--agent", choices=AVAILABLE_AGENTS, default=DEFAULT_AGENT)
     parser.add_argument("--opponent", choices=AVAILABLE_AGENTS, default=DEFAULT_OPPONENT)
-    parser.add_argument("-n", "--games", type=int, default=DEFAULT_GAME_COUNT)
+    parser.add_argument(
+        "-n",
+        "--games",
+        type=int,
+        default=DEFAULT_GAME_COUNT,
+        help="Number of games to play in this matchup.",
+    )
     parser.add_argument("--weights", type=Path, default=DEFAULT_AGENT_WEIGHTS)
     parser.add_argument("--opponent-weights", type=Path, default=DEFAULT_OPPONENT_WEIGHTS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)

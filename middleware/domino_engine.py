@@ -1,6 +1,5 @@
 """Domino rules engine shared by the UI, agents, and training code."""
 
-import copy
 import random
 
 
@@ -48,10 +47,18 @@ def infer_dead_suits(board_history, hand_sizes, current_player):
 class DominoEngine:
     """Stateful two-player domino engine with draw/pass and blocked-game rules."""
 
+    _next_game_id = 0
+
     def __init__(self, player_count=2):
         self.player_count = player_count
         self.all_tiles = [(i, j) for i in range(7) for j in range(i, 7)]
         self.reset()
+
+    @classmethod
+    def _allocate_game_id(cls):
+        """Return a process-unique id for a newly reset game."""
+        cls._next_game_id += 1
+        return cls._next_game_id
 
     def print_tiles(self):
         for tile in self.all_tiles:
@@ -59,6 +66,7 @@ class DominoEngine:
 
     def reset(self):
         """Start a new game, shuffle, deal, and choose the opening player."""
+        self.game_id = self._allocate_game_id()
         shuffled_tiles = self.all_tiles.copy()
         random.shuffle(shuffled_tiles)
 
@@ -66,9 +74,10 @@ class DominoEngine:
             shuffled_tiles[i * 7:(i + 1) * 7]
             for i in range(self.player_count)
         ]
+        self.initial_hands = [hand.copy() for hand in self.hands]
+        self.drawn_tiles_by_player = [[] for _ in range(self.player_count)]
         self.stock = shuffled_tiles[self.player_count * 7:]
         self.board_history = []
-        self.visual_chain = []
         self.ends = []
         self.winner = None
         self.game_over = False
@@ -141,6 +150,7 @@ class DominoEngine:
         if action == ("DRAW", None):
             drawn_tile = self.stock.pop(0)
             hand.append(drawn_tile)
+            self.drawn_tiles_by_player[self.current_player].append(drawn_tile)
             self.board_history.append(action)
             self.drew_this_turn[self.current_player] = True
             advance_player = False
@@ -155,23 +165,11 @@ class DominoEngine:
             if self.required_opening_tile and tile == self.required_opening_tile:
                 self.required_opening_tile = None
 
-            visual_info = {
-                "tile": list(tile),
-                "played_side": side,
-                "turn_index": self.turn,
-                "orientation": "vertical" if tile[0] == tile[1] else "horizontal",
-                "connected_value": None,
-                "exposed_value": None,
-            }
-
             if not self.ends:
                 self.ends = [tile[0], tile[1]]
-                visual_info["played_side"] = None
-                self.visual_chain.append(visual_info)
             else:
                 left_end, right_end = self.ends
                 if side == 0:
-                    connected_value = left_end
                     if tile[0] == left_end:
                         new_end = tile[1]
                     elif tile[1] == left_end:
@@ -179,12 +177,8 @@ class DominoEngine:
                     else:
                         raise ValueError(f"Tile {tile} does not connect to left end {left_end}")
                     self.ends[0] = new_end
-                    visual_info["connected_value"] = connected_value
-                    visual_info["exposed_value"] = new_end
-                    self.visual_chain.insert(0, visual_info)
 
                 elif side == 1:
-                    connected_value = right_end
                     if tile[0] == right_end:
                         new_end = tile[1]
                     elif tile[1] == right_end:
@@ -192,9 +186,6 @@ class DominoEngine:
                     else:
                         raise ValueError(f"Tile {tile} does not connect to right end {right_end}")
                     self.ends[1] = new_end
-                    visual_info["connected_value"] = connected_value
-                    visual_info["exposed_value"] = new_end
-                    self.visual_chain.append(visual_info)
 
         else:
             self.board_history.append(None)
@@ -221,23 +212,22 @@ class DominoEngine:
     def _get_state(self):
         """Return the compact state consumed by agents and encoders."""
         hand_sizes = [len(hand) for hand in self.hands]
-        absences = infer_dead_suits(self.board_history, hand_sizes, self.current_player)
-
-        opponent_dead_suits = set()
-        for player, missing_values in absences.items():
-            if player != self.current_player:
-                opponent_dead_suits |= missing_values
 
         return {
+            "game_id": self.game_id,
             "ends": list(self.ends),
             "current_player_hand": [list(tile) for tile in self.hands[self.current_player]],
+            "current_player_initial_hand": [
+                list(tile) for tile in self.initial_hands[self.current_player]
+            ],
+            "current_player_drawn_tiles": [
+                list(tile) for tile in self.drawn_tiles_by_player[self.current_player]
+            ],
             "current_player": self.current_player,
             "turn": self.turn,
             "hand_sizes": hand_sizes,
             "board_history": [self._serialize_action(action) for action in self.board_history],
-            "visual_chain": copy.deepcopy(self.visual_chain),
             "stock_size": len(self.stock),
-            "opponent_dead_suits": sorted(opponent_dead_suits),
         }
 
     def _serialize_action(self, action):
@@ -250,12 +240,17 @@ class DominoEngine:
     def to_dict(self):
         """Return a JSON-serializable snapshot of the full engine state."""
         return {
+            "game_id": self.game_id,
             "player_count": self.player_count,
             "current_player": self.current_player,
             "ends": list(self.ends),
             "logical_board": [self._serialize_action(action) for action in self.board_history],
-            "visual_chain": copy.deepcopy(self.visual_chain),
             "hands": [[list(tile) for tile in hand] for hand in self.hands],
+            "initial_hands": [[list(tile) for tile in hand] for hand in self.initial_hands],
+            "drawn_tiles_by_player": [
+                [list(tile) for tile in drawn_tiles]
+                for drawn_tiles in self.drawn_tiles_by_player
+            ],
             "stock": [list(tile) for tile in self.stock],
             "turn": self.turn,
             "game_over": self.game_over,

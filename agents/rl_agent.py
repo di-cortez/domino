@@ -1,5 +1,7 @@
 """Agent wrapper used by reinforcement-learning training and evaluation."""
 
+from dataclasses import dataclass
+
 from agents.agent import Agent
 from agents.encoder import DominoEncoder
 from agents.nn import GPU_ENABLED
@@ -12,12 +14,39 @@ else:
     import numpy as xp
 
 
+@dataclass
+class TrajectoryStep:
+    """One real learner decision saved for REINFORCE training."""
+
+    x: object
+    action_index: int
+    legal_mask: object
+    decision_turn: int
+    option_count: int
+    local_reward: float = 0.0
+
+
+@dataclass(frozen=True)
+class FinishedTrajectoryStep:
+    """A sampled decision after terminal reward has been attached."""
+
+    x: object
+    action_index: int
+    legal_mask: object
+    raw_reward: float
+    local_reward: float
+    terminal_reward: float
+    option_count: int
+
+
 class RLAgent(Agent):
     """Choose tile plays from a policy network and record sampled decisions.
 
     Draw, pass, and single-option tile plays are forced by the rules engine in
-    the current rule set. They are returned directly and are not stored as
-    policy-gradient decisions.
+    the current rule set. They bypass the network and are not stored as
+    policy-gradient decisions. Real decisions store their turn and option count
+    so self-play can apply temporally decayed local rewards and option-count
+    multipliers outside the agent.
     """
 
     def __init__(self, network, mode="training"):
@@ -58,21 +87,43 @@ class RLAgent(Agent):
 
         if self.mode == "training":
             move, action_index = self.encoder.sample_action(probabilities, policy_actions)
-            self.trajectory.append([x, action_index, legal_mask, 0.0])
+            self.trajectory.append(
+                TrajectoryStep(
+                    x=x,
+                    action_index=action_index,
+                    legal_mask=legal_mask,
+                    decision_turn=int(state["turn"]),
+                    option_count=len(policy_actions),
+                )
+            )
             return move
 
         return self.encoder.decode_output(probabilities, policy_actions)
 
-    def add_reward_to_last_decision(self, amount):
-        """Add intermediate reward to the most recent learner tile-play decision."""
-        if self.trajectory:
-            self.trajectory[-1][-1] += amount
+    def add_decayed_event_reward(self, event_turn, base_reward, decay_lambda):
+        """Distribute one local event reward to every earlier real decision."""
+        for step in self.trajectory:
+            elapsed_actions = int(event_turn) - step.decision_turn - 1
+            if elapsed_actions < 0:
+                raise ValueError(
+                    "Event reward chronology is invalid: "
+                    f"event_turn={event_turn}, decision_turn={step.decision_turn}."
+                )
+            step.local_reward += float(base_reward) * (float(decay_lambda) ** elapsed_actions)
 
     def finish_episode(self, final_reward):
-        """Attach terminal reward to every sampled tile-play decision."""
+        """Attach uniform terminal reward to every sampled tile-play decision."""
         steps = [
-            (x, action_index, legal_mask, final_reward + shaped_reward)
-            for x, action_index, legal_mask, shaped_reward in self.trajectory
+            FinishedTrajectoryStep(
+                x=step.x,
+                action_index=step.action_index,
+                legal_mask=step.legal_mask,
+                raw_reward=float(final_reward) + step.local_reward,
+                local_reward=step.local_reward,
+                terminal_reward=float(final_reward),
+                option_count=step.option_count,
+            )
+            for step in self.trajectory
         ]
         self.trajectory = []
         return steps

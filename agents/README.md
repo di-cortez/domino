@@ -10,7 +10,7 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 | `heuristic_agent.py` | `StrategicAgent`, the exact-probability rule-based teacher used for supervised labels and benchmarks. |
 | `nn.py` | Supervised MLP backend. Uses CuPy automatically when installed, otherwise NumPy. |
 | `neural_agent.py` | Loads `models/domino_sl_weights.npz` and plays the supervised policy. |
-| `rl_nn.py` | Policy network with REINFORCE gradients, entropy regularization, and value baseline. |
+| `rl_nn.py` | Policy-only network with masked REINFORCE gradients and entropy regularization. |
 | `rl_agent.py` | Wraps `PolicyNetwork` for training trajectories or deterministic evaluation play. |
 
 The opponent belief model lives in `middleware/opponent_model.py` because it is
@@ -59,9 +59,15 @@ tile-play actions, `RLAgent` returns the forced action directly without calling
 the network or saving a trajectory step.
 
 RL trajectory steps store the encoded state, sampled action index, legal-action
-mask, and shaped reward. The policy-gradient backward pass uses that mask to
+mask, decision turn, option count, and local reward accumulator. During
+self-play, draw/pass events are distributed to earlier real decisions with
+temporal decay. The policy-gradient backward pass uses the saved mask to
 renormalize the softmax over legal actions only, so illegal actions receive no
 direct policy or entropy gradient.
+
+`PolicyNetwork` is policy-only. RL checkpoints contain only `W1`, `b1`, `W2`,
+`b2`, `W3`, and `b3`; extra arrays from older checkpoints are ignored when
+loading.
 
 Because the input/output shapes changed from the old 86/58 encoder to the new
 168/56 encoder, old `domino_sl_weights.npz` and `domino_rl_weights.npz`

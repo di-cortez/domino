@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 from agents.encoder import DominoEncoder
 from agents.heuristic_agent import StrategicAgent
 from agents.nn import GPU_ENABLED
-from agents.rl_agent import RLAgent
+from agents.rl_agent import RLAgent, TrajectoryStep
 from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import (
     save_csv,
@@ -35,6 +35,19 @@ from middleware.opponent_model import (
     ALL_TILES,
     CompactOpponentBelief,
     compute_opponent_suit_probabilities,
+)
+from training.self_play import (
+    EVENT_REWARD_DECAY,
+    LEARNER_DRAW_PENALTY,
+    LEARNER_PASS_PENALTY,
+    OPPONENT_DRAW_REWARD,
+    OPPONENT_PASS_REWARD,
+    EventStats,
+    TrainingSample,
+    _choice_multiplier,
+    _event_reward_for_action,
+    _finish_episode_with_rewards,
+    _reward_signal_summary,
 )
 
 from math import comb
@@ -62,6 +75,29 @@ class UniformPolicyNetwork:
 
 def _to_numpy(value):
     return value.get() if hasattr(value, "get") else value
+
+
+def _masked_action_probability(network, x_batch, legal_mask, action_index):
+    network.forward(x_batch)
+    logits = network.cache["Z3"]
+    masked_logits = xp.where(legal_mask > 0, logits, -xp.inf)
+    shifted = masked_logits - xp.max(masked_logits, axis=0, keepdims=True)
+    masked_policy = xp.exp(shifted) / xp.sum(xp.exp(shifted), axis=0, keepdims=True)
+    return float(_to_numpy(masked_policy[action_index, 0]))
+
+
+def _small_policy_network(input_size=4, hidden1_size=5, hidden2_size=3, output_size=56, learning_rate=0.1):
+    """Build a deterministic tiny policy network without invoking backend RNG."""
+    network = PolicyNetwork.__new__(PolicyNetwork)
+    network.lr = learning_rate
+    network.W1 = xp.zeros((hidden1_size, input_size))
+    network.b1 = xp.zeros((hidden1_size, 1))
+    network.W2 = xp.zeros((hidden2_size, hidden1_size))
+    network.b2 = xp.zeros((hidden2_size, 1))
+    network.W3 = xp.zeros((output_size, hidden2_size))
+    network.b3 = xp.zeros((output_size, 1))
+    network.cache = {}
+    return network
 
 
 def _run(name, fn):
@@ -274,24 +310,20 @@ def test_rl_agent_saves_legal_mask_for_real_decision():
     assert chosen in legal_actions
     assert len(agent.trajectory) == 1
 
-    x, action_index, legal_mask, reward = agent.trajectory[0]
-    legal_mask = _to_numpy(legal_mask)
+    step = agent.trajectory[0]
+    legal_mask = _to_numpy(step.legal_mask)
 
-    assert x.shape == (encoder.VECTOR_SIZE, 1)
+    assert step.x.shape == (encoder.VECTOR_SIZE, 1)
     assert legal_mask.shape == (encoder.ACTION_SIZE, 1)
     assert legal_mask.sum() == 2.0
-    assert legal_mask[action_index, 0] == 1.0
-    assert reward == 0.0
+    assert legal_mask[step.action_index, 0] == 1.0
+    assert step.decision_turn == state["turn"]
+    assert step.option_count == 2
+    assert step.local_reward == 0.0
 
 
 def test_policy_gradient_updates_only_legal_policy_biases():
-    network = PolicyNetwork(
-        input_size=4,
-        hidden1_size=5,
-        hidden2_size=3,
-        output_size=DominoEncoder.ACTION_SIZE,
-        learning_rate=0.1,
-    )
+    network = _small_policy_network(output_size=DominoEncoder.ACTION_SIZE)
     x_batch = xp.ones((4, 1))
     legal_mask = xp.zeros((DominoEncoder.ACTION_SIZE, 1))
     legal_mask[3, 0] = 1.0
@@ -302,11 +334,9 @@ def test_policy_gradient_updates_only_legal_policy_biases():
 
     network.backward_policy_gradient(
         action_indices=[3],
-        advantages=xp.ones((1, 1)),
+        policy_rewards=xp.ones((1, 1)),
         legal_masks=legal_mask,
-        returns=None,
         entropy_coef=0.0,
-        value_coef=0.0,
         clip_grad_norm=None,
     )
 
@@ -319,13 +349,7 @@ def test_policy_gradient_updates_only_legal_policy_biases():
 
 
 def test_policy_gradient_rejects_single_action_mask():
-    network = PolicyNetwork(
-        input_size=4,
-        hidden1_size=5,
-        hidden2_size=3,
-        output_size=DominoEncoder.ACTION_SIZE,
-        learning_rate=0.1,
-    )
+    network = _small_policy_network(output_size=DominoEncoder.ACTION_SIZE)
     x_batch = xp.ones((4, 1))
     legal_mask = xp.zeros((DominoEncoder.ACTION_SIZE, 1))
     legal_mask[3, 0] = 1.0
@@ -335,17 +359,188 @@ def test_policy_gradient_rejects_single_action_mask():
     try:
         network.backward_policy_gradient(
             action_indices=[3],
-            advantages=xp.ones((1, 1)),
+            policy_rewards=xp.ones((1, 1)),
             legal_masks=legal_mask,
-            returns=None,
             entropy_coef=0.0,
-            value_coef=0.0,
             clip_grad_norm=None,
         )
     except ValueError as exc:
         assert "at least two legal policy actions" in str(exc)
     else:
         raise AssertionError("Expected ValueError for a single-action legal mask.")
+
+
+def test_decayed_event_reward_exponents():
+    cases = [(11, 0.10), (12, 0.09), (13, 0.081)]
+
+    for event_turn, expected in cases:
+        agent = RLAgent(UniformPolicyNetwork(), mode="training")
+        agent.trajectory = [
+            TrajectoryStep(None, 0, None, decision_turn=10, option_count=2),
+        ]
+
+        agent.add_decayed_event_reward(event_turn, 0.10, EVENT_REWARD_DECAY)
+
+        assert abs(agent.trajectory[0].local_reward - expected) < 1e-12
+
+
+def test_event_reward_signs_and_counts():
+    stats = EventStats()
+
+    assert _event_reward_for_action(1, 0, ("DRAW", None), stats) == OPPONENT_DRAW_REWARD
+    assert _event_reward_for_action(1, 0, None, stats) == OPPONENT_PASS_REWARD
+    assert _event_reward_for_action(0, 0, ("DRAW", None), stats) == LEARNER_DRAW_PENALTY
+    assert _event_reward_for_action(0, 0, None, stats) == LEARNER_PASS_PENALTY
+
+    assert stats.opponent_draws == 1
+    assert stats.opponent_passes == 1
+    assert stats.learner_draws == 1
+    assert stats.learner_passes == 1
+
+
+def test_multiple_events_and_all_previous_decisions_receive_rewards():
+    agent = RLAgent(UniformPolicyNetwork(), mode="training")
+    agent.trajectory = [
+        TrajectoryStep(None, 0, None, decision_turn=10, option_count=2),
+        TrajectoryStep(None, 0, None, decision_turn=12, option_count=2),
+    ]
+
+    agent.add_decayed_event_reward(13, 0.10, EVENT_REWARD_DECAY)
+    agent.add_decayed_event_reward(14, -0.02, EVENT_REWARD_DECAY)
+
+    assert abs(agent.trajectory[0].local_reward - (0.081 - 0.01458)) < 1e-12
+    assert abs(agent.trajectory[1].local_reward - (0.10 - 0.018)) < 1e-12
+
+
+def test_event_reward_without_decisions_is_noop():
+    agent = RLAgent(UniformPolicyNetwork(), mode="training")
+
+    agent.add_decayed_event_reward(3, 0.10, EVENT_REWARD_DECAY)
+
+    assert agent.trajectory == []
+
+
+def test_terminal_reward_is_uniform_before_local_shaping():
+    agent = RLAgent(UniformPolicyNetwork(), mode="training")
+    agent.trajectory = [
+        TrajectoryStep(None, 0, None, decision_turn=1, option_count=2, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=3, option_count=2, local_reward=-0.05),
+    ]
+
+    steps = agent.finish_episode(0.50)
+
+    assert steps[0].terminal_reward == 0.50
+    assert steps[1].terminal_reward == 0.50
+    assert abs(steps[0].raw_reward - 0.60) < 1e-12
+    assert abs(steps[1].raw_reward - 0.45) < 1e-12
+
+
+def test_option_multipliers_apply_after_terminal_and_local_rewards():
+    agent = RLAgent(UniformPolicyNetwork(), mode="training")
+    agent.trajectory = [
+        TrajectoryStep(None, 0, None, decision_turn=1, option_count=2, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, option_count=3, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, option_count=4, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, option_count=5, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, option_count=6, local_reward=0.10),
+    ]
+
+    samples = _finish_episode_with_rewards(agent, 0.50)
+
+    assert _choice_multiplier(2) == 1.0
+    assert _choice_multiplier(3) == 2.0
+    assert _choice_multiplier(4) == 5.0
+    assert _choice_multiplier(5) == 10.0
+    assert _choice_multiplier(6) == 10.0
+    assert [sample.policy_reward for sample in samples] == [0.60, 1.20, 3.00, 6.00, 6.00]
+
+
+def test_positive_reward_increases_chosen_masked_probability():
+    network = _small_policy_network()
+    x_batch = xp.ones((4, 1))
+    legal_mask = xp.zeros((56, 1))
+    legal_mask[3, 0] = 1.0
+    legal_mask[8, 0] = 1.0
+    network.W1 = xp.zeros_like(network.W1)
+    network.W2 = xp.zeros_like(network.W2)
+    network.W3 = xp.zeros_like(network.W3)
+
+    before = _masked_action_probability(network, x_batch, legal_mask, 3)
+    network.backward_policy_gradient(
+        action_indices=[3],
+        policy_rewards=xp.ones((1, 1)),
+        legal_masks=legal_mask,
+        entropy_coef=0.0,
+        clip_grad_norm=None,
+    )
+    after = _masked_action_probability(network, x_batch, legal_mask, 3)
+
+    assert after > before
+
+
+def test_negative_reward_decreases_chosen_masked_probability():
+    network = _small_policy_network()
+    x_batch = xp.ones((4, 1))
+    legal_mask = xp.zeros((56, 1))
+    legal_mask[3, 0] = 1.0
+    legal_mask[8, 0] = 1.0
+    network.W1 = xp.zeros_like(network.W1)
+    network.W2 = xp.zeros_like(network.W2)
+    network.W3 = xp.zeros_like(network.W3)
+
+    before = _masked_action_probability(network, x_batch, legal_mask, 3)
+    network.backward_policy_gradient(
+        action_indices=[3],
+        policy_rewards=-xp.ones((1, 1)),
+        legal_masks=legal_mask,
+        entropy_coef=0.0,
+        clip_grad_norm=None,
+    )
+    after = _masked_action_probability(network, x_batch, legal_mask, 3)
+
+    assert after < before
+
+
+def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
+    network = _small_policy_network(learning_rate=0.01)
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "policy.npz"
+        network.save(path)
+        saved = host_np.load(path)
+        assert set(saved.files) == {"W1", "b1", "W2", "b2", "W3", "b3"}
+
+        legacy_path = Path(folder) / "legacy.npz"
+        host_np.savez(
+            legacy_path,
+            W1=_to_numpy(network.W1),
+            b1=_to_numpy(network.b1),
+            W2=_to_numpy(network.W2),
+            b2=_to_numpy(network.b2),
+            W3=_to_numpy(network.W3),
+            b3=_to_numpy(network.b3),
+            Wv=host_np.zeros((1, 3)),
+            bv=host_np.zeros((1, 1)),
+        )
+        loaded = PolicyNetwork.load(legacy_path)
+
+    assert not hasattr(loaded, "Wv")
+    assert loaded.W1.shape == network.W1.shape
+
+
+def test_reward_signal_summary_classifies_rewards():
+    samples = [
+        TrainingSample(None, 0, None, 1.0, 1.0, 0.20, 0.80, 1.0, 2),
+        TrainingSample(None, 0, None, 0.0, 0.0, 0.00, 0.00, 1.0, 2),
+        TrainingSample(None, 0, None, -1.0, -1.0, -0.10, -0.90, 1.0, 2),
+    ]
+
+    summary = _reward_signal_summary(samples)
+
+    assert abs(summary["good_pct"] - (100.0 / 3.0)) < 1e-12
+    assert abs(summary["neutral_pct"] - (100.0 / 3.0)) < 1e-12
+    assert abs(summary["bad_pct"] - (100.0 / 3.0)) < 1e-12
+    assert abs(summary["local_mean"] - (0.10 / 3.0)) < 1e-12
 
 
 def test_first_stock_draw_summary_ignores_games_without_draws():
@@ -477,6 +672,25 @@ def main():
         ("RL trajectory legal mask", test_rl_agent_saves_legal_mask_for_real_decision),
         ("masked policy gradient", test_policy_gradient_updates_only_legal_policy_biases),
         ("invalid policy mask", test_policy_gradient_rejects_single_action_mask),
+        ("decayed event reward exponents", test_decayed_event_reward_exponents),
+        ("event reward signs", test_event_reward_signs_and_counts),
+        (
+            "multiple decayed events",
+            test_multiple_events_and_all_previous_decisions_receive_rewards,
+        ),
+        ("event reward no decisions", test_event_reward_without_decisions_is_noop),
+        ("uniform terminal reward", test_terminal_reward_is_uniform_before_local_shaping),
+        ("option reward multipliers", test_option_multipliers_apply_after_terminal_and_local_rewards),
+        (
+            "positive reward gradient",
+            test_positive_reward_increases_chosen_masked_probability,
+        ),
+        (
+            "negative reward gradient",
+            test_negative_reward_decreases_chosen_masked_probability,
+        ),
+        ("policy checkpoint keys", test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys),
+        ("reward signal summary", test_reward_signal_summary_classifies_rewards),
         ("first stock draw summary", test_first_stock_draw_summary_ignores_games_without_draws),
         (
             "compact hidden draw expansion",

@@ -1,20 +1,22 @@
-"""Reinforcement-learning self-play for the domino policy network.
+"""Direct REINFORCE self-play for the domino policy network.
 
 The policy controls only real tile-play decisions. Draw, pass, and single-option
 tile-play turns are forced by the rules engine and do not enter the learner
-trajectory. Rewards are multiplied when the learner had many legal tile-play
-options, so rare high-choice decisions have a stronger learning signal.
+trajectory. Local draw/pass events are distributed to all earlier real
+decisions with temporal decay, then combined with a uniform terminal reward and
+an option-count multiplier.
 """
 
 from collections import deque
+from dataclasses import dataclass
 import random
 import time
 
+from agents.encoder import DominoEncoder
 from agents.heuristic_agent import StrategicAgent
+from agents.nn import GPU_ENABLED
 from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
-from agents.encoder import DominoEncoder
-from agents.nn import GPU_ENABLED
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
 from utils.runtime_status import format_duration, print_memory_report
@@ -28,13 +30,58 @@ SL_WEIGHTS = "models/domino_sl_weights.npz"
 RL_WEIGHTS = "models/domino_rl_weights.npz"
 TRAINING_OPPONENT = "self_play"
 
-OPPONENT_DRAW_REWARD = 0.05
-OPPONENT_PASS_REWARD = 0.05
+TERMINAL_WIN_REWARD = 0.50
+TERMINAL_TIE_REWARD = 0.00
+TERMINAL_LOSS_REWARD = -0.50
 FINAL_PIP_PENALTY = 0.001
 
+OPPONENT_DRAW_REWARD = 0.02
+LEARNER_DRAW_PENALTY = -0.02
+OPPONENT_PASS_REWARD = 0.10
+LEARNER_PASS_PENALTY = -0.10
+EVENT_REWARD_DECAY = 0.90
+
+MIN_REAL_DECISION_OPTIONS = 2
+THREE_OPTION_DECISION = 3
+FOUR_OPTION_DECISION = 4
+FIVE_PLUS_OPTION_DECISION = 5
+CHOICE_MULTIPLIER_2_OPTIONS = 1.0
 CHOICE_MULTIPLIER_3_OPTIONS = 2.0
 CHOICE_MULTIPLIER_4_OPTIONS = 5.0
 CHOICE_MULTIPLIER_5_PLUS_OPTIONS = 10.0
+
+REWARD_ZERO_EPSILON = 1e-8
+
+
+@dataclass
+class EventStats:
+    """Raw draw/pass event counts collected during one training game or batch."""
+
+    opponent_draws: int = 0
+    opponent_passes: int = 0
+    learner_draws: int = 0
+    learner_passes: int = 0
+
+    def add(self, other):
+        self.opponent_draws += other.opponent_draws
+        self.opponent_passes += other.opponent_passes
+        self.learner_draws += other.learner_draws
+        self.learner_passes += other.learner_passes
+
+
+@dataclass(frozen=True)
+class TrainingSample:
+    """One finalized real decision used by the REINFORCE update."""
+
+    x: object
+    action_index: int
+    legal_mask: object
+    policy_reward: float
+    raw_reward: float
+    local_reward: float
+    terminal_reward: float
+    multiplier: float
+    option_count: int
 
 
 def _tile_play_actions(legal_actions):
@@ -48,39 +95,34 @@ def _tile_play_actions(legal_actions):
 
 def _choice_multiplier(option_count):
     """Return the reward multiplier for a real decision with many options."""
-    if option_count >= 5:
+    if option_count < MIN_REAL_DECISION_OPTIONS:
+        raise ValueError("Real RL decisions must have at least two legal tile actions.")
+    if option_count >= FIVE_PLUS_OPTION_DECISION:
         return CHOICE_MULTIPLIER_5_PLUS_OPTIONS
-    if option_count == 4:
+    if option_count == FOUR_OPTION_DECISION:
         return CHOICE_MULTIPLIER_4_OPTIONS
-    if option_count == 3:
+    if option_count == THREE_OPTION_DECISION:
         return CHOICE_MULTIPLIER_3_OPTIONS
-    return 1.0
+    return CHOICE_MULTIPLIER_2_OPTIONS
 
 
-def _reset_decision_multipliers(learner_agent):
-    learner_agent._real_decision_multipliers = []
-
-
-def _append_decision_multiplier(learner_agent, option_count):
-    learner_agent._real_decision_multipliers.append(_choice_multiplier(option_count))
-
-
-def _finish_episode_with_multipliers(learner_agent, final_reward):
-    """Finish an episode and multiply each saved decision return by its option count."""
-    steps = learner_agent.finish_episode(final_reward)
-    multipliers = getattr(learner_agent, "_real_decision_multipliers", [])
-    learner_agent._real_decision_multipliers = []
-
-    if len(steps) != len(multipliers):
-        raise RuntimeError(
-            "RL trajectory/multiplier mismatch: "
-            f"{len(steps)} saved steps but {len(multipliers)} multipliers."
-        )
-
-    return [
-        (x, action_index, legal_mask, reward * multiplier)
-        for (x, action_index, legal_mask, reward), multiplier in zip(steps, multipliers)
-    ]
+def _event_reward_for_action(current_player, learner_position, action, event_stats):
+    """Return the local event reward for draw/pass actions and update counts."""
+    if current_player != learner_position:
+        if action == ("DRAW", None):
+            event_stats.opponent_draws += 1
+            return OPPONENT_DRAW_REWARD
+        if action is None:
+            event_stats.opponent_passes += 1
+            return OPPONENT_PASS_REWARD
+    else:
+        if action == ("DRAW", None):
+            event_stats.learner_draws += 1
+            return LEARNER_DRAW_PENALTY
+        if action is None:
+            event_stats.learner_passes += 1
+            return LEARNER_PASS_PENALTY
+    return None
 
 
 def _remaining_pips(hand):
@@ -88,17 +130,67 @@ def _remaining_pips(hand):
 
 
 def _terminal_reward(engine, learner_position):
-    """Return win/loss/draw reward plus final remaining-pip penalty."""
+    """Return terminal outcome reward plus final remaining-pip penalty."""
     winner = engine.winner
     if winner == -1:
-        outcome_reward = 0.0
+        outcome_reward = TERMINAL_TIE_REWARD
     elif winner == learner_position:
-        outcome_reward = 1.0
+        outcome_reward = TERMINAL_WIN_REWARD
     else:
-        outcome_reward = -1.0
+        outcome_reward = TERMINAL_LOSS_REWARD
 
     pip_penalty = FINAL_PIP_PENALTY * _remaining_pips(engine.hands[learner_position])
     return outcome_reward - pip_penalty
+
+
+def _finish_episode_with_rewards(learner_agent, terminal_reward):
+    """Finalize one learner trajectory into policy-gradient training samples."""
+    finished_steps = learner_agent.finish_episode(terminal_reward)
+    samples = []
+    for step in finished_steps:
+        multiplier = _choice_multiplier(step.option_count)
+        policy_reward = step.raw_reward * multiplier
+        samples.append(
+            TrainingSample(
+                x=step.x,
+                action_index=step.action_index,
+                legal_mask=step.legal_mask,
+                policy_reward=policy_reward,
+                raw_reward=step.raw_reward,
+                local_reward=step.local_reward,
+                terminal_reward=step.terminal_reward,
+                multiplier=multiplier,
+                option_count=step.option_count,
+            )
+        )
+    return samples
+
+
+def _reward_signal_summary(samples):
+    """Return compact diagnostics for finalized decision rewards."""
+    rewards = xp.asarray([sample.policy_reward for sample in samples], dtype=float)
+    local_rewards = xp.asarray([sample.local_reward for sample in samples], dtype=float)
+    total = rewards.size
+
+    good = xp.sum(rewards > REWARD_ZERO_EPSILON)
+    neutral = xp.sum(xp.abs(rewards) <= REWARD_ZERO_EPSILON)
+    bad = xp.sum(rewards < -REWARD_ZERO_EPSILON)
+
+    return {
+        "reward_mean": float(xp.mean(rewards)),
+        "reward_min": float(xp.min(rewards)),
+        "reward_max": float(xp.max(rewards)),
+        "local_mean": float(xp.mean(local_rewards)),
+        "good_pct": float(100.0 * good / total),
+        "neutral_pct": float(100.0 * neutral / total),
+        "bad_pct": float(100.0 * bad / total),
+    }
+
+
+def _gradient_log_text(metrics):
+    """Return a compact gradient-norm string for the iteration log."""
+    suffix = " clipped" if metrics.get("grad_clipped") else ""
+    return f"{metrics['grad_norm']:.2f}{suffix}"
 
 
 def _play_game(agents):
@@ -110,14 +202,9 @@ def _play_game(agents):
 
 
 def _play_training_game(agents, learner_position, learner_agent):
-    """Play one RL training game and attach intermediate shaping rewards.
-
-    The learner receives +0.05 when the opponent is forced to draw and +0.05
-    when the opponent is forced to pass. If the opponent draws and then passes,
-    both rewards are applied to the learner's most recent real decision.
-    """
+    """Play one RL training game and attach decayed local event rewards."""
     engine = DominoEngine(player_count=len(agents))
-    _reset_decision_multipliers(learner_agent)
+    event_stats = EventStats()
 
     while not engine.game_over:
         state = engine._get_state()
@@ -128,41 +215,41 @@ def _play_training_game(agents, learner_position, learner_agent):
         if current_player == learner_position and len(tile_actions) == 1:
             action = tile_actions[0]
         else:
-            saved_step_count = len(learner_agent.trajectory)
             action = agents[current_player].choose_move(state, legal_actions)
 
-            if (
-                current_player == learner_position
-                and len(tile_actions) >= 2
-                and len(learner_agent.trajectory) > saved_step_count
-            ):
-                _append_decision_multiplier(learner_agent, len(tile_actions))
-
-        if current_player != learner_position:
-            if action == ("DRAW", None):
-                learner_agent.add_reward_to_last_decision(OPPONENT_DRAW_REWARD)
-            elif action is None:
-                learner_agent.add_reward_to_last_decision(OPPONENT_PASS_REWARD)
+        event_reward = _event_reward_for_action(
+            current_player,
+            learner_position,
+            action,
+            event_stats,
+        )
+        if event_reward is not None:
+            learner_agent.add_decayed_event_reward(
+                event_turn=state["turn"],
+                base_reward=event_reward,
+                decay_lambda=EVENT_REWARD_DECAY,
+            )
 
         engine.step(action)
 
-    return engine
+    return engine, event_stats
 
 
 def _collect_self_play_steps(network, pool):
-    """Play one game against a frozen policy snapshot and collect learner steps."""
+    """Play one game against a frozen policy snapshot and collect learner samples."""
     learner_position = random.randint(0, 1)
     opponent_network = random.choice(pool) if pool else network
 
     learner = RLAgent(network, mode="training")
-    opponent = RLAgent(opponent_network, mode="training")
+    opponent = RLAgent(opponent_network, mode="evaluation")
     agents = [None, None]
     agents[learner_position] = learner
     agents[1 - learner_position] = opponent
 
-    engine = _play_training_game(agents, learner_position, learner)
+    engine, event_stats = _play_training_game(agents, learner_position, learner)
     reward = _terminal_reward(engine, learner_position)
-    return _finish_episode_with_multipliers(learner, reward), engine.winner, learner_position
+    samples = _finish_episode_with_rewards(learner, reward)
+    return samples, event_stats, engine.winner, learner_position
 
 
 def _collect_steps_vs_heuristic(network):
@@ -173,9 +260,10 @@ def _collect_steps_vs_heuristic(network):
     agents[learner_position] = learner
     agents[1 - learner_position] = StrategicAgent()
 
-    engine = _play_training_game(agents, learner_position, learner)
+    engine, event_stats = _play_training_game(agents, learner_position, learner)
     reward = _terminal_reward(engine, learner_position)
-    return _finish_episode_with_multipliers(learner, reward), engine.winner, learner_position
+    samples = _finish_episode_with_rewards(learner, reward)
+    return samples, event_stats, engine.winner, learner_position
 
 
 def evaluate_against_heuristic(network, game_count=200):
@@ -247,16 +335,12 @@ def train(
     sl_weights_path=SL_WEIGHTS,
     rl_weights_path=RL_WEIGHTS,
 ):
-    """
-    Train the policy with REINFORCE plus a learned value baseline.
+    """Train the policy with direct REINFORCE and decayed local rewards.
 
     ``training_opponent`` can be ``"self_play"`` for a pool of frozen previous
     policy snapshots, or ``"heuristic"`` for direct play against StrategicAgent.
-    Intermediate reward shaping is intentionally weak and transparent: the
-    learner gets a small bonus when the opponent is forced to draw/pass and a
-    small terminal penalty for final remaining pips. Each saved decision return
-    is multiplied by the number-of-options schedule defined at the top of this
-    file.
+    The update uses the reward assigned to each real decision directly, with no
+    extra prediction target beyond the masked policy.
     """
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
@@ -273,36 +357,43 @@ def train(
     last_checkpoint_time = start_time
     for iteration in range(1, iterations + 1):
         batch = []
+        event_totals = EventStats()
         wins = 0
 
         for _ in range(games_per_iteration):
             if training_opponent == "self_play":
-                steps, winner, learner_position = _collect_self_play_steps(network, pool)
+                samples, event_stats, winner, learner_position = _collect_self_play_steps(
+                    network,
+                    pool,
+                )
             else:
-                steps, winner, learner_position = _collect_steps_vs_heuristic(network)
-            batch.extend(steps)
+                samples, event_stats, winner, learner_position = _collect_steps_vs_heuristic(
+                    network
+                )
+            batch.extend(samples)
+            event_totals.add(event_stats)
             if winner == learner_position:
                 wins += 1
 
         if not batch:
             continue
 
-        x_batch = xp.hstack([x for x, _, _, _ in batch])
-        action_indices = [action_index for _, action_index, _, _ in batch]
+        x_batch = xp.hstack([sample.x for sample in batch])
+        action_indices = [sample.action_index for sample in batch]
         legal_masks = xp.hstack([
-            xp.asarray(legal_mask)
-            for _, _, legal_mask, _ in batch
+            xp.asarray(sample.legal_mask)
+            for sample in batch
         ])
-        returns = xp.array([reward for _, _, _, reward in batch], dtype=float).reshape(1, -1)
+        policy_rewards = xp.array(
+            [sample.policy_reward for sample in batch],
+            dtype=float,
+        ).reshape(1, -1)
 
-        values = network.predict_values(x_batch)
-        advantages = returns - values
-
+        network.forward(x_batch)
         metrics = network.backward_policy_gradient(
             action_indices,
-            advantages,
+            policy_rewards,
             legal_masks=legal_masks,
-            returns=returns,
             entropy_coef=entropy_coef,
         )
 
@@ -310,16 +401,25 @@ def train(
             pool.append(network.clone())
 
         if iteration % log_interval == 0:
+            reward_summary = _reward_signal_summary(batch)
             win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
             pool_suffix = f" | pool: {len(pool)}" if training_opponent == "self_play" else ""
             print(
-                f"Iteration {iteration} | steps: {len(batch)} | "
-                f"mean return: {float(xp.mean(returns)):.2f} | "
-                f"max return: {float(xp.max(returns)):.1f} | "
-                f"min return: {float(xp.min(returns)):.1f} | "
-                f"mean adv: {float(xp.mean(advantages)):.2f} | "
-                f"value loss: {metrics['value_loss']:.2f} | "
-                f"wins {win_label}: {wins}/{games_per_iteration}{pool_suffix}"
+                f"Iteration {iteration} | decisions: {len(batch)} | "
+                "reward mean/min/max: "
+                f"{reward_summary['reward_mean']:+.2f}/"
+                f"{reward_summary['reward_min']:+.2f}/"
+                f"{reward_summary['reward_max']:+.2f} | "
+                "good/neutral/bad: "
+                f"{reward_summary['good_pct']:.0f}%/"
+                f"{reward_summary['neutral_pct']:.0f}%/"
+                f"{reward_summary['bad_pct']:.0f}% | "
+                f"local mean: {reward_summary['local_mean']:+.3f} | "
+                "events opp D/P: "
+                f"{event_totals.opponent_draws}/{event_totals.opponent_passes}, "
+                f"self D/P: {event_totals.learner_draws}/{event_totals.learner_passes} | "
+                f"wins {win_label}: {wins}/{games_per_iteration}{pool_suffix} | "
+                f"grad: {_gradient_log_text(metrics)}"
             )
 
         if iteration % checkpoint_interval == 0:

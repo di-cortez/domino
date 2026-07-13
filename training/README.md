@@ -105,18 +105,22 @@ Default behavior:
 - save `models/domino_rl_weights.npz`.
 
 The command prints startup memory, checkpoint-to-checkpoint time, and total
-elapsed time. Iteration logs omit entropy and keep the focus on returns, value
-loss, and win counts.
+elapsed time. Iteration logs omit entropy and report the direct reward signal
+sent to the policy gradient: reward mean/min/max, good/neutral/bad percentages,
+local reward mean, raw event counts, wins, pool size, and gradient norm.
 
 The learner trajectory stores only real decisions. Draw, pass, and single-option
 tile plays are forced actions, so `RLAgent` returns them directly without
 calling the network or saving a trajectory step. Each saved step carries the
-legal-action mask used by the RL backward pass, keeping sampling and gradient
-calculation on the same masked policy distribution.
+legal-action mask, the decision turn, and the number of legal tile-play options.
+Sampling and gradient calculation use the same masked policy distribution.
 
-The masked-gradient change does not alter checkpoint shapes or `.npz` keys, so
-existing weights still load. For clean comparisons, archive the previous RL
-checkpoint and start the next long RL run from `models/domino_sl_weights.npz`.
+`PolicyNetwork` uses direct REINFORCE and is policy-only. RL checkpoints contain
+only the six policy weights shared with supervised checkpoints: `W1`, `b1`,
+`W2`, `b2`, `W3`, and `b3`. Old RL checkpoints with extra arrays still load, but
+only those six policy weights are used. For clean comparisons, archive the
+previous RL checkpoint and start the next long RL run from
+`models/domino_sl_weights.npz`.
 
 `TRAINING_OPPONENT` at the top of `self_play.py` controls the training opponent:
 
@@ -125,19 +129,34 @@ checkpoint and start the next long RL run from `models/domino_sl_weights.npz`.
 | `"self_play"` | Train against a rotating pool of frozen policy snapshots. |
 | `"heuristic"` | Train directly against `StrategicAgent`, useful for controlled comparisons. |
 
-The RL reward now includes weak shaping:
+The RL reward now uses a uniform terminal reward plus temporally decayed local
+draw/pass shaping. For each real decision at turn `d_i`, a later event at turn
+`t_e` contributes:
+
+```text
+c_e * EVENT_REWARD_DECAY ** (t_e - d_i - 1)
+```
+
+with `EVENT_REWARD_DECAY = 0.90`. An immediately following event therefore has
+exponent `0` and receives the full event reward. The terminal result is not
+decayed and is applied uniformly to every real decision in the game.
+
+Reward constants:
 
 | Event | Reward |
 |---|---:|
-| terminal win | `+1.0` |
+| terminal win | `+0.50` |
 | terminal draw | `0.0` |
-| terminal loss | `-1.0` |
-| opponent forced to draw | `+0.05` |
-| opponent forced to pass | `+0.05` |
+| terminal loss | `-0.50` |
+| opponent draw | `+0.02` |
+| opponent pass | `+0.10` |
+| learner draw | `-0.02` |
+| learner pass | `-0.10` |
 | final remaining pips | `-0.001 * remaining_pips` |
 
-If the opponent draws and then passes, both intermediate rewards are applied.
-The final pip penalty is applied to the learner's own final hand.
+Multiple local events are summed. A learner draw/pass penalty is applied to all
+earlier real decisions with the same decay rule, not just to the most recent
+decision. The final pip penalty is applied to the learner's own final hand.
 
 Each saved decision return is then multiplied by the number of tile-play options
 available at that decision:
@@ -149,8 +168,20 @@ available at that decision:
 | 4 | `5.0` |
 | 5 or more | `10.0` |
 
-The policy gradient still uses `clip_grad_norm=5.0` in `PolicyNetwork` to limit
-large updates from rare high-choice decisions.
+The final training weight for each decision is:
+
+```text
+policy_reward = multiplier * (terminal_reward + local_reward)
+```
+
+The policy gradient uses that value directly:
+
+```text
+L = -mean(policy_reward * log pi(action | state)) - entropy_coef * entropy
+```
+
+Gradient clipping remains active in `PolicyNetwork` to limit large updates from
+rare high-choice decisions.
 
 The snapshot pool lives only in memory. Resuming from an RL checkpoint restores
 the policy weights, but not the previous in-memory opponent pool.

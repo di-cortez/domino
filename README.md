@@ -30,10 +30,10 @@ and visual UI can be changed independently.
 | `agents/neural_agent.py` | `NeuralAgent`, which loads supervised weights and plays with action masking. |
 | `agents/rl_agent.py` | `RLAgent`, which plays a `PolicyNetwork` in training or evaluation mode. |
 | `agents/nn.py` | NumPy/CuPy MLP for supervised learning. CuPy is selected automatically when available. |
-| `agents/rl_nn.py` | Policy-gradient network with a value baseline for self-play RL. |
+| `agents/rl_nn.py` | Policy-only network with masked REINFORCE gradients for self-play RL. |
 | `training/dataset_generator.py` | Generates JSONL `(state, target_action)` examples from heuristic-vs-heuristic games. |
 | `training/training_loop.py` | Trains supervised weights, skips forced labels, and saves the best validation checkpoint. |
-| `training/self_play.py` | Refines the RL policy with REINFORCE, a value baseline, and weak reward shaping. |
+| `training/self_play.py` | Refines the RL policy with direct REINFORCE and decayed draw/pass reward shaping. |
 | `diagnostics/evaluate.py` | Runs the upper-triangle all-pairs diagnostic matrix. |
 | `diagnostics/pairwise.py` | Helper for evaluating one agent against another and writing `summary.json`, `games.csv`, and plots. |
 | `ui/visual_main.py` | Starts the visual simulator. |
@@ -146,7 +146,15 @@ python -m training.self_play
 ```
 
 Self-play reports startup memory, checkpoint-to-checkpoint time, and total
-elapsed time. Iteration logs omit entropy to keep the console compact.
+elapsed time. Iteration logs omit entropy and show reward mean/min/max,
+good/neutral/bad percentages, local reward mean, draw/pass event counts, wins,
+pool size, and gradient norm.
+
+The RL update is policy-only REINFORCE. It applies local draw/pass events to all
+earlier real decisions with `EVENT_REWARD_DECAY = 0.90`, using
+`k = event_turn - decision_turn - 1`, then adds the uniform terminal result and
+multiplies by the number of legal tile-play options. The RL checkpoint contains
+only `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`.
 
 Generated files:
 

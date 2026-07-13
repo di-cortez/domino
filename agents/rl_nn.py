@@ -1,4 +1,4 @@
-"""Policy network used by reinforcement-learning self-play."""
+"""Policy-only network used by reinforcement-learning self-play."""
 
 import os
 
@@ -12,25 +12,16 @@ else:
     import numpy as xp
 
 _POLICY_WEIGHTS = ("W1", "b1", "W2", "b2", "W3", "b3")
-_VALUE_WEIGHTS = ("Wv", "bv")
 
 
 class PolicyNetwork(SupervisedNeuralNetwork):
-    """
-    Supervised policy architecture extended with a linear value head.
+    """Supervised policy architecture updated with masked REINFORCE gradients.
 
-    The policy head is the inherited 56-action softmax over tile-play actions.
-    Policy-gradient updates rebuild the softmax over each state's legal actions
-    only, matching the masked distribution used during sampling. The value head
-    predicts ``V(s)`` from the second hidden layer and is used as a
-    state-dependent baseline for REINFORCE updates.
+    The network keeps exactly the same weights as the supervised policy:
+    ``W1``, ``b1``, ``W2``, ``b2``, ``W3``, and ``b3``. Reinforcement learning
+    applies policy-gradient updates directly from the reward assigned to each
+    real decision. The checkpoint format contains only the six policy weights.
     """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        hidden2_size = self.W3.shape[1]
-        self.Wv = xp.zeros((1, hidden2_size))
-        self.bv = xp.zeros((1, 1))
 
     @classmethod
     def _load_npz_weights(cls, path, learning_rate):
@@ -48,10 +39,6 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         )
         for name in _POLICY_WEIGHTS:
             setattr(network, name, xp.array(data[name]))
-
-        if all(name in data for name in _VALUE_WEIGHTS):
-            for name in _VALUE_WEIGHTS:
-                setattr(network, name, xp.array(data[name]))
         return network
 
     @classmethod
@@ -61,10 +48,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
 
     @classmethod
     def load(cls, rl_weights_path, learning_rate=0.001):
-        """Load an RL checkpoint saved by ``save``."""
+        """Load a policy checkpoint, ignoring stale extra keys if present."""
         return cls._load_npz_weights(rl_weights_path, learning_rate)
 
     def save(self, weights_path):
+        """Save only the six policy weights shared with supervised checkpoints."""
         def to_numpy(matrix):
             return matrix.get() if hasattr(matrix, "get") else matrix
 
@@ -74,7 +62,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
 
         np.savez(
             weights_path,
-            **{name: to_numpy(getattr(self, name)) for name in _POLICY_WEIGHTS + _VALUE_WEIGHTS},
+            **{name: to_numpy(getattr(self, name)) for name in _POLICY_WEIGHTS},
         )
 
     def clone(self):
@@ -86,26 +74,19 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             output_size=self.W3.shape[0],
             learning_rate=self.lr,
         )
-        for name in _POLICY_WEIGHTS + _VALUE_WEIGHTS:
+        for name in _POLICY_WEIGHTS:
             setattr(clone, name, getattr(self, name).copy())
         return clone
-
-    def predict_values(self, x):
-        """Return value estimates for every column in ``x``."""
-        self.forward(x)
-        return xp.dot(self.Wv, self.cache["A2"]) + self.bv
 
     def backward_policy_gradient(
         self,
         action_indices,
-        advantages,
+        policy_rewards,
         legal_masks,
-        returns=None,
         entropy_coef=0.01,
-        value_coef=0.5,
         clip_grad_norm=5.0,
     ):
-        """Apply one actor-critic policy-gradient update on legal actions only."""
+        """Apply one masked REINFORCE update using direct reward weights."""
         z3 = self.cache["Z3"]
         a2 = self.cache["A2"]
         a1 = self.cache["A1"]
@@ -113,7 +94,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         m = z3.shape[1]
 
         action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
-        advantages = xp.asarray(advantages).reshape(1, m)
+        policy_rewards = xp.asarray(policy_rewards).reshape(1, m)
         legal_masks = (xp.asarray(legal_masks) > 0).astype(z3.dtype)
 
         if action_indices.shape[0] != m:
@@ -149,7 +130,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         sampled_y = xp.zeros_like(masked_policy)
         sampled_y[action_indices, xp.arange(m)] = 1.0
 
-        dz3_policy = (masked_policy - sampled_y) * advantages
+        dz3_policy = (masked_policy - sampled_y) * policy_rewards
 
         log_masked_policy = xp.log(masked_policy + 1e-8)
         entropy = -xp.sum(masked_policy * log_masked_policy, axis=0, keepdims=True)
@@ -159,20 +140,6 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         dW3 = (1.0 / m) * xp.dot(dz3, a2.T)
         db3 = (1.0 / m) * xp.sum(dz3, axis=1, keepdims=True)
         da2 = xp.dot(self.W3.T, dz3)
-
-        value_loss = 0.0
-        dWv = xp.zeros_like(self.Wv)
-        dbv = xp.zeros_like(self.bv)
-        if returns is not None:
-            returns = xp.asarray(returns).reshape(1, m)
-            values = xp.dot(self.Wv, a2) + self.bv
-            value_error = values - returns
-            value_loss = float(xp.mean(0.5 * value_error ** 2))
-
-            dzv = value_coef * value_error
-            dWv = (1.0 / m) * xp.dot(dzv, a2.T)
-            dbv = (1.0 / m) * xp.sum(dzv, axis=1, keepdims=True)
-            da2 = da2 + xp.dot(self.Wv.T, dzv)
 
         dz2 = da2 * self.relu_derivative(self.cache["Z2"])
         dW2 = (1.0 / m) * xp.dot(dz2, a1.T)
@@ -190,20 +157,23 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             "b2": db2,
             "W3": dW3,
             "b3": db3,
-            "Wv": dWv,
-            "bv": dbv,
         }
 
         grad_norm = float(xp.sqrt(sum(xp.sum(grad ** 2) for grad in gradients.values())))
+        grad_clipped = False
+        applied_grad_norm = grad_norm
         if clip_grad_norm is not None and grad_norm > clip_grad_norm:
             scale = clip_grad_norm / (grad_norm + 1e-8)
             gradients = {name: grad * scale for name, grad in gradients.items()}
+            grad_clipped = True
+            applied_grad_norm = float(clip_grad_norm)
 
         for name, grad in gradients.items():
             setattr(self, name, getattr(self, name) - self.lr * grad)
 
         return {
             "entropy": float(xp.mean(entropy)),
-            "value_loss": value_loss,
             "grad_norm": grad_norm,
+            "grad_clipped": grad_clipped,
+            "applied_grad_norm": applied_grad_norm,
         }

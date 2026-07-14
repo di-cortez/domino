@@ -4,6 +4,7 @@ Only states with at least two legal tile-play actions are written. Forced draw,
 pass, opening-double, and single-tile-play turns are excluded from the dataset.
 """
 
+import argparse
 import json
 import os
 import time
@@ -108,5 +109,27 @@ def generate_dataset(game_count, output_file):
     print(f"Elapsed time: {format_duration(elapsed_time)}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate supervised-learning examples from heuristic-vs-heuristic games.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "-n",
+        "--games",
+        type=int,
+        default=30000,
+        help="Number of heuristic-vs-heuristic games to simulate.",
+    )
+    parser.add_argument(
+        "--output-file",
+        type=str,
+        default="dataset/supervised_dataset.jsonl",
+        help="Path to the generated JSONL dataset file.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    generate_dataset(game_count=30000, output_file="dataset/supervised_dataset.jsonl")
+    args = parse_args()
+    generate_dataset(game_count=args.games, output_file=args.output_file)

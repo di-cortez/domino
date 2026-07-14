@@ -12,6 +12,21 @@ This folder contains the full training pipeline:
 | `training_loop.py` | Loads the JSONL dataset, trains `SupervisedNeuralNetwork`, and saves `models/domino_sl_weights.npz`. Forced draw/pass and single-option labels are skipped defensively. |
 | `self_play.py` | Loads the supervised policy or an existing RL checkpoint, then trains `PolicyNetwork` from real learner decisions with reward shaping and option-count multipliers. |
 
+## Running the Full Pipeline in One Command
+
+`train_script/run_training_pipeline.sh`, at the repository root, chains the
+three stages below with a single command and consistent file paths between
+them:
+
+```bash
+train_script/run_training_pipeline.sh
+```
+
+See `train_script/README.md` for the full option list (dataset size, epoch/iteration
+counts, file paths, and `--skip-dataset`/`--skip-sl`/`--skip-rl` to re-run only
+part of the pipeline). Each stage below can still be run standalone with
+`python -m training.*`, which is what the script itself calls.
+
 ## Important Shape Change
 
 The neural encoder now uses a 168-feature input vector and a 56-action output
@@ -60,6 +75,13 @@ The following turns are skipped:
 - forced opening double;
 - any state with only one legal tile play.
 
+Command-line arguments (`python -m training.dataset_generator --help`):
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `-n`, `--games` | Number of heuristic-vs-heuristic games to simulate | `30000` |
+| `--output-file` | Output JSONL dataset path | `dataset/supervised_dataset.jsonl` |
+
 ## Supervised Training
 
 Run:
@@ -87,6 +109,22 @@ elapsed time.
 
 The encoded cache is rebuilt automatically when the source JSONL file changes,
 the encoder input/output dimensions change, or the feature-version tag changes.
+
+Command-line arguments (`python -m training.training_loop --help`):
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--dataset-file` | Input JSONL dataset path | `dataset/supervised_dataset.jsonl` |
+| `--weights-file` | Output SL weights path | `models/domino_sl_weights.npz` |
+| `--cache-file` | Encoded dataset cache path | `dataset/supervised_dataset_encoded.npz` |
+| `--epochs` | Training epochs | `1000` |
+| `--batch-size` | Mini-batch size | `1024` |
+| `--learning-rate` | Learning rate | `0.005` |
+| `--checkpoint-every` | Epochs between checkpoints | `10` |
+| `--checkpoint-dir` | Checkpoint directory | `models/supervised_checkpoints` |
+| `--early-stopping-patience` | Validation checks (every 10 epochs) without improvement before stopping; `0` disables | `5` |
+| `--weight-decay` | L2 penalty on `W1`/`W2`/`W3`; `0` disables | `0.0001` |
+| `--lr-decay-factor` | LR multiplier applied on each validation check without improvement; `1` disables | `0.5` |
 
 ## Self-Play RL
 
@@ -118,7 +156,29 @@ The masked-gradient change does not alter checkpoint shapes or `.npz` keys, so
 existing weights still load. For clean comparisons, archive the previous RL
 checkpoint and start the next long RL run from `models/domino_sl_weights.npz`.
 
-`TRAINING_OPPONENT` at the top of `self_play.py` controls the training opponent:
+Command-line arguments (`python -m training.self_play --help`):
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--iterations` | Training iterations | `1000` |
+| `--games-per-iteration` | Games played per iteration | `40` |
+| `--training-opponent` | `self_play` or `heuristic` | `self_play` |
+| `--learning-rate` | Learning rate | `0.001` |
+| `--entropy-coef` | Entropy bonus coefficient | `0.01` |
+| `--log-interval` | Iterations between log lines | `10` |
+| `--checkpoint-interval` | Iterations between checkpoints | `50` |
+| `--pool-interval` | Iterations between self-play pool snapshots | `10` |
+| `--max-pool-size` | Max frozen snapshots kept in the pool | `50` |
+| `--evaluation-games` | Games per checkpoint evaluation | `200` |
+| `--sl-weights-path` | SL checkpoint to warm-start from | `models/domino_sl_weights.npz` |
+| `--rl-weights-path` | RL checkpoint to resume/save | `models/domino_rl_weights.npz` |
+| `--value-coef` | Value-loss coefficient in the actor-critic update | `0.5` |
+| `--clip-grad-norm` | Gradient-norm clipping threshold | `5.0` |
+| `--gamma` | Terminal-reward discount per remaining decision | `0.99` |
+| `--normalize-advantages` | Per-batch advantage standardization (`--no-normalize-advantages` disables) | enabled |
+
+`--training-opponent` (or `TRAINING_OPPONENT` at the top of `self_play.py` when
+calling `train()` directly from Python) controls the training opponent:
 
 | Value | Meaning |
 |---|---|
@@ -145,9 +205,20 @@ available at that decision:
 | Legal tile-play options | Multiplier |
 |---:|---:|
 | 2 | `1.0` |
-| 3 | `2.0` |
-| 4 | `5.0` |
-| 5 or more | `10.0` |
+| 3 | `1.5` |
+| 4 | `2.0` |
+| 5 or more | `3.0` |
+
+This schedule was flattened from the original `2/5/10` after the `10x`
+multiplier on rare 5+ option decisions was identified as the dominant source
+of return variance (see
+`references/explicacoes/relatorios/teste_1/plano_correcao.tex`).
+
+The terminal reward is additionally discounted by `--gamma` (default `0.99`)
+per decision remaining until the end of the episode, and advantages are
+standardized per batch (zero mean, unit variance) before the policy-gradient
+step unless `--no-normalize-advantages` is passed. The value head always
+regresses on the raw (unnormalized) returns.
 
 The policy gradient still uses `clip_grad_norm=5.0` in `PolicyNetwork` to limit
 large updates from rare high-choice decisions.

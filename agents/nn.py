@@ -1,5 +1,7 @@
 """Small NumPy/CuPy multilayer perceptron used by the domino agents."""
 
+import numpy as host_np
+
 try:
     import cupy as np
 
@@ -20,8 +22,10 @@ class SupervisedNeuralNetwork:
         hidden2_size=128,
         output_size=56,
         learning_rate=0.01,
+        weight_decay=0.0,
     ):
         self.lr = learning_rate
+        self.weight_decay = weight_decay
 
         self.W1 = np.random.randn(hidden1_size, input_size) * np.sqrt(2.0 / input_size)
         self.b1 = np.zeros((hidden1_size, 1))
@@ -41,7 +45,12 @@ class SupervisedNeuralNetwork:
         exp_z = np.exp(z - np.max(z, axis=0, keepdims=True))
         return exp_z / np.sum(exp_z, axis=0, keepdims=True)
 
+    def _to_backend(self, array):
+        """Move a host-memory batch onto the active backend (no-op on CPU)."""
+        return np.asarray(array)
+
     def forward(self, x):
+        x = self._to_backend(x)
         z1 = np.dot(self.W1, x) + self.b1
         a1 = self.relu(z1)
         z2 = np.dot(self.W2, a1) + self.b2
@@ -53,6 +62,7 @@ class SupervisedNeuralNetwork:
         return a3
 
     def backward(self, y_target):
+        y_target = self._to_backend(y_target)
         m = y_target.shape[1]
         a3 = self.cache["A3"]
         a2 = self.cache["A2"]
@@ -73,11 +83,12 @@ class SupervisedNeuralNetwork:
         dW1 = (1.0 / m) * np.dot(dz1, x.T)
         db1 = (1.0 / m) * np.sum(dz1, axis=1, keepdims=True)
 
-        self.W3 -= self.lr * dW3
+        # L2 weight decay applies to weights only, never biases.
+        self.W3 -= self.lr * (dW3 + self.weight_decay * self.W3)
         self.b3 -= self.lr * db3
-        self.W2 -= self.lr * dW2
+        self.W2 -= self.lr * (dW2 + self.weight_decay * self.W2)
         self.b2 -= self.lr * db2
-        self.W1 -= self.lr * dW1
+        self.W1 -= self.lr * (dW1 + self.weight_decay * self.W1)
         self.b1 -= self.lr * db1
 
         return -(1.0 / m) * np.sum(y_target * np.log(a3 + 1e-8))
@@ -99,7 +110,7 @@ class SupervisedNeuralNetwork:
 
         for i in range(0, sample_count, batch_size):
             x_batch = x_val[:, i:i + batch_size]
-            y_batch = y_val[:, i:i + batch_size]
+            y_batch = self._to_backend(y_val[:, i:i + batch_size])
             batch_count = x_batch.shape[1]
             probabilities = self.forward(x_batch)
             batch_loss = -(1.0 / batch_count) * np.sum(
@@ -110,18 +121,45 @@ class SupervisedNeuralNetwork:
         self._release_gpu_cache()
         return total_loss / sample_count
 
-    def train(self, x_train, y_train, x_val=None, y_val=None, epochs=1500, batch_size=128, on_validation=None):
+    def train(
+        self,
+        x_train,
+        y_train,
+        x_val=None,
+        y_val=None,
+        epochs=1500,
+        batch_size=128,
+        on_validation=None,
+        early_stopping_patience=None,
+        lr_decay_factor=None,
+    ):
         """
         Train with mini-batch SGD.
 
-        The shuffle step keeps only index arrays in memory and materializes one
-        batch at a time. This avoids duplicating the full dataset in GPU memory.
+        ``x_train``/``y_train``/``x_val``/``y_val`` are expected to stay in host
+        (NumPy) memory. The shuffle step keeps only index arrays in memory, and
+        each batch is converted to the active backend (GPU, when CuPy is
+        installed) only when it is sliced out and passed to ``forward``. This
+        keeps GPU memory proportional to ``batch_size`` instead of dataset size.
+
+        ``early_stopping_patience`` counts validation checks (every 10 epochs)
+        without improvement in validation loss before the loop stops early.
+        ``None`` (the default) disables early stopping and always runs every
+        requested epoch. Has no effect when ``x_val``/``y_val`` are not given.
+
+        ``lr_decay_factor`` multiplies the learning rate on every validation
+        check that fails to improve the best validation loss. ``None`` keeps
+        the learning rate constant.
         """
         loss_history = []
         sample_count = x_train.shape[1]
+        best_validation_loss = float("inf")
+        checks_without_improvement = 0
 
         for epoch in range(epochs):
-            permutation = np.random.permutation(sample_count)
+            # x_train/y_train live in host memory (see docstring above), so the
+            # shuffle indices must be host NumPy too, even when np is CuPy.
+            permutation = host_np.random.permutation(sample_count)
             epoch_loss = 0.0
             batch_counter = 0
 
@@ -150,6 +188,29 @@ class SupervisedNeuralNetwork:
                     if on_validation is not None:
                         on_validation(epoch, validation_loss, self)
 
+                    if validation_loss < best_validation_loss:
+                        best_validation_loss = validation_loss
+                        checks_without_improvement = 0
+                    else:
+                        checks_without_improvement += 1
+                        if lr_decay_factor is not None:
+                            self.lr *= lr_decay_factor
+                            print(
+                                f"  -> No validation improvement; learning rate "
+                                f"decayed to {self.lr:.6f}."
+                            )
+
                 print(f"Epoch {epoch} | training loss: {mean_loss:.4f}{validation_text}")
+
+                if (
+                    early_stopping_patience is not None
+                    and checks_without_improvement >= early_stopping_patience
+                ):
+                    print(
+                        f"Early stopping: validation loss did not improve for "
+                        f"{early_stopping_patience} checks "
+                        f"({early_stopping_patience * 10} epochs). Stopping at epoch {epoch}."
+                    )
+                    break
 
         return loss_history

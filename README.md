@@ -18,6 +18,7 @@ and visual UI can be changed independently.
 | `dataset/` | Generated supervised-learning datasets. |
 | `models/` | Generated `.npz` neural-network checkpoints. |
 | `tests/` | Core non-UI tests. |
+| `train_script/` | `run_training_pipeline.sh`, which chains dataset generation, supervised training, and self-play RL in one command. |
 
 ## Main Modules
 
@@ -121,6 +122,21 @@ feature still load by shape, but their final seven inputs now have the opposite
 meaning. Archive those weights and retrain for clean results.
 
 ## Training Pipeline
+
+Run all three stages (dataset generation, supervised training, self-play RL)
+with one command:
+
+```bash
+train_script/run_training_pipeline.sh
+```
+
+Pass `--help` for the full option list (dataset size, epoch/iteration counts,
+file paths, learning rates, and `--skip-dataset`/`--skip-sl`/`--skip-rl` to
+re-run only part of the pipeline). See `train_script/README.md` and
+`training/README.md` for details.
+
+Each stage also runs standalone and now accepts command-line arguments
+(`--help` on any of them lists every flag):
 
 Generate supervised data:
 

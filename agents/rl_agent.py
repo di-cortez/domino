@@ -68,11 +68,23 @@ class RLAgent(Agent):
         if self.trajectory:
             self.trajectory[-1][-1] += amount
 
-    def finish_episode(self, final_reward):
-        """Attach terminal reward to every sampled tile-play decision."""
+    def finish_episode(self, final_reward, gamma=1.0):
+        """Attach terminal reward to every sampled tile-play decision.
+
+        ``gamma`` discounts the terminal reward by the number of decisions
+        between each step and the end of the episode, so early decisions get
+        less credit/blame for the final result than late ones. Shaped rewards
+        stay undiscounted because they were earned at their own step.
+        """
+        step_count = len(self.trajectory)
         steps = [
-            (x, action_index, legal_mask, final_reward + shaped_reward)
-            for x, action_index, legal_mask, shaped_reward in self.trajectory
+            (
+                x,
+                action_index,
+                legal_mask,
+                final_reward * (gamma ** (step_count - 1 - t)) + shaped_reward,
+            )
+            for t, (x, action_index, legal_mask, shaped_reward) in enumerate(self.trajectory)
         ]
         self.trajectory = []
         return steps

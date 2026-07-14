@@ -5,6 +5,7 @@ draw, pass, and single-option tile-play records are skipped because those turns
 do not require a neural decision.
 """
 
+import argparse
 import json
 import os
 import time
@@ -28,6 +29,9 @@ except ImportError:
 
 EPOCHS = 1000
 BATCH_SIZE = 1024
+EARLY_STOPPING_PATIENCE = 5
+WEIGHT_DECAY = 0.0001
+LR_DECAY_FACTOR = 0.5
 
 CHECKPOINT_EVERY = 10
 CHECKPOINT_DIR = "models/supervised_checkpoints"
@@ -193,11 +197,20 @@ def load_dataset(file_path, encoder):
     return x, y
 
 
-def main():
+def main(
+    dataset_file="dataset/supervised_dataset.jsonl",
+    weights_file="models/domino_sl_weights.npz",
+    cache_file=ENCODED_CACHE_FILE,
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    learning_rate=0.005,
+    checkpoint_every=CHECKPOINT_EVERY,
+    checkpoint_dir=CHECKPOINT_DIR,
+    early_stopping_patience=EARLY_STOPPING_PATIENCE,
+    weight_decay=WEIGHT_DECAY,
+    lr_decay_factor=LR_DECAY_FACTOR,
+):
     start_time = time.time()
-    dataset_file = "dataset/supervised_dataset.jsonl"
-    weights_file = "models/domino_sl_weights.npz"
-    cache_file = ENCODED_CACHE_FILE
 
     print_memory_report("Supervised training startup memory")
 
@@ -210,10 +223,14 @@ def main():
     train_indices = indices[:train_count]
     validation_indices = indices[train_count:]
 
-    x_train = cp.array(x_full[:, train_indices])
-    y_train = cp.array(y_full[:, train_indices])
-    x_val = cp.array(x_full[:, validation_indices])
-    y_val = cp.array(y_full[:, validation_indices])
+    # Keep the full split in host (NumPy) memory. SupervisedNeuralNetwork.train()
+    # moves one mini-batch at a time onto the GPU, so GPU memory stays
+    # proportional to batch_size instead of the whole dataset, which can be
+    # far larger than available VRAM once the dataset has millions of rows.
+    x_train = x_full[:, train_indices]
+    y_train = y_full[:, train_indices]
+    x_val = x_full[:, validation_indices]
+    y_val = y_full[:, validation_indices]
     print(f"Split complete: {x_train.shape[1]} train | {x_val.shape[1]} validation")
 
     network = SupervisedNeuralNetwork(
@@ -221,7 +238,8 @@ def main():
         hidden1_size=256,
         hidden2_size=128,
         output_size=len(encoder.all_actions),
-        learning_rate=0.005,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
     )
 
     if os.path.exists(weights_file):
@@ -265,11 +283,11 @@ def main():
 
     def save_checkpoint(current_network, epoch, validation_loss):
         """Save both an archival checkpoint and the active model used by UI/self-play."""
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+        os.makedirs(checkpoint_dir, exist_ok=True)
         os.makedirs(os.path.dirname(weights_file), exist_ok=True)
 
         checkpoint_file = os.path.join(
-            CHECKPOINT_DIR,
+            checkpoint_dir,
             f"domino_sl_epoch_{epoch:04d}_val_{validation_loss:.4f}.npz",
         )
 
@@ -296,7 +314,7 @@ def main():
         print(f"  -> Active supervised model updated at {weights_file}.")
         
     def save_if_best(epoch, validation_loss, current_network):
-        if epoch % CHECKPOINT_EVERY == 0:
+        if epoch % checkpoint_every == 0:
             save_checkpoint(current_network, epoch, validation_loss)
 
         if validation_loss < best_state["validation_loss"]:
@@ -317,9 +335,13 @@ def main():
         y_train,
         x_val=x_val,
         y_val=y_val,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
+        epochs=epochs,
+        batch_size=batch_size,
         on_validation=save_if_best,
+        early_stopping_patience=early_stopping_patience,
+        lr_decay_factor=(
+            lr_decay_factor if lr_decay_factor and 0 < lr_decay_factor < 1 else None
+        ),
     )
 
     os.makedirs(os.path.dirname(weights_file), exist_ok=True)
@@ -349,5 +371,60 @@ def main():
     print(f"Total elapsed time: {format_duration(elapsed_time)}.")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train the supervised-learning domino policy from a JSONL dataset.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--dataset-file", type=str, default="dataset/supervised_dataset.jsonl")
+    parser.add_argument("--weights-file", type=str, default="models/domino_sl_weights.npz")
+    parser.add_argument("--cache-file", type=str, default=ENCODED_CACHE_FILE)
+    parser.add_argument("--epochs", type=int, default=EPOCHS)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--learning-rate", type=float, default=0.005)
+    parser.add_argument("--checkpoint-every", type=int, default=CHECKPOINT_EVERY)
+    parser.add_argument("--checkpoint-dir", type=str, default=CHECKPOINT_DIR)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=EARLY_STOPPING_PATIENCE,
+        help=(
+            "Validation checks (every 10 epochs) without improvement before "
+            "stopping early. Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=WEIGHT_DECAY,
+        help="L2 penalty applied to W1/W2/W3 during updates. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--lr-decay-factor",
+        type=float,
+        default=LR_DECAY_FACTOR,
+        help=(
+            "Multiply the learning rate by this factor on each validation "
+            "check without improvement. Use 1 to disable."
+        ),
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(
+        dataset_file=args.dataset_file,
+        weights_file=args.weights_file,
+        cache_file=args.cache_file,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        checkpoint_every=args.checkpoint_every,
+        checkpoint_dir=args.checkpoint_dir,
+        early_stopping_patience=(
+            args.early_stopping_patience if args.early_stopping_patience > 0 else None
+        ),
+        weight_decay=args.weight_decay,
+        lr_decay_factor=args.lr_decay_factor,
+    )

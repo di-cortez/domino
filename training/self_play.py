@@ -6,6 +6,7 @@ trajectory. Rewards are multiplied when the learner had many legal tile-play
 options, so rare high-choice decisions have a stronger learning signal.
 """
 
+import argparse
 from collections import deque
 import random
 import time
@@ -32,9 +33,17 @@ OPPONENT_DRAW_REWARD = 0.05
 OPPONENT_PASS_REWARD = 0.05
 FINAL_PIP_PENALTY = 0.001
 
-CHOICE_MULTIPLIER_3_OPTIONS = 2.0
-CHOICE_MULTIPLIER_4_OPTIONS = 5.0
-CHOICE_MULTIPLIER_5_PLUS_OPTIONS = 10.0
+# Flattened from the original 2/5/10 schedule: the old 10x multiplier on rare
+# 5+ option decisions dominated the return variance and destabilized the value
+# target (see references/explicacoes/relatorios/teste_1/plano_correcao.tex).
+CHOICE_MULTIPLIER_3_OPTIONS = 1.5
+CHOICE_MULTIPLIER_4_OPTIONS = 2.0
+CHOICE_MULTIPLIER_5_PLUS_OPTIONS = 3.0
+
+VALUE_COEF = 0.5
+CLIP_GRAD_NORM = 5.0
+METRICS_WINDOW = 10
+GAMMA = 0.99
 
 
 def _tile_play_actions(legal_actions):
@@ -65,9 +74,9 @@ def _append_decision_multiplier(learner_agent, option_count):
     learner_agent._real_decision_multipliers.append(_choice_multiplier(option_count))
 
 
-def _finish_episode_with_multipliers(learner_agent, final_reward):
+def _finish_episode_with_multipliers(learner_agent, final_reward, gamma=1.0):
     """Finish an episode and multiply each saved decision return by its option count."""
-    steps = learner_agent.finish_episode(final_reward)
+    steps = learner_agent.finish_episode(final_reward, gamma=gamma)
     multipliers = getattr(learner_agent, "_real_decision_multipliers", [])
     learner_agent._real_decision_multipliers = []
 
@@ -149,7 +158,7 @@ def _play_training_game(agents, learner_position, learner_agent):
     return engine
 
 
-def _collect_self_play_steps(network, pool):
+def _collect_self_play_steps(network, pool, gamma=1.0):
     """Play one game against a frozen policy snapshot and collect learner steps."""
     learner_position = random.randint(0, 1)
     opponent_network = random.choice(pool) if pool else network
@@ -162,10 +171,14 @@ def _collect_self_play_steps(network, pool):
 
     engine = _play_training_game(agents, learner_position, learner)
     reward = _terminal_reward(engine, learner_position)
-    return _finish_episode_with_multipliers(learner, reward), engine.winner, learner_position
+    return (
+        _finish_episode_with_multipliers(learner, reward, gamma=gamma),
+        engine.winner,
+        learner_position,
+    )
 
 
-def _collect_steps_vs_heuristic(network):
+def _collect_steps_vs_heuristic(network, gamma=1.0):
     """Play one training game against the fixed heuristic agent."""
     learner_position = random.randint(0, 1)
     learner = RLAgent(network, mode="training")
@@ -175,7 +188,11 @@ def _collect_steps_vs_heuristic(network):
 
     engine = _play_training_game(agents, learner_position, learner)
     reward = _terminal_reward(engine, learner_position)
-    return _finish_episode_with_multipliers(learner, reward), engine.winner, learner_position
+    return (
+        _finish_episode_with_multipliers(learner, reward, gamma=gamma),
+        engine.winner,
+        learner_position,
+    )
 
 
 def evaluate_against_heuristic(network, game_count=200):
@@ -246,6 +263,10 @@ def train(
     evaluation_games=200,
     sl_weights_path=SL_WEIGHTS,
     rl_weights_path=RL_WEIGHTS,
+    value_coef=VALUE_COEF,
+    clip_grad_norm=CLIP_GRAD_NORM,
+    gamma=GAMMA,
+    normalize_advantages=True,
 ):
     """
     Train the policy with REINFORCE plus a learned value baseline.
@@ -256,7 +277,13 @@ def train(
     learner gets a small bonus when the opponent is forced to draw/pass and a
     small terminal penalty for final remaining pips. Each saved decision return
     is multiplied by the number-of-options schedule defined at the top of this
-    file.
+    file. ``value_coef`` and ``clip_grad_norm`` are forwarded to
+    ``PolicyNetwork.backward_policy_gradient``.
+
+    ``gamma`` discounts the terminal reward per remaining decision inside each
+    episode. ``normalize_advantages`` standardizes advantages per batch (zero
+    mean, unit variance) before the policy-gradient step; the value head still
+    regresses on the raw returns.
     """
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
@@ -269,6 +296,9 @@ def train(
         pool = deque(maxlen=max_pool_size)
         pool.append(network.clone())
 
+    value_loss_history = deque(maxlen=METRICS_WINDOW)
+    win_rate_history = deque(maxlen=METRICS_WINDOW)
+
     start_time = time.time()
     last_checkpoint_time = start_time
     for iteration in range(1, iterations + 1):
@@ -277,9 +307,13 @@ def train(
 
         for _ in range(games_per_iteration):
             if training_opponent == "self_play":
-                steps, winner, learner_position = _collect_self_play_steps(network, pool)
+                steps, winner, learner_position = _collect_self_play_steps(
+                    network, pool, gamma=gamma
+                )
             else:
-                steps, winner, learner_position = _collect_steps_vs_heuristic(network)
+                steps, winner, learner_position = _collect_steps_vs_heuristic(
+                    network, gamma=gamma
+                )
             batch.extend(steps)
             if winner == learner_position:
                 wins += 1
@@ -297,6 +331,12 @@ def train(
 
         values = network.predict_values(x_batch)
         advantages = returns - values
+        raw_advantage_mean = float(xp.mean(advantages))
+
+        if normalize_advantages:
+            advantages = (advantages - xp.mean(advantages)) / (
+                float(xp.std(advantages)) + 1e-8
+            )
 
         metrics = network.backward_policy_gradient(
             action_indices,
@@ -304,7 +344,12 @@ def train(
             legal_masks=legal_masks,
             returns=returns,
             entropy_coef=entropy_coef,
+            value_coef=value_coef,
+            clip_grad_norm=clip_grad_norm,
         )
+
+        value_loss_history.append(metrics["value_loss"])
+        win_rate_history.append(wins / games_per_iteration)
 
         if training_opponent == "self_play" and iteration % pool_interval == 0:
             pool.append(network.clone())
@@ -312,14 +357,19 @@ def train(
         if iteration % log_interval == 0:
             win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
             pool_suffix = f" | pool: {len(pool)}" if training_opponent == "self_play" else ""
+            value_loss_ma = sum(value_loss_history) / len(value_loss_history)
+            win_rate_ma = sum(win_rate_history) / len(win_rate_history)
             print(
                 f"Iteration {iteration} | steps: {len(batch)} | "
                 f"mean return: {float(xp.mean(returns)):.2f} | "
+                f"std return: {float(xp.std(returns)):.2f} | "
                 f"max return: {float(xp.max(returns)):.1f} | "
                 f"min return: {float(xp.min(returns)):.1f} | "
-                f"mean adv: {float(xp.mean(advantages)):.2f} | "
-                f"value loss: {metrics['value_loss']:.2f} | "
-                f"wins {win_label}: {wins}/{games_per_iteration}{pool_suffix}"
+                f"mean adv: {raw_advantage_mean:.2f} | "
+                f"value loss: {metrics['value_loss']:.2f} "
+                f"(mv avg/{len(value_loss_history)}: {value_loss_ma:.2f}) | "
+                f"wins {win_label}: {wins}/{games_per_iteration} "
+                f"(mv avg win rate: {win_rate_ma:.1%}){pool_suffix}"
             )
 
         if iteration % checkpoint_interval == 0:
@@ -341,5 +391,61 @@ def train(
     print(f"Final weights: {rl_weights_path}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Refine the RL policy network with self-play REINFORCE.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--iterations", type=int, default=1000)
+    parser.add_argument("--games-per-iteration", type=int, default=40)
+    parser.add_argument(
+        "--training-opponent",
+        choices=("self_play", "heuristic"),
+        default=TRAINING_OPPONENT,
+    )
+    parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--log-interval", type=int, default=10)
+    parser.add_argument("--checkpoint-interval", type=int, default=50)
+    parser.add_argument("--pool-interval", type=int, default=10)
+    parser.add_argument("--max-pool-size", type=int, default=50)
+    parser.add_argument("--evaluation-games", type=int, default=200)
+    parser.add_argument("--sl-weights-path", type=str, default=SL_WEIGHTS)
+    parser.add_argument("--rl-weights-path", type=str, default=RL_WEIGHTS)
+    parser.add_argument("--value-coef", type=float, default=VALUE_COEF)
+    parser.add_argument("--clip-grad-norm", type=float, default=CLIP_GRAD_NORM)
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=GAMMA,
+        help="Discount applied to the terminal reward per remaining decision.",
+    )
+    parser.add_argument(
+        "--normalize-advantages",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Standardize advantages per batch before the policy-gradient step.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    train()
+    args = parse_args()
+    train(
+        iterations=args.iterations,
+        games_per_iteration=args.games_per_iteration,
+        training_opponent=args.training_opponent,
+        learning_rate=args.learning_rate,
+        entropy_coef=args.entropy_coef,
+        log_interval=args.log_interval,
+        checkpoint_interval=args.checkpoint_interval,
+        pool_interval=args.pool_interval,
+        max_pool_size=args.max_pool_size,
+        evaluation_games=args.evaluation_games,
+        sl_weights_path=args.sl_weights_path,
+        rl_weights_path=args.rl_weights_path,
+        value_coef=args.value_coef,
+        clip_grad_norm=args.clip_grad_norm,
+        gamma=args.gamma,
+        normalize_advantages=args.normalize_advantages,
+    )

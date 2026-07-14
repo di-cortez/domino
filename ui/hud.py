@@ -7,7 +7,7 @@ engine; all game changes go through `GameController`.
 
 import pygame
 
-from middleware.opponent_model import compute_opponent_suit_probabilities
+from middleware.opponent_model import ExactOpponentModel
 from ui.primitives import (
     begin_2d,
     draw_domino_2d,
@@ -43,6 +43,10 @@ class HudRenderer:
         self._normal_font = None
         self._hint_font = None
         self._probability_cache = {}
+        self._opponent_models = {
+            0: ExactOpponentModel(),
+            1: ExactOpponentModel(),
+        }
 
     def _init_fonts(self):
         if self._fonts_ready:
@@ -270,8 +274,10 @@ class HudRenderer:
 
         try:
             perspective_state = self._probability_state_for_player(state, player)
-            probabilities = compute_opponent_suit_probabilities(perspective_state)
+            model = self._opponent_models[player]
+            probabilities = model.update(perspective_state)
         except (KeyError, ValueError, IndexError, TypeError):
+            self._opponent_models[player].reset()
             probabilities = [0.0] * 7
 
         if len(self._probability_cache) > 64:

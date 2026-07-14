@@ -1,5 +1,7 @@
 """Small NumPy/CuPy multilayer perceptron used by the domino agents."""
 
+import numpy as host_np
+
 try:
     import cupy as np
 
@@ -20,14 +22,28 @@ class SupervisedNeuralNetwork:
         hidden2_size=128,
         output_size=56,
         learning_rate=0.01,
+        random_seed=None,
+        weight_decay=0.0,
     ):
         self.lr = learning_rate
+        self.weight_decay = weight_decay
+        random_source = (
+            np.random
+            if random_seed is None
+            else np.random.RandomState(random_seed)
+        )
 
-        self.W1 = np.random.randn(hidden1_size, input_size) * np.sqrt(2.0 / input_size)
+        self.W1 = random_source.randn(hidden1_size, input_size) * np.sqrt(
+            2.0 / input_size
+        )
         self.b1 = np.zeros((hidden1_size, 1))
-        self.W2 = np.random.randn(hidden2_size, hidden1_size) * np.sqrt(2.0 / hidden1_size)
+        self.W2 = random_source.randn(hidden2_size, hidden1_size) * np.sqrt(
+            2.0 / hidden1_size
+        )
         self.b2 = np.zeros((hidden2_size, 1))
-        self.W3 = np.random.randn(output_size, hidden2_size) * np.sqrt(1.0 / hidden2_size)
+        self.W3 = random_source.randn(output_size, hidden2_size) * np.sqrt(
+            1.0 / hidden2_size
+        )
         self.b3 = np.zeros((output_size, 1))
         self.cache = {}
 
@@ -41,7 +57,12 @@ class SupervisedNeuralNetwork:
         exp_z = np.exp(z - np.max(z, axis=0, keepdims=True))
         return exp_z / np.sum(exp_z, axis=0, keepdims=True)
 
+    def _to_backend(self, array):
+        """Move one host-memory batch to the active NumPy/CuPy backend."""
+        return np.asarray(array)
+
     def forward(self, x):
+        x = self._to_backend(x)
         z1 = np.dot(self.W1, x) + self.b1
         a1 = self.relu(z1)
         z2 = np.dot(self.W2, a1) + self.b2
@@ -53,6 +74,7 @@ class SupervisedNeuralNetwork:
         return a3
 
     def backward(self, y_target):
+        y_target = self._to_backend(y_target)
         m = y_target.shape[1]
         a3 = self.cache["A3"]
         a2 = self.cache["A2"]
@@ -73,11 +95,11 @@ class SupervisedNeuralNetwork:
         dW1 = (1.0 / m) * np.dot(dz1, x.T)
         db1 = (1.0 / m) * np.sum(dz1, axis=1, keepdims=True)
 
-        self.W3 -= self.lr * dW3
+        self.W3 -= self.lr * (dW3 + self.weight_decay * self.W3)
         self.b3 -= self.lr * db3
-        self.W2 -= self.lr * dW2
+        self.W2 -= self.lr * (dW2 + self.weight_decay * self.W2)
         self.b2 -= self.lr * db2
-        self.W1 -= self.lr * dW1
+        self.W1 -= self.lr * (dW1 + self.weight_decay * self.W1)
         self.b1 -= self.lr * db1
 
         return -(1.0 / m) * np.sum(y_target * np.log(a3 + 1e-8))
@@ -99,7 +121,7 @@ class SupervisedNeuralNetwork:
 
         for i in range(0, sample_count, batch_size):
             x_batch = x_val[:, i:i + batch_size]
-            y_batch = y_val[:, i:i + batch_size]
+            y_batch = self._to_backend(y_val[:, i:i + batch_size])
             batch_count = x_batch.shape[1]
             probabilities = self.forward(x_batch)
             batch_loss = -(1.0 / batch_count) * np.sum(
@@ -121,18 +143,29 @@ class SupervisedNeuralNetwork:
         on_validation=None,
         progress_callback=None,
         quiet=False,
+        early_stopping_patience=None,
+        lr_decay_factor=None,
     ):
         """
         Train with mini-batch SGD.
 
-        The shuffle step keeps only index arrays in memory and materializes one
-        batch at a time. This avoids duplicating the full dataset in GPU memory.
+        Training and validation arrays remain in host NumPy memory. Shuffle
+        indices and slices are created on the host, and ``forward``/``backward``
+        move only the current mini-batch to the active backend. GPU memory usage
+        therefore scales with batch size instead of total dataset size.
+
+        ``early_stopping_patience`` counts validation checks without an
+        improvement before stopping. ``lr_decay_factor`` multiplies the
+        learning rate after each failed validation check. Both are disabled
+        when ``None`` so the default learning rate remains fixed.
         """
         loss_history = []
         sample_count = x_train.shape[1]
+        best_validation_loss = float("inf")
+        checks_without_improvement = 0
 
         for epoch in range(epochs):
-            permutation = np.random.permutation(sample_count)
+            permutation = host_np.random.permutation(sample_count)
             epoch_loss = 0.0
             batch_counter = 0
 
@@ -161,10 +194,35 @@ class SupervisedNeuralNetwork:
                     if on_validation is not None:
                         on_validation(epoch, validation_loss, self)
 
+                    if validation_loss < best_validation_loss:
+                        best_validation_loss = validation_loss
+                        checks_without_improvement = 0
+                    else:
+                        checks_without_improvement += 1
+                        if lr_decay_factor is not None:
+                            self.lr *= lr_decay_factor
+                            if not quiet:
+                                print(
+                                    "  -> Validation did not improve; "
+                                    f"learning rate reduced to {self.lr:.8f}."
+                                )
+
                 if not quiet:
                     print(f"Epoch {epoch} | training loss: {mean_loss:.4f}{validation_text}")
 
             if progress_callback is not None:
                 progress_callback(epoch + 1, epochs)
+
+            if (
+                early_stopping_patience is not None
+                and checks_without_improvement >= early_stopping_patience
+            ):
+                if not quiet:
+                    print(
+                        "Early stopping: validation loss did not improve for "
+                        f"{early_stopping_patience} checks. Stopped after "
+                        f"epoch {epoch}."
+                    )
+                break
 
         return loss_history

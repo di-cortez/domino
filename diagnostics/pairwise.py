@@ -31,7 +31,6 @@ import numpy as np
 
 from diagnostics.plots import LABEL, generate_plots as write_diagnostic_plots, summarize
 from middleware.domino_engine import DominoEngine
-from middleware.opponent_model import ExactOpponentModel
 from utils.runtime_status import format_duration, print_memory_report
 
 try:
@@ -48,9 +47,21 @@ DEFAULT_OPPONENT_WEIGHTS = None
 DEFAULT_OUTPUT_DIR = None
 DEFAULT_GENERATE_PLOTS = True
 
-CANONICAL_AGENTS = ("rl", "neural", "heuristic", "random")
-LEGACY_AGENT_ALIASES = {"sl": "neural"}
+CANONICAL_AGENTS = ("rl", "neural", "random_nn", "heuristic", "random")
+LEGACY_AGENT_ALIASES = {
+    "sl": "neural",
+    "random neural": "random_nn",
+    "random-neural": "random_nn",
+    "random nn": "random_nn",
+    "random-nn": "random_nn",
+}
 AVAILABLE_AGENTS = CANONICAL_AGENTS + tuple(LEGACY_AGENT_ALIASES)
+
+LEGACY_ARTIFACT_NAMES = (
+    "compact_to_enumerated_counts.png",
+    "first_stock_draw_final_state_counts.png",
+    "first_stock_draw_turns.png",
+)
 
 DEFAULT_WEIGHTS = {
     "rl": ROOT / "models" / "domino_rl_weights.npz",
@@ -94,6 +105,10 @@ def create_agent(agent_name, weights_path=None):
         from agents.neural_agent import NeuralAgent
 
         return NeuralAgent.load(str(resolve_weights_path("neural", weights_path)))
+    if agent_name == "random_nn":
+        from agents.random_neural_agent import RandomNeuralAgent
+
+        return RandomNeuralAgent.create()
     if agent_name == "heuristic":
         from agents.heuristic_agent import StrategicAgent
 
@@ -157,45 +172,6 @@ def update_choice_stats(stats, legal_actions):
         stats["agent_forced_tile_turns"] += 1
 
 
-def observer_state_from_engine(engine, observer_player):
-    """Build an opponent-model observer state for a fixed player."""
-    return {
-        "game_id": engine.game_id,
-        "ends": list(engine.ends),
-        "current_player_hand": [
-            list(tile) for tile in engine.hands[observer_player]
-        ],
-        "current_player_initial_hand": [
-            list(tile) for tile in engine.initial_hands[observer_player]
-        ],
-        "current_player_drawn_tiles": [
-            list(tile) for tile in engine.drawn_tiles_by_player[observer_player]
-        ],
-        "current_player": observer_player,
-        "observer_player": observer_player,
-        "history_current_player": engine.current_player,
-        "turn": engine.turn,
-        "hand_sizes": [len(hand) for hand in engine.hands],
-        "board_history": [
-            engine._serialize_action(action) for action in engine.board_history
-        ],
-        "stock_size": len(engine.stock),
-        "game_over": engine.game_over,
-    }
-
-
-def compact_hidden_draw_final_state_count(observer_model, action_turn):
-    """Return the exact hidden-draw hand upper bound for ``action_turn``.
-
-    The property name is retained for CSV compatibility with diagnostics made
-    before the slot-to-mu migration.
-    """
-    for record in observer_model.compact_hidden_draw_state_records:
-        if record["turn"] == action_turn:
-            return int(record["final_state_count"])
-    return None
-
-
 def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     """Play one game and return the outcome from the evaluated agent's view."""
     agents = [None, None]
@@ -203,10 +179,7 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     agents[1 - agent_position] = opponent
 
     engine = DominoEngine(player_count=2)
-    diagnostic_observer_models = [ExactOpponentModel(), ExactOpponentModel()]
     choice_stats = empty_choice_stats()
-    first_stock_draw_turn = None
-    first_stock_draw_final_state_count = None
 
     while not engine.game_over:
         state = engine._get_state()
@@ -223,20 +196,6 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
             action = agents[current_player].choose_move(state, legal_actions)
 
         engine.step(action)
-
-        if first_stock_draw_turn is None and (
-            action == ("DRAW", None) or not engine.game_over
-        ):
-            for observer_player, observer_model in enumerate(diagnostic_observer_models):
-                observer_model.update(observer_state_from_engine(engine, observer_player))
-
-            if action == ("DRAW", None):
-                first_stock_draw_turn = engine.turn
-                observer_player = 1 - current_player
-                first_stock_draw_final_state_count = compact_hidden_draw_final_state_count(
-                    diagnostic_observer_models[observer_player],
-                    first_stock_draw_turn,
-                )
 
     final_state = engine.to_dict()
     winner = final_state["winner"]
@@ -256,8 +215,6 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         "agent_position": agent_position,
         "result": result,
         "turns": final_state["turn"],
-        "first_stock_draw_turn": first_stock_draw_turn,
-        "first_stock_draw_final_state_count": first_stock_draw_final_state_count,
         "agent_initial_hand": initial_hands[agent_position],
         "opponent_initial_hand": initial_hands[1 - agent_position],
         "agent_remaining_pips": pips[agent_position],
@@ -313,14 +270,12 @@ def save_csv(games, path):
         "agent_position",
         "result",
         "turns",
-        "first_stock_draw_turn",
-        "first_stock_draw_final_state_count",
         "agent_initial_hand",
         "opponent_initial_hand",
         "agent_remaining_pips",
         "opponent_remaining_pips",
     ]
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(
@@ -365,77 +320,6 @@ def add_choice_summary(summary, games):
     return summary
 
 
-def summarize_first_stock_draw_turns(games):
-    """Summarize the first stock-draw turn across a set of game records."""
-    values = []
-    histogram = {}
-    for game in games:
-        turn = game.get("first_stock_draw_turn")
-        if turn is None:
-            continue
-        turn = int(turn)
-        values.append(turn)
-        key = str(turn)
-        histogram[key] = histogram.get(key, 0) + 1
-
-    game_count = len(games)
-    games_with_stock_draw = len(values)
-    summary = {
-        "games": game_count,
-        "games_with_stock_draw": games_with_stock_draw,
-        "games_without_stock_draw": game_count - games_with_stock_draw,
-        "stock_draw_rate": games_with_stock_draw / game_count if game_count else 0.0,
-        "mean_turn": float(np.mean(values)) if values else None,
-        "median_turn": float(np.median(values)) if values else None,
-        "min_turn": int(min(values)) if values else None,
-        "max_turn": int(max(values)) if values else None,
-        "turn_histogram": dict(sorted(histogram.items(), key=lambda item: int(item[0]))),
-    }
-    return summary
-
-
-def add_first_stock_draw_summary(summary, games):
-    """Attach first-stock-draw statistics to a pairwise summary."""
-    summary["first_stock_draw"] = summarize_first_stock_draw_turns(games)
-    return summary
-
-
-def summarize_first_stock_draw_expansions(games):
-    """Summarize raw hand upper bounds computed at the first stock draw."""
-    values = []
-    histogram = {}
-    for game in games:
-        value = game.get("first_stock_draw_final_state_count")
-        if value is None:
-            continue
-        value = int(value)
-        values.append(value)
-        key = str(value)
-        histogram[key] = histogram.get(key, 0) + 1
-
-    game_count = len(games)
-    games_with_count = len(values)
-    return {
-        "games": game_count,
-        "games_with_count": games_with_count,
-        "games_without_count": game_count - games_with_count,
-        "count_rate": games_with_count / game_count if game_count else 0.0,
-        "mean_final_state_count": float(np.mean(values)) if values else None,
-        "median_final_state_count": float(np.median(values)) if values else None,
-        "min_final_state_count": int(min(values)) if values else None,
-        "max_final_state_count": int(max(values)) if values else None,
-        "final_state_count_histogram": dict(
-            sorted(histogram.items(), key=lambda item: int(item[0]))
-        ),
-    }
-
-
-def add_first_stock_draw_expansion_summary(summary, games):
-    """Attach first-stock-draw expansion statistics to a summary."""
-    summary["first_stock_draw_expansion"] = summarize_first_stock_draw_expansions(games)
-    return summary
-
-
 def print_summary(summary, duration_s):
     """Print the main pairwise metrics in a compact console format."""
     game_count = summary["game_count"]
@@ -477,32 +361,13 @@ def print_summary(summary, duration_s):
             f"pass {choice_info['forced_passes']}"
         )
         print(f"  Choice histogram: {choice_info['choice_histogram']}")
-    first_draw = summary.get("first_stock_draw")
-    if first_draw:
-        if first_draw["games_with_stock_draw"]:
-            print(
-                "  First stock draw: "
-                f"{first_draw['games_with_stock_draw']}/{first_draw['games']} games "
-                f"({first_draw['stock_draw_rate']:.1%}) | "
-                f"mean turn {first_draw['mean_turn']:.1f} | "
-                f"median turn {first_draw['median_turn']:.1f}"
-            )
-        else:
-            print("  First stock draw: none recorded")
-    expansion_info = summary.get("first_stock_draw_expansion")
-    if expansion_info:
-        if expansion_info["games_with_count"]:
-            print(
-                "  First draw raw hand upper bound: "
-                f"{expansion_info['games_with_count']}/"
-                f"{expansion_info['games']} games "
-                f"({expansion_info['count_rate']:.1%}) | "
-                f"mean upper bound "
-                f"{expansion_info['mean_final_state_count']:.1f} | "
-                f"median {expansion_info['median_final_state_count']:.1f}"
-            )
-        else:
-            print("  First draw raw hand upper bound: none recorded")
+
+
+def remove_legacy_artifacts(output_dir):
+    """Delete obsolete diagnostic plots left by older runs in ``output_dir``."""
+    output_dir = Path(output_dir)
+    for filename in LEGACY_ARTIFACT_NAMES:
+        (output_dir / filename).unlink(missing_ok=True)
 
 
 def run_pairwise(
@@ -522,9 +387,16 @@ def run_pairwise(
     """Run one matchup and write the standard pairwise artifacts."""
     agent_name = normalize_agent_name(agent_name)
     opponent_name = normalize_agent_name(opponent_name)
-    output_dir = output_dir or ROOT / "diagnostics" / "results" / "pairwise" / f"{agent_name}_vs_{opponent_name}"
+    output_dir = output_dir or (
+        ROOT
+        / "diagnostics"
+        / "results"
+        / "pairwise"
+        / f"{agent_name}_vs_{opponent_name}"
+    )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    remove_legacy_artifacts(output_dir)
 
     if print_console_summary:
         print(
@@ -569,14 +441,12 @@ def run_pairwise(
 
     summary = summarize(games, agent_name, opponent_name, seed)
     summary = add_choice_summary(summary, games)
-    summary = add_first_stock_draw_summary(summary, games)
-    summary = add_first_stock_draw_expansion_summary(summary, games)
     summary["duration_s"] = duration
     if print_console_summary:
         print_summary(summary, duration)
 
     save_csv(games, output_dir / "games.csv")
-    with open(output_dir / "summary.json", "w") as f:
+    with open(output_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     if generate_plots:
@@ -587,8 +457,7 @@ def run_pairwise(
         if generate_plots:
             print(
                 "  cumulative_rates.png, result_distribution.png, wins_by_position.png, "
-                "game_lengths.png, choice_opportunities.png, first_stock_draw_turns.png, "
-                "first_stock_draw_final_state_counts.png"
+                "game_lengths.png, choice_opportunities.png"
             )
         print("  games.csv, summary.json")
 

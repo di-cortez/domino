@@ -1,4 +1,4 @@
-"""Policy-only network used by reinforcement-learning self-play."""
+"""Masked policy network with an optional training-only value head."""
 
 import os
 
@@ -12,19 +12,27 @@ else:
     import numpy as xp
 
 _POLICY_WEIGHTS = ("W1", "b1", "W2", "b2", "W3", "b3")
+_VALUE_WEIGHTS = ("Wv", "bv")
 
 
 class PolicyNetwork(SupervisedNeuralNetwork):
-    """Supervised policy architecture updated with masked REINFORCE gradients.
+    """Supervised policy architecture with masked REINFORCE gradients.
 
-    The network keeps exactly the same weights as the supervised policy:
-    ``W1``, ``b1``, ``W2``, ``b2``, ``W3``, and ``b3``. Reinforcement learning
-    applies policy-gradient updates directly from the reward assigned to each
-    real decision. The checkpoint format contains only the six policy weights.
+    Direct REINFORCE is the default and keeps exactly the six supervised policy
+    weights. ``use_value_head=True`` adds a linear ``V(s)`` head over the second
+    hidden layer so the policy can train from reward-minus-value advantages.
     """
 
+    def __init__(self, *args, use_value_head=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_value_head = use_value_head
+        if use_value_head:
+            hidden2_size = self.W3.shape[1]
+            self.Wv = xp.zeros((1, hidden2_size))
+            self.bv = xp.zeros((1, 1))
+
     @classmethod
-    def _load_npz_weights(cls, path, learning_rate):
+    def _load_npz_weights(cls, path, learning_rate, use_value_head=False):
         data = np.load(path)
         hidden1_size, input_size = data["W1"].shape
         hidden2_size, _ = data["W2"].shape
@@ -36,20 +44,37 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             hidden2_size=hidden2_size,
             output_size=output_size,
             learning_rate=learning_rate,
+            use_value_head=use_value_head,
         )
         for name in _POLICY_WEIGHTS:
             setattr(network, name, xp.array(data[name]))
+        if use_value_head and all(name in data for name in _VALUE_WEIGHTS):
+            for name in _VALUE_WEIGHTS:
+                setattr(network, name, xp.array(data[name]))
         return network
 
     @classmethod
-    def load_from_sl(cls, sl_weights_path="models/domino_sl_weights.npz", learning_rate=0.001):
+    def load_from_sl(
+        cls,
+        sl_weights_path="models/domino_sl_weights.npz",
+        learning_rate=0.001,
+        use_value_head=False,
+    ):
         """Use a supervised-learning checkpoint as the initial RL policy."""
-        return cls._load_npz_weights(sl_weights_path, learning_rate)
+        return cls._load_npz_weights(
+            sl_weights_path,
+            learning_rate,
+            use_value_head=use_value_head,
+        )
 
     @classmethod
-    def load(cls, rl_weights_path, learning_rate=0.001):
-        """Load a policy checkpoint, ignoring stale extra keys if present."""
-        return cls._load_npz_weights(rl_weights_path, learning_rate)
+    def load(cls, rl_weights_path, learning_rate=0.001, use_value_head=False):
+        """Load policy weights and optionally restore a saved value head."""
+        return cls._load_npz_weights(
+            rl_weights_path,
+            learning_rate,
+            use_value_head=use_value_head,
+        )
 
     def save(self, weights_path):
         """Save only the six policy weights shared with supervised checkpoints."""
@@ -60,10 +85,14 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         if weights_dir:
             os.makedirs(weights_dir, exist_ok=True)
 
-        np.savez(
-            weights_path,
-            **{name: to_numpy(getattr(self, name)) for name in _POLICY_WEIGHTS},
-        )
+        weight_names = _POLICY_WEIGHTS
+        if getattr(self, "use_value_head", False):
+            weight_names += _VALUE_WEIGHTS
+
+        np.savez(weights_path, **{
+            name: to_numpy(getattr(self, name))
+            for name in weight_names
+        })
 
     def clone(self):
         """Return a frozen copy for the self-play opponent pool."""
@@ -73,10 +102,21 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             hidden2_size=self.W2.shape[0],
             output_size=self.W3.shape[0],
             learning_rate=self.lr,
+            use_value_head=getattr(self, "use_value_head", False),
         )
-        for name in _POLICY_WEIGHTS:
+        weight_names = _POLICY_WEIGHTS
+        if clone.use_value_head:
+            weight_names += _VALUE_WEIGHTS
+        for name in weight_names:
             setattr(clone, name, getattr(self, name).copy())
         return clone
+
+    def predict_values(self, x):
+        """Return ``V(s)`` for each state column when the value head is enabled."""
+        if not getattr(self, "use_value_head", False):
+            raise RuntimeError("The value head is not enabled for this network.")
+        self.forward(x)
+        return xp.dot(self.Wv, self.cache["A2"]) + self.bv
 
     def backward_policy_gradient(
         self,
@@ -85,8 +125,10 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         legal_masks,
         entropy_coef=0.01,
         clip_grad_norm=5.0,
+        value_returns=None,
+        value_coef=0.5,
     ):
-        """Apply one masked REINFORCE update using direct reward weights."""
+        """Apply masked REINFORCE, optionally updating a value baseline."""
         z3 = self.cache["Z3"]
         a2 = self.cache["A2"]
         a1 = self.cache["A1"]
@@ -141,6 +183,30 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         db3 = (1.0 / m) * xp.sum(dz3, axis=1, keepdims=True)
         da2 = xp.dot(self.W3.T, dz3)
 
+        value_loss = None
+        value_gradients = {}
+        use_value_head = getattr(self, "use_value_head", False)
+        if use_value_head:
+            if value_returns is None:
+                raise ValueError(
+                    "value_returns are required when the value head is enabled."
+                )
+            value_returns = xp.asarray(value_returns).reshape(1, m)
+            values = xp.dot(self.Wv, a2) + self.bv
+            value_error = values - value_returns
+            value_loss = float(xp.mean(0.5 * value_error ** 2))
+
+            dzv = value_coef * value_error
+            value_gradients = {
+                "Wv": (1.0 / m) * xp.dot(dzv, a2.T),
+                "bv": (1.0 / m) * xp.sum(dzv, axis=1, keepdims=True),
+            }
+            da2 = da2 + xp.dot(self.Wv.T, dzv)
+        elif value_returns is not None:
+            raise ValueError(
+                "value_returns were provided, but the value head is disabled."
+            )
+
         dz2 = da2 * self.relu_derivative(self.cache["Z2"])
         dW2 = (1.0 / m) * xp.dot(dz2, a1.T)
         db2 = (1.0 / m) * xp.sum(dz2, axis=1, keepdims=True)
@@ -158,6 +224,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             "W3": dW3,
             "b3": db3,
         }
+        gradients.update(value_gradients)
 
         grad_norm = float(xp.sqrt(sum(xp.sum(grad ** 2) for grad in gradients.values())))
         grad_clipped = False
@@ -176,4 +243,5 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             "grad_norm": grad_norm,
             "grad_clipped": grad_clipped,
             "applied_grad_norm": applied_grad_norm,
+            "value_loss": value_loss,
         }

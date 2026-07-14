@@ -8,6 +8,7 @@ Run from the repository root with:
 
 import csv
 import json
+import os
 import sys
 import tempfile
 from itertools import combinations
@@ -21,14 +22,19 @@ if str(ROOT) not in sys.path:
 
 from agents.encoder import DominoEncoder
 from agents.heuristic_agent import StrategicAgent
-from agents.nn import GPU_ENABLED
+from agents.neural_agent import NeuralAgent
+from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
+from agents.random_neural_agent import RandomNeuralAgent
 from agents.rl_agent import RLAgent, TrajectoryStep
 from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import (
+    CANONICAL_AGENTS,
+    LEGACY_ARTIFACT_NAMES,
+    create_agent,
+    remove_legacy_artifacts,
     save_csv,
-    summarize_first_stock_draw_expansions,
-    summarize_first_stock_draw_turns,
 )
+from diagnostics.evaluate import diagnostic_plan
 from middleware.domino_engine import DominoEngine, infer_dead_suits
 from middleware.middleware import GameManager
 from middleware.opponent_model import (
@@ -54,7 +60,17 @@ from training.self_play import (
     _event_reward_for_action,
     _finish_episode_with_rewards,
     _reward_signal_summary,
+    parse_args as parse_self_play_args,
 )
+from training.training_loop import (
+    DEFAULT_EARLY_STOPPING_PATIENCE,
+    DEFAULT_LR_DECAY_FACTOR,
+    DEFAULT_WEIGHT_DECAY,
+    MAX_SUPERVISED_CHECKPOINTS,
+    _prune_supervised_checkpoints,
+    parse_args as parse_supervised_args,
+)
+from run_pipeline import _build_config, parse_args as parse_pipeline_args
 
 from math import comb, factorial
 
@@ -111,7 +127,14 @@ def _masked_action_probability(network, x_batch, legal_mask, action_index):
     return float(_to_numpy(masked_policy[action_index, 0]))
 
 
-def _small_policy_network(input_size=4, hidden1_size=5, hidden2_size=3, output_size=56, learning_rate=0.1):
+def _small_policy_network(
+    input_size=4,
+    hidden1_size=5,
+    hidden2_size=3,
+    output_size=56,
+    learning_rate=0.1,
+    use_value_head=False,
+):
     """Build a deterministic tiny policy network without invoking backend RNG."""
     network = PolicyNetwork.__new__(PolicyNetwork)
     network.lr = learning_rate
@@ -121,6 +144,10 @@ def _small_policy_network(input_size=4, hidden1_size=5, hidden2_size=3, output_s
     network.b2 = xp.zeros((hidden2_size, 1))
     network.W3 = xp.zeros((output_size, hidden2_size))
     network.b3 = xp.zeros((output_size, 1))
+    network.use_value_head = use_value_head
+    if use_value_head:
+        network.Wv = xp.zeros((1, hidden2_size))
+        network.bv = xp.zeros((1, 1))
     network.cache = {}
     return network
 
@@ -160,6 +187,38 @@ def test_encoder_accepts_list_tiles_from_json():
     encoder = DominoEncoder()
 
     assert encoder._action_index(([0, 6], 1)) == encoder._action_index(((0, 6), 1))
+
+
+def test_neural_agents_skip_network_for_single_option_tile_play():
+    """Forced tile plays must bypass inference for trained and random policies."""
+    only_action = ((6, 6), 0)
+
+    for agent in (
+        NeuralAgent(NetworkThatMustNotRun()),
+        RandomNeuralAgent(NetworkThatMustNotRun()),
+    ):
+        assert agent.choose_move({}, [only_action]) == only_action
+
+
+def test_supervised_checkpoint_retention_keeps_latest_ten():
+    """Archival checkpoint pruning must preserve only the newest ten files."""
+    with tempfile.TemporaryDirectory() as folder:
+        checkpoint_dir = Path(folder)
+        for index in range(MAX_SUPERVISED_CHECKPOINTS + 3):
+            path = checkpoint_dir / f"domino_sl_epoch_{index:04d}_val_1.0000.npz"
+            path.write_bytes(b"checkpoint")
+            os.utime(path, (index + 1, index + 1))
+
+        unrelated = checkpoint_dir / "notes.txt"
+        unrelated.write_text("keep", encoding="utf-8")
+
+        removed = _prune_supervised_checkpoints(checkpoint_dir)
+        remaining = sorted(checkpoint_dir.glob("domino_sl_epoch_*.npz"))
+
+        assert len(removed) == 3
+        assert len(remaining) == MAX_SUPERVISED_CHECKPOINTS
+        assert remaining[0].name.startswith("domino_sl_epoch_0003_")
+        assert unrelated.exists()
 
 
 def test_engine_requires_highest_opening_double_when_present():
@@ -207,6 +266,158 @@ def test_game_manager_training_history_uses_compact_engine_state():
     assert "visual_chain" not in row["state"]
     assert "current_player_initial_hand" in row["state"]
     assert "current_player_drawn_tiles" in row["state"]
+
+
+def test_supervised_training_transfers_only_host_minibatches_to_backend():
+    """Keep full supervised arrays on the host and transfer bounded batches."""
+    network = SupervisedNeuralNetwork(
+        input_size=4,
+        hidden1_size=5,
+        hidden2_size=3,
+        output_size=2,
+        learning_rate=0.01,
+        random_seed=7,
+    )
+    x_train = host_np.ones((4, 5), dtype=float)
+    y_train = host_np.zeros((2, 5), dtype=float)
+    y_train[0, :] = 1.0
+
+    transferred_shapes = []
+    original_to_backend = network._to_backend
+
+    def track_transfer(array):
+        transferred_shapes.append(array.shape)
+        return original_to_backend(array)
+
+    network._to_backend = track_transfer
+    network.train(
+        x_train,
+        y_train,
+        epochs=1,
+        batch_size=2,
+        quiet=True,
+    )
+
+    assert isinstance(x_train, host_np.ndarray)
+    assert isinstance(y_train, host_np.ndarray)
+    assert transferred_shapes
+    assert max(shape[1] for shape in transferred_shapes) == 2
+    assert network.cache["X"].shape == (4, 1)
+    assert isinstance(network.cache["X"], xp.ndarray)
+
+
+def test_supervised_weight_decay_regularizes_weights_but_not_biases():
+    """Apply the configured L2 term only to trainable weight matrices."""
+    common_args = {
+        "input_size": 4,
+        "hidden1_size": 5,
+        "hidden2_size": 3,
+        "output_size": 2,
+        "learning_rate": 0.01,
+        "random_seed": 11,
+    }
+    plain = SupervisedNeuralNetwork(**common_args)
+    regularized = SupervisedNeuralNetwork(**common_args, weight_decay=0.2)
+    x_batch = host_np.ones((4, 3), dtype=float)
+    y_batch = host_np.zeros((2, 3), dtype=float)
+    y_batch[0, :] = 1.0
+
+    initial_weights = {
+        name: _to_numpy(getattr(regularized, name)).copy()
+        for name in ("W1", "W2", "W3")
+    }
+    plain.forward(x_batch)
+    plain.backward(y_batch)
+    regularized.forward(x_batch)
+    regularized.backward(y_batch)
+
+    for name in ("W1", "W2", "W3"):
+        expected = (
+            _to_numpy(getattr(plain, name))
+            - common_args["learning_rate"] * 0.2 * initial_weights[name]
+        )
+        assert host_np.allclose(_to_numpy(getattr(regularized, name)), expected)
+
+    for name in ("b1", "b2", "b3"):
+        assert host_np.allclose(
+            _to_numpy(getattr(regularized, name)),
+            _to_numpy(getattr(plain, name)),
+        )
+
+
+def test_supervised_early_stopping_and_lr_decay_are_opt_in():
+    """Stop and decay only after repeated non-improving validation checks."""
+    network = SupervisedNeuralNetwork(
+        input_size=4,
+        hidden1_size=5,
+        hidden2_size=3,
+        output_size=2,
+        learning_rate=0.01,
+        random_seed=13,
+    )
+    x = host_np.ones((4, 5), dtype=float)
+    y = host_np.zeros((2, 5), dtype=float)
+    y[0, :] = 1.0
+    network._batched_validation_loss = lambda *_args, **_kwargs: 1.0
+
+    history = network.train(
+        x,
+        y,
+        x_val=x,
+        y_val=y,
+        epochs=50,
+        batch_size=2,
+        quiet=True,
+        early_stopping_patience=2,
+        lr_decay_factor=0.5,
+    )
+
+    assert len(history) == 21
+    assert abs(network.lr - 0.0025) < 1e-12
+
+
+def test_supervised_regularization_cli_defaults_and_shortcuts():
+    """Keep every optional SL control disabled unless its flag is present."""
+    defaults = parse_supervised_args([])
+    assert defaults.weight_decay == 0.0
+    assert defaults.early_stopping is None
+    assert defaults.lr_decay is None
+
+    enabled = parse_supervised_args([
+        "--weight-decay",
+        "--early-stopping",
+        "--lr-decay",
+    ])
+    assert enabled.weight_decay == DEFAULT_WEIGHT_DECAY
+    assert enabled.early_stopping == DEFAULT_EARLY_STOPPING_PATIENCE
+    assert enabled.lr_decay == DEFAULT_LR_DECAY_FACTOR
+
+    custom = parse_supervised_args([
+        "--weight-decay",
+        "0.0005",
+        "--early-stopping",
+        "8",
+        "--lr-decay",
+        "0.8",
+    ])
+    assert custom.weight_decay == 0.0005
+    assert custom.early_stopping == 8
+    assert custom.lr_decay == 0.8
+
+    pipeline = parse_pipeline_args([
+        "small",
+        "--weight-decay",
+        "--early-stopping",
+        "7",
+        "--lr-decay",
+        "0.6",
+        "--value-head",
+    ])
+    assert pipeline.scale == "small"
+    assert pipeline.weight_decay == DEFAULT_WEIGHT_DECAY
+    assert pipeline.early_stopping == 7
+    assert pipeline.lr_decay == 0.6
+    assert pipeline.value_head
 
 
 def test_exact_opponent_probabilities_match_initial_hypergeometric_formula():
@@ -578,6 +789,45 @@ def test_rl_agent_saves_legal_mask_for_real_decision():
     assert step.local_reward == 0.0
 
 
+def test_rl_evaluation_modes_separate_sampling_from_trajectory_storage():
+    state = _base_probability_state()
+    legal_actions = [((0, 0), 0), ((0, 1), 0)]
+    stochastic = RLAgent(UniformPolicyNetwork(), mode="stochastic_evaluation")
+    stochastic.opponent_model = FixedStrategicOpponentModel([0.5] * 7)
+
+    def choose_second(_probabilities, actions):
+        action = actions[1]
+        return action, stochastic.encoder._action_index(action)
+
+    def trajectory_mask_must_not_run(_actions):
+        raise AssertionError("Evaluation must not build a trajectory mask.")
+
+    stochastic.encoder.sample_action = choose_second
+    stochastic.encoder.policy_action_mask = trajectory_mask_must_not_run
+
+    assert stochastic.choose_move(state, legal_actions) == legal_actions[1]
+    assert stochastic.trajectory == []
+
+    deterministic = RLAgent(UniformPolicyNetwork(), mode="evaluation")
+    deterministic.opponent_model = FixedStrategicOpponentModel([0.5] * 7)
+    deterministic.encoder.sample_action = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("Deterministic evaluation must not sample.")
+    )
+    deterministic.encoder.decode_output = lambda _probabilities, actions: actions[0]
+
+    assert deterministic.choose_move(
+        _base_probability_state(), legal_actions
+    ) == legal_actions[0]
+    assert deterministic.trajectory == []
+
+    try:
+        RLAgent(UniformPolicyNetwork(), mode="unknown")
+    except ValueError as exc:
+        assert "Unknown RLAgent mode" in str(exc)
+    else:
+        raise AssertionError("Expected invalid RLAgent modes to be rejected.")
+
+
 def test_policy_gradient_updates_only_legal_policy_biases():
     network = _small_policy_network(output_size=DominoEncoder.ACTION_SIZE)
     x_batch = xp.ones((4, 1))
@@ -757,6 +1007,35 @@ def test_negative_reward_decreases_chosen_masked_probability():
     assert after < before
 
 
+def test_optional_value_head_learns_reward_baseline():
+    network = _small_policy_network(use_value_head=True)
+    network.b1 = xp.ones_like(network.b1)
+    network.b2 = xp.ones_like(network.b2)
+    x_batch = xp.ones((4, 1))
+    legal_mask = xp.zeros((56, 1))
+    legal_mask[3, 0] = 1.0
+    legal_mask[8, 0] = 1.0
+    returns = xp.ones((1, 1))
+
+    values_before = network.predict_values(x_batch)
+    advantages = returns - values_before
+    metrics = network.backward_policy_gradient(
+        action_indices=[3],
+        policy_rewards=advantages,
+        legal_masks=legal_mask,
+        entropy_coef=0.0,
+        clip_grad_norm=None,
+        value_returns=returns,
+        value_coef=0.5,
+    )
+    values_after = network.predict_values(x_batch)
+
+    assert float(_to_numpy(values_before[0, 0])) == 0.0
+    assert float(_to_numpy(values_after[0, 0])) > 0.0
+    assert abs(metrics["value_loss"] - 0.5) < 1e-12
+    assert host_np.any(_to_numpy(network.Wv) != 0.0)
+
+
 def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
     network = _small_policy_network(learning_rate=0.01)
 
@@ -780,8 +1059,34 @@ def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
         )
         loaded = PolicyNetwork.load(legacy_path)
 
+        value_network = _small_policy_network(
+            learning_rate=0.01,
+            use_value_head=True,
+        )
+        value_network.Wv[:] = 0.25
+        value_network.bv[:] = -0.10
+        value_path = Path(folder) / "value_policy.npz"
+        value_network.save(value_path)
+        value_saved = host_np.load(value_path)
+        assert set(value_saved.files) == {
+            "W1", "b1", "W2", "b2", "W3", "b3", "Wv", "bv"
+        }
+
+        value_loaded = PolicyNetwork.load(value_path, use_value_head=True)
+        policy_only_loaded = PolicyNetwork.load(value_path)
+
     assert not hasattr(loaded, "Wv")
     assert loaded.W1.shape == network.W1.shape
+    assert value_loaded.use_value_head
+    assert host_np.allclose(_to_numpy(value_loaded.Wv), 0.25)
+    assert host_np.allclose(_to_numpy(value_loaded.bv), -0.10)
+    assert not policy_only_loaded.use_value_head
+    assert not hasattr(policy_only_loaded, "Wv")
+
+
+def test_value_head_cli_is_disabled_by_default():
+    assert not parse_self_play_args([]).value_head
+    assert parse_self_play_args(["--value-head"]).value_head
 
 
 def test_reward_signal_summary_classifies_rewards():
@@ -797,27 +1102,6 @@ def test_reward_signal_summary_classifies_rewards():
     assert abs(summary["neutral_pct"] - (100.0 / 3.0)) < 1e-12
     assert abs(summary["bad_pct"] - (100.0 / 3.0)) < 1e-12
     assert abs(summary["local_mean"] - (0.10 / 3.0)) < 1e-12
-
-
-def test_first_stock_draw_summary_ignores_games_without_draws():
-    games = [
-        {"first_stock_draw_turn": None},
-        {"first_stock_draw_turn": 2},
-        {"first_stock_draw_turn": 5},
-        {"first_stock_draw_turn": 5},
-    ]
-
-    summary = summarize_first_stock_draw_turns(games)
-
-    assert summary["games"] == 4
-    assert summary["games_with_stock_draw"] == 3
-    assert summary["games_without_stock_draw"] == 1
-    assert summary["stock_draw_rate"] == 0.75
-    assert summary["mean_turn"] == 4.0
-    assert summary["median_turn"] == 5.0
-    assert summary["min_turn"] == 2
-    assert summary["max_turn"] == 5
-    assert summary["turn_histogram"] == {"2": 1, "5": 2}
 
 
 def test_hybrid_switches_once_at_threshold_and_never_returns_to_slots():
@@ -914,38 +1198,6 @@ def test_terminal_history_reconstructs_the_non_advanced_final_actor():
     assert actions[1].actor == 1
 
 
-def test_hidden_draw_record_exposes_exact_raw_hand_upper_bound():
-    model = ExactOpponentModel()
-    model.update_detailed(_draw_turn_state())
-
-    record = model.hidden_draw_state_records[0]
-    assert record["turn"] == 2
-    assert record["raw_hand_upper_bound"] == comb(21, 8)
-    assert record["final_state_count"] == record["raw_hand_upper_bound"]
-    assert record["resulting_mode"] == "slots_exact"
-
-
-def test_first_stock_draw_expansion_summary_ignores_games_without_counts():
-    games = [
-        {"first_stock_draw_final_state_count": None},
-        {"first_stock_draw_final_state_count": 210},
-        {"first_stock_draw_final_state_count": 210},
-        {"first_stock_draw_final_state_count": 840},
-    ]
-
-    summary = summarize_first_stock_draw_expansions(games)
-
-    assert summary["games"] == 4
-    assert summary["games_with_count"] == 3
-    assert summary["games_without_count"] == 1
-    assert summary["count_rate"] == 0.75
-    assert summary["mean_final_state_count"] == 420.0
-    assert summary["median_final_state_count"] == 210.0
-    assert summary["min_final_state_count"] == 210
-    assert summary["max_final_state_count"] == 840
-    assert summary["final_state_count_histogram"] == {"210": 2, "840": 1}
-
-
 def test_pairwise_csv_writes_initial_hands_as_json_arrays():
     games = [
         {
@@ -953,8 +1205,6 @@ def test_pairwise_csv_writes_initial_hands_as_json_arrays():
             "agent_position": 0,
             "result": "win",
             "turns": 12,
-            "first_stock_draw_turn": 4,
-            "first_stock_draw_final_state_count": 210,
             "agent_initial_hand": [[6, 6], [0, 1]],
             "opponent_initial_hand": [[5, 5], [2, 3]],
             "agent_remaining_pips": 0,
@@ -971,17 +1221,88 @@ def test_pairwise_csv_writes_initial_hands_as_json_arrays():
 
     assert json.loads(row["agent_initial_hand"]) == [[6, 6], [0, 1]]
     assert json.loads(row["opponent_initial_hand"]) == [[5, 5], [2, 3]]
-    assert row["first_stock_draw_final_state_count"] == "210"
+    assert "first_stock_draw_turn" not in row
+    assert "first_stock_draw_final_state_count" not in row
+
+
+def test_random_neural_agent_has_reproducible_untrained_weights():
+    first = RandomNeuralAgent.create()
+    second = RandomNeuralAgent.create()
+
+    for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
+        assert host_np.array_equal(
+            _to_numpy(getattr(first.network, name)),
+            _to_numpy(getattr(second.network, name)),
+        )
+
+    assert "random_nn" in CANONICAL_AGENTS
+    assert isinstance(create_agent("random nn"), RandomNeuralAgent)
+
+
+def test_diagnostics_remove_legacy_plot_artifacts():
+    with tempfile.TemporaryDirectory() as folder:
+        output_dir = Path(folder)
+        for filename in LEGACY_ARTIFACT_NAMES:
+            (output_dir / filename).touch()
+
+        remove_legacy_artifacts(output_dir)
+
+        assert all(not (output_dir / filename).exists() for filename in LEGACY_ARTIFACT_NAMES)
+
+
+def test_diagnostic_modes_select_expected_matchups():
+    default_agents, default_matchups = diagnostic_plan("default")
+    fast_agents, fast_matchups = diagnostic_plan("fast")
+    complete_agents, complete_matchups = diagnostic_plan("complete")
+
+    assert default_agents == ("rl", "neural", "heuristic", "random")
+    assert len(default_matchups) == 10
+    assert "random_nn" not in default_agents
+    assert fast_agents == ("rl", "heuristic", "random")
+    assert fast_matchups == (("rl", "random"), ("heuristic", "random"))
+    assert complete_agents == CANONICAL_AGENTS
+    assert len(complete_matchups) == 15
+
+
+def test_pipeline_scales_select_expected_diagnostic_modes():
+    assert _build_config("small").diagnostic_mode == "fast"
+    assert _build_config("default").diagnostic_mode == "default"
+    assert _build_config("big").diagnostic_mode == "complete"
+    assert _build_config("huge").diagnostic_mode == "complete"
 
 
 def main():
     tests = [
         ("encoder action space", test_encoder_action_space_excludes_forced_actions),
         ("encoder JSON tile actions", test_encoder_accepts_list_tiles_from_json),
+        (
+            "neural forced tile skips network",
+            test_neural_agents_skip_network_for_single_option_tile_play,
+        ),
         ("opening double rule", test_engine_requires_highest_opening_double_when_present),
         ("unique game ids", test_engine_game_ids_are_unique_across_instances),
         ("dead suit inference", test_infer_dead_suits_from_draw_and_pass_history),
         ("training history shape", test_game_manager_training_history_uses_compact_engine_state),
+        (
+            "supervised host minibatch transfers",
+            test_supervised_training_transfers_only_host_minibatches_to_backend,
+        ),
+        (
+            "supervised weight decay",
+            test_supervised_weight_decay_regularizes_weights_but_not_biases,
+        ),
+        (
+            "supervised early stopping and LR decay",
+            test_supervised_early_stopping_and_lr_decay_are_opt_in,
+        ),
+        (
+            "supervised optional CLI controls",
+            test_supervised_regularization_cli_defaults_and_shortcuts,
+        ),
+        (
+            "supervised checkpoint retention",
+            test_supervised_checkpoint_retention_keeps_latest_ten,
+        ),
         (
             "exact probability initialization",
             test_exact_opponent_probabilities_match_initial_hypergeometric_formula,
@@ -1011,6 +1332,10 @@ def main():
         ),
         ("RL forced actions skip network", test_rl_agent_skips_network_for_forced_actions),
         ("RL trajectory legal mask", test_rl_agent_saves_legal_mask_for_real_decision),
+        (
+            "RL stochastic and deterministic evaluation",
+            test_rl_evaluation_modes_separate_sampling_from_trajectory_storage,
+        ),
         ("masked policy gradient", test_policy_gradient_updates_only_legal_policy_biases),
         ("invalid policy mask", test_policy_gradient_rejects_single_action_mask),
         ("decayed event reward exponents", test_decayed_event_reward_exponents),
@@ -1030,9 +1355,10 @@ def main():
             "negative reward gradient",
             test_negative_reward_decreases_chosen_masked_probability,
         ),
+        ("optional value baseline", test_optional_value_head_learns_reward_baseline),
         ("policy checkpoint keys", test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys),
+        ("value head CLI", test_value_head_cli_is_disabled_by_default),
         ("reward signal summary", test_reward_signal_summary_classifies_rewards),
-        ("first stock draw summary", test_first_stock_draw_summary_ignores_games_without_draws),
         (
             "hybrid one-way threshold switch",
             test_hybrid_switches_once_at_threshold_and_never_returns_to_slots,
@@ -1049,12 +1375,14 @@ def main():
             "terminal actor reconstruction",
             test_terminal_history_reconstructs_the_non_advanced_final_actor,
         ),
-        ("hidden draw upper bound", test_hidden_draw_record_exposes_exact_raw_hand_upper_bound),
-        (
-            "first stock draw expansion summary",
-            test_first_stock_draw_expansion_summary_ignores_games_without_counts,
-        ),
         ("pairwise CSV initial hands", test_pairwise_csv_writes_initial_hands_as_json_arrays),
+        ("random neural baseline", test_random_neural_agent_has_reproducible_untrained_weights),
+        ("legacy diagnostic cleanup", test_diagnostics_remove_legacy_plot_artifacts),
+        ("diagnostic mode matchups", test_diagnostic_modes_select_expected_matchups),
+        (
+            "pipeline diagnostic modes",
+            test_pipeline_scales_select_expected_diagnostic_modes,
+        ),
     ]
 
     for name, fn in tests:

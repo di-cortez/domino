@@ -12,15 +12,8 @@ class StateRenderer:
         self._pivot_key = None
 
     def _tile_key(self, info):
-        if "id" in info:
-            return ("id", info["id"])
-
-        # Backward compatibility with older generated visual-chain snapshots.
-        if "tile_id" in info:
-            return ("tile_id", info["tile_id"])
-
-        first, second = info["tile"]
-        return ("tile", min(first, second), max(first, second))
+        """Return the history-based id assigned by ``visual_chain_from_state``."""
+        return info["id"]
 
     def get_pivot_index(self, visual_chain):
         if not visual_chain:

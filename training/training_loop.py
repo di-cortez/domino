@@ -5,8 +5,10 @@ draw, pass, and single-option tile-play records are skipped because those turns
 do not require a neural decision.
 """
 
+import argparse
 import json
 import os
+from pathlib import Path
 import time
 
 import numpy as np
@@ -28,9 +30,13 @@ except ImportError:
 
 EPOCHS = 1000
 BATCH_SIZE = 1024
+DEFAULT_WEIGHT_DECAY = 0.0001
+DEFAULT_EARLY_STOPPING_PATIENCE = 5
+DEFAULT_LR_DECAY_FACTOR = 0.5
 
 CHECKPOINT_EVERY = 10
 CHECKPOINT_DIR = "models/supervised_checkpoints"
+MAX_SUPERVISED_CHECKPOINTS = 10
 ENCODED_CACHE_FILE = "dataset/supervised_dataset_encoded.npz"
 ENCODED_FEATURE_VERSION = "opponent_suit_presence_v1"
 
@@ -38,6 +44,28 @@ ENCODED_FEATURE_VERSION = "opponent_suit_presence_v1"
 def to_backend_array(matrix):
     """Convert a NumPy array loaded from disk to the active backend."""
     return cp.array(matrix)
+
+
+def _prune_supervised_checkpoints(
+    checkpoint_dir=CHECKPOINT_DIR,
+    keep_count=MAX_SUPERVISED_CHECKPOINTS,
+):
+    """Delete older archival checkpoints and return the removed paths."""
+    if keep_count < 1:
+        raise ValueError("keep_count must be at least one.")
+
+    checkpoint_paths = list(
+        Path(checkpoint_dir).glob("domino_sl_epoch_*.npz")
+    )
+    checkpoint_paths.sort(
+        key=lambda path: (path.stat().st_mtime_ns, path.name),
+        reverse=True,
+    )
+
+    removed_paths = checkpoint_paths[keep_count:]
+    for path in removed_paths:
+        path.unlink()
+    return removed_paths
 
 
 def _normalize_action(action):
@@ -207,8 +235,15 @@ def train_supervised(
     cache_file=ENCODED_CACHE_FILE,
     quiet=False,
     progress_callback=None,
+    weight_decay=0.0,
+    early_stopping_patience=None,
+    lr_decay_factor=None,
 ):
-    """Train the supervised policy and return a compact run summary."""
+    """Train the supervised policy and return a compact run summary.
+
+    Regularization, early stopping, and learning-rate decay are opt-in. The
+    default call keeps a fixed learning rate and runs every requested epoch.
+    """
     start_time = time.time()
 
     if not quiet:
@@ -223,10 +258,13 @@ def train_supervised(
     train_indices = indices[:train_count]
     validation_indices = indices[train_count:]
 
-    x_train = cp.array(x_full[:, train_indices])
-    y_train = cp.array(y_full[:, train_indices])
-    x_val = cp.array(x_full[:, validation_indices])
-    y_val = cp.array(y_full[:, validation_indices])
+    # Keep complete splits in host memory. SupervisedNeuralNetwork transfers
+    # only the current train/validation mini-batch to CuPy when a GPU is active.
+    x_train = x_full[:, train_indices]
+    y_train = y_full[:, train_indices]
+    x_val = x_full[:, validation_indices]
+    y_val = y_full[:, validation_indices]
+    del x_full, y_full, indices, train_indices, validation_indices
     if not quiet:
         print(f"Split complete: {x_train.shape[1]} train | {x_val.shape[1]} validation")
 
@@ -236,6 +274,7 @@ def train_supervised(
         hidden2_size=128,
         output_size=len(encoder.all_actions),
         learning_rate=0.005,
+        weight_decay=weight_decay,
     )
 
     if os.path.exists(weights_file):
@@ -300,6 +339,7 @@ def train_supervised(
 
         np.savez(checkpoint_file, **weights_payload)
         np.savez(weights_file, **weights_payload)
+        removed_checkpoints = _prune_supervised_checkpoints(CHECKPOINT_DIR)
 
         now = time.time()
         checkpoint_elapsed = now - last_checkpoint_time["value"]
@@ -310,6 +350,12 @@ def train_supervised(
                 f"  -> Checkpoint saved to {checkpoint_file} "
                 f"(time since previous checkpoint: {format_duration(checkpoint_elapsed)})."
             )
+            if removed_checkpoints:
+                print(
+                    "  -> Removed "
+                    f"{len(removed_checkpoints)} older supervised checkpoint(s); "
+                    f"keeping the latest {MAX_SUPERVISED_CHECKPOINTS}."
+                )
             print(f"  -> Active supervised model updated at {weights_file}.")
         
     def save_if_best(epoch, validation_loss, current_network):
@@ -331,7 +377,7 @@ def train_supervised(
 
     if not quiet:
         print("\nStarting supervised training...")
-    network.train(
+    loss_history = network.train(
         x_train,
         y_train,
         x_val=x_val,
@@ -341,6 +387,8 @@ def train_supervised(
         on_validation=save_if_best,
         progress_callback=progress_callback,
         quiet=quiet,
+        early_stopping_patience=early_stopping_patience,
+        lr_decay_factor=lr_decay_factor,
     )
 
     os.makedirs(os.path.dirname(weights_file), exist_ok=True)
@@ -372,19 +420,105 @@ def train_supervised(
         print(f"Total elapsed time: {format_duration(elapsed_time)}.")
 
     return {
-        "epochs": epochs,
+        "epochs": len(loss_history),
+        "requested_epochs": epochs,
         "batch_size": batch_size,
         "total_examples": total_examples,
         "train_examples": x_train.shape[1],
         "validation_examples": x_val.shape[1],
         "best_validation_loss": best_state["validation_loss"],
+        "weight_decay": weight_decay,
+        "early_stopping_patience": early_stopping_patience,
+        "lr_decay_factor": lr_decay_factor,
+        "final_learning_rate": network.lr,
         "weights_file": weights_file,
         "duration_s": elapsed_time,
     }
 
 
-def main():
-    train_supervised()
+def _nonnegative_float(value):
+    """Parse a non-negative command-line floating-point value."""
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
+def _positive_int(value):
+    """Parse a positive command-line integer value."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
+def _decay_factor(value):
+    """Parse a multiplicative decay factor strictly between zero and one."""
+    parsed = float(value)
+    if not 0.0 < parsed < 1.0:
+        raise argparse.ArgumentTypeError("value must be greater than 0 and less than 1")
+    return parsed
+
+
+def add_optional_training_arguments(parser):
+    """Add opt-in SL regularization and scheduling flags to ``parser``."""
+    group = parser.add_argument_group("optional supervised-training controls")
+    group.add_argument(
+        "--weight-decay",
+        nargs="?",
+        type=_nonnegative_float,
+        const=DEFAULT_WEIGHT_DECAY,
+        default=0.0,
+        metavar="COEFFICIENT",
+        help=(
+            "Enable L2 weight decay. When passed without a value, use "
+            f"{DEFAULT_WEIGHT_DECAY}."
+        ),
+    )
+    group.add_argument(
+        "--early-stopping",
+        nargs="?",
+        type=_positive_int,
+        const=DEFAULT_EARLY_STOPPING_PATIENCE,
+        default=None,
+        metavar="PATIENCE",
+        help=(
+            "Stop after this many validation checks without improvement. "
+            f"When passed without a value, use {DEFAULT_EARLY_STOPPING_PATIENCE}."
+        ),
+    )
+    group.add_argument(
+        "--lr-decay",
+        nargs="?",
+        type=_decay_factor,
+        const=DEFAULT_LR_DECAY_FACTOR,
+        default=None,
+        metavar="FACTOR",
+        help=(
+            "Multiply the learning rate by this factor after each failed "
+            "validation check. When omitted, keep the learning rate fixed."
+        ),
+    )
+    return parser
+
+
+def parse_args(argv=None):
+    """Return optional supervised-training controls from the command line."""
+    parser = argparse.ArgumentParser(
+        description="Train the supervised-learning domino policy.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    add_optional_training_arguments(parser)
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    train_supervised(
+        weight_decay=args.weight_decay,
+        early_stopping_patience=args.early_stopping,
+        lr_decay_factor=args.lr_decay,
+    )
 
 
 if __name__ == "__main__":

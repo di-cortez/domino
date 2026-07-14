@@ -49,7 +49,14 @@ class RLAgent(Agent):
     multipliers outside the agent.
     """
 
+    VALID_MODES = {"training", "stochastic_evaluation", "evaluation"}
+
     def __init__(self, network, mode="training"):
+        if mode not in self.VALID_MODES:
+            raise ValueError(
+                f"Unknown RLAgent mode {mode!r}; expected one of "
+                f"{sorted(self.VALID_MODES)}."
+            )
         self.network = network
         self.mode = mode
         self.encoder = DominoEncoder()
@@ -81,21 +88,21 @@ class RLAgent(Agent):
         if hasattr(probabilities, "get"):
             probabilities = probabilities.get()
 
-        legal_mask = self.encoder.policy_action_mask(policy_actions)
-        if GPU_ENABLED:
-            legal_mask = xp.array(legal_mask)
-
-        if self.mode == "training":
+        if self.mode in {"training", "stochastic_evaluation"}:
             move, action_index = self.encoder.sample_action(probabilities, policy_actions)
-            self.trajectory.append(
-                TrajectoryStep(
-                    x=x,
-                    action_index=action_index,
-                    legal_mask=legal_mask,
-                    decision_turn=int(state["turn"]),
-                    option_count=len(policy_actions),
+            if self.mode == "training":
+                legal_mask = self.encoder.policy_action_mask(policy_actions)
+                if GPU_ENABLED:
+                    legal_mask = xp.array(legal_mask)
+                self.trajectory.append(
+                    TrajectoryStep(
+                        x=x,
+                        action_index=action_index,
+                        legal_mask=legal_mask,
+                        decision_turn=int(state["turn"]),
+                        option_count=len(policy_actions),
+                    )
                 )
-            )
             return move
 
         return self.encoder.decode_output(probabilities, policy_actions)

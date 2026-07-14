@@ -2,6 +2,8 @@
 
 Interactive two-player domino simulator with a 3D OpenGL board, a rule-based
 heuristic agent, a supervised neural agent, and an RL agent refined by self-play.
+An untrained neural baseline is also available for measuring whether learned
+checkpoints improve on their random initialization.
 
 The project is organized so the game rules, agents, training code, diagnostics,
 and visual UI can be changed independently.
@@ -28,6 +30,7 @@ and visual UI can be changed independently.
 | `agents/encoder.py` | Shared state/action encoder: 168 input features and 56 tile-play policy actions. Forced draw/pass actions bypass the network. |
 | `agents/heuristic_agent.py` | `StrategicAgent`, the rule-based teacher used for dataset generation and benchmark evaluation. |
 | `agents/neural_agent.py` | `NeuralAgent`, which loads supervised weights and plays with action masking. |
+| `agents/random_neural_agent.py` | `RandomNeuralAgent`, a reproducible untrained neural-policy baseline. |
 | `agents/rl_agent.py` | `RLAgent`, which plays a `PolicyNetwork` in training or evaluation mode. |
 | `agents/nn.py` | NumPy/CuPy MLP for supervised learning. CuPy is selected automatically when available. |
 | `agents/rl_nn.py` | Policy-only network with masked REINFORCE gradients for self-play RL. |
@@ -73,7 +76,7 @@ Default players are:
 - Player 1: `Heuristic`
 
 Use the in-game menu (`M`) to cycle either player through `Neural`,
-`Heuristic`, `Random`, `Human`, and `RL (self-play)`.
+`Random NN`, `Heuristic`, `Random`, `Human`, and `RL (self-play)`.
 
 ## Visual Controls
 
@@ -101,10 +104,11 @@ During a human turn:
 ## Neural Encoding Update
 
 The current neural policy uses a 168-feature public-information vector and a
-56-action output space. The network only chooses tile plays: 28 possible tiles on
-the left end and 28 possible tiles on the right end. Draw and pass are forced by
-the rules engine, so `NeuralAgent` and `RLAgent` return them directly when they
-are the only legal action.
+56-action output space. The network only chooses real tile-play decisions: 28
+possible tiles on the left end and 28 possible tiles on the right end. Draw,
+pass, and single-option tile plays are forced by the rules engine, so
+`NeuralAgent`, `RandomNeuralAgent`, and `RLAgent` return them directly without a
+network call.
 
 The input vector includes current hand, played tiles, normalized play turn, who
 played each tile, board ends, hand sizes, stock size, draw/pass counts, and
@@ -137,11 +141,14 @@ python run_pipeline.py big
 python run_pipeline.py huge
 ```
 
-With no argument, the runner uses the normal defaults: 30,000 dataset games,
+With no argument, the runner uses the normal defaults: 10,000 dataset games,
 1,000 supervised epochs, 1,000 RL iterations, and 10,000 diagnostic games per
 matchup. `small` uses one fifth of those counts, `big` uses five times those
 counts, and `huge` uses twenty times those counts. RL keeps 40 games per
-iteration so the scale changes total RL iterations linearly.
+iteration so the scale changes total RL iterations linearly. Pipeline diagnostic
+modes are selected automatically: `small` uses `fast` (2 matchups), the default
+pipeline uses `default` (10), and `big`/`huge` use `complete` (15). Diagnostic
+game counts are always specified per matchup.
 
 Generate supervised data:
 
@@ -157,8 +164,13 @@ Train the supervised neural agent:
 python -m training.training_loop
 ```
 
-Supervised training uses mini-batches of 1024 examples and reports startup
-memory, checkpoint-to-checkpoint time, and total elapsed time.
+Supervised training keeps the complete encoded dataset in RAM and transfers
+only mini-batches of 1024 examples to the GPU. It reports startup memory,
+checkpoint-to-checkpoint time, and total elapsed time.
+
+Weight decay, early stopping, and learning-rate decay are optional. The default
+keeps the learning rate fixed; see `training/README.md` for the three flags and
+their configurable values. The same flags work with `run_pipeline.py`.
 
 Refine the RL agent:
 
@@ -171,11 +183,17 @@ elapsed time. Iteration logs omit entropy and show reward mean/min/max,
 good/neutral/bad percentages, local reward mean, draw/pass event counts, wins,
 pool size, and gradient norm.
 
-The RL update is policy-only REINFORCE. It applies local draw/pass events to all
+The learner samples actions and stores its trajectory. Frozen self-play pool
+opponents also sample actions but do not store trajectories. Checkpoint
+evaluation, diagnostics, and UI play remain deterministic.
+
+The default RL update is policy-only REINFORCE. It applies local draw/pass events to all
 earlier real decisions with `EVENT_REWARD_DECAY = 0.90`, using
 `k = event_turn - decision_turn - 1`, then adds the uniform terminal result and
-multiplies by the number of legal tile-play options. The RL checkpoint contains
-only `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`.
+multiplies by the number of legal tile-play options. Add `--value-head` to
+`training.self_play` or `run_pipeline.py` to learn `V(s)` and train the policy
+from `reward - V(s)` advantages. Default checkpoints contain only policy arrays;
+value-head checkpoints also contain `Wv` and `bv`.
 
 Generated files:
 
@@ -188,16 +206,21 @@ Generated files:
 
 ## Diagnostics
 
-Run the upper-triangle all-pairs diagnostic matrix. The default is 10,000 games
-per matchup:
+Run diagnostics with 10,000 games per selected matchup. With no mode argument,
+the historical four-agent upper triangle runs 10 matchups:
 
 ```bash
 python -m diagnostics.evaluate
-python -m diagnostics.evaluate -n 5000
+python -m diagnostics.evaluate fast
+python -m diagnostics.evaluate complete
+python -m diagnostics.evaluate complete -n 5000
 ```
 
-Supported names are `rl`, `neural`, `heuristic`, and `random`. The old `greedy`
-baseline is no longer part of diagnostics.
+Supported names are `rl`, `neural`, `random_nn`, `heuristic`, and `random`.
+`random_nn` uses the supervised network architecture with reproducible random
+initial weights and no checkpoint. The old `greedy` baseline is no longer part
+of diagnostics. The `random_nn` agent enters the automatic matrix only in
+`complete` mode, but remains available to the pairwise helper in every mode.
 
 The full diagnostic writes to `diagnostics/results/all_pairs/` unless `--output`
 is provided. Pair evaluation uses a progress bar, and both pair summaries and

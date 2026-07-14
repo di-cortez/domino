@@ -1,12 +1,14 @@
-"""Direct REINFORCE self-play for the domino policy network.
+"""REINFORCE self-play with an optional learned value baseline.
 
 The policy controls only real tile-play decisions. Draw, pass, and single-option
 tile-play turns are forced by the rules engine and do not enter the learner
 trajectory. Local draw/pass events are distributed to all earlier real
 decisions with temporal decay, then combined with a uniform terminal reward and
-an option-count multiplier.
+an option-count multiplier. Direct reward updates are the default; a value head
+can optionally convert those rewards into reward-minus-value advantages.
 """
 
+import argparse
 from collections import deque
 from dataclasses import dataclass
 import random
@@ -51,6 +53,7 @@ CHOICE_MULTIPLIER_4_OPTIONS = 5.0
 CHOICE_MULTIPLIER_5_PLUS_OPTIONS = 10.0
 
 REWARD_ZERO_EPSILON = 1e-8
+VALUE_COEF = 0.5
 
 
 @dataclass
@@ -241,7 +244,7 @@ def _collect_self_play_steps(network, pool):
     opponent_network = random.choice(pool) if pool else network
 
     learner = RLAgent(network, mode="training")
-    opponent = RLAgent(opponent_network, mode="evaluation")
+    opponent = RLAgent(opponent_network, mode="stochastic_evaluation")
     agents = [None, None]
     agents[learner_position] = learner
     agents[1 - learner_position] = opponent
@@ -294,10 +297,20 @@ def _checkpoint_matches_encoder(network):
     )
 
 
-def _load_initial_network(learning_rate, sl_weights_path, rl_weights_path, quiet=False):
+def _load_initial_network(
+    learning_rate,
+    sl_weights_path,
+    rl_weights_path,
+    quiet=False,
+    use_value_head=False,
+):
     """Load a compatible RL checkpoint or initialize from compatible SL weights."""
     try:
-        network = PolicyNetwork.load(rl_weights_path, learning_rate=learning_rate)
+        network = PolicyNetwork.load(
+            rl_weights_path,
+            learning_rate=learning_rate,
+            use_value_head=use_value_head,
+        )
         if not _checkpoint_matches_encoder(network):
             raise ValueError(
                 f"RL checkpoint {rl_weights_path} has shape "
@@ -310,7 +323,11 @@ def _load_initial_network(learning_rate, sl_weights_path, rl_weights_path, quiet
     except FileNotFoundError:
         pass
 
-    network = PolicyNetwork.load_from_sl(sl_weights_path, learning_rate=learning_rate)
+    network = PolicyNetwork.load_from_sl(
+        sl_weights_path,
+        learning_rate=learning_rate,
+        use_value_head=use_value_head,
+    )
     if not _checkpoint_matches_encoder(network):
         raise ValueError(
             f"SL checkpoint {sl_weights_path} has shape "
@@ -338,13 +355,17 @@ def train(
     rl_weights_path=RL_WEIGHTS,
     quiet=False,
     progress_callback=None,
+    use_value_head=False,
+    value_coef=VALUE_COEF,
 ):
-    """Train the policy with direct REINFORCE and decayed local rewards.
+    """Train with direct REINFORCE or an optional learned value baseline.
 
     ``training_opponent`` can be ``"self_play"`` for a pool of frozen previous
     policy snapshots, or ``"heuristic"`` for direct play against StrategicAgent.
     The update uses the reward assigned to each real decision directly, with no
-    extra prediction target beyond the masked policy.
+    extra prediction target beyond the masked policy. With
+    ``use_value_head=True``, the same finalized policy rewards become value
+    targets and the policy update uses ``reward - V(s)`` advantages.
     """
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
@@ -356,6 +377,7 @@ def train(
         sl_weights_path,
         rl_weights_path,
         quiet=quiet,
+        use_value_head=use_value_head,
     )
 
     pool = None
@@ -401,12 +423,22 @@ def train(
             dtype=float,
         ).reshape(1, -1)
 
-        network.forward(x_batch)
+        value_returns = None
+        policy_signal = policy_rewards
+        if use_value_head:
+            values = network.predict_values(x_batch)
+            policy_signal = policy_rewards - values
+            value_returns = policy_rewards
+        else:
+            network.forward(x_batch)
+
         metrics = network.backward_policy_gradient(
             action_indices,
-            policy_rewards,
+            policy_signal,
             legal_masks=legal_masks,
             entropy_coef=entropy_coef,
+            value_returns=value_returns,
+            value_coef=value_coef,
         )
 
         if training_opponent == "self_play" and iteration % pool_interval == 0:
@@ -416,6 +448,12 @@ def train(
             reward_summary = _reward_signal_summary(batch)
             win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
             pool_suffix = f" | pool: {len(pool)}" if training_opponent == "self_play" else ""
+            value_suffix = ""
+            if use_value_head:
+                value_suffix = (
+                    f" | value loss: {metrics['value_loss']:.3f}"
+                    f" | advantage mean: {float(xp.mean(policy_signal)):+.3f}"
+                )
             print(
                 f"Iteration {iteration} | decisions: {len(batch)} | "
                 "reward mean/min/max: "
@@ -431,7 +469,7 @@ def train(
                 f"{event_totals.opponent_draws}/{event_totals.opponent_passes}, "
                 f"self D/P: {event_totals.learner_draws}/{event_totals.learner_passes} | "
                 f"wins {win_label}: {wins}/{games_per_iteration}{pool_suffix} | "
-                f"grad: {_gradient_log_text(metrics)}"
+                f"grad: {_gradient_log_text(metrics)}{value_suffix}"
             )
 
         if iteration % checkpoint_interval == 0:
@@ -461,10 +499,41 @@ def train(
         "iterations": iterations,
         "games_per_iteration": games_per_iteration,
         "training_opponent": training_opponent,
+        "use_value_head": use_value_head,
+        "value_coef": value_coef if use_value_head else None,
         "rl_weights_path": rl_weights_path,
         "duration_s": elapsed_time,
     }
 
 
+def add_optional_rl_arguments(parser):
+    """Add the opt-in learned value baseline flag to ``parser``."""
+    group = parser.add_argument_group("optional reinforcement-learning controls")
+    group.add_argument(
+        "--value-head",
+        action="store_true",
+        help=(
+            "Train a linear V(s) baseline and use reward-minus-value policy "
+            "advantages. Direct REINFORCE remains the default."
+        ),
+    )
+    return parser
+
+
+def parse_args(argv=None):
+    """Parse optional self-play training controls."""
+    parser = argparse.ArgumentParser(
+        description="Train the domino policy with reinforcement learning.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    add_optional_rl_arguments(parser)
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    train(use_value_head=args.value_head)
+
+
 if __name__ == "__main__":
-    train()
+    main()

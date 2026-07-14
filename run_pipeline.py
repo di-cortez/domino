@@ -21,7 +21,7 @@ except ImportError:
     tqdm = None
 
 ROOT = Path(__file__).resolve().parent
-BASE_DATASET_GAMES = 30000
+BASE_DATASET_GAMES = 10000
 BASE_SUPERVISED_EPOCHS = 1000
 BASE_RL_ITERATIONS = 1000
 BASE_RL_GAMES_PER_ITERATION = 40
@@ -32,6 +32,13 @@ SCALE_FACTORS = {
     "small": 0.2,
     "big": 5.0,
     "huge": 20.0,
+}
+
+DIAGNOSTIC_MODE_BY_SCALE = {
+    "small": "fast",
+    "default": "default",
+    "big": "complete",
+    "huge": "complete",
 }
 
 
@@ -46,6 +53,7 @@ class PipelineConfig:
     rl_iterations: int
     rl_games_per_iteration: int
     diagnostic_games: int
+    diagnostic_mode: str
 
 
 def _scaled_count(base_count, scale_factor):
@@ -64,6 +72,7 @@ def _build_config(scale_name):
         rl_iterations=_scaled_count(BASE_RL_ITERATIONS, scale_factor),
         rl_games_per_iteration=BASE_RL_GAMES_PER_ITERATION,
         diagnostic_games=_scaled_count(BASE_DIAGNOSTIC_GAMES, scale_factor),
+        diagnostic_mode=DIAGNOSTIC_MODE_BY_SCALE[scale_name],
     )
 
 
@@ -129,7 +138,12 @@ def _run_dataset(config):
     )
 
 
-def _run_supervised_training(config):
+def _run_supervised_training(
+    config,
+    weight_decay=0.0,
+    early_stopping_patience=None,
+    lr_decay_factor=None,
+):
     """Train the supervised policy with compact epoch progress."""
     training_loop = _silent_import("training.training_loop")
 
@@ -142,15 +156,19 @@ def _run_supervised_training(config):
             batch_size=training_loop.BATCH_SIZE,
             quiet=True,
             progress_callback=progress,
+            weight_decay=weight_decay,
+            early_stopping_patience=early_stopping_patience,
+            lr_decay_factor=lr_decay_factor,
         ),
         lambda summary: (
+            f"{summary['epochs']}/{summary['requested_epochs']} epochs, "
             f"best validation loss {summary['best_validation_loss']:.4f}, "
             f"{summary['total_examples']} examples"
         ),
     )
 
 
-def _run_rl_training(config):
+def _run_rl_training(config, use_value_head=False):
     """Run reinforcement-learning self-play with compact iteration progress."""
     self_play = importlib.import_module("training.self_play")
 
@@ -163,23 +181,31 @@ def _run_rl_training(config):
             games_per_iteration=config.rl_games_per_iteration,
             quiet=True,
             progress_callback=progress,
+            use_value_head=use_value_head,
         ),
         lambda summary: (
             f"{summary['iterations']} iterations x "
             f"{summary['games_per_iteration']} games, "
+            f"value head {'on' if summary['use_value_head'] else 'off'}, "
             f"weights {summary['rl_weights_path']}"
         ),
     )
 
 
+def _diagnostic_workload(config):
+    """Return the diagnostics module, matchup count, and aggregate game count."""
+    evaluate = importlib.import_module("diagnostics.evaluate")
+    _agents, matchups = evaluate.diagnostic_plan(config.diagnostic_mode)
+    matchup_count = len(matchups)
+    return evaluate, matchup_count, matchup_count * config.diagnostic_games
+
+
 def _run_diagnostics(config):
     """Run the all-pairs diagnostics matrix with one aggregate progress bar."""
-    evaluate = importlib.import_module("diagnostics.evaluate")
-    pair_count = len(evaluate.CANONICAL_AGENTS) * (len(evaluate.CANONICAL_AGENTS) + 1) // 2
-    total_games = pair_count * config.diagnostic_games
+    evaluate, matchup_count, total_games = _diagnostic_workload(config)
 
     return _run_stage(
-        "Diagnostics",
+        f"Diagnostics ({matchup_count} matchups)",
         total_games,
         "game",
         lambda progress: evaluate.run_all_pairs(
@@ -187,15 +213,18 @@ def _run_diagnostics(config):
             output_dir=evaluate.DEFAULT_OUTPUT_DIR,
             quiet=True,
             progress_callback=progress,
+            diagnostic_mode=config.diagnostic_mode,
         ),
         lambda summary: (
-            f"{summary['evaluated_matchups']} matchups, "
-            f"{summary['game_count_per_matchup']} games per matchup"
+            f"{summary['evaluated_matchups']} matchups x "
+            f"{summary['game_count_per_matchup']} games = "
+            f"{summary['evaluated_matchups'] * summary['game_count_per_matchup']} "
+            "total games"
         ),
     )
 
 
-def parse_args():
+def parse_args(argv=None):
     """Parse the optional workload scale."""
     parser = argparse.ArgumentParser(
         description=(
@@ -214,7 +243,11 @@ def parse_args():
             "and 'huge' is 20x larger than the defaults."
         ),
     )
-    return parser.parse_args()
+    training_loop = _silent_import("training.training_loop")
+    training_loop.add_optional_training_arguments(parser)
+    self_play = importlib.import_module("training.self_play")
+    self_play.add_optional_rl_arguments(parser)
+    return parser.parse_args(argv)
 
 
 def main():
@@ -225,19 +258,29 @@ def main():
         sys.path.insert(0, str(ROOT))
 
     config = _build_config(args.scale)
+    _evaluate, diagnostic_matchups, diagnostic_total_games = (
+        _diagnostic_workload(config)
+    )
     print(
         "Pipeline scale "
         f"{config.scale_name} ({config.scale_factor:g}x): "
         f"{config.dataset_games} dataset games, "
         f"{config.supervised_epochs} supervised epochs, "
         f"{config.rl_iterations} RL iterations, "
-        f"{config.diagnostic_games} diagnostics games per matchup."
+        f"{config.diagnostic_mode} diagnostics with "
+        f"{config.diagnostic_games} games per matchup "
+        f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
 
     start_time = time.time()
     dataset_summary = _run_dataset(config)
-    supervised_summary = _run_supervised_training(config)
-    rl_summary = _run_rl_training(config)
+    supervised_summary = _run_supervised_training(
+        config,
+        weight_decay=args.weight_decay,
+        early_stopping_patience=args.early_stopping,
+        lr_decay_factor=args.lr_decay,
+    )
+    rl_summary = _run_rl_training(config, use_value_head=args.value_head)
     diagnostics_summary = _run_diagnostics(config)
     elapsed_time = time.time() - start_time
 
@@ -246,7 +289,13 @@ def main():
     print(f"Dataset: {dataset_summary['output_file']}")
     print(f"Supervised weights: {supervised_summary['weights_file']}")
     print(f"RL weights: {rl_summary['rl_weights_path']}")
-    print(f"Diagnostics: {diagnostics_summary['evaluated_matchups']} matchups in diagnostics/results/all_pairs/")
+    print(
+        "Diagnostics: "
+        f"{diagnostics_summary['diagnostic_mode']} mode, "
+        f"{diagnostics_summary['evaluated_matchups']} matchups x "
+        f"{diagnostics_summary['game_count_per_matchup']} games in "
+        "diagnostics/results/all_pairs/"
+    )
 
 
 if __name__ == "__main__":

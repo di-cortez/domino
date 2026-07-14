@@ -19,7 +19,9 @@ from agents.heuristic_agent import StrategicAgent
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
 from ui.game_controller import GameController
+from ui.hud import HudRenderer
 from ui.scene_renderer import visual_chain_from_state
+from ui.visual_main import _window_caption
 
 
 def _new_controller(agent_types=None, interval_ms=1000):
@@ -335,6 +337,43 @@ def test_visual_chain_is_rebuilt_from_board_history():
     ]
 
 
+def test_probability_hud_reuses_persistent_models_and_snapshot_cache():
+    class CountingOpponentModel:
+        def __init__(self):
+            self.calls = 0
+            self.reset_calls = 0
+
+        def update(self, _state):
+            self.calls += 1
+            return [0.5] * 7
+
+        def reset(self):
+            self.reset_calls += 1
+
+    _engine, controller = _new_controller()
+    hud = HudRenderer()
+    model = CountingOpponentModel()
+    hud._opponent_models[0] = model
+    state = controller.current_state()
+
+    first = hud._cached_probabilities_for_player(state, 0)
+    second = hud._cached_probabilities_for_player(state, 0)
+
+    next_state = dict(state)
+    next_state["turn"] = state.get("turn", 0) + 1
+    third = hud._cached_probabilities_for_player(next_state, 0)
+
+    assert first == second == third == [0.5] * 7
+    assert model.calls == 2
+    assert model.reset_calls == 0
+    assert hud._opponent_models[0] is model
+
+
+def test_window_caption_tracks_selected_agents():
+    assert _window_caption(["neural", "heuristic"]) == "Domino - Neural vs Heuristic"
+    assert _window_caption(["human", "rl"]) == "Domino - Human vs RL (self-play)"
+
+
 def test_menu_cycle_updates_manager_agent():
     _engine, controller = _new_controller()
 
@@ -404,6 +443,21 @@ def test_restart_after_game_over_is_immediate():
     assert engine.turn == 0
     assert not controller.game_over
     assert not controller._restart_confirmation_active()
+
+
+def test_terminal_visual_snapshot_preserves_game_over_metadata():
+    engine, controller = _new_controller()
+    engine.game_over = True
+    engine.winner = 1
+    controller.history = []
+    controller.history_info = []
+    controller.index = 0
+
+    controller._capture_state({"winner": 1})
+    snapshot = controller.current_state()
+
+    assert snapshot["game_over"] is True
+    assert snapshot["winner"] == 1
 
 
 def test_ai_vs_ai_keeps_hands_visible():
@@ -486,11 +540,20 @@ def main():
         ("human pass rejection", test_human_pass_rejects_when_draw_is_available),
         ("draw notification history", test_draw_notification_follows_history_cursor),
         ("visual chain rebuild", test_visual_chain_is_rebuilt_from_board_history),
+        (
+            "persistent probability HUD",
+            test_probability_hud_reuses_persistent_models_and_snapshot_cache,
+        ),
+        ("dynamic window caption", test_window_caption_tracks_selected_agents),
         ("menu updates manager agent", test_menu_cycle_updates_manager_agent),
         ("speed bounds", test_speed_has_bounds),
         ("restart asks and expires", test_restart_requires_confirmation_and_expires),
         ("second R confirms restart", test_second_r_confirms_restart),
         ("restart after game over", test_restart_after_game_over_is_immediate),
+        (
+            "terminal snapshot metadata",
+            test_terminal_visual_snapshot_preserves_game_over_metadata,
+        ),
         ("AI vs AI visibility", test_ai_vs_ai_keeps_hands_visible),
         ("human vs AI visibility", test_human_vs_ai_visibility),
         ("human vs human visibility", test_human_vs_human_shows_only_current_hand),

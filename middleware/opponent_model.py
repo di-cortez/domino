@@ -769,8 +769,6 @@ class HybridExactOpponentModel:
         )
         self._current_update_snapshots: list[ProbabilitySnapshot] = []
         self._current_update_traces: list[OpponentTurnTrace] = []
-        self._hidden_draw_state_records: list[dict] = []
-        self._switch_records: list[dict] = []
         self._switched_to_mu = False
         self._switched_this_update = False
         self._switch_turn: int | None = None
@@ -792,8 +790,6 @@ class HybridExactOpponentModel:
         self._new_snapshots.clear()
         self._current_update_snapshots = []
         self._current_update_traces = []
-        self._hidden_draw_state_records = []
-        self._switch_records = []
         self._switched_to_mu = False
         self._switched_this_update = False
         self._switch_turn = None
@@ -937,15 +933,6 @@ class HybridExactOpponentModel:
                     )
 
                 self._belief.opponent_hidden_draw()
-                self._hidden_draw_state_records.append({
-                    "turn": entry.history_action_index,
-                    "public_turn": entry.public_turn,
-                    "raw_hand_upper_bound": self._belief.raw_hand_upper_bound,
-                    # Compatibility name used by existing diagnostics files.
-                    "final_state_count": self._belief.raw_hand_upper_bound,
-                    "profile_count": self.profile_count,
-                    "resulting_mode": self.mode,
-                })
                 trace.after_draw = self._record_snapshot(
                     entry,
                     ProbabilityStage.AFTER_DRAW,
@@ -1069,12 +1056,6 @@ class HybridExactOpponentModel:
         self._switch_upper_bound = int(upper_bound)
         self._switch_mu_state_count = len(weights)
         self._switch_conversion_time_ms = conversion_time_ms
-        self._switch_records.append({
-            "public_turn": self._switch_turn,
-            "upper_bound": self._switch_upper_bound,
-            "mu_state_count": self._switch_mu_state_count,
-            "conversion_time_ms": self._switch_conversion_time_ms,
-        })
 
     def suit_probabilities(self) -> list[float]:
         if self._belief is None:
@@ -1156,27 +1137,6 @@ class HybridExactOpponentModel:
     @property
     def turn_trace_history(self) -> list[OpponentTurnTrace]:
         return list(self._turn_trace_history)
-
-    @property
-    def hidden_draw_state_records(self) -> list[dict]:
-        return [dict(record) for record in self._hidden_draw_state_records]
-
-    @property
-    def switch_records(self) -> list[dict]:
-        return [dict(record) for record in self._switch_records]
-
-    @property
-    def compact_hidden_draw_state_records(self) -> list[dict]:
-        """Deprecated compatibility view for existing diagnostics consumers."""
-        return self.hidden_draw_state_records
-
-    @property
-    def compact_to_enumerated_state_counts(self) -> list[int]:
-        """Deprecated compatibility view of exact slot-to-mu switch bounds."""
-        if self._switch_upper_bound is None:
-            return []
-        return [self._switch_upper_bound]
-
 
 # Stable public names used by agents, UI code, and older imports.
 ExactOpponentModel = HybridExactOpponentModel

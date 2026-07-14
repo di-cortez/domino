@@ -75,7 +75,7 @@ def render_scene(state):
 
     draw_table()
 
-    visual_chain = state.get("visual_chain") or visual_chain_from_state(state)
+    visual_chain = visual_chain_from_state(state)
 
     if not visual_chain:
         return

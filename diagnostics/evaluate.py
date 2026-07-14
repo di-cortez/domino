@@ -1,15 +1,17 @@
 """
-Run the upper-triangle diagnostics matrix for all supported domino agents.
+Run a selected diagnostics matrix for the supported domino agents.
 
 This is the high-level diagnostics entry point. It intentionally delegates each
 single matchup to ``diagnostics.pairwise`` so the two-agent evaluator remains the
 only place that knows how to play games, summarize them, and write per-matchup
-artifacts.
+artifacts. The optional mode controls whether the run uses a focused two-pair
+check, the historical four-agent matrix, or the complete five-agent matrix.
 """
 
 import argparse
 import csv
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -18,16 +20,24 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diagnostics.pairwise import CANONICAL_AGENTS, DEFAULT_GAME_COUNT, run_pairwise
+from diagnostics.pairwise import (
+    CANONICAL_AGENTS,
+    DEFAULT_GAME_COUNT,
+    remove_legacy_artifacts,
+    run_pairwise,
+)
 from diagnostics.plots import (
     plot_aggregate_choice_opportunities,
-    plot_aggregate_first_stock_draws,
-    plot_aggregate_first_stock_draw_final_state_counts,
     plot_all_pairs_table,
 )
 from utils.runtime_status import format_duration, print_memory_report
 
 DEFAULT_OUTPUT_DIR = ROOT / "diagnostics" / "results" / "all_pairs"
+DEFAULT_DIAGNOSTIC_MODE = "default"
+DIAGNOSTIC_MODES = ("default", "fast", "complete")
+DEFAULT_MATRIX_AGENTS = ("rl", "neural", "heuristic", "random")
+FAST_MATRIX_AGENTS = ("rl", "heuristic", "random")
+FAST_MATCHUPS = (("rl", "random"), ("heuristic", "random"))
 
 
 def _weights_for(agent_name, rl_weights=None, neural_weights=None):
@@ -45,8 +55,6 @@ def _matrix_rows(summaries):
     for summary in summaries:
         counts = summary["counts"]
         rates = summary["rates"]
-        first_draw = summary.get("first_stock_draw", {})
-        first_draw_expansion = summary.get("first_stock_draw_expansion", {})
         rows.append({
             "agent": summary["agent"],
             "opponent": summary["opponent"],
@@ -58,24 +66,6 @@ def _matrix_rows(summaries):
             "draw_rate": rates["draw"],
             "loss_rate": rates["loss"],
             "mean_turns": summary["mean_turns"],
-            "games_with_stock_draw": first_draw.get("games_with_stock_draw", 0),
-            "stock_draw_rate": first_draw.get("stock_draw_rate", 0.0),
-            "mean_first_stock_draw_turn": first_draw.get("mean_turn"),
-            "median_first_stock_draw_turn": first_draw.get("median_turn"),
-            "first_stock_draw_final_state_count_games": first_draw_expansion.get(
-                "games_with_count",
-                0,
-            ),
-            "first_stock_draw_final_state_count_rate": first_draw_expansion.get(
-                "count_rate",
-                0.0,
-            ),
-            "mean_first_stock_draw_final_state_count": (
-                first_draw_expansion.get("mean_final_state_count")
-            ),
-            "median_first_stock_draw_final_state_count": (
-                first_draw_expansion.get("median_final_state_count")
-            ),
         })
     return rows
 
@@ -93,16 +83,8 @@ def _save_matrix_csv(rows, path):
         "draw_rate",
         "loss_rate",
         "mean_turns",
-        "games_with_stock_draw",
-        "stock_draw_rate",
-        "mean_first_stock_draw_turn",
-        "median_first_stock_draw_turn",
-        "first_stock_draw_final_state_count_games",
-        "first_stock_draw_final_state_count_rate",
-        "mean_first_stock_draw_final_state_count",
-        "median_first_stock_draw_final_state_count",
     ]
-    with open(path, "w", newline="") as f:
+    with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
@@ -115,6 +97,25 @@ def _selected_pairs(agents):
         for agent_index, agent in enumerate(agents)
         for opponent in agents[agent_index:]
     ]
+
+
+def diagnostic_plan(mode=DEFAULT_DIAGNOSTIC_MODE):
+    """Return the displayed agents and evaluated pairs for a diagnostics mode."""
+    if mode == "fast":
+        return FAST_MATRIX_AGENTS, FAST_MATCHUPS
+    if mode == "default":
+        return DEFAULT_MATRIX_AGENTS, tuple(_selected_pairs(DEFAULT_MATRIX_AGENTS))
+    if mode == "complete":
+        return CANONICAL_AGENTS, tuple(_selected_pairs(CANONICAL_AGENTS))
+    raise ValueError(f"Unknown diagnostics mode {mode!r}. Options: {DIAGNOSTIC_MODES}")
+
+
+def _remove_stale_pair_outputs(pairs_dir, pairs):
+    """Remove pair folders that do not belong to the selected diagnostics mode."""
+    selected_folders = {f"{agent}_vs_{opponent}" for agent, opponent in pairs}
+    for path in pairs_dir.iterdir():
+        if path.is_dir() and path.name not in selected_folders:
+            shutil.rmtree(path)
 
 
 def _aggregate_choice_opportunities(summaries):
@@ -153,126 +154,8 @@ def _aggregate_choice_opportunities(summaries):
     return totals
 
 
-def _histogram_value_at_rank(histogram, rank):
-    """Return the turn value at a 1-based cumulative histogram rank."""
-    cumulative = 0
-    for turn, count in sorted(histogram.items(), key=lambda item: int(item[0])):
-        cumulative += count
-        if cumulative >= rank:
-            return int(turn)
-    return None
-
-
-def _median_from_histogram(histogram, count):
-    """Return the median turn represented by a sparse integer histogram."""
-    if count == 0:
-        return None
-    if count % 2:
-        return float(_histogram_value_at_rank(histogram, count // 2 + 1))
-
-    left = _histogram_value_at_rank(histogram, count // 2)
-    right = _histogram_value_at_rank(histogram, count // 2 + 1)
-    return (left + right) / 2.0
-
-
-def _aggregate_first_stock_draws(summaries):
-    """Accumulate first-stock-draw stats across all evaluated matchups."""
-    totals = {
-        "matchups": len(summaries),
-        "games": 0,
-        "games_with_stock_draw": 0,
-        "games_without_stock_draw": 0,
-        "stock_draw_rate": 0.0,
-        "mean_turn": None,
-        "median_turn": None,
-        "min_turn": None,
-        "max_turn": None,
-        "turn_histogram": {},
-    }
-
-    for summary in summaries:
-        first_draw = summary.get("first_stock_draw", {})
-        totals["games"] += first_draw.get("games", summary.get("game_count", 0))
-        totals["games_with_stock_draw"] += first_draw.get("games_with_stock_draw", 0)
-        totals["games_without_stock_draw"] += first_draw.get("games_without_stock_draw", 0)
-
-        for turn, count in first_draw.get("turn_histogram", {}).items():
-            histogram = totals["turn_histogram"]
-            histogram[turn] = histogram.get(turn, 0) + count
-
-    if totals["games"]:
-        totals["stock_draw_rate"] = totals["games_with_stock_draw"] / totals["games"]
-
-    histogram = dict(sorted(totals["turn_histogram"].items(), key=lambda item: int(item[0])))
-    totals["turn_histogram"] = histogram
-    drawn_games = totals["games_with_stock_draw"]
-    if drawn_games:
-        totals["mean_turn"] = (
-            sum(int(turn) * count for turn, count in histogram.items()) / drawn_games
-        )
-        totals["median_turn"] = _median_from_histogram(histogram, drawn_games)
-        totals["min_turn"] = int(next(iter(histogram)))
-        totals["max_turn"] = int(next(reversed(histogram)))
-
-    return totals
-
-
-def _aggregate_first_stock_draw_expansions(summaries):
-    """Accumulate first-stock-draw raw hand upper bounds across matchups."""
-    totals = {
-        "matchups": len(summaries),
-        "games": 0,
-        "games_with_count": 0,
-        "games_without_count": 0,
-        "count_rate": 0.0,
-        "mean_final_state_count": None,
-        "median_final_state_count": None,
-        "min_final_state_count": None,
-        "max_final_state_count": None,
-        "final_state_count_histogram": {},
-    }
-
-    for summary in summaries:
-        expansion_info = summary.get("first_stock_draw_expansion", {})
-        totals["games"] += expansion_info.get("games", summary.get("game_count", 0))
-        totals["games_with_count"] += expansion_info.get("games_with_count", 0)
-        totals["games_without_count"] += expansion_info.get(
-            "games_without_count",
-            0,
-        )
-
-        for value, count in expansion_info.get("final_state_count_histogram", {}).items():
-            histogram = totals["final_state_count_histogram"]
-            histogram[value] = histogram.get(value, 0) + count
-
-    if totals["games"]:
-        totals["count_rate"] = totals["games_with_count"] / totals["games"]
-
-    histogram = dict(
-        sorted(
-            totals["final_state_count_histogram"].items(),
-            key=lambda item: int(item[0]),
-        )
-    )
-    totals["final_state_count_histogram"] = histogram
-    expansion_count = totals["games_with_count"]
-    if expansion_count:
-        totals["mean_final_state_count"] = (
-            sum(int(value) * count for value, count in histogram.items())
-            / expansion_count
-        )
-        totals["median_final_state_count"] = _median_from_histogram(
-            histogram,
-            expansion_count,
-        )
-        totals["min_final_state_count"] = int(next(iter(histogram)))
-        totals["max_final_state_count"] = int(next(reversed(histogram)))
-
-    return totals
-
-
 def run_all_pairs(
-    agents=CANONICAL_AGENTS,
+    agents=None,
     game_count=DEFAULT_GAME_COUNT,
     output_dir=DEFAULT_OUTPUT_DIR,
     seed=None,
@@ -281,18 +164,32 @@ def run_all_pairs(
     generate_pair_plots=True,
     quiet=False,
     progress_callback=None,
+    diagnostic_mode=DEFAULT_DIAGNOSTIC_MODE,
 ):
-    """Evaluate the upper-triangle agent matrix and write aggregate artifacts."""
+    """Evaluate one diagnostics mode and write its aggregate artifacts.
+
+    Passing ``agents`` retains support for custom upper-triangle matrices. When
+    omitted, ``diagnostic_mode`` selects one of the standard plans.
+    """
+    if agents is None:
+        agents, pairs = diagnostic_plan(diagnostic_mode)
+        report_mode = diagnostic_mode
+    else:
+        agents = tuple(agents)
+        pairs = tuple(_selected_pairs(agents))
+        report_mode = "custom"
+
     output_dir = Path(output_dir)
     pairs_dir = output_dir / "pairs"
     output_dir.mkdir(parents=True, exist_ok=True)
     pairs_dir.mkdir(parents=True, exist_ok=True)
+    remove_legacy_artifacts(output_dir)
+    _remove_stale_pair_outputs(pairs_dir, pairs)
 
     if not quiet:
         print_memory_report("All-pairs diagnostics startup memory")
 
     summaries = []
-    pairs = _selected_pairs(agents)
     total_pairs = len(pairs)
     completed_games = 0
     start_time = time.time()
@@ -330,22 +227,19 @@ def run_all_pairs(
     rows = _matrix_rows(summaries)
     _save_matrix_csv(rows, output_dir / "all_pairs_matrix.csv")
     choice_opportunities = _aggregate_choice_opportunities(summaries)
-    first_stock_draw = _aggregate_first_stock_draws(summaries)
-    first_stock_draw_expansion = _aggregate_first_stock_draw_expansions(summaries)
 
     report = {
         "choice_opportunities": choice_opportunities,
-        "first_stock_draw": first_stock_draw,
-        "first_stock_draw_expansion": first_stock_draw_expansion,
+        "diagnostic_mode": report_mode,
         "agents": list(agents),
         "game_count_per_matchup": game_count,
         "evaluated_matchups": total_pairs,
-        "skipped_reverse_matchups": len(agents) * len(agents) - total_pairs,
+        "unevaluated_matrix_matchups": len(agents) * len(agents) - total_pairs,
         "seed": seed,
         "duration_s": time.time() - start_time,
         "summaries": summaries,
     }
-    with open(output_dir / "all_pairs_summary.json", "w") as f:
+    with open(output_dir / "all_pairs_summary.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
     plot_all_pairs_table(summaries, agents, output_dir / "all_pairs_table.png")
@@ -353,21 +247,23 @@ def run_all_pairs(
         choice_opportunities,
         output_dir / "choice_opportunities.png",
     )
-    plot_aggregate_first_stock_draws(
-        first_stock_draw,
-        output_dir / "first_stock_draw_turns.png",
-    )
-    plot_aggregate_first_stock_draw_final_state_counts(
-        first_stock_draw_expansion,
-        output_dir / "first_stock_draw_final_state_counts.png",
-    )
     return report
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate the upper-triangle matrix of supported domino agents.",
+        description="Evaluate a selected matrix of supported domino agents.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=DIAGNOSTIC_MODES,
+        default=DEFAULT_DIAGNOSTIC_MODE,
+        help=(
+            "Diagnostic scope: default uses the historical 10 matchups, fast "
+            "uses 2 focused matchups, and complete uses all 15 matchups."
+        ),
     )
     parser.add_argument(
         "-n",
@@ -394,19 +290,19 @@ def main():
         rl_weights=args.rl_weights,
         neural_weights=args.neural_weights,
         generate_pair_plots=not args.no_pair_plots,
+        diagnostic_mode=args.mode,
     )
 
     print("\n===== All-pairs diagnostics complete =====")
+    print(f"Mode: {report['diagnostic_mode']}")
     print(f"Agents: {', '.join(report['agents'])}")
     print(f"Games per matchup: {report['game_count_per_matchup']}")
     print(f"Evaluated matchups: {report['evaluated_matchups']}")
-    print(f"Skipped reverse matchups: {report['skipped_reverse_matchups']}")
+    print(f"Unevaluated matrix matchups: {report['unevaluated_matrix_matchups']}")
     print(f"Elapsed time: {format_duration(report['duration_s'])}")
     print(f"Results saved in {Path(args.output)}/")
     print("  all_pairs_table.png")
     print("  choice_opportunities.png")
-    print("  first_stock_draw_turns.png")
-    print("  first_stock_draw_final_state_counts.png")
     print("  all_pairs_matrix.csv")
     print("  all_pairs_summary.json")
     print("  pairs/<agent>_vs_<opponent>/...")

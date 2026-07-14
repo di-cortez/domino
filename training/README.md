@@ -21,6 +21,18 @@ uses one fifth of the default counts, `big` uses five times the default counts,
 and `huge` uses twenty times the default counts. The scaled counts apply to
 dataset games, supervised epochs, RL iterations, and diagnostic games per
 matchup. RL games per iteration stay at 40 so the scale remains linear.
+The default dataset workload is 10,000 heuristic-vs-heuristic games.
+Diagnostics counts are per matchup, and their mode depends on pipeline scale:
+
+| Pipeline scale | Diagnostic mode | Matchups |
+|---|---|---:|
+| `small` | `fast` | 2 |
+| `default` | `default` | 10 |
+| `big` | `complete` | 15 |
+| `huge` | `complete` | 15 |
+
+For example, `small` runs 2,000 games in each of 2 matchups, for 4,000
+diagnostic games in total.
 
 | File | Purpose |
 |---|---|
@@ -60,7 +72,8 @@ python -m training.dataset_generator
 The generator records `(state, target_action)` pairs from games played by
 `StrategicAgent` against itself. Engine states are already compact and do not
 include rendering metadata. The command prints a startup RAM/GPU memory
-snapshot, shows a progress bar, and reports total elapsed time.
+snapshot, shows a progress bar, and reports total elapsed time. Its default is
+10,000 games.
 
 `StrategicAgent` now uses the exact two-player opponent model from
 `middleware/opponent_model.py`. Dataset generation is therefore slower than the
@@ -94,17 +107,63 @@ The loop:
 - encodes states and tile-play actions with `DominoEncoder`;
 - saves/loads `dataset/supervised_dataset_encoded.npz` to skip repeated JSONL encoding;
 - splits data into training and validation sets;
+- keeps the encoded dataset and both splits in NumPy host memory;
 - trains the MLP in mini-batches of 1024 examples;
 - keeps the best validation checkpoint in memory;
+- keeps only the 10 most recent archival checkpoints;
 - saves `models/domino_sl_weights.npz`.
 
-`agents/nn.py` uses CuPy automatically when it is installed. Validation loss is
-computed in batches so large datasets do not allocate a full GPU copy at once.
-The command prints startup memory, checkpoint-to-checkpoint time, and total
-elapsed time.
+`agents/nn.py` uses CuPy automatically when it is installed. Only the current
+training or validation mini-batch is transferred to the GPU; complete datasets
+are never copied into VRAM. GPU memory usage therefore stays proportional to
+the batch size rather than the number of encoded examples. The command prints
+startup memory, checkpoint-to-checkpoint time, and total elapsed time.
+Archival files in `models/supervised_checkpoints/` are pruned after every save,
+so repeated or large training runs retain at most 10 of them.
 
 The encoded cache is rebuilt automatically when the source JSONL file changes,
 the encoder input/output dimensions change, or the feature-version tag changes.
+
+### Optional SL controls
+
+The default command uses a fixed learning rate, no weight decay, and no early
+stopping. It still tracks validation loss and saves the best validation weights.
+
+Enable any control independently by adding its flag:
+
+```bash
+python -m training.training_loop --weight-decay
+python -m training.training_loop --early-stopping
+python -m training.training_loop --lr-decay
+```
+
+Passing a flag without a value uses these defaults:
+
+| Flag | Enabled behavior | Default value when enabled |
+|---|---|---:|
+| `--weight-decay [COEFFICIENT]` | Adds L2 decay to `W1`, `W2`, and `W3`, but not biases | `0.0001` |
+| `--early-stopping [PATIENCE]` | Stops after this many validation checks without improvement | `5` |
+| `--lr-decay [FACTOR]` | Multiplies the learning rate after each failed validation check | `0.5` |
+
+Validation is checked every 10 epochs. The options can be combined and can
+receive explicit values:
+
+```bash
+python -m training.training_loop \
+  --weight-decay 0.00005 \
+  --early-stopping 8 \
+  --lr-decay 0.7
+```
+
+Reported training and validation losses remain cross-entropy values, allowing
+loss curves to be compared with runs that do not enable weight decay.
+
+`run_pipeline.py` accepts the same flags and forwards them only to supervised
+training:
+
+```bash
+python run_pipeline.py small --weight-decay --early-stopping --lr-decay
+```
 
 ## Self-Play RL
 
@@ -122,6 +181,17 @@ Default behavior:
 - periodically evaluate deterministic RL play against `StrategicAgent`;
 - save `models/domino_rl_weights.npz`.
 
+The learner uses `RLAgent(..., mode="training")`: it samples from the masked
+policy and stores trajectory steps. Frozen pool opponents use
+`mode="stochastic_evaluation"`: they sample from their masked policies but do
+not build training masks or store trajectories. This exposes the learner to
+more of each snapshot's policy distribution without retaining unused opponent
+experience.
+
+Checkpoint evaluation against `StrategicAgent`, diagnostics, and the UI use
+`mode="evaluation"`, which always selects the highest-probability legal action
+and stores no trajectory. Their results therefore avoid action-sampling noise.
+
 The command prints startup memory, checkpoint-to-checkpoint time, and total
 elapsed time. Iteration logs omit entropy and report the direct reward signal
 sent to the policy gradient: reward mean/min/max, good/neutral/bad percentages,
@@ -133,12 +203,31 @@ calling the network or saving a trajectory step. Each saved step carries the
 legal-action mask, the decision turn, and the number of legal tile-play options.
 Sampling and gradient calculation use the same masked policy distribution.
 
-`PolicyNetwork` uses direct REINFORCE and is policy-only. RL checkpoints contain
-only the six policy weights shared with supervised checkpoints: `W1`, `b1`,
-`W2`, `b2`, `W3`, and `b3`. Old RL checkpoints with extra arrays still load, but
-only those six policy weights are used. For clean comparisons, archive the
-previous RL checkpoint and start the next long RL run from
-`models/domino_sl_weights.npz`.
+`PolicyNetwork` uses direct policy-only REINFORCE by default. Default RL
+checkpoints contain only the six policy weights shared with supervised
+checkpoints: `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`.
+
+Enable the optional actor-critic baseline with:
+
+```bash
+python -m training.self_play --value-head
+```
+
+This adds a linear `V(s)` head over the second hidden layer. The current
+finalized policy reward is the value target, and the masked policy update uses
+`reward - V(s)` as its advantage. The value-loss coefficient is `0.5`. In this
+mode checkpoints also contain `Wv` and `bv`.
+
+`run_pipeline.py` forwards the same flag to RL training:
+
+```bash
+python run_pipeline.py small --value-head
+```
+
+Policy-only loading ignores `Wv`/`bv`, while value-head loading initializes
+them to zero when they are absent. This permits mode changes without changing
+the policy architecture, but clean comparisons should still start from the
+same supervised checkpoint and use separately archived RL outputs.
 
 `TRAINING_OPPONENT` at the top of `self_play.py` controls the training opponent:
 

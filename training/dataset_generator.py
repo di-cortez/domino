@@ -18,6 +18,9 @@ try:
 except ImportError:
     tqdm = None
 
+DEFAULT_GAME_COUNT = 10000
+DEFAULT_OUTPUT_FILE = "dataset/supervised_dataset.jsonl"
+
 
 def _normalize_action(action):
     """Return a normalized tile-play action or None for draw/pass."""
@@ -122,4 +125,7 @@ def generate_dataset(game_count, output_file, quiet=False, progress_callback=Non
 
 
 if __name__ == "__main__":
-    generate_dataset(game_count=30000, output_file="dataset/supervised_dataset.jsonl")
+    generate_dataset(
+        game_count=DEFAULT_GAME_COUNT,
+        output_file=DEFAULT_OUTPUT_FILE,
+    )

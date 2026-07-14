@@ -30,9 +30,7 @@ When a human is playing, Left/Right select a hand tile, Up/Down switch the
 target end when legal, Enter plays, D draws, and P passes.
 """
 
-import contextlib
 import copy
-import io
 
 import pygame
 
@@ -124,6 +122,8 @@ class GameController(HandVisibilityMixin, HumanControlMixin):
         state["initial_hands"] = copy.deepcopy(full_state.get("initial_hands", []))
         state["drawn_tiles_by_player"] = copy.deepcopy(full_state.get("drawn_tiles_by_player", []))
         state["stock"] = copy.deepcopy(full_state.get("stock", []))
+        state["game_over"] = bool(full_state.get("game_over", False))
+        state["winner"] = full_state.get("winner")
 
         self.history.append(state)
         self.history_info.append(info)
@@ -275,22 +275,9 @@ class GameController(HandVisibilityMixin, HumanControlMixin):
             print(f"Game finished! Winner: player {info.get('winner')}")
             info["announced"] = True
 
-    def _play_turn_with_filtered_console(self):
-        """
-        Execute one AI turn while suppressing noisy console output.
-
-        Neural agents print legal move diagnostics that are useful during
-        demonstrations, so those lines are kept.
-        """
-        buffer = io.StringIO()
-
-        try:
-            with contextlib.redirect_stdout(buffer):
-                return self.manager.play_turn()
-        finally:
-            for line in buffer.getvalue().splitlines():
-                if "Possible" in line:
-                    print(line)
+    def _play_automatic_turn(self):
+        """Execute one non-human turn through the shared game manager."""
+        return self.manager.play_turn()
 
     def _play_next_turn(self):
         """
@@ -308,7 +295,7 @@ class GameController(HandVisibilityMixin, HumanControlMixin):
             return
 
         try:
-            done, info = self._play_turn_with_filtered_console()
+            done, info = self._play_automatic_turn()
             self._capture_state(info)
             self.index = len(self.history) - 1
             self._update_notification()

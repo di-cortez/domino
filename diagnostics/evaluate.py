@@ -279,6 +279,8 @@ def run_all_pairs(
     rl_weights=None,
     neural_weights=None,
     generate_pair_plots=True,
+    quiet=False,
+    progress_callback=None,
 ):
     """Evaluate the upper-triangle agent matrix and write aggregate artifacts."""
     output_dir = Path(output_dir)
@@ -286,16 +288,26 @@ def run_all_pairs(
     output_dir.mkdir(parents=True, exist_ok=True)
     pairs_dir.mkdir(parents=True, exist_ok=True)
 
-    print_memory_report("All-pairs diagnostics startup memory")
+    if not quiet:
+        print_memory_report("All-pairs diagnostics startup memory")
 
     summaries = []
     pairs = _selected_pairs(agents)
     total_pairs = len(pairs)
+    completed_games = 0
     start_time = time.time()
 
     for index, (agent, opponent) in enumerate(pairs, start=1):
-        print(f"\n[{index}/{total_pairs}] {agent} vs {opponent}", flush=True)
+        if not quiet:
+            print(f"\n[{index}/{total_pairs}] {agent} vs {opponent}", flush=True)
         pair_output = pairs_dir / f"{agent}_vs_{opponent}"
+
+        def pair_progress(_done, _total):
+            nonlocal completed_games
+            completed_games += 1
+            if progress_callback is not None:
+                progress_callback(completed_games, total_pairs * game_count)
+
         result = run_pairwise(
             agent,
             opponent,
@@ -309,8 +321,9 @@ def run_all_pairs(
             seed=seed,
             output_dir=pair_output,
             generate_plots=generate_pair_plots,
-            print_console_summary=True,
+            print_console_summary=not quiet,
             print_memory_summary=False,
+            progress_callback=pair_progress,
         )
         summaries.append(result["summary"])
 

@@ -294,7 +294,7 @@ def _checkpoint_matches_encoder(network):
     )
 
 
-def _load_initial_network(learning_rate, sl_weights_path, rl_weights_path):
+def _load_initial_network(learning_rate, sl_weights_path, rl_weights_path, quiet=False):
     """Load a compatible RL checkpoint or initialize from compatible SL weights."""
     try:
         network = PolicyNetwork.load(rl_weights_path, learning_rate=learning_rate)
@@ -304,7 +304,8 @@ def _load_initial_network(learning_rate, sl_weights_path, rl_weights_path):
                 f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
                 "but the current encoder expects input=168, output=56."
             )
-        print(f"Resuming RL training from {rl_weights_path}")
+        if not quiet:
+            print(f"Resuming RL training from {rl_weights_path}")
         return network
     except FileNotFoundError:
         pass
@@ -317,7 +318,8 @@ def _load_initial_network(learning_rate, sl_weights_path, rl_weights_path):
             "but the current encoder expects input=168, output=56. "
             "Regenerate the supervised dataset and retrain SL first."
         )
-    print(f"Initializing RL policy from supervised weights: {sl_weights_path}")
+    if not quiet:
+        print(f"Initializing RL policy from supervised weights: {sl_weights_path}")
     return network
 
 
@@ -334,6 +336,8 @@ def train(
     evaluation_games=200,
     sl_weights_path=SL_WEIGHTS,
     rl_weights_path=RL_WEIGHTS,
+    quiet=False,
+    progress_callback=None,
 ):
     """Train the policy with direct REINFORCE and decayed local rewards.
 
@@ -345,8 +349,14 @@ def train(
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
 
-    print_memory_report("RL self-play startup memory")
-    network = _load_initial_network(learning_rate, sl_weights_path, rl_weights_path)
+    if not quiet:
+        print_memory_report("RL self-play startup memory")
+    network = _load_initial_network(
+        learning_rate,
+        sl_weights_path,
+        rl_weights_path,
+        quiet=quiet,
+    )
 
     pool = None
     if training_opponent == "self_play":
@@ -376,6 +386,8 @@ def train(
                 wins += 1
 
         if not batch:
+            if progress_callback is not None:
+                progress_callback(iteration, iterations)
             continue
 
         x_batch = xp.hstack([sample.x for sample in batch])
@@ -400,7 +412,7 @@ def train(
         if training_opponent == "self_play" and iteration % pool_interval == 0:
             pool.append(network.clone())
 
-        if iteration % log_interval == 0:
+        if iteration % log_interval == 0 and not quiet:
             reward_summary = _reward_signal_summary(batch)
             win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
             pool_suffix = f" | pool: {len(pool)}" if training_opponent == "self_play" else ""
@@ -415,7 +427,7 @@ def train(
                 f"{reward_summary['neutral_pct']:.0f}%/"
                 f"{reward_summary['bad_pct']:.0f}% | "
                 f"local mean: {reward_summary['local_mean']:+.3f} | "
-                "events opp D/P: "
+                "opp D/P: "
                 f"{event_totals.opponent_draws}/{event_totals.opponent_passes}, "
                 f"self D/P: {event_totals.learner_draws}/{event_totals.learner_passes} | "
                 f"wins {win_label}: {wins}/{games_per_iteration}{pool_suffix} | "
@@ -428,17 +440,30 @@ def train(
             now = time.time()
             checkpoint_elapsed = now - last_checkpoint_time
             last_checkpoint_time = now
-            print(
-                f"  [checkpoint] saved {rl_weights_path} | "
-                f"time since previous checkpoint: {format_duration(checkpoint_elapsed)} | "
-                f"deterministic RL vs heuristic: {win_rate:.1%} wins, "
-                f"{draw_rate:.1%} draws ({evaluation_games} games)"
-            )
+            if not quiet:
+                print(
+                    f"  [checkpoint] saved {rl_weights_path} | "
+                    f"time since previous checkpoint: {format_duration(checkpoint_elapsed)} | "
+                    f"deterministic RL vs heuristic: {win_rate:.1%} wins, "
+                    f"{draw_rate:.1%} draws ({evaluation_games} games)"
+                )
+
+        if progress_callback is not None:
+            progress_callback(iteration, iterations)
 
     network.save(rl_weights_path)
     elapsed_time = time.time() - start_time
-    print(f"\nTraining complete. Total elapsed time: {format_duration(elapsed_time)}.")
-    print(f"Final weights: {rl_weights_path}")
+    if not quiet:
+        print(f"\nTraining complete. Total elapsed time: {format_duration(elapsed_time)}.")
+        print(f"Final weights: {rl_weights_path}")
+
+    return {
+        "iterations": iterations,
+        "games_per_iteration": games_per_iteration,
+        "training_opponent": training_opponent,
+        "rl_weights_path": rl_weights_path,
+        "duration_s": elapsed_time,
+    }
 
 
 if __name__ == "__main__":

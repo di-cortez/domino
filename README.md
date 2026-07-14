@@ -122,6 +122,21 @@ meaning. Archive those weights and retrain for clean results.
 
 ## Training Pipeline
 
+Run the complete sequence with compact progress bars:
+
+```bash
+python run_pipeline.py
+python run_pipeline.py small
+python run_pipeline.py big
+python run_pipeline.py huge
+```
+
+With no argument, the runner uses the normal defaults: 30,000 dataset games,
+1,000 supervised epochs, 1,000 RL iterations, and 10,000 diagnostic games per
+matchup. `small` uses one fifth of those counts, `big` uses five times those
+counts, and `huge` uses twenty times those counts. RL keeps 40 games per
+iteration so the scale changes total RL iterations linearly.
+
 Generate supervised data:
 
 ```bash

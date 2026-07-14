@@ -110,7 +110,18 @@ class SupervisedNeuralNetwork:
         self._release_gpu_cache()
         return total_loss / sample_count
 
-    def train(self, x_train, y_train, x_val=None, y_val=None, epochs=1500, batch_size=128, on_validation=None):
+    def train(
+        self,
+        x_train,
+        y_train,
+        x_val=None,
+        y_val=None,
+        epochs=1500,
+        batch_size=128,
+        on_validation=None,
+        progress_callback=None,
+        quiet=False,
+    ):
         """
         Train with mini-batch SGD.
 
@@ -150,6 +161,10 @@ class SupervisedNeuralNetwork:
                     if on_validation is not None:
                         on_validation(epoch, validation_loss, self)
 
-                print(f"Epoch {epoch} | training loss: {mean_loss:.4f}{validation_text}")
+                if not quiet:
+                    print(f"Epoch {epoch} | training loss: {mean_loss:.4f}{validation_text}")
+
+            if progress_callback is not None:
+                progress_callback(epoch + 1, epochs)
 
         return loss_history

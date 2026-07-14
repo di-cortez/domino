@@ -109,7 +109,7 @@ def _cache_matches(cache_data, expected_metadata):
     return True
 
 
-def _save_encoded_cache(cache_file, x, y, metadata):
+def _save_encoded_cache(cache_file, x, y, metadata, quiet=False):
     """Persist encoded supervised arrays for faster future training runs."""
     cache_dir = os.path.dirname(cache_file)
     if cache_dir:
@@ -121,10 +121,11 @@ def _save_encoded_cache(cache_file, x, y, metadata):
         Y=y,
         **metadata,
     )
-    print(f"Encoded dataset cache saved to {cache_file}.")
+    if not quiet:
+        print(f"Encoded dataset cache saved to {cache_file}.")
 
 
-def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE):
+def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE, quiet=False):
     """Load encoded ``X/Y`` arrays from cache, rebuilding when the cache is stale."""
     metadata = _dataset_metadata(file_path, encoder)
 
@@ -134,27 +135,31 @@ def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE):
                 if _cache_matches(cache_data, metadata):
                     x = cache_data["X"]
                     y = cache_data["Y"]
-                    print(f"Loaded encoded dataset cache from {cache_file}.")
-                    print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
+                    if not quiet:
+                        print(f"Loaded encoded dataset cache from {cache_file}.")
+                        print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
                     return x, y
 
-            print(f"Encoded dataset cache is stale: {cache_file}. Rebuilding.")
+            if not quiet:
+                print(f"Encoded dataset cache is stale: {cache_file}. Rebuilding.")
         except (OSError, KeyError, ValueError) as exc:
-            print(f"Could not read encoded dataset cache {cache_file}: {exc}. Rebuilding.")
+            if not quiet:
+                print(f"Could not read encoded dataset cache {cache_file}: {exc}. Rebuilding.")
 
-    x, y = load_dataset(file_path, encoder)
-    _save_encoded_cache(cache_file, x, y, metadata)
+    x, y = load_dataset(file_path, encoder, quiet=quiet)
+    _save_encoded_cache(cache_file, x, y, metadata, quiet=quiet)
     return x, y
 
 
-def load_dataset(file_path, encoder):
+def load_dataset(file_path, encoder, quiet=False):
     """Load JSONL tile-play examples into ``X`` and one-hot ``Y`` matrices."""
     x_rows = []
     y_rows = []
     skipped_draw_pass = 0
     skipped_single_option = 0
 
-    print(f"Loading dataset from {file_path}...")
+    if not quiet:
+        print(f"Loading dataset from {file_path}...")
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -187,22 +192,30 @@ def load_dataset(file_path, encoder):
 
     x = np.hstack(x_rows)
     y = np.hstack(y_rows)
-    print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
-    print(f"Skipped forced draw/pass examples: {skipped_draw_pass}")
-    print(f"Skipped single-option tile-play examples: {skipped_single_option}")
+    if not quiet:
+        print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
+        print(f"Skipped forced draw/pass examples: {skipped_draw_pass}")
+        print(f"Skipped single-option tile-play examples: {skipped_single_option}")
     return x, y
 
 
-def main():
+def train_supervised(
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    dataset_file="dataset/supervised_dataset.jsonl",
+    weights_file="models/domino_sl_weights.npz",
+    cache_file=ENCODED_CACHE_FILE,
+    quiet=False,
+    progress_callback=None,
+):
+    """Train the supervised policy and return a compact run summary."""
     start_time = time.time()
-    dataset_file = "dataset/supervised_dataset.jsonl"
-    weights_file = "models/domino_sl_weights.npz"
-    cache_file = ENCODED_CACHE_FILE
 
-    print_memory_report("Supervised training startup memory")
+    if not quiet:
+        print_memory_report("Supervised training startup memory")
 
     encoder = DominoEncoder()
-    x_full, y_full = load_or_build_dataset(dataset_file, encoder, cache_file)
+    x_full, y_full = load_or_build_dataset(dataset_file, encoder, cache_file, quiet=quiet)
 
     total_examples = x_full.shape[1]
     train_count = int(total_examples * 0.85)
@@ -214,7 +227,8 @@ def main():
     y_train = cp.array(y_full[:, train_indices])
     x_val = cp.array(x_full[:, validation_indices])
     y_val = cp.array(y_full[:, validation_indices])
-    print(f"Split complete: {x_train.shape[1]} train | {x_val.shape[1]} validation")
+    if not quiet:
+        print(f"Split complete: {x_train.shape[1]} train | {x_val.shape[1]} validation")
 
     network = SupervisedNeuralNetwork(
         input_size=DominoEncoder.VECTOR_SIZE,
@@ -225,7 +239,8 @@ def main():
     )
 
     if os.path.exists(weights_file):
-        print(f"Existing supervised model found at {weights_file}. Resuming training.")
+        if not quiet:
+            print(f"Existing supervised model found at {weights_file}. Resuming training.")
 
         weights = np.load(weights_file)
 
@@ -253,7 +268,8 @@ def main():
         network.W3 = to_backend_array(weights["W3"])
         network.b3 = to_backend_array(weights["b3"])
     else:
-        print("No existing supervised model found. Training from scratch.")
+        if not quiet:
+            print("No existing supervised model found. Training from scratch.")
         
     best_state = {"validation_loss": float("inf"), "weights": None}
     last_checkpoint_time = {"value": start_time}
@@ -289,11 +305,12 @@ def main():
         checkpoint_elapsed = now - last_checkpoint_time["value"]
         last_checkpoint_time["value"] = now
 
-        print(
-            f"  -> Checkpoint saved to {checkpoint_file} "
-            f"(time since previous checkpoint: {format_duration(checkpoint_elapsed)})."
-        )
-        print(f"  -> Active supervised model updated at {weights_file}.")
+        if not quiet:
+            print(
+                f"  -> Checkpoint saved to {checkpoint_file} "
+                f"(time since previous checkpoint: {format_duration(checkpoint_elapsed)})."
+            )
+            print(f"  -> Active supervised model updated at {weights_file}.")
         
     def save_if_best(epoch, validation_loss, current_network):
         if epoch % CHECKPOINT_EVERY == 0:
@@ -309,17 +326,21 @@ def main():
                 "W3": current_network.W3.copy(),
                 "b3": current_network.b3.copy(),
             }
-            print(f"  -> New best validation loss {validation_loss:.4f} at epoch {epoch}.")
+            if not quiet:
+                print(f"  -> New best validation loss {validation_loss:.4f} at epoch {epoch}.")
 
-    print("\nStarting supervised training...")
+    if not quiet:
+        print("\nStarting supervised training...")
     network.train(
         x_train,
         y_train,
         x_val=x_val,
         y_val=y_val,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
+        epochs=epochs,
+        batch_size=batch_size,
         on_validation=save_if_best,
+        progress_callback=progress_callback,
+        quiet=quiet,
     )
 
     os.makedirs(os.path.dirname(weights_file), exist_ok=True)
@@ -341,12 +362,29 @@ def main():
         W3=to_numpy(weights_to_save["W3"]),
         b3=to_numpy(weights_to_save["b3"]),
     )
-    print(
-        f"Model saved to {weights_file} "
-        f"(best validation loss: {best_state['validation_loss']:.4f})."
-    )
+    if not quiet:
+        print(
+            f"Model saved to {weights_file} "
+            f"(best validation loss: {best_state['validation_loss']:.4f})."
+        )
     elapsed_time = time.time() - start_time
-    print(f"Total elapsed time: {format_duration(elapsed_time)}.")
+    if not quiet:
+        print(f"Total elapsed time: {format_duration(elapsed_time)}.")
+
+    return {
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "total_examples": total_examples,
+        "train_examples": x_train.shape[1],
+        "validation_examples": x_val.shape[1],
+        "best_validation_loss": best_state["validation_loss"],
+        "weights_file": weights_file,
+        "duration_s": elapsed_time,
+    }
+
+
+def main():
+    train_supervised()
 
 
 if __name__ == "__main__":

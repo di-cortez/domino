@@ -62,10 +62,11 @@ def _is_real_decision_state(state):
     return len(_legal_tile_actions_from_state(state)) >= 2
 
 
-def generate_dataset(game_count, output_file):
+def generate_dataset(game_count, output_file, quiet=False, progress_callback=None):
     """Write one JSONL row per real decision point."""
-    print(f"Generating {game_count} games...")
-    print_memory_report("Dataset generation startup memory")
+    if not quiet:
+        print(f"Generating {game_count} games...")
+        print_memory_report("Dataset generation startup memory")
     start_time = time.time()
     saved_turn_count = 0
     skipped_turn_count = 0
@@ -76,7 +77,7 @@ def generate_dataset(game_count, output_file):
 
     with open(output_file, "w", encoding="utf-8") as f:
         game_range = range(game_count)
-        if tqdm is not None:
+        if tqdm is not None and not quiet:
             game_range = tqdm(game_range, total=game_count, desc="Generating dataset", unit="game")
 
         for _i in game_range:
@@ -99,13 +100,25 @@ def generate_dataset(game_count, output_file):
                 f.write(json.dumps(turn) + "\n")
                 saved_turn_count += 1
 
+            if progress_callback is not None:
+                progress_callback(_i + 1, game_count)
+
     elapsed_time = time.time() - start_time
-    print("-" * 40)
-    print("GENERATION COMPLETE")
-    print(f"Real decision pairs: {saved_turn_count}")
-    print(f"Forced turns skipped: {skipped_turn_count}")
-    print(f"Output file: {output_file}")
-    print(f"Elapsed time: {format_duration(elapsed_time)}")
+    if not quiet:
+        print("-" * 40)
+        print("GENERATION COMPLETE")
+        print(f"Real decision pairs: {saved_turn_count}")
+        print(f"Forced turns skipped: {skipped_turn_count}")
+        print(f"Output file: {output_file}")
+        print(f"Elapsed time: {format_duration(elapsed_time)}")
+
+    return {
+        "game_count": game_count,
+        "saved_turn_count": saved_turn_count,
+        "skipped_turn_count": skipped_turn_count,
+        "output_file": output_file,
+        "duration_s": elapsed_time,
+    }
 
 
 if __name__ == "__main__":

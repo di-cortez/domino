@@ -512,6 +512,7 @@ def run_pairwise(
     print_console_summary=True,
     suppress_agent_output=True,
     print_memory_summary=True,
+    progress_callback=None,
 ):
     """Run one matchup and write the standard pairwise artifacts."""
     agent_name = normalize_agent_name(agent_name)
@@ -520,10 +521,11 @@ def run_pairwise(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(
-        f"Evaluating {agent_name} vs {opponent_name} over {game_count} games "
-        "(starting position alternates every game)"
-    )
+    if print_console_summary:
+        print(
+            f"Evaluating {agent_name} vs {opponent_name} over {game_count} games "
+            "(starting position alternates every game)"
+        )
     if print_console_summary and print_memory_summary:
         print_memory_report("Diagnostics startup memory")
 
@@ -539,6 +541,8 @@ def run_pairwise(
     def progress(_done, _total):
         if progress_bar is not None:
             progress_bar.update(1)
+        if progress_callback is not None:
+            progress_callback(_done, _total)
 
     start_time = time.time()
     try:

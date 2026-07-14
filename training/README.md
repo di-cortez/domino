@@ -6,6 +6,22 @@ This folder contains the full training pipeline:
 2. train a supervised neural policy;
 3. refine that policy through self-play reinforcement learning.
 
+From the repository root, `run_pipeline.py` runs the full sequence with compact
+progress bars and one summary line per stage:
+
+```bash
+python run_pipeline.py
+python run_pipeline.py small
+python run_pipeline.py big
+python run_pipeline.py huge
+```
+
+The default runner uses the same workload as the individual commands. `small`
+uses one fifth of the default counts, `big` uses five times the default counts,
+and `huge` uses twenty times the default counts. The scaled counts apply to
+dataset games, supervised epochs, RL iterations, and diagnostic games per
+matchup. RL games per iteration stay at 40 so the scale remains linear.
+
 | File | Purpose |
 |---|---|
 | `dataset_generator.py` | Simulates games and writes only real decisions to `dataset/supervised_dataset.jsonl`. |

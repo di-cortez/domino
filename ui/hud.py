@@ -253,6 +253,7 @@ class HudRenderer:
             "hand_sizes": state.get("hand_sizes", [len(hand) for hand in hands]),
             "board_history": state.get("board_history", []),
             "stock_size": state.get("stock_size", len(state.get("stock", []))),
+            "game_over": state.get("game_over", False),
         }
 
     def _cached_probabilities_for_player(self, state, player):

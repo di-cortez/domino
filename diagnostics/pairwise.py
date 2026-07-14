@@ -180,11 +180,16 @@ def observer_state_from_engine(engine, observer_player):
             engine._serialize_action(action) for action in engine.board_history
         ],
         "stock_size": len(engine.stock),
+        "game_over": engine.game_over,
     }
 
 
 def compact_hidden_draw_final_state_count(observer_model, action_turn):
-    """Return the compact hidden-draw expansion count for ``action_turn``."""
+    """Return the exact hidden-draw hand upper bound for ``action_turn``.
+
+    The property name is retained for CSV compatibility with diagnostics made
+    before the slot-to-mu migration.
+    """
     for record in observer_model.compact_hidden_draw_state_records:
         if record["turn"] == action_turn:
             return int(record["final_state_count"])
@@ -396,7 +401,7 @@ def add_first_stock_draw_summary(summary, games):
 
 
 def summarize_first_stock_draw_expansions(games):
-    """Summarize final-state counts computed at the first stock draw."""
+    """Summarize raw hand upper bounds computed at the first stock draw."""
     values = []
     histogram = {}
     for game in games:
@@ -488,16 +493,16 @@ def print_summary(summary, duration_s):
     if expansion_info:
         if expansion_info["games_with_count"]:
             print(
-                "  First draw final_state_count: "
+                "  First draw raw hand upper bound: "
                 f"{expansion_info['games_with_count']}/"
                 f"{expansion_info['games']} games "
                 f"({expansion_info['count_rate']:.1%}) | "
-                f"mean final_state_count "
+                f"mean upper bound "
                 f"{expansion_info['mean_final_state_count']:.1f} | "
                 f"median {expansion_info['median_final_state_count']:.1f}"
             )
         else:
-            print("  First draw final_state_count: none recorded")
+            print("  First draw raw hand upper bound: none recorded")
 
 
 def run_pairwise(

@@ -38,13 +38,16 @@ shared by agents, training, diagnostics, and the UI.
 The opponent probability feature is bounded in `[0, 1]`: `0.0` means the
 opponent is known not to hold that suit, and `1.0` means the opponent is known
 to hold it. For two-player games, the model replays public history with the
-observer's private initial hand and draw history. Older states without those
-private observer fields use a snapshot combinatorial fallback.
+observer's private initial hand and draw history. States without those private
+observer fields are rejected because exact temporal reconstruction is not
+possible.
 
-`StrategicAgent` uses those probabilities as marginal presence estimates. It
-filters moves by lowest approximate opponent response chance, then by near-best
-normalized mobility, then by highest pip sum, with deterministic legal-action
-order as the final tie-breaker.
+The shared exact model starts with temporal slot/cohort profiles and switches
+once to integer `mu(H)` hand weights when `comb(|U|, h) <= 500`. It never uses a
+particle fallback. `StrategicAgent` filters moves by the exact joint probability
+that the opponent can answer the resulting ends, then by near-best normalized
+mobility, then by highest pip sum, with deterministic legal-action order as the
+final tie-breaker.
 
 ## Action Encoding
 

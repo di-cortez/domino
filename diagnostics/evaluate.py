@@ -218,7 +218,7 @@ def _aggregate_first_stock_draws(summaries):
 
 
 def _aggregate_first_stock_draw_expansions(summaries):
-    """Accumulate first-stock-draw final-state counts across matchups."""
+    """Accumulate first-stock-draw raw hand upper bounds across matchups."""
     totals = {
         "matchups": len(summaries),
         "games": 0,

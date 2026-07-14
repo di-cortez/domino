@@ -8,9 +8,9 @@ Run from the repository root with:
 
 import csv
 import json
-import random
 import sys
 import tempfile
+from itertools import combinations
 from pathlib import Path
 
 import numpy as host_np
@@ -33,8 +33,14 @@ from middleware.domino_engine import DominoEngine, infer_dead_suits
 from middleware.middleware import GameManager
 from middleware.opponent_model import (
     ALL_TILES,
-    CompactOpponentBelief,
+    SUIT_MASKS,
+    ExactOpponentModel,
+    MuOpponentBelief,
+    ProbabilityStage,
+    SlotOpponentBelief,
     compute_opponent_suit_probabilities,
+    mask_from_tiles,
+    reconstruct_public_actions,
 )
 from training.self_play import (
     EVENT_REWARD_DECAY,
@@ -50,7 +56,7 @@ from training.self_play import (
     _reward_signal_summary,
 )
 
-from math import comb
+from math import comb, factorial
 
 if GPU_ENABLED:
     import cupy as xp
@@ -71,6 +77,25 @@ class NetworkThatMustNotRun:
 class UniformPolicyNetwork:
     def forward(self, x):
         return host_np.ones((DominoEncoder.ACTION_SIZE, 1), dtype=float) / DominoEncoder.ACTION_SIZE
+
+
+class FixedStrategicOpponentModel:
+    """Small exact-model stand-in used to isolate heuristic tie-break tests."""
+
+    def __init__(self, probabilities):
+        self.probabilities = list(probabilities)
+
+    def update(self, state):
+        return list(self.probabilities)
+
+    def probability_can_play(self, ends):
+        left, right = ends
+        if left == right:
+            return self.probabilities[left]
+        return 1.0 - (
+            (1.0 - self.probabilities[left])
+            * (1.0 - self.probabilities[right])
+        )
 
 
 def _to_numpy(value):
@@ -202,6 +227,162 @@ def test_exact_opponent_probabilities_match_initial_hypergeometric_formula():
         assert abs(probabilities[suit] - expected) < 1e-12
 
 
+def _uniform_mu_belief(tiles, hand_size):
+    """Return a small uniform mu belief over all hands from ``tiles``."""
+    unknown_mask = mask_from_tiles(tiles)
+    indices = [
+        index
+        for index, tile in enumerate(ALL_TILES)
+        if tile in set(tiles)
+    ]
+    weights = {}
+    for selected in combinations(indices, hand_size):
+        hand_mask = sum(1 << index for index in selected)
+        weights[hand_mask] = 1
+    return MuOpponentBelief.from_weights(
+        unknown_mask=unknown_mask,
+        opponent_hand_size=hand_size,
+        weights=weights,
+    )
+
+
+def test_mu_belief_exact_integer_operations():
+    tiles = [(0, 0), (0, 1), (1, 1), (2, 2)]
+
+    initial = _uniform_mu_belief(tiles, 2)
+    assert initial.state_count == comb(4, 2)
+    assert all(isinstance(weight, int) and weight == 1 for weight in initial.weights.values())
+
+    conditioned = _uniform_mu_belief(tiles, 2)
+    conditioned.condition_no_legal(0, 0)
+    expected_hand = mask_from_tiles([(1, 1), (2, 2)])
+    assert conditioned.weights == {expected_hand: 1}
+
+    observer_conditioned = _uniform_mu_belief(tiles, 2)
+    observer_conditioned.observer_known_draw((0, 0))
+    assert not observer_conditioned.unknown_mask & mask_from_tiles([(0, 0)])
+    assert observer_conditioned.state_count == comb(3, 2)
+
+    revealed = _uniform_mu_belief(tiles, 2)
+    revealed.opponent_reveals_and_plays((0, 0))
+    assert revealed.opponent_hand_size == 1
+    assert revealed.state_count == 3
+    assert set(revealed.weights.values()) == {1}
+
+    drawn = _uniform_mu_belief(tiles, 1)
+    drawn.opponent_hidden_draw()
+    assert drawn.opponent_hand_size == 2
+    assert drawn.state_count == comb(4, 2)
+    assert set(drawn.weights.values()) == {2}
+
+
+def test_mu_probability_can_play_uses_joint_distribution():
+    tile_00 = mask_from_tiles([(0, 0)])
+    tile_11 = mask_from_tiles([(1, 1)])
+    belief = MuOpponentBelief.from_weights(
+        unknown_mask=tile_00 | tile_11,
+        opponent_hand_size=1,
+        weights={tile_00: 1, tile_11: 1},
+    )
+
+    assert belief.suit_probabilities()[0] == 0.5
+    assert belief.suit_probabilities()[1] == 0.5
+    assert belief.probability_can_play((0, 1)) == 1.0
+
+
+def test_slot_initial_count_and_dp_conversion_match_mu():
+    observer_hand = ALL_TILES[:7]
+    slot = SlotOpponentBelief(observer_hand)
+    mu = MuOpponentBelief.from_initial(observer_hand)
+
+    assert slot.mode == "slots_exact"
+    assert slot.profile_count == 1
+    assert slot.opponent_hand_size == 7
+    assert slot.assignment_weight == factorial(21) // factorial(14)
+
+    converted = slot.to_hand_weights_dp()
+    assert len(converted) == comb(21, 7)
+    assert set(converted.values()) == {factorial(7)}
+    assert slot.suit_probabilities() == mu.suit_probabilities()
+
+
+def test_slot_cohorts_preserve_temporal_draw_restrictions():
+    tiles = [(0, 0), (0, 1), (1, 1), (1, 2), (2, 2), (3, 3)]
+    unknown_mask = mask_from_tiles(tiles)
+    slot = SlotOpponentBelief.from_profiles(
+        unknown_mask=unknown_mask,
+        opponent_hand_size=1,
+        profiles={(unknown_mask,): 1},
+    )
+
+    slot.condition_no_legal(0, 0)
+    first_cohort_domain = next(iter(slot.profiles))[0]
+    assert first_cohort_domain & SUIT_MASKS[0] == 0
+
+    slot.opponent_hidden_draw()
+    assert slot.suit_probabilities()[0] > 0.0
+
+    slot.condition_no_legal(1, 1)
+    slot.opponent_hidden_draw()
+    profile = next(iter(slot.profiles))
+    expected_domains = sorted((
+        unknown_mask & ~SUIT_MASKS[0] & ~SUIT_MASKS[1],
+        unknown_mask & ~SUIT_MASKS[1],
+        unknown_mask,
+    ))
+    assert list(profile) == expected_domains
+
+    weights = slot.to_hand_weights_dp()
+    mu = MuOpponentBelief.from_weights(
+        unknown_mask=slot.unknown_mask,
+        opponent_hand_size=slot.opponent_hand_size,
+        weights=weights,
+    )
+    assert slot.suit_probabilities() == mu.suit_probabilities()
+    assert slot.probability_can_play((2, 3)) == mu.probability_can_play((2, 3))
+
+
+def test_slot_play_branch_multiplicity_matches_mu():
+    tiles = [(0, 0), (1, 1), (2, 2), (3, 3)]
+    unknown_mask = mask_from_tiles(tiles)
+    slot = SlotOpponentBelief.from_profiles(
+        unknown_mask=unknown_mask,
+        opponent_hand_size=2,
+        profiles={(unknown_mask, unknown_mask): 1},
+    )
+    mu = MuOpponentBelief.from_weights(
+        unknown_mask=unknown_mask,
+        opponent_hand_size=2,
+        weights=slot.to_hand_weights_dp(),
+    )
+
+    slot.opponent_reveals_and_plays((0, 0))
+    mu.opponent_reveals_and_plays((0, 0))
+
+    assert slot.to_hand_weights_dp() == mu.weights
+    assert next(iter(slot.profiles.values())) == 2
+
+
+def test_slot_known_tile_removes_hall_infeasible_profiles():
+    tile_a = mask_from_tiles([(0, 0)])
+    tile_b = mask_from_tiles([(1, 1)])
+    tile_c = mask_from_tiles([(2, 2)])
+    unknown_mask = tile_a | tile_b | tile_c
+    slot = SlotOpponentBelief.from_profiles(
+        unknown_mask=unknown_mask,
+        opponent_hand_size=2,
+        profiles={
+            tuple(sorted((tile_a | tile_b, tile_a | tile_b))): 1,
+            tuple(sorted((tile_a | tile_c, tile_b | tile_c))): 1,
+        },
+    )
+
+    slot.observer_known_draw((1, 1))
+
+    assert slot.profile_count == 1
+    assert slot.assignment_weight > 0
+
+
 def test_exact_opponent_pass_sets_playable_suit_probabilities_to_zero():
     state = _base_probability_state()
     state["current_player_hand"] = [
@@ -215,31 +396,104 @@ def test_exact_opponent_pass_sets_playable_suit_probabilities_to_zero():
         None,
     ]
 
-    probabilities = compute_opponent_suit_probabilities(state)
+    model = ExactOpponentModel()
+    result = model.update_detailed(state)
+    probabilities = result.probabilities
+    trace = result.completed_turn_traces[-1]
 
     assert probabilities[1] == 0.0
     assert probabilities[2] == 0.0
+    assert trace.after_negative_evidence is not None
+    assert trace.after_draw is None
+    assert trace.end_turn is not None
+    assert trace.end_turn.same_as_previous
 
 
-def test_exact_opponent_draw_reopens_suit_probabilities_after_no_legal_condition():
+_NO_FINAL_DRAW_ACTION = object()
+
+
+def _draw_turn_state(include_final_action=_NO_FINAL_DRAW_ACTION):
+    """Return an observer state ending during or after one opponent draw turn."""
     state = _base_probability_state()
     state["current_player_hand"] = [
         tile for tile in state["current_player_initial_hand"] if tuple(tile) != (1, 2)
     ]
     state["ends"] = [1, 2]
-    state["turn"] = 3
+    state["observer_player"] = 0
+    state["history_current_player"] = 1
+    state["turn"] = 2
     state["hand_sizes"] = [6, 8]
     state["board_history"] = [
         [[1, 2], 0],
         ["DRAW", None],
-        None,
     ]
     state["stock_size"] = 13
 
-    probabilities = compute_opponent_suit_probabilities(state)
+    if include_final_action is not _NO_FINAL_DRAW_ACTION:
+        state["history_current_player"] = 0
+        state["turn"] = 3
+        action = None if include_final_action is False else include_final_action
+        state["board_history"].append(action)
+        if action is not None:
+            state["ends"] = [3, 2]
+            state["hand_sizes"] = [6, 7]
+    return state
 
-    assert probabilities[1] > 0.0
-    assert probabilities[2] > 0.0
+
+def test_draw_pass_exposes_negative_draw_and_end_turn_probabilities():
+    model = ExactOpponentModel()
+    partial_state = _draw_turn_state()
+
+    partial = model.update_detailed(partial_state)
+    repeated = model.update_detailed(partial_state)
+
+    assert [snapshot.stage for snapshot in partial.new_snapshots] == [
+        ProbabilityStage.END_TURN,
+        ProbabilityStage.AFTER_NEGATIVE_EVIDENCE,
+        ProbabilityStage.AFTER_DRAW,
+    ]
+    assert repeated.new_snapshots == ()
+    assert repeated.completed_turn_traces == ()
+
+    full_state = _draw_turn_state(include_final_action=False)
+    completed = model.update_detailed(full_state)
+    trace = completed.completed_turn_traces[0]
+
+    assert trace.public_turn == 2
+    assert trace.after_negative_evidence.probabilities[1] == 0.0
+    assert trace.after_negative_evidence.probabilities[2] == 0.0
+    assert trace.after_draw.probabilities[1] > 0.0
+    assert trace.after_draw.probabilities[2] > 0.0
+    assert trace.end_turn.probabilities[1] == 0.0
+    assert trace.end_turn.probabilities[2] == 0.0
+    assert completed.probabilities[1] == 0.0
+    assert completed.probabilities[2] == 0.0
+
+    snapshots = model.consume_new_snapshots()
+    assert len(snapshots) == 4
+    assert model.consume_new_snapshots() == []
+    model.reset()
+    assert model.last_snapshot is None
+    assert model.last_completed_turn_trace is None
+    assert model.turn_trace_history == []
+    assert not model.switched_to_mu
+
+
+def test_draw_play_exposes_three_stages_and_reveals_drawn_tile():
+    state = _draw_turn_state(include_final_action=[[1, 3], 0])
+    model = ExactOpponentModel()
+
+    result = model.update_detailed(state)
+    trace = result.completed_turn_traces[-1]
+
+    assert trace.after_negative_evidence is not None
+    assert trace.after_draw is not None
+    assert trace.end_turn is not None
+    assert trace.after_negative_evidence.stage is ProbabilityStage.AFTER_NEGATIVE_EVIDENCE
+    assert trace.after_draw.stage is ProbabilityStage.AFTER_DRAW
+    assert trace.end_turn.stage is ProbabilityStage.END_TURN
+    assert trace.after_negative_evidence.probabilities[1] == 0.0
+    assert trace.after_draw.probabilities[1] > 0.0
 
 
 def test_exact_observer_draw_removes_private_tile_from_unknown_pool():
@@ -264,8 +518,10 @@ def test_exact_observer_draw_removes_private_tile_from_unknown_pool():
 
 def test_strategic_agent_uses_response_then_mobility_then_pip_sum_filters():
     agent = StrategicAgent()
+    fixed_probabilities = [0.00, 0.20, 0.27, 0.30, 0.45, 0.70, 0.00]
+    agent.opponent_model = FixedStrategicOpponentModel(fixed_probabilities)
     state = {
-        "opponent_suit_probabilities": [0.00, 0.20, 0.27, 0.30, 0.45, 0.70, 0.00],
+        "opponent_suit_probabilities": fixed_probabilities,
         "ends": [0, 6],
         "current_player_hand": [[0, 1], [0, 2], [0, 3], [0, 4]],
         "current_player": 0,
@@ -564,34 +820,109 @@ def test_first_stock_draw_summary_ignores_games_without_draws():
     assert summary["turn_histogram"] == {"2": 1, "5": 2}
 
 
-def test_compact_hidden_draw_records_expansion_count():
-    belief = CompactOpponentBelief(
-        observer_initial_hand=ALL_TILES[:7],
-        opponent_hand_size=1,
-        rng=random.Random(0),
-        max_enumerated_hands=1000,
-        particle_count=100,
+def test_hybrid_switches_once_at_threshold_and_never_returns_to_slots():
+    tiles = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]
+    unknown_mask = mask_from_tiles(tiles)
+    slot = SlotOpponentBelief.from_profiles(
+        unknown_mask=unknown_mask,
+        opponent_hand_size=2,
+        profiles={(unknown_mask, unknown_mask): 1},
     )
+    model = ExactOpponentModel(switch_to_mu_max_hands=10)
+    model._belief = slot
 
-    next_belief = belief.opponent_hidden_draw()
+    model._maybe_switch_to_mu(public_turn=4, terminal_turn=False)
 
-    assert next_belief.mode == "enumerated_exact"
-    assert next_belief.compact_hidden_draw_final_state_count == 210
+    assert model.mode == "mu_exact"
+    assert model.switched_to_mu
+    assert model.switch_turn == 4
+    assert model.switch_upper_bound == comb(5, 2)
+    assert model.switch_mu_state_count == comb(5, 2)
+    first_switch_time = model.switch_conversion_time_ms
+
+    model._belief.opponent_hidden_draw()
+    model._maybe_switch_to_mu(public_turn=5, terminal_turn=False)
+
+    assert model.mode == "mu_exact"
+    assert model.switch_turn == 4
+    assert model.switch_conversion_time_ms == first_switch_time
 
 
-def test_compact_hidden_draw_records_particle_expansion_count():
-    belief = CompactOpponentBelief(
-        observer_initial_hand=ALL_TILES[:7],
-        opponent_hand_size=1,
-        rng=random.Random(0),
-        max_enumerated_hands=1,
-        particle_count=100,
+def test_hybrid_does_not_switch_above_threshold_or_on_terminal_turn():
+    tiles = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]
+    unknown_mask = mask_from_tiles(tiles)
+
+    above_threshold = ExactOpponentModel(switch_to_mu_max_hands=9)
+    above_threshold._belief = SlotOpponentBelief.from_profiles(
+        unknown_mask=unknown_mask,
+        opponent_hand_size=2,
+        profiles={(unknown_mask, unknown_mask): 1},
     )
+    above_threshold._maybe_switch_to_mu(public_turn=1, terminal_turn=False)
+    assert above_threshold.mode == "slots_exact"
 
-    next_belief = belief.opponent_hidden_draw()
+    terminal = ExactOpponentModel(switch_to_mu_max_hands=10)
+    terminal._belief = SlotOpponentBelief.from_profiles(
+        unknown_mask=unknown_mask,
+        opponent_hand_size=2,
+        profiles={(unknown_mask, unknown_mask): 1},
+    )
+    terminal._maybe_switch_to_mu(public_turn=1, terminal_turn=True)
+    assert terminal.mode == "slots_exact"
 
-    assert next_belief.mode == "particle_approximate"
-    assert next_belief.compact_hidden_draw_final_state_count == 210
+
+def test_opponent_model_does_not_trust_stale_state_probability_output():
+    state = _base_probability_state()
+    model = ExactOpponentModel()
+    initial = model.update_detailed(state)
+    assert initial.new_snapshots == ()
+
+    state["current_player_hand"] = [
+        tile for tile in state["current_player_initial_hand"] if tuple(tile) != (1, 2)
+    ]
+    state["ends"] = [1, 2]
+    state["history_current_player"] = 1
+    state["current_player"] = 1
+    state["observer_player"] = 0
+    state["turn"] = 1
+    state["hand_sizes"] = [6, 7]
+    state["board_history"] = [[[1, 2], 0]]
+    state["opponent_suit_probabilities"] = [0.123] * 7
+
+    updated = model.update_detailed(state)
+
+    assert len(updated.new_snapshots) == 1
+    assert updated.probabilities != tuple([0.123] * 7)
+    assert state["opponent_model_metadata"]["processed_history_length"] == 1
+
+
+def test_terminal_history_reconstructs_the_non_advanced_final_actor():
+    state = {
+        "game_over": True,
+        "history_current_player": 1,
+        "current_player": 1,
+        "hand_sizes": [3, 0],
+        "board_history": [
+            [[6, 6], 0],
+            [[3, 6], 0],
+        ],
+    }
+
+    actions = reconstruct_public_actions(state)
+
+    assert actions[0].actor == 0
+    assert actions[1].actor == 1
+
+
+def test_hidden_draw_record_exposes_exact_raw_hand_upper_bound():
+    model = ExactOpponentModel()
+    model.update_detailed(_draw_turn_state())
+
+    record = model.hidden_draw_state_records[0]
+    assert record["turn"] == 2
+    assert record["raw_hand_upper_bound"] == comb(21, 8)
+    assert record["final_state_count"] == record["raw_hand_upper_bound"]
+    assert record["resulting_mode"] == "slots_exact"
 
 
 def test_first_stock_draw_expansion_summary_ignores_games_without_counts():
@@ -655,10 +986,20 @@ def main():
             "exact probability initialization",
             test_exact_opponent_probabilities_match_initial_hypergeometric_formula,
         ),
+        ("mu exact operations", test_mu_belief_exact_integer_operations),
+        ("mu joint play probability", test_mu_probability_can_play_uses_joint_distribution),
+        ("slot initial conversion", test_slot_initial_count_and_dp_conversion_match_mu),
+        ("slot temporal cohorts", test_slot_cohorts_preserve_temporal_draw_restrictions),
+        ("slot play multiplicity", test_slot_play_branch_multiplicity_matches_mu),
+        ("slot infeasible profile filter", test_slot_known_tile_removes_hall_infeasible_profiles),
         ("exact probability pass", test_exact_opponent_pass_sets_playable_suit_probabilities_to_zero),
         (
-            "exact probability draw",
-            test_exact_opponent_draw_reopens_suit_probabilities_after_no_legal_condition,
+            "draw-pass probability stages",
+            test_draw_pass_exposes_negative_draw_and_end_turn_probabilities,
+        ),
+        (
+            "draw-play probability stages",
+            test_draw_play_exposes_three_stages_and_reveals_drawn_tile,
         ),
         (
             "exact private draw",
@@ -693,13 +1034,22 @@ def main():
         ("reward signal summary", test_reward_signal_summary_classifies_rewards),
         ("first stock draw summary", test_first_stock_draw_summary_ignores_games_without_draws),
         (
-            "compact hidden draw expansion",
-            test_compact_hidden_draw_records_expansion_count,
+            "hybrid one-way threshold switch",
+            test_hybrid_switches_once_at_threshold_and_never_returns_to_slots,
         ),
         (
-            "compact hidden draw particle expansion",
-            test_compact_hidden_draw_records_particle_expansion_count,
+            "hybrid switch guards",
+            test_hybrid_does_not_switch_above_threshold_or_on_terminal_turn,
         ),
+        (
+            "opponent cache invalidation",
+            test_opponent_model_does_not_trust_stale_state_probability_output,
+        ),
+        (
+            "terminal actor reconstruction",
+            test_terminal_history_reconstructs_the_non_advanced_final_actor,
+        ),
+        ("hidden draw upper bound", test_hidden_draw_record_exposes_exact_raw_hand_upper_bound),
         (
             "first stock draw expansion summary",
             test_first_stock_draw_expansion_summary_ignores_games_without_counts,

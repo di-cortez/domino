@@ -53,7 +53,7 @@ The output folder defaults to `diagnostics/results/all_pairs/`.
 | `all_pairs_table.png` | Triangular image table with one win-rate number per evaluated matchup. |
 | `choice_opportunities.png` | Aggregate histogram of draw/pass/choice opportunities across all evaluated matchups. |
 | `first_stock_draw_turns.png` | Aggregate histogram of the first stock-draw turn across all evaluated matchups. |
-| `first_stock_draw_final_state_counts.png` | Aggregate histogram of `final_state_count` values computed at the first stock draw. |
+| `first_stock_draw_final_state_counts.png` | Aggregate histogram of the raw `comb(|U|, h)` hand upper bound immediately after the first stock draw. The filename is retained for compatibility. |
 | `all_pairs_matrix.csv` | One row per evaluated matchup. |
 | `all_pairs_summary.json` | Full aggregate report with accumulated choice-opportunity stats, accumulated first-stock-draw stats, accumulated first-draw expansion stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
@@ -76,14 +76,14 @@ By default, pairwise files are written under
 | File | Contents |
 |---|---|
 | `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, first-stock-draw totals, first-draw expansion totals, and `duration_s`. |
-| `games.csv` | Compact one-row-per-game data with position, result, turns, first stock-draw turn, first-draw `final_state_count`, initial hands as JSON arrays, and pip counts. |
+| `games.csv` | Compact one-row-per-game data with position, result, turns, first stock-draw turn, the first-draw raw hand upper bound under the compatibility field `first_stock_draw_final_state_count`, initial hands as JSON arrays, and pip counts. |
 | `cumulative_rates.png` | Win/draw/loss rates over time. |
 | `result_distribution.png` | Final result counts. |
 | `wins_by_position.png` | Win rate as player 0 vs. player 1. |
 | `game_lengths.png` | Turn-count histogram. |
 | `choice_opportunities.png` | Histogram of draw/pass/choice opportunities for the evaluated agent. |
 | `first_stock_draw_turns.png` | Histogram of the first turn where any player drew from the stock. |
-| `first_stock_draw_final_state_counts.png` | Histogram of `final_state_count` values computed at the first stock draw. |
+| `first_stock_draw_final_state_counts.png` | Histogram of the raw hand upper bound immediately after the first stock draw. |
 
 ## Interpretation
 

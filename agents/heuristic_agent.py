@@ -1,10 +1,7 @@
 """Rule-based teacher agent used for supervised data generation."""
 
 from agents.agent import Agent
-from middleware.opponent_model import (
-    ExactOpponentModel,
-    response_probability_from_marginals,
-)
+from middleware.opponent_model import ExactOpponentModel
 
 
 class StrategicAgent(Agent):
@@ -12,7 +9,7 @@ class StrategicAgent(Agent):
 
     The agent uses lexicographic filters instead of a weighted utility sum:
 
-    1. prefer moves that minimize the opponent's approximate response chance;
+    1. prefer moves that minimize the opponent's exact response chance;
     2. among near ties, prefer moves with near-best normalized mobility;
     3. among remaining ties, prefer the highest pip sum;
     4. preserve the stable ``legal_actions`` order for exact ties.
@@ -49,9 +46,8 @@ class StrategicAgent(Agent):
                 return move
 
             ends_after_move = self._ends_after_move(current_ends, move)
-            response_probability = response_probability_from_marginals(
-                probabilities,
-                ends_after_move,
+            response_probability = self.opponent_model.probability_can_play(
+                ends_after_move
             )
             mobility = self._normalized_mobility(remaining_hand, ends_after_move)
             pip_sum = tile[0] + tile[1]

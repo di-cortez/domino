@@ -112,6 +112,12 @@ played each tile, board ends, hand sizes, stock size, draw/pass counts, and
 that the opponent currently holds each suit/value. `0.0` means known absence;
 `1.0` means known presence.
 
+Opponent inference is exact. It starts with temporal slot/cohort domains, then
+converts once to integer `mu(H)` hand weights at the first non-terminal turn end
+where `comb(|U|, h) <= 500`. Drawn slots retain only evidence observed after
+their creation. The exact path has no particle fallback, and the heuristic uses
+the joint hand posterior rather than combining suit marginals independently.
+
 Old checkpoints trained with the previous 86-input/58-output encoder are not
 compatible. Regenerate the dataset, retrain supervised learning, and then retrain
 RL before using `Neural` or `RL` in the UI or diagnostics.

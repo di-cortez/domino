@@ -66,7 +66,9 @@ snapshot, shows a progress bar, and reports total elapsed time.
 `middleware/opponent_model.py`. Dataset generation is therefore slower than the
 old heuristic-only version, but each saved state includes the computed
 `opponent_suit_probabilities` so supervised training can reuse them without
-replaying the exact belief model for every row.
+replaying the exact belief model for every row. The model keeps temporal draw
+cohorts in `slots_exact`, converts once to integer `mu(H)` weights when the raw
+hand bound reaches 500, and never falls back to particles.
 
 A row is written only when the player had at least two legal tile-play choices.
 The following turns are skipped:

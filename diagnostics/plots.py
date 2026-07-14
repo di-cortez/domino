@@ -342,12 +342,12 @@ def plot_first_stock_draw_turns(summary, path, subtitle):
 
 
 def plot_first_stock_draw_final_state_counts(summary, path, subtitle):
-    """Plot final-state counts computed at the first stock draw."""
+    """Plot raw hidden-hand upper bounds at the first stock draw."""
     expansion_info = summary.get("first_stock_draw_expansion", summary)
     histogram = expansion_info.get("final_state_count_histogram", {})
 
     fig, ax = _new_figure(width=8.0, height=4.0)
-    _prepare_axis(ax, f"First draw final_state_count - {subtitle}")
+    _prepare_axis(ax, f"First draw raw hand upper bound - {subtitle}")
 
     if not histogram:
         ax.grid(visible=False)
@@ -395,7 +395,7 @@ def plot_first_stock_draw_final_state_counts(summary, path, subtitle):
             fontsize=9,
         )
 
-    ax.set_xlabel("final_state_count at first stock draw")
+    ax.set_xlabel("comb(|U|, h) immediately after first stock draw")
     ax.set_ylabel("Games")
     _save_figure(fig, path)
 
@@ -519,5 +519,5 @@ def plot_aggregate_first_stock_draws(first_draw_info, path):
 
 
 def plot_aggregate_first_stock_draw_final_state_counts(expansion_info, path):
-    """Plot aggregate first-stock-draw final-state counts."""
+    """Plot aggregate first-stock-draw raw hand upper bounds."""
     plot_first_stock_draw_final_state_counts(expansion_info, path, "all evaluated pairs")

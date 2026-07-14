@@ -8,6 +8,7 @@ do not require a neural decision.
 import argparse
 import json
 import os
+from pathlib import Path
 import time
 
 import numpy as np
@@ -29,12 +30,13 @@ except ImportError:
 
 EPOCHS = 1000
 BATCH_SIZE = 1024
-EARLY_STOPPING_PATIENCE = 5
-WEIGHT_DECAY = 0.0001
-LR_DECAY_FACTOR = 0.5
+DEFAULT_WEIGHT_DECAY = 0.0001
+DEFAULT_EARLY_STOPPING_PATIENCE = 5
+DEFAULT_LR_DECAY_FACTOR = 0.5
 
 CHECKPOINT_EVERY = 10
 CHECKPOINT_DIR = "models/supervised_checkpoints"
+MAX_SUPERVISED_CHECKPOINTS = 10
 ENCODED_CACHE_FILE = "dataset/supervised_dataset_encoded.npz"
 ENCODED_FEATURE_VERSION = "opponent_suit_presence_v1"
 
@@ -42,6 +44,28 @@ ENCODED_FEATURE_VERSION = "opponent_suit_presence_v1"
 def to_backend_array(matrix):
     """Convert a NumPy array loaded from disk to the active backend."""
     return cp.array(matrix)
+
+
+def _prune_supervised_checkpoints(
+    checkpoint_dir=CHECKPOINT_DIR,
+    keep_count=MAX_SUPERVISED_CHECKPOINTS,
+):
+    """Delete older archival checkpoints and return the removed paths."""
+    if keep_count < 1:
+        raise ValueError("keep_count must be at least one.")
+
+    checkpoint_paths = list(
+        Path(checkpoint_dir).glob("domino_sl_epoch_*.npz")
+    )
+    checkpoint_paths.sort(
+        key=lambda path: (path.stat().st_mtime_ns, path.name),
+        reverse=True,
+    )
+
+    removed_paths = checkpoint_paths[keep_count:]
+    for path in removed_paths:
+        path.unlink()
+    return removed_paths
 
 
 def _normalize_action(action):
@@ -113,7 +137,7 @@ def _cache_matches(cache_data, expected_metadata):
     return True
 
 
-def _save_encoded_cache(cache_file, x, y, metadata):
+def _save_encoded_cache(cache_file, x, y, metadata, quiet=False):
     """Persist encoded supervised arrays for faster future training runs."""
     cache_dir = os.path.dirname(cache_file)
     if cache_dir:
@@ -125,10 +149,11 @@ def _save_encoded_cache(cache_file, x, y, metadata):
         Y=y,
         **metadata,
     )
-    print(f"Encoded dataset cache saved to {cache_file}.")
+    if not quiet:
+        print(f"Encoded dataset cache saved to {cache_file}.")
 
 
-def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE):
+def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE, quiet=False):
     """Load encoded ``X/Y`` arrays from cache, rebuilding when the cache is stale."""
     metadata = _dataset_metadata(file_path, encoder)
 
@@ -138,27 +163,31 @@ def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE):
                 if _cache_matches(cache_data, metadata):
                     x = cache_data["X"]
                     y = cache_data["Y"]
-                    print(f"Loaded encoded dataset cache from {cache_file}.")
-                    print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
+                    if not quiet:
+                        print(f"Loaded encoded dataset cache from {cache_file}.")
+                        print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
                     return x, y
 
-            print(f"Encoded dataset cache is stale: {cache_file}. Rebuilding.")
+            if not quiet:
+                print(f"Encoded dataset cache is stale: {cache_file}. Rebuilding.")
         except (OSError, KeyError, ValueError) as exc:
-            print(f"Could not read encoded dataset cache {cache_file}: {exc}. Rebuilding.")
+            if not quiet:
+                print(f"Could not read encoded dataset cache {cache_file}: {exc}. Rebuilding.")
 
-    x, y = load_dataset(file_path, encoder)
-    _save_encoded_cache(cache_file, x, y, metadata)
+    x, y = load_dataset(file_path, encoder, quiet=quiet)
+    _save_encoded_cache(cache_file, x, y, metadata, quiet=quiet)
     return x, y
 
 
-def load_dataset(file_path, encoder):
+def load_dataset(file_path, encoder, quiet=False):
     """Load JSONL tile-play examples into ``X`` and one-hot ``Y`` matrices."""
     x_rows = []
     y_rows = []
     skipped_draw_pass = 0
     skipped_single_option = 0
 
-    print(f"Loading dataset from {file_path}...")
+    if not quiet:
+        print(f"Loading dataset from {file_path}...")
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -191,31 +220,37 @@ def load_dataset(file_path, encoder):
 
     x = np.hstack(x_rows)
     y = np.hstack(y_rows)
-    print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
-    print(f"Skipped forced draw/pass examples: {skipped_draw_pass}")
-    print(f"Skipped single-option tile-play examples: {skipped_single_option}")
+    if not quiet:
+        print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
+        print(f"Skipped forced draw/pass examples: {skipped_draw_pass}")
+        print(f"Skipped single-option tile-play examples: {skipped_single_option}")
     return x, y
 
 
-def main(
+def train_supervised(
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
     dataset_file="dataset/supervised_dataset.jsonl",
     weights_file="models/domino_sl_weights.npz",
     cache_file=ENCODED_CACHE_FILE,
-    epochs=EPOCHS,
-    batch_size=BATCH_SIZE,
-    learning_rate=0.005,
-    checkpoint_every=CHECKPOINT_EVERY,
-    checkpoint_dir=CHECKPOINT_DIR,
-    early_stopping_patience=EARLY_STOPPING_PATIENCE,
-    weight_decay=WEIGHT_DECAY,
-    lr_decay_factor=LR_DECAY_FACTOR,
+    quiet=False,
+    progress_callback=None,
+    weight_decay=0.0,
+    early_stopping_patience=None,
+    lr_decay_factor=None,
 ):
+    """Train the supervised policy and return a compact run summary.
+
+    Regularization, early stopping, and learning-rate decay are opt-in. The
+    default call keeps a fixed learning rate and runs every requested epoch.
+    """
     start_time = time.time()
 
-    print_memory_report("Supervised training startup memory")
+    if not quiet:
+        print_memory_report("Supervised training startup memory")
 
     encoder = DominoEncoder()
-    x_full, y_full = load_or_build_dataset(dataset_file, encoder, cache_file)
+    x_full, y_full = load_or_build_dataset(dataset_file, encoder, cache_file, quiet=quiet)
 
     total_examples = x_full.shape[1]
     train_count = int(total_examples * 0.85)
@@ -223,27 +258,28 @@ def main(
     train_indices = indices[:train_count]
     validation_indices = indices[train_count:]
 
-    # Keep the full split in host (NumPy) memory. SupervisedNeuralNetwork.train()
-    # moves one mini-batch at a time onto the GPU, so GPU memory stays
-    # proportional to batch_size instead of the whole dataset, which can be
-    # far larger than available VRAM once the dataset has millions of rows.
+    # Keep complete splits in host memory. SupervisedNeuralNetwork transfers
+    # only the current train/validation mini-batch to CuPy when a GPU is active.
     x_train = x_full[:, train_indices]
     y_train = y_full[:, train_indices]
     x_val = x_full[:, validation_indices]
     y_val = y_full[:, validation_indices]
-    print(f"Split complete: {x_train.shape[1]} train | {x_val.shape[1]} validation")
+    del x_full, y_full, indices, train_indices, validation_indices
+    if not quiet:
+        print(f"Split complete: {x_train.shape[1]} train | {x_val.shape[1]} validation")
 
     network = SupervisedNeuralNetwork(
         input_size=DominoEncoder.VECTOR_SIZE,
         hidden1_size=256,
         hidden2_size=128,
         output_size=len(encoder.all_actions),
-        learning_rate=learning_rate,
+        learning_rate=0.005,
         weight_decay=weight_decay,
     )
 
     if os.path.exists(weights_file):
-        print(f"Existing supervised model found at {weights_file}. Resuming training.")
+        if not quiet:
+            print(f"Existing supervised model found at {weights_file}. Resuming training.")
 
         weights = np.load(weights_file)
 
@@ -271,7 +307,8 @@ def main(
         network.W3 = to_backend_array(weights["W3"])
         network.b3 = to_backend_array(weights["b3"])
     else:
-        print("No existing supervised model found. Training from scratch.")
+        if not quiet:
+            print("No existing supervised model found. Training from scratch.")
         
     best_state = {"validation_loss": float("inf"), "weights": None}
     last_checkpoint_time = {"value": start_time}
@@ -283,11 +320,11 @@ def main(
 
     def save_checkpoint(current_network, epoch, validation_loss):
         """Save both an archival checkpoint and the active model used by UI/self-play."""
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
         os.makedirs(os.path.dirname(weights_file), exist_ok=True)
 
         checkpoint_file = os.path.join(
-            checkpoint_dir,
+            CHECKPOINT_DIR,
             f"domino_sl_epoch_{epoch:04d}_val_{validation_loss:.4f}.npz",
         )
 
@@ -302,19 +339,27 @@ def main(
 
         np.savez(checkpoint_file, **weights_payload)
         np.savez(weights_file, **weights_payload)
+        removed_checkpoints = _prune_supervised_checkpoints(CHECKPOINT_DIR)
 
         now = time.time()
         checkpoint_elapsed = now - last_checkpoint_time["value"]
         last_checkpoint_time["value"] = now
 
-        print(
-            f"  -> Checkpoint saved to {checkpoint_file} "
-            f"(time since previous checkpoint: {format_duration(checkpoint_elapsed)})."
-        )
-        print(f"  -> Active supervised model updated at {weights_file}.")
+        if not quiet:
+            print(
+                f"  -> Checkpoint saved to {checkpoint_file} "
+                f"(time since previous checkpoint: {format_duration(checkpoint_elapsed)})."
+            )
+            if removed_checkpoints:
+                print(
+                    "  -> Removed "
+                    f"{len(removed_checkpoints)} older supervised checkpoint(s); "
+                    f"keeping the latest {MAX_SUPERVISED_CHECKPOINTS}."
+                )
+            print(f"  -> Active supervised model updated at {weights_file}.")
         
     def save_if_best(epoch, validation_loss, current_network):
-        if epoch % checkpoint_every == 0:
+        if epoch % CHECKPOINT_EVERY == 0:
             save_checkpoint(current_network, epoch, validation_loss)
 
         if validation_loss < best_state["validation_loss"]:
@@ -327,10 +372,12 @@ def main(
                 "W3": current_network.W3.copy(),
                 "b3": current_network.b3.copy(),
             }
-            print(f"  -> New best validation loss {validation_loss:.4f} at epoch {epoch}.")
+            if not quiet:
+                print(f"  -> New best validation loss {validation_loss:.4f} at epoch {epoch}.")
 
-    print("\nStarting supervised training...")
-    network.train(
+    if not quiet:
+        print("\nStarting supervised training...")
+    loss_history = network.train(
         x_train,
         y_train,
         x_val=x_val,
@@ -338,10 +385,10 @@ def main(
         epochs=epochs,
         batch_size=batch_size,
         on_validation=save_if_best,
+        progress_callback=progress_callback,
+        quiet=quiet,
         early_stopping_patience=early_stopping_patience,
-        lr_decay_factor=(
-            lr_decay_factor if lr_decay_factor and 0 < lr_decay_factor < 1 else None
-        ),
+        lr_decay_factor=lr_decay_factor,
     )
 
     os.makedirs(os.path.dirname(weights_file), exist_ok=True)
@@ -363,68 +410,116 @@ def main(
         W3=to_numpy(weights_to_save["W3"]),
         b3=to_numpy(weights_to_save["b3"]),
     )
-    print(
-        f"Model saved to {weights_file} "
-        f"(best validation loss: {best_state['validation_loss']:.4f})."
-    )
+    if not quiet:
+        print(
+            f"Model saved to {weights_file} "
+            f"(best validation loss: {best_state['validation_loss']:.4f})."
+        )
     elapsed_time = time.time() - start_time
-    print(f"Total elapsed time: {format_duration(elapsed_time)}.")
+    if not quiet:
+        print(f"Total elapsed time: {format_duration(elapsed_time)}.")
+
+    return {
+        "epochs": len(loss_history),
+        "requested_epochs": epochs,
+        "batch_size": batch_size,
+        "total_examples": total_examples,
+        "train_examples": x_train.shape[1],
+        "validation_examples": x_val.shape[1],
+        "best_validation_loss": best_state["validation_loss"],
+        "weight_decay": weight_decay,
+        "early_stopping_patience": early_stopping_patience,
+        "lr_decay_factor": lr_decay_factor,
+        "final_learning_rate": network.lr,
+        "weights_file": weights_file,
+        "duration_s": elapsed_time,
+    }
 
 
-def parse_args():
+def _nonnegative_float(value):
+    """Parse a non-negative command-line floating-point value."""
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
+def _positive_int(value):
+    """Parse a positive command-line integer value."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
+def _decay_factor(value):
+    """Parse a multiplicative decay factor strictly between zero and one."""
+    parsed = float(value)
+    if not 0.0 < parsed < 1.0:
+        raise argparse.ArgumentTypeError("value must be greater than 0 and less than 1")
+    return parsed
+
+
+def add_optional_training_arguments(parser):
+    """Add opt-in SL regularization and scheduling flags to ``parser``."""
+    group = parser.add_argument_group("optional supervised-training controls")
+    group.add_argument(
+        "--weight-decay",
+        nargs="?",
+        type=_nonnegative_float,
+        const=DEFAULT_WEIGHT_DECAY,
+        default=0.0,
+        metavar="COEFFICIENT",
+        help=(
+            "Enable L2 weight decay. When passed without a value, use "
+            f"{DEFAULT_WEIGHT_DECAY}."
+        ),
+    )
+    group.add_argument(
+        "--early-stopping",
+        nargs="?",
+        type=_positive_int,
+        const=DEFAULT_EARLY_STOPPING_PATIENCE,
+        default=None,
+        metavar="PATIENCE",
+        help=(
+            "Stop after this many validation checks without improvement. "
+            f"When passed without a value, use {DEFAULT_EARLY_STOPPING_PATIENCE}."
+        ),
+    )
+    group.add_argument(
+        "--lr-decay",
+        nargs="?",
+        type=_decay_factor,
+        const=DEFAULT_LR_DECAY_FACTOR,
+        default=None,
+        metavar="FACTOR",
+        help=(
+            "Multiply the learning rate by this factor after each failed "
+            "validation check. When omitted, keep the learning rate fixed."
+        ),
+    )
+    return parser
+
+
+def parse_args(argv=None):
+    """Return optional supervised-training controls from the command line."""
     parser = argparse.ArgumentParser(
-        description="Train the supervised-learning domino policy from a JSONL dataset.",
+        description="Train the supervised-learning domino policy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--dataset-file", type=str, default="dataset/supervised_dataset.jsonl")
-    parser.add_argument("--weights-file", type=str, default="models/domino_sl_weights.npz")
-    parser.add_argument("--cache-file", type=str, default=ENCODED_CACHE_FILE)
-    parser.add_argument("--epochs", type=int, default=EPOCHS)
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
-    parser.add_argument("--learning-rate", type=float, default=0.005)
-    parser.add_argument("--checkpoint-every", type=int, default=CHECKPOINT_EVERY)
-    parser.add_argument("--checkpoint-dir", type=str, default=CHECKPOINT_DIR)
-    parser.add_argument(
-        "--early-stopping-patience",
-        type=int,
-        default=EARLY_STOPPING_PATIENCE,
-        help=(
-            "Validation checks (every 10 epochs) without improvement before "
-            "stopping early. Use 0 to disable."
-        ),
+    add_optional_training_arguments(parser)
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    train_supervised(
+        weight_decay=args.weight_decay,
+        early_stopping_patience=args.early_stopping,
+        lr_decay_factor=args.lr_decay,
     )
-    parser.add_argument(
-        "--weight-decay",
-        type=float,
-        default=WEIGHT_DECAY,
-        help="L2 penalty applied to W1/W2/W3 during updates. Use 0 to disable.",
-    )
-    parser.add_argument(
-        "--lr-decay-factor",
-        type=float,
-        default=LR_DECAY_FACTOR,
-        help=(
-            "Multiply the learning rate by this factor on each validation "
-            "check without improvement. Use 1 to disable."
-        ),
-    )
-    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    main(
-        dataset_file=args.dataset_file,
-        weights_file=args.weights_file,
-        cache_file=args.cache_file,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        checkpoint_every=args.checkpoint_every,
-        checkpoint_dir=args.checkpoint_dir,
-        early_stopping_patience=(
-            args.early_stopping_patience if args.early_stopping_patience > 0 else None
-        ),
-        weight_decay=args.weight_decay,
-        lr_decay_factor=args.lr_decay_factor,
-    )
+    main()

@@ -3,7 +3,7 @@ UI-facing agent factory.
 
 The visual interface identifies players with small string IDs:
 
-    "neural", "heuristic", "random", "human", "rl"
+    "neural", "random_nn", "heuristic", "random", "human", "rl"
 
 This module is the only place that translates those IDs into objects accepted
 by `GameManager`. Keeping that mapping here prevents the controller and HUD
@@ -13,7 +13,7 @@ from importing every concrete agent implementation directly.
 import random
 
 
-AGENT_TYPES = ("neural", "heuristic", "random", "human", "rl")
+AGENT_TYPES = ("neural", "random_nn", "heuristic", "random", "human", "rl")
 
 
 class RandomUIAgent:
@@ -40,6 +40,7 @@ def agent_type_name(agent_type):
     """Friendly label used by the HUD and notifications."""
     names = {
         "neural": "Neural",
+        "random_nn": "Random NN",
         "heuristic": "Heuristic",
         "random": "Random",
         "human": "Human",
@@ -59,6 +60,11 @@ def create_agent_by_type(agent_type):
         from agents.neural_agent import NeuralAgent
 
         return NeuralAgent.load("models/domino_sl_weights.npz")
+
+    if agent_type == "random_nn":
+        from agents.random_neural_agent import RandomNeuralAgent
+
+        return RandomNeuralAgent.create()
 
     if agent_type == "heuristic":
         from agents.heuristic_agent import StrategicAgent

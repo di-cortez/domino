@@ -42,6 +42,7 @@ The controller uses two mixins:
 `ui_agents.py` maps menu strings to real agent objects:
 
 - `neural` -> `NeuralAgent`;
+- `random_nn` -> `RandomNeuralAgent` with fixed, untrained weights;
 - `heuristic` -> `StrategicAgent`;
 - `random` -> `RandomUIAgent`;
 - `human` -> `BlockedHumanAgent`;

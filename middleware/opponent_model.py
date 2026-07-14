@@ -1,44 +1,32 @@
-"""Hybrid two-player opponent-suit probabilities.
+"""Exact two-player opponent inference with slot and hand-weight beliefs.
 
-The model exports seven presence probabilities:
+The public model starts with an exact temporal-slot representation. Each slot
+keeps the restrictions that were known when that tile entered the opponent's
+hand. At the end of the first non-terminal public turn where ``comb(|U|, h)``
+is at most ``SWITCH_TO_MU_MAX_HANDS``, the model converts once to an exact
+``mu(H)`` distribution over hidden hands and remains there for the game.
 
-    p[j] = P(the opponent currently has at least one tile containing suit j).
+The exported probabilities have direct presence semantics:
 
-Semantics are direct:
+    p[s] = P(the opponent currently holds at least one tile containing suit s)
 
-    0.0 = known absence;
-    1.0 = known presence.
-
-The implementation has three internal modes:
-
-* ``compact_exact``: exact uniform posterior over all h-subsets of a candidate
-  tile mask. No hands are enumerated.
-* ``enumerated_exact``: exact weighted posterior over at most
-  ``MAX_ENUMERATED_HANDS`` explicit hands.
-* ``particle_approximate``: fixed-size particle approximation when an exact
-  hidden-draw expansion would exceed the configured hand limit.
-
-The model is strict: it supports temporal reconstruction only for two-player
-observer states containing the observer's initial hand and private draw history.
-There is no snapshot fallback.
+Thus ``0.0`` means known absence and ``1.0`` means known presence. The exact
+path never creates particles or silently changes to an approximate posterior.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
-from hashlib import blake2b
+from enum import Enum
 from itertools import combinations
 from math import comb
-import random
+from time import perf_counter
 from typing import Iterable, Sequence
 
 
-MAX_ENUMERATED_HANDS = 1000
-PARTICLE_COUNT = 1000
-PARTICLE_SEED = 0
-
-MODEL_VERSION = "hybrid-particles-rejuvenation-v2"
+SWITCH_TO_MU_MAX_HANDS = 500
+MODEL_VERSION = "slots-mu-exact-v1"
 
 ALL_TILES = [(i, j) for i in range(7) for j in range(i, 7)]
 SUIT_COUNT = 7
@@ -46,7 +34,6 @@ INITIAL_HAND_SIZE = 7
 
 TILE_TO_INDEX = {tile: index for index, tile in enumerate(ALL_TILES)}
 INDEX_TO_TILE = {index: tile for tile, index in TILE_TO_INDEX.items()}
-TILE_BITS = [1 << index for index in range(len(ALL_TILES))]
 ALL_MASK = (1 << len(ALL_TILES)) - 1
 
 SUIT_MASKS: list[int] = []
@@ -58,17 +45,68 @@ for suit in range(SUIT_COUNT):
     SUIT_MASKS.append(mask)
 
 
-class ParticleDepletionError(RuntimeError):
-    """Raised when no particle survives a logically required observation."""
+class ProbabilityStage(Enum):
+    """Named stages exposed while a public turn is being processed."""
+
+    AFTER_NEGATIVE_EVIDENCE = "after_negative_evidence"
+    AFTER_DRAW = "after_draw"
+    END_TURN = "end_turn"
 
 
 @dataclass(frozen=True)
 class PublicAction:
-    """A board-history action annotated with its reconstructed actor."""
+    """A board-history action with reconstructed actor, turn, and board ends."""
 
     actor: int
     action: object
     ends_before: tuple[int, int] | None
+    ends_after: tuple[int, int] | None
+    history_action_index: int
+    public_turn: int
+
+
+@dataclass(frozen=True)
+class ProbabilitySnapshot:
+    """One exact probability vector at a named stage of a public turn."""
+
+    public_turn: int
+    history_action_index: int
+    actor: int
+    stage: ProbabilityStage
+    probabilities: tuple[float, ...]
+    mode: str
+    ends: tuple[int, int] | None
+    opponent_hand_size: int
+    unknown_count: int
+    state_count: int
+    profile_count: int | None
+    mu_hand_count: int | None
+    total_weight: int
+    raw_hand_upper_bound: int
+    action: object
+    same_as_previous: bool = False
+
+
+@dataclass
+class OpponentTurnTrace:
+    """Labelled probability stages belonging to one reconstructed public turn."""
+
+    public_turn: int
+    actor: int
+    after_negative_evidence: ProbabilitySnapshot | None = None
+    after_draw: ProbabilitySnapshot | None = None
+    end_turn: ProbabilitySnapshot | None = None
+
+
+@dataclass(frozen=True)
+class OpponentModelUpdate:
+    """Rich result returned by :meth:`HybridExactOpponentModel.update_detailed`."""
+
+    probabilities: tuple[float, ...]
+    new_snapshots: tuple[ProbabilitySnapshot, ...]
+    completed_turn_traces: tuple[OpponentTurnTrace, ...]
+    mode: str
+    switched_this_update: bool
 
 
 def _normalize_tile(tile: Sequence[int]) -> tuple[int, int]:
@@ -110,6 +148,13 @@ def _indices_from_mask(mask: int) -> Iterable[int]:
         mask ^= bit
 
 
+def _bits_from_mask(mask: int) -> Iterable[int]:
+    while mask:
+        bit = mask & -mask
+        yield bit
+        mask ^= bit
+
+
 def _mask_from_indices(indices: Iterable[int]) -> int:
     mask = 0
     for index in indices:
@@ -125,11 +170,22 @@ def mask_from_tiles(tiles: Iterable[Sequence[int]]) -> int:
     return mask
 
 
-def reconstruct_public_actions(state: dict) -> list[PublicAction]:
-    """Reconstruct actors and pre-action ends for public board history.
+def _legal_mask(left_end: int, right_end: int) -> int:
+    return SUIT_MASKS[int(left_end)] | SUIT_MASKS[int(right_end)]
 
-    The engine history stores actions but not actors. Tile plays and passes
-    advance the actor, while a draw keeps the same actor.
+
+def _raw_hand_upper_bound(unknown_mask: int, hand_size: int) -> int:
+    unknown_count = int(unknown_mask).bit_count()
+    if hand_size < 0 or hand_size > unknown_count:
+        return 0
+    return comb(unknown_count, hand_size)
+
+
+def reconstruct_public_actions(state: dict) -> list[PublicAction]:
+    """Reconstruct actors, public turns, and board ends for action history.
+
+    A draw keeps the actor and public-turn number. A pass or tile play closes
+    the current public turn and advances both values.
     """
     board_history = [
         _normalize_action(action)
@@ -140,225 +196,52 @@ def reconstruct_public_actions(state: dict) -> list[PublicAction]:
         state.get("history_current_player", state.get("current_player", 0))
     )
 
-    advancing_actions = sum(
-        1 for action in board_history if not _is_draw(action)
-    )
-    actor = (current_player - advancing_actions) % player_count
+    # DominoEngine keeps the terminal actor as ``current_player`` because it
+    # does not advance after a winning play or the final blocked-game pass.
+    # Actor reconstruction needs the player who would have acted next.
+    if state.get("game_over") and board_history and not _is_draw(board_history[-1]):
+        current_player = (current_player + 1) % player_count
 
+    advancing_actions = sum(1 for action in board_history if not _is_draw(action))
+    actor = (current_player - advancing_actions) % player_count
+    public_turn = 1
     ends: list[int] | None = None
     annotated: list[PublicAction] = []
 
-    for action in board_history:
+    for action_index, action in enumerate(board_history, start=1):
         ends_before = tuple(ends) if ends is not None else None
+
+        if _is_tile_play(action):
+            tile, side = action
+            if ends is None:
+                ends = [tile[0], tile[1]]
+            else:
+                connected_value = ends[side]
+                ends[side] = tile[1] if tile[0] == connected_value else tile[0]
+
+        ends_after = tuple(ends) if ends is not None else None
         annotated.append(
-            PublicAction(actor=actor, action=action, ends_before=ends_before)
+            PublicAction(
+                actor=actor,
+                action=action,
+                ends_before=ends_before,
+                ends_after=ends_after,
+                history_action_index=action_index,
+                public_turn=public_turn,
+            )
         )
 
-        if _is_draw(action):
-            continue
-
-        if _is_pass(action):
+        if not _is_draw(action):
             actor = (actor + 1) % player_count
-            continue
-
-        tile, side = action
-        if ends is None:
-            ends = [tile[0], tile[1]]
-        else:
-            connected_value = ends[side]
-            ends[side] = tile[1] if tile[0] == connected_value else tile[0]
-        actor = (actor + 1) % player_count
+            public_turn += 1
 
     return annotated
 
 
-def _stable_seed(
-    base_seed: int,
-    game_id,
-    observer_player: int,
-    observer_initial_hand: Sequence[Sequence[int]],
-) -> int:
-    """Build a reproducible per-game, per-observer RNG seed."""
-    initial_mask = mask_from_tiles(observer_initial_hand)
-    payload = (
-        f"{int(base_seed)}|{game_id!r}|{int(observer_player)}|{initial_mask}"
-    ).encode("utf-8")
-    return int.from_bytes(
-        blake2b(payload, digest_size=8).digest(),
-        byteorder="big",
-        signed=False,
-    )
+class MuOpponentBelief:
+    """Exact integer-weight posterior ``hand_mask -> mu(H)``."""
 
-
-def _presence_probabilities_from_uniform_subsets(
-    candidate_mask: int,
-    hand_size: int,
-) -> list[float]:
-    """Exact suit probabilities for a uniform h-subset of candidate_mask."""
-    candidate_count = candidate_mask.bit_count()
-    hand_size = int(hand_size)
-
-    if hand_size <= 0:
-        return [0.0] * SUIT_COUNT
-    if candidate_count < hand_size:
-        raise ValueError("Candidate pool is smaller than the opponent hand.")
-
-    denominator = comb(candidate_count, hand_size)
-    probabilities: list[float] = []
-
-    for suit_mask in SUIT_MASKS:
-        suit_count = (candidate_mask & suit_mask).bit_count()
-        non_suit_count = candidate_count - suit_count
-        if non_suit_count < hand_size:
-            probability_no_suit = 0.0
-        else:
-            probability_no_suit = comb(non_suit_count, hand_size) / denominator
-        probabilities.append(1.0 - probability_no_suit)
-
-    return probabilities
-
-
-def _probability_can_play_uniform(
-    candidate_mask: int,
-    hand_size: int,
-    ends: Sequence[int],
-) -> float:
-    """Exact play probability for a uniform h-subset of candidate_mask."""
-    if not ends:
-        return 1.0
-
-    legal_mask = SUIT_MASKS[int(ends[0])] | SUIT_MASKS[int(ends[1])]
-    candidate_count = candidate_mask.bit_count()
-    playable_count = (candidate_mask & legal_mask).bit_count()
-    non_playable_count = candidate_count - playable_count
-
-    if hand_size <= 0:
-        return 0.0
-    if candidate_count < hand_size:
-        raise ValueError("Candidate pool is smaller than the opponent hand.")
-
-    denominator = comb(candidate_count, hand_size)
-    if non_playable_count < hand_size:
-        probability_no_play = 0.0
-    else:
-        probability_no_play = comb(non_playable_count, hand_size) / denominator
-    return 1.0 - probability_no_play
-
-
-class CompactOpponentBelief:
-    """Exact uniform posterior over h-subsets of ``candidate_mask``."""
-
-    mode = "compact_exact"
-
-    def __init__(
-        self,
-        observer_initial_hand: Sequence[Sequence[int]],
-        opponent_hand_size: int = INITIAL_HAND_SIZE,
-        *,
-        rng: random.Random,
-        max_enumerated_hands: int,
-        particle_count: int,
-    ):
-        own_initial_mask = mask_from_tiles(observer_initial_hand)
-        self.unknown_mask = ALL_MASK ^ own_initial_mask
-        self.candidate_mask = self.unknown_mask
-        self.opponent_hand_size = int(opponent_hand_size)
-        self.rng = rng
-        self.max_enumerated_hands = int(max_enumerated_hands)
-        self.particle_count = int(particle_count)
-        self._probability_cache: list[float] | None = None
-        self._assert_consistent()
-
-    def _invalidate_cache(self) -> None:
-        self._probability_cache = None
-
-    def _assert_consistent(self) -> None:
-        if self.candidate_mask & ~self.unknown_mask:
-            raise ValueError("Candidate mask is not contained in the unknown mask.")
-        if self.opponent_hand_size < 0:
-            raise ValueError("Opponent hand size cannot be negative.")
-        if self.candidate_mask.bit_count() < self.opponent_hand_size:
-            raise ValueError("Not enough candidate tiles for the opponent hand.")
-
-    def condition_no_legal(self, left_end: int, right_end: int) -> None:
-        legal_mask = SUIT_MASKS[int(left_end)] | SUIT_MASKS[int(right_end)]
-        self.candidate_mask &= ~legal_mask
-        self._invalidate_cache()
-        self._assert_consistent()
-
-    def observer_known_draw(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
-        if not (self.unknown_mask & bit):
-            return
-        self.candidate_mask &= ~bit
-        self.unknown_mask &= ~bit
-        self._invalidate_cache()
-        self._assert_consistent()
-
-    def observer_known_play(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
-        if not (self.unknown_mask & bit):
-            return
-        self.candidate_mask &= ~bit
-        self.unknown_mask &= ~bit
-        self._invalidate_cache()
-        self._assert_consistent()
-
-    def opponent_reveals_and_plays(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
-        if not (self.candidate_mask & bit):
-            raise ValueError(
-                f"Opponent revealed impossible tile {_normalize_tile(tile)}."
-            )
-        self.candidate_mask &= ~bit
-        self.unknown_mask &= ~bit
-        self.opponent_hand_size -= 1
-        self._invalidate_cache()
-        self._assert_consistent()
-
-    def opponent_hidden_draw(self):
-        """Return an exact-enumerated or particle belief after one hidden draw."""
-        candidate_count = self.candidate_mask.bit_count()
-        unknown_count = self.unknown_mask.bit_count()
-        hand_size = self.opponent_hand_size
-        outside_count = unknown_count - candidate_count
-
-        if unknown_count - hand_size <= 0:
-            raise ValueError("Opponent cannot draw because the hidden stock is empty.")
-
-        inside_only_count = (
-            comb(candidate_count, hand_size + 1)
-            if candidate_count >= hand_size + 1
-            else 0
-        )
-        one_outside_count = comb(candidate_count, hand_size) * outside_count
-        final_state_count = inside_only_count + one_outside_count
-
-        if final_state_count <= self.max_enumerated_hands:
-            return EnumeratedOpponentBelief.from_compact_hidden_draw(self)
-        return ParticleOpponentBelief.from_compact_hidden_draw(self)
-
-    def suit_probabilities(self) -> list[float]:
-        if self._probability_cache is None:
-            self._probability_cache = _presence_probabilities_from_uniform_subsets(
-                self.candidate_mask, self.opponent_hand_size
-            )
-        return list(self._probability_cache)
-
-    def probability_can_play(self, ends: Sequence[int]) -> float:
-        return _probability_can_play_uniform(
-            self.candidate_mask, self.opponent_hand_size, ends
-        )
-
-    @property
-    def state_count(self) -> int:
-        return comb(self.candidate_mask.bit_count(), self.opponent_hand_size)
-
-
-class EnumeratedOpponentBelief:
-    """Exact weighted posterior over explicitly represented hidden hands."""
-
-    mode = "enumerated_exact"
+    mode = "mu_exact"
 
     def __init__(
         self,
@@ -366,112 +249,112 @@ class EnumeratedOpponentBelief:
         unknown_mask: int,
         opponent_hand_size: int,
         weights: dict[int, int],
-        rng: random.Random,
-        max_enumerated_hands: int,
-        particle_count: int,
     ):
         self.unknown_mask = int(unknown_mask)
         self.opponent_hand_size = int(opponent_hand_size)
         self.weights = dict(weights)
-        self.rng = rng
-        self.max_enumerated_hands = int(max_enumerated_hands)
-        self.particle_count = int(particle_count)
-        self._probability_cache: list[float] | None = None
-        self._assert_consistent()
+        self._probability_cache: tuple[float, ...] | None = None
+        self.assert_consistent()
 
     @classmethod
-    def from_compact_hidden_draw(cls, compact: CompactOpponentBelief):
-        candidate_indices = list(_indices_from_mask(compact.candidate_mask))
-        outside_mask = compact.unknown_mask & ~compact.candidate_mask
-        outside_indices = list(_indices_from_mask(outside_mask))
-        hand_size = compact.opponent_hand_size
-        weights: dict[int, int] = defaultdict(int)
-
-        # If the drawn tile was also in candidate_mask, each final hand of
-        # size h+1 has h+1 compatible histories.
-        if len(candidate_indices) >= hand_size + 1:
-            for combo in combinations(candidate_indices, hand_size + 1):
-                final_hand = _mask_from_indices(combo)
-                weights[final_hand] += hand_size + 1
-
-        # If the drawn tile was known to be in the stock, the history is unique.
-        if len(candidate_indices) >= hand_size:
-            for combo in combinations(candidate_indices, hand_size):
-                original_hand = _mask_from_indices(combo)
-                for outside_index in outside_indices:
-                    weights[original_hand | (1 << outside_index)] += 1
-
+    def from_initial(
+        cls,
+        observer_initial_hand: Sequence[Sequence[int]],
+        opponent_hand_size: int = INITIAL_HAND_SIZE,
+    ) -> "MuOpponentBelief":
+        """Enumerate the independent uniform initial hand distribution."""
+        unknown_mask = ALL_MASK & ~mask_from_tiles(observer_initial_hand)
+        unknown_indices = list(_indices_from_mask(unknown_mask))
+        weights = {
+            _mask_from_indices(indices): 1
+            for indices in combinations(unknown_indices, int(opponent_hand_size))
+        }
         return cls(
-            unknown_mask=compact.unknown_mask,
-            opponent_hand_size=hand_size + 1,
+            unknown_mask=unknown_mask,
+            opponent_hand_size=opponent_hand_size,
+            weights=weights,
+        )
+
+    @classmethod
+    def from_weights(
+        cls,
+        *,
+        unknown_mask: int,
+        opponent_hand_size: int,
+        weights: dict[int, int],
+    ) -> "MuOpponentBelief":
+        """Build a belief from exact slot-conversion weights without re-enumeration."""
+        return cls(
+            unknown_mask=unknown_mask,
+            opponent_hand_size=opponent_hand_size,
             weights=dict(weights),
-            rng=compact.rng,
-            max_enumerated_hands=compact.max_enumerated_hands,
-            particle_count=compact.particle_count,
         )
 
     def _invalidate_cache(self) -> None:
         self._probability_cache = None
 
-    def _assert_consistent(self) -> None:
+    def assert_consistent(self) -> None:
+        """Validate all exact hand-weight invariants."""
         if not self.weights:
-            raise ValueError("Enumerated model has no compatible hidden hands.")
+            raise ValueError("Mu belief has no compatible hidden hands.")
+        if self.opponent_hand_size < 0:
+            raise ValueError("Opponent hand size cannot be negative.")
         for hand_mask, weight in self.weights.items():
             if not isinstance(weight, int) or weight <= 0:
-                raise ValueError("Enumerated weights must be positive integers.")
+                raise ValueError("Mu weights must be positive integers.")
             if hand_mask & ~self.unknown_mask:
-                raise ValueError("A hidden hand contains a tile outside the unknown pool.")
+                raise ValueError("A mu hand contains a tile outside the unknown pool.")
             if hand_mask.bit_count() != self.opponent_hand_size:
-                raise ValueError("A hidden hand has an incompatible tile count.")
+                raise ValueError("A mu hand has an incompatible tile count.")
 
-    def _filter(self, predicate) -> None:
+    def condition_no_legal(self, left_end: int, right_end: int) -> None:
+        legal_mask = _legal_mask(left_end, right_end)
         self.weights = {
             hand_mask: weight
             for hand_mask, weight in self.weights.items()
-            if predicate(hand_mask)
+            if not hand_mask & legal_mask
         }
         self._invalidate_cache()
-        self._assert_consistent()
+        self.assert_consistent()
 
-    def condition_no_legal(self, left_end: int, right_end: int) -> None:
-        legal_mask = SUIT_MASKS[int(left_end)] | SUIT_MASKS[int(right_end)]
-        self._filter(lambda hand_mask: (hand_mask & legal_mask) == 0)
+    def _observer_known_tile(self, tile: Sequence[int]) -> None:
+        bit = _tile_bit(tile)
+        if not self.unknown_mask & bit:
+            return
+        self.weights = {
+            hand_mask: weight
+            for hand_mask, weight in self.weights.items()
+            if not hand_mask & bit
+        }
+        self.unknown_mask &= ~bit
+        self._invalidate_cache()
+        self.assert_consistent()
 
     def observer_known_draw(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
-        if not (self.unknown_mask & bit):
-            return
-        self._filter(lambda hand_mask: (hand_mask & bit) == 0)
-        self.unknown_mask &= ~bit
-        self._invalidate_cache()
-        self._assert_consistent()
+        self._observer_known_tile(tile)
 
     def observer_known_play(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
-        if not (self.unknown_mask & bit):
-            return
-        self._filter(lambda hand_mask: (hand_mask & bit) == 0)
-        self.unknown_mask &= ~bit
-        self._invalidate_cache()
-        self._assert_consistent()
+        self._observer_known_tile(tile)
 
     def opponent_reveals_and_plays(self, tile: Sequence[int]) -> None:
         bit = _tile_bit(tile)
-        if not (self.unknown_mask & bit):
+        if not self.unknown_mask & bit:
             raise ValueError(
                 f"Revealed opponent tile {_normalize_tile(tile)} is not unknown."
             )
+
         new_weights: dict[int, int] = defaultdict(int)
         for hand_mask, weight in self.weights.items():
             if hand_mask & bit:
                 new_weights[hand_mask ^ bit] += weight
+
         self.weights = dict(new_weights)
         self.unknown_mask &= ~bit
         self.opponent_hand_size -= 1
         self._invalidate_cache()
-        self._assert_consistent()
+        self.assert_consistent()
 
-    def opponent_hidden_draw(self):
+    def opponent_hidden_draw(self) -> "MuOpponentBelief":
         stock_size = self.unknown_mask.bit_count() - self.opponent_hand_size
         if stock_size <= 0:
             raise ValueError("Opponent cannot draw because the hidden stock is empty.")
@@ -479,384 +362,447 @@ class EnumeratedOpponentBelief:
         new_weights: dict[int, int] = defaultdict(int)
         for hand_mask, weight in self.weights.items():
             stock_mask = self.unknown_mask & ~hand_mask
-            for index in _indices_from_mask(stock_mask):
-                new_weights[hand_mask | (1 << index)] += weight
-                if len(new_weights) > self.max_enumerated_hands:
-                    particle_belief = ParticleOpponentBelief.from_enumerated(self)
-                    return particle_belief.opponent_hidden_draw()
+            for bit in _bits_from_mask(stock_mask):
+                new_weights[hand_mask | bit] += weight
 
         self.weights = dict(new_weights)
         self.opponent_hand_size += 1
         self._invalidate_cache()
-        self._assert_consistent()
+        self.assert_consistent()
         return self
 
     def suit_probabilities(self) -> list[float]:
-        if self._probability_cache is not None:
-            return list(self._probability_cache)
-        total_weight = sum(self.weights.values())
-        probabilities = []
-        for suit_mask in SUIT_MASKS:
-            numerator = sum(
-                weight
-                for hand_mask, weight in self.weights.items()
-                if hand_mask & suit_mask
+        if self._probability_cache is None:
+            total_weight = self.total_weight
+            self._probability_cache = tuple(
+                sum(
+                    weight
+                    for hand_mask, weight in self.weights.items()
+                    if hand_mask & suit_mask
+                )
+                / total_weight
+                for suit_mask in SUIT_MASKS
             )
-            probabilities.append(numerator / total_weight)
-        self._probability_cache = probabilities
-        return list(probabilities)
+        return list(self._probability_cache)
 
     def probability_can_play(self, ends: Sequence[int]) -> float:
         if not ends:
             return 1.0
-        legal_mask = SUIT_MASKS[int(ends[0])] | SUIT_MASKS[int(ends[1])]
-        total_weight = sum(self.weights.values())
+        legal_mask = _legal_mask(ends[0], ends[1])
         playable_weight = sum(
             weight
             for hand_mask, weight in self.weights.items()
             if hand_mask & legal_mask
         )
-        return playable_weight / total_weight
+        return playable_weight / self.total_weight
+
+    @property
+    def total_weight(self) -> int:
+        return sum(self.weights.values())
 
     @property
     def state_count(self) -> int:
         return len(self.weights)
 
+    @property
+    def raw_hand_upper_bound(self) -> int:
+        return _raw_hand_upper_bound(self.unknown_mask, self.opponent_hand_size)
 
-class ParticleOpponentBelief:
-    """Fixed-size sequential Monte Carlo approximation of hidden hands."""
 
-    mode = "particle_approximate"
+class SlotOpponentBelief:
+    """Exact posterior over canonical temporal-slot domain profiles.
+
+    ``profiles`` maps a sorted tuple of allowed tile masks to an integer history
+    weight. Slots are injective: two slots can never receive the same tile.
+    Assignment totals use a slot-occupancy DP, while conversion to ``mu(H)``
+    uses the required partial-hand-mask DP and merges equal hands after every
+    slot.
+    """
+
+    mode = "slots_exact"
 
     def __init__(
         self,
+        observer_initial_hand: Sequence[Sequence[int]],
+        opponent_hand_size: int = INITIAL_HAND_SIZE,
+    ):
+        own_initial_mask = mask_from_tiles(observer_initial_hand)
+        self.unknown_mask = ALL_MASK & ~own_initial_mask
+        self.opponent_hand_size = int(opponent_hand_size)
+        initial_profile = tuple([self.unknown_mask] * self.opponent_hand_size)
+        self.profiles: dict[tuple[int, ...], int] = {initial_profile: 1}
+        self._assignment_count_cache: dict[tuple[int, ...], int] = {}
+        self._hand_weights_cache: dict[tuple[int, ...], dict[int, int]] = {}
+        self._probability_cache: tuple[float, ...] | None = None
+        self.assert_consistent()
+
+    @classmethod
+    def from_profiles(
+        cls,
         *,
         unknown_mask: int,
         opponent_hand_size: int,
-        particles: Sequence[int],
-        rng: random.Random,
-        max_enumerated_hands: int,
-        particle_count: int,
-    ):
-        self.unknown_mask = int(unknown_mask)
-        self.opponent_hand_size = int(opponent_hand_size)
-        self.particles = list(particles)
-        self.rng = rng
-        self.max_enumerated_hands = int(max_enumerated_hands)
-        self.particle_count = int(particle_count)
-        self._probability_cache: list[float] | None = None
-        self._assert_consistent()
+        profiles: dict[tuple[int, ...], int],
+    ) -> "SlotOpponentBelief":
+        """Build a small exact slot state for tests and controlled conversions."""
+        belief = cls.__new__(cls)
+        belief.unknown_mask = int(unknown_mask)
+        belief.opponent_hand_size = int(opponent_hand_size)
+        canonical_profiles: dict[tuple[int, ...], int] = defaultdict(int)
+        for profile, weight in profiles.items():
+            canonical = tuple(sorted(int(mask) for mask in profile))
+            canonical_profiles[canonical] += int(weight)
+        belief.profiles = dict(canonical_profiles)
+        belief._assignment_count_cache = {}
+        belief._hand_weights_cache = {}
+        belief._probability_cache = None
+        belief.assert_consistent()
+        return belief
 
-    @classmethod
-    def from_compact_hidden_draw(cls, compact: CompactOpponentBelief):
-        candidate_indices = list(_indices_from_mask(compact.candidate_mask))
-        particles: list[int] = []
-
-        for _ in range(compact.particle_count):
-            sampled_indices = compact.rng.sample(
-                candidate_indices, compact.opponent_hand_size
-            )
-            hand_mask = _mask_from_indices(sampled_indices)
-            stock_indices = list(
-                _indices_from_mask(compact.unknown_mask & ~hand_mask)
-            )
-            if not stock_indices:
-                raise ValueError("Opponent cannot draw because the hidden stock is empty.")
-            drawn_index = compact.rng.choice(stock_indices)
-            particles.append(hand_mask | (1 << drawn_index))
-
-        return cls(
-            unknown_mask=compact.unknown_mask,
-            opponent_hand_size=compact.opponent_hand_size + 1,
-            particles=particles,
-            rng=compact.rng,
-            max_enumerated_hands=compact.max_enumerated_hands,
-            particle_count=compact.particle_count,
-        )
-
-    @classmethod
-    def from_enumerated(cls, enumerated: EnumeratedOpponentBelief):
-        hands = list(enumerated.weights)
-        weights = list(enumerated.weights.values())
-        particles = enumerated.rng.choices(
-            hands, weights=weights, k=enumerated.particle_count
-        )
-        return cls(
-            unknown_mask=enumerated.unknown_mask,
-            opponent_hand_size=enumerated.opponent_hand_size,
-            particles=particles,
-            rng=enumerated.rng,
-            max_enumerated_hands=enumerated.max_enumerated_hands,
-            particle_count=enumerated.particle_count,
-        )
-
-    def _invalidate_cache(self) -> None:
+    def _invalidate_caches(self) -> None:
+        self._assignment_count_cache.clear()
+        self._hand_weights_cache.clear()
         self._probability_cache = None
 
-    def _assert_consistent(self) -> None:
-        if not self.particles:
-            raise ParticleDepletionError("Particle model has no particles.")
-        if len(self.particles) != self.particle_count:
-            raise ValueError("Particle population has an unexpected size.")
-        for hand_mask in self.particles:
-            if hand_mask & ~self.unknown_mask:
-                raise ValueError("A particle contains a tile outside the unknown pool.")
-            if hand_mask.bit_count() != self.opponent_hand_size:
-                raise ValueError("A particle has an incompatible tile count.")
+    def _count_profile_assignments(self, profile: tuple[int, ...]) -> int:
+        """Count injective assignments without materializing hidden hands.
 
-    def _filter_and_resample(
-        self,
-        predicate,
-        transform=None,
-        *,
-        observation: str,
-        repair=None,
-    ) -> None:
-        """Condition particles on an observation without needless collapse.
-
-        Every surviving particle is retained once. Sampling with replacement is
-        used only to fill the population back to ``particle_count``. If finite
-        particle support is accidentally exhausted, ``repair`` performs a local
-        rejuvenation move that creates hands compatible with the hard public
-        observation instead of aborting the game.
+        The DP scans unknown tiles and tracks which labelled slot positions are
+        occupied. Its state space is ``2**h`` rather than the set of possible
+        hand masks, which keeps slot-mode probability queries compact.
         """
-        survivors: list[int] = []
-        for hand_mask in self.particles:
-            if predicate(hand_mask):
-                survivors.append(
-                    transform(hand_mask) if transform is not None else hand_mask
-                )
+        profile = tuple(sorted(profile))
+        cached = self._assignment_count_cache.get(profile)
+        if cached is not None:
+            return cached
+        if not profile:
+            return 1
+        if any(mask == 0 for mask in profile):
+            return 0
 
-        if not survivors:
-            if repair is None:
-                raise ParticleDepletionError(
-                    f"No particle survived observation {observation!r}. "
-                    "No compatible rejuvenation rule is available."
-                )
-            survivors = [repair(hand_mask) for hand_mask in self.particles]
+        slot_count = len(profile)
+        full_slot_mask = (1 << slot_count) - 1
+        assignment_counts = [0] * (1 << slot_count)
+        assignment_counts[0] = 1
 
-        # Preserve all support that survived. The previous implementation drew
-        # all particles afresh from ``survivors`` and therefore discarded much
-        # of the remaining diversity after every observation.
-        if len(survivors) >= self.particle_count:
-            self.particles = self.rng.sample(
-                survivors,
-                self.particle_count,
-            )
-        else:
-            self.particles = list(survivors)
-            self.particles.extend(
-                self.rng.choices(
-                    survivors,
-                    k=self.particle_count - len(survivors),
-                )
-            )
-            self.rng.shuffle(self.particles)
+        tile_union = 0
+        for domain in profile:
+            tile_union |= domain
 
-        self._invalidate_cache()
-        self._assert_consistent()
+        for tile_bit in _bits_from_mask(tile_union):
+            eligible_slots = 0
+            for slot_index, domain in enumerate(profile):
+                if domain & tile_bit:
+                    eligible_slots |= 1 << slot_index
+
+            next_counts = assignment_counts.copy()
+            for occupied_slots, count in enumerate(assignment_counts):
+                if not count:
+                    continue
+                available_slots = eligible_slots & ~occupied_slots
+                while available_slots:
+                    slot_bit = available_slots & -available_slots
+                    next_counts[occupied_slots | slot_bit] += count
+                    available_slots ^= slot_bit
+            assignment_counts = next_counts
+
+        total = assignment_counts[full_slot_mask]
+        self._assignment_count_cache[profile] = total
+        return total
+
+    def _profile_hand_weights(self, profile: tuple[int, ...]) -> dict[int, int]:
+        """Return hand weights for one profile using incremental DP merging."""
+        profile = tuple(sorted(profile, key=lambda mask: (mask.bit_count(), mask)))
+        cached = self._hand_weights_cache.get(profile)
+        if cached is not None:
+            return dict(cached)
+
+        partial: dict[int, int] = {0: 1}
+        for allowed_mask in profile:
+            next_partial: dict[int, int] = defaultdict(int)
+            for hand_mask, count in partial.items():
+                available = allowed_mask & self.unknown_mask & ~hand_mask
+                for tile_bit in _bits_from_mask(available):
+                    next_partial[hand_mask | tile_bit] += count
+            partial = dict(next_partial)
+            if not partial:
+                break
+
+        self._hand_weights_cache[profile] = dict(partial)
+        return partial
+
+    def assert_consistent(self) -> None:
+        """Validate profile shape, weights, domains, and injective feasibility."""
+        if not self.profiles:
+            raise ValueError("Slot belief has no compatible profiles.")
+        if self.opponent_hand_size < 0:
+            raise ValueError("Opponent hand size cannot be negative.")
+
+        for profile, weight in self.profiles.items():
+            if tuple(sorted(profile)) != profile:
+                raise ValueError("Slot profiles must be canonical sorted tuples.")
+            if len(profile) != self.opponent_hand_size:
+                raise ValueError("A slot profile has an incompatible slot count.")
+            if not isinstance(weight, int) or weight <= 0:
+                raise ValueError("Slot profile weights must be positive integers.")
+            if any(mask == 0 for mask in profile):
+                raise ValueError("A slot domain cannot be empty.")
+            if any(mask & ~self.unknown_mask for mask in profile):
+                raise ValueError("A slot domain contains a tile outside the unknown pool.")
+            if self._count_profile_assignments(profile) <= 0:
+                raise ValueError("A slot profile has no injective assignment.")
+
+    def _replace_profiles(
+        self,
+        profiles: dict[tuple[int, ...], int],
+        *,
+        unknown_mask: int | None = None,
+        opponent_hand_size: int | None = None,
+    ) -> None:
+        if unknown_mask is not None:
+            self.unknown_mask = int(unknown_mask)
+        if opponent_hand_size is not None:
+            self.opponent_hand_size = int(opponent_hand_size)
+        self.profiles = dict(profiles)
+        self._invalidate_caches()
+        self.assert_consistent()
 
     def condition_no_legal(self, left_end: int, right_end: int) -> None:
-        legal_mask = SUIT_MASKS[int(left_end)] | SUIT_MASKS[int(right_end)]
+        legal_mask = _legal_mask(left_end, right_end)
+        new_profiles: dict[tuple[int, ...], int] = defaultdict(int)
 
-        def repair(hand_mask: int) -> int:
-            repaired = hand_mask & ~legal_mask
-            missing_count = self.opponent_hand_size - repaired.bit_count()
-            replacement_mask = self.unknown_mask & ~legal_mask & ~repaired
-            replacement_indices = list(_indices_from_mask(replacement_mask))
-            if len(replacement_indices) < missing_count:
-                raise ParticleDepletionError(
-                    "The public no-legal observation is incompatible with the "
-                    "remaining unknown tiles."
-                )
-            additions = self.rng.sample(replacement_indices, missing_count)
-            return repaired | _mask_from_indices(additions)
+        for profile, weight in self.profiles.items():
+            restricted = tuple(sorted(domain & ~legal_mask for domain in profile))
+            if any(domain == 0 for domain in restricted):
+                continue
+            if self._count_profile_assignments(restricted) > 0:
+                new_profiles[restricted] += weight
 
-        self._filter_and_resample(
-            lambda hand_mask: (hand_mask & legal_mask) == 0,
-            observation=f"no legal tile on ({left_end}, {right_end})",
-            repair=repair,
+        self._replace_profiles(dict(new_profiles))
+
+    def _observer_known_tile(self, tile: Sequence[int]) -> None:
+        bit = _tile_bit(tile)
+        if not self.unknown_mask & bit:
+            return
+
+        new_unknown_mask = self.unknown_mask & ~bit
+        new_profiles: dict[tuple[int, ...], int] = defaultdict(int)
+        for profile, weight in self.profiles.items():
+            restricted = tuple(sorted(domain & ~bit for domain in profile))
+            if any(domain == 0 for domain in restricted):
+                continue
+            if self._count_profile_assignments(restricted) > 0:
+                new_profiles[restricted] += weight
+
+        self._replace_profiles(
+            dict(new_profiles),
+            unknown_mask=new_unknown_mask,
         )
 
     def observer_known_draw(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
-        if not (self.unknown_mask & bit):
-            return
-        normalized = _normalize_tile(tile)
-
-        def repair(hand_mask: int) -> int:
-            if not (hand_mask & bit):
-                return hand_mask
-            stock_mask = self.unknown_mask & ~hand_mask
-            stock_indices = list(_indices_from_mask(stock_mask))
-            if not stock_indices:
-                raise ParticleDepletionError(
-                    f"Cannot condition on observer draw {normalized}: hidden "
-                    "stock is empty in every particle."
-                )
-            replacement_index = self.rng.choice(stock_indices)
-            return (hand_mask ^ bit) | (1 << replacement_index)
-
-        self._filter_and_resample(
-            lambda hand_mask: (hand_mask & bit) == 0,
-            observation=f"observer drew {normalized}",
-            repair=repair,
-        )
-        self.unknown_mask &= ~bit
-        self._invalidate_cache()
-        self._assert_consistent()
+        self._observer_known_tile(tile)
 
     def observer_known_play(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
-        if not (self.unknown_mask & bit):
-            return
-        normalized = _normalize_tile(tile)
-
-        def repair(hand_mask: int) -> int:
-            if not (hand_mask & bit):
-                return hand_mask
-            stock_mask = self.unknown_mask & ~hand_mask
-            stock_indices = list(_indices_from_mask(stock_mask))
-            if not stock_indices:
-                raise ParticleDepletionError(
-                    f"Cannot condition on observer play {normalized}: no "
-                    "replacement stock tile is available."
-                )
-            replacement_index = self.rng.choice(stock_indices)
-            return (hand_mask ^ bit) | (1 << replacement_index)
-
-        self._filter_and_resample(
-            lambda hand_mask: (hand_mask & bit) == 0,
-            observation=f"observer played {normalized}",
-            repair=repair,
-        )
-        self.unknown_mask &= ~bit
-        self._invalidate_cache()
-        self._assert_consistent()
+        self._observer_known_tile(tile)
 
     def opponent_reveals_and_plays(self, tile: Sequence[int]) -> None:
         bit = _tile_bit(tile)
-        normalized = _normalize_tile(tile)
-        if not (self.unknown_mask & bit):
-            raise ValueError(f"Revealed opponent tile {normalized} is not unknown.")
-
-        # Set the new size before checking transformed particles.
-        self.opponent_hand_size -= 1
-
-        def repair(hand_mask: int) -> int:
-            # The particle had x in its stock although the public observation
-            # proves x was in the opponent hand. Swap x into that prior hand and
-            # then remove it as the played tile. The resulting post-play hand is
-            # obtained by removing one uniformly chosen former hand tile.
-            hand_indices = list(_indices_from_mask(hand_mask))
-            if not hand_indices:
-                raise ParticleDepletionError(
-                    f"Cannot condition on opponent play {normalized}: particle "
-                    "hand is empty."
-                )
-            removed_index = self.rng.choice(hand_indices)
-            return hand_mask & ~(1 << removed_index)
-
-        self._filter_and_resample(
-            lambda hand_mask: bool(hand_mask & bit),
-            transform=lambda hand_mask: hand_mask ^ bit,
-            observation=f"opponent played {normalized}",
-            repair=repair,
-        )
-        self.unknown_mask &= ~bit
-        self._invalidate_cache()
-        self._assert_consistent()
-
-    def opponent_hidden_draw(self):
-        new_particles: list[int] = []
-        for hand_mask in self.particles:
-            stock_indices = list(
-                _indices_from_mask(self.unknown_mask & ~hand_mask)
+        if not self.unknown_mask & bit:
+            raise ValueError(
+                f"Revealed opponent tile {_normalize_tile(tile)} is not unknown."
             )
-            if not stock_indices:
-                raise ValueError("Opponent cannot draw because the hidden stock is empty.")
-            drawn_index = self.rng.choice(stock_indices)
-            new_particles.append(hand_mask | (1 << drawn_index))
 
-        self.particles = new_particles
-        self.opponent_hand_size += 1
-        self._invalidate_cache()
-        self._assert_consistent()
+        new_unknown_mask = self.unknown_mask & ~bit
+        new_profiles: dict[tuple[int, ...], int] = defaultdict(int)
+
+        for profile, profile_weight in self.profiles.items():
+            domain_counts = Counter(profile)
+            for domain, multiplicity in domain_counts.items():
+                if not domain & bit:
+                    continue
+                remaining = list(profile)
+                remaining.remove(domain)
+                remaining = [allowed & ~bit for allowed in remaining]
+                new_profile = tuple(sorted(remaining))
+                if any(allowed == 0 for allowed in new_profile):
+                    continue
+                if self._count_profile_assignments(new_profile) > 0:
+                    new_profiles[new_profile] += profile_weight * multiplicity
+
+        self._replace_profiles(
+            dict(new_profiles),
+            unknown_mask=new_unknown_mask,
+            opponent_hand_size=self.opponent_hand_size - 1,
+        )
+
+    def opponent_hidden_draw(self) -> "SlotOpponentBelief":
+        stock_size = self.unknown_mask.bit_count() - self.opponent_hand_size
+        if stock_size <= 0:
+            raise ValueError("Opponent cannot draw because the hidden stock is empty.")
+
+        new_profiles: dict[tuple[int, ...], int] = defaultdict(int)
+        for profile, weight in self.profiles.items():
+            new_profile = tuple(sorted((*profile, self.unknown_mask)))
+            new_profiles[new_profile] += weight
+
+        self._replace_profiles(
+            dict(new_profiles),
+            opponent_hand_size=self.opponent_hand_size + 1,
+        )
         return self
 
     def suit_probabilities(self) -> list[float]:
-        if self._probability_cache is not None:
-            return list(self._probability_cache)
-        total = len(self.particles)
-        probabilities = [
-            sum(
-                1 for hand_mask in self.particles if hand_mask & suit_mask
-            ) / total
-            for suit_mask in SUIT_MASKS
-        ]
-        self._probability_cache = probabilities
-        return list(probabilities)
+        if self._probability_cache is None:
+            denominator = self.assignment_weight
+            numerators = [0] * SUIT_COUNT
+
+            for profile, profile_weight in self.profiles.items():
+                total_assignments = self._count_profile_assignments(profile)
+                for suit, suit_mask in enumerate(SUIT_MASKS):
+                    without_suit = tuple(
+                        sorted(domain & ~suit_mask for domain in profile)
+                    )
+                    no_suit_assignments = self._count_profile_assignments(without_suit)
+                    numerators[suit] += profile_weight * (
+                        total_assignments - no_suit_assignments
+                    )
+
+            self._probability_cache = tuple(
+                numerator / denominator for numerator in numerators
+            )
+        return list(self._probability_cache)
 
     def probability_can_play(self, ends: Sequence[int]) -> float:
         if not ends:
             return 1.0
-        legal_mask = SUIT_MASKS[int(ends[0])] | SUIT_MASKS[int(ends[1])]
-        return sum(
-            1 for hand_mask in self.particles if hand_mask & legal_mask
-        ) / len(self.particles)
+        legal_mask = _legal_mask(ends[0], ends[1])
+        denominator = self.assignment_weight
+        playable_weight = 0
+
+        for profile, profile_weight in self.profiles.items():
+            total_assignments = self._count_profile_assignments(profile)
+            without_legal = tuple(
+                sorted(domain & ~legal_mask for domain in profile)
+            )
+            no_legal_assignments = self._count_profile_assignments(without_legal)
+            playable_weight += profile_weight * (
+                total_assignments - no_legal_assignments
+            )
+
+        return playable_weight / denominator
+
+    def to_hand_weights_dp(self) -> dict[int, int]:
+        """Convert profiles to exact ``mu(H)`` weights with incremental merging."""
+        result: dict[int, int] = defaultdict(int)
+        for profile, profile_weight in self.profiles.items():
+            for hand_mask, assignment_count in self._profile_hand_weights(profile).items():
+                result[hand_mask] += profile_weight * assignment_count
+        if not result:
+            raise ValueError("Slot-to-mu conversion produced no compatible hands.")
+        return dict(result)
+
+    @property
+    def profile_count(self) -> int:
+        return len(self.profiles)
 
     @property
     def state_count(self) -> int:
-        return len(self.particles)
+        return self.profile_count
 
     @property
-    def unique_state_count(self) -> int:
-        return len(set(self.particles))
+    def assignment_weight(self) -> int:
+        return sum(
+            profile_weight * self._count_profile_assignments(profile)
+            for profile, profile_weight in self.profiles.items()
+        )
+
+    @property
+    def total_weight(self) -> int:
+        return self.assignment_weight
+
+    @property
+    def raw_hand_upper_bound(self) -> int:
+        return _raw_hand_upper_bound(self.unknown_mask, self.opponent_hand_size)
 
 
-class ExactOpponentModel:
-    """Persistent hybrid model for one observer in one two-player game.
-
-    The public class name is retained for compatibility. The model is exact in
-    compact and enumerated modes and approximate in particle mode.
-    """
+class HybridExactOpponentModel:
+    """Persistent exact controller that switches once from slots to ``mu(H)``."""
 
     def __init__(
         self,
         *,
-        max_enumerated_hands: int = MAX_ENUMERATED_HANDS,
-        particle_count: int = PARTICLE_COUNT,
-        seed: int = PARTICLE_SEED,
+        switch_to_mu_max_hands: int = SWITCH_TO_MU_MAX_HANDS,
+        trace_history_limit: int = 256,
+        **legacy_options,
     ):
-        if max_enumerated_hands <= 0:
-            raise ValueError("max_enumerated_hands must be positive.")
-        if particle_count <= 0:
-            raise ValueError("particle_count must be positive.")
+        if switch_to_mu_max_hands <= 0:
+            raise ValueError("switch_to_mu_max_hands must be positive.")
+        if trace_history_limit <= 0:
+            raise ValueError("trace_history_limit must be positive.")
 
-        self.max_enumerated_hands = int(max_enumerated_hands)
-        self.particle_count = int(particle_count)
-        self.seed = int(seed)
-        self._belief = None
+        # Old constructor knobs are accepted so external callers do not fail,
+        # but they cannot alter the exact path or enable particle fallback.
+        unsupported = set(legacy_options) - {
+            "max_enumerated_hands",
+            "particle_count",
+            "seed",
+        }
+        if unsupported:
+            names = ", ".join(sorted(unsupported))
+            raise TypeError(f"Unexpected opponent-model options: {names}.")
+
+        self.switch_to_mu_max_hands = int(switch_to_mu_max_hands)
+        self.trace_history_limit = int(trace_history_limit)
+        self._belief: SlotOpponentBelief | MuOpponentBelief | None = None
         self._game_id = None
-        self._observer_player = None
+        self._observer_player: int | None = None
         self._processed_history_length = 0
         self._own_draws_consumed = 0
-        self._last_action_by_player: dict[int, object] = {}
+        self._pending_trace: OpponentTurnTrace | None = None
+        self._last_snapshot: ProbabilitySnapshot | None = None
+        self._last_completed_turn_trace: OpponentTurnTrace | None = None
+        self._turn_trace_history: deque[OpponentTurnTrace] = deque(
+            maxlen=self.trace_history_limit
+        )
+        self._new_snapshots: deque[ProbabilitySnapshot] = deque(
+            maxlen=self.trace_history_limit * 3
+        )
+        self._current_update_snapshots: list[ProbabilitySnapshot] = []
+        self._current_update_traces: list[OpponentTurnTrace] = []
+        self._switched_to_mu = False
+        self._switched_this_update = False
+        self._switch_turn: int | None = None
+        self._switch_upper_bound: int | None = None
+        self._switch_mu_state_count: int | None = None
+        self._switch_conversion_time_ms: float | None = None
 
     def reset(self) -> None:
+        """Clear game identity, belief state, traces, and switch metadata."""
         self._belief = None
         self._game_id = None
         self._observer_player = None
         self._processed_history_length = 0
         self._own_draws_consumed = 0
-        self._last_action_by_player = {}
+        self._pending_trace = None
+        self._last_snapshot = None
+        self._last_completed_turn_trace = None
+        self._turn_trace_history.clear()
+        self._new_snapshots.clear()
+        self._current_update_snapshots = []
+        self._current_update_traces = []
+        self._switched_to_mu = False
+        self._switched_this_update = False
+        self._switch_turn = None
+        self._switch_upper_bound = None
+        self._switch_mu_state_count = None
+        self._switch_conversion_time_ms = None
 
     def update(self, state: dict) -> list[float]:
-        """Process new actions and return opponent suit-presence probabilities."""
-        cached = state.get("opponent_suit_probabilities")
-        if cached is not None:
-            return [float(value) for value in cached]
+        """Process new history and return the current seven probabilities."""
+        return list(self.update_detailed(state).probabilities)
 
+    def update_detailed(self, state: dict) -> OpponentModelUpdate:
+        """Process new history and return probabilities plus labelled new traces."""
         self._validate_state(state)
         game_id = state.get("game_id")
         observer_player = int(
@@ -877,16 +823,46 @@ class ExactOpponentModel:
             _normalize_tile(tile)
             for tile in state.get("current_player_drawn_tiles", [])
         ]
+        hand_sizes = [int(size) for size in state.get("hand_sizes", [])]
+        history_is_terminal = bool(state.get("game_over")) or 0 in hand_sizes
 
-        for entry in history[self._processed_history_length:]:
-            self._process_entry(entry, observer_player, own_draws)
+        self._current_update_snapshots = []
+        self._current_update_traces = []
+        self._switched_this_update = False
+
+        for history_index in range(self._processed_history_length, len(history)):
+            entry = history[history_index]
+            is_terminal_entry = (
+                history_is_terminal
+                and history_index == len(history) - 1
+                and not _is_draw(entry.action)
+            )
+            self._process_entry(
+                entry,
+                observer_player,
+                own_draws,
+                terminal_turn=is_terminal_entry,
+            )
             self._processed_history_length += 1
 
-        probabilities = self.suit_probabilities()
-        state["opponent_suit_probabilities"] = probabilities
+        probabilities = tuple(self.suit_probabilities())
+        state["opponent_suit_probabilities"] = list(probabilities)
         state["opponent_model_mode"] = self.mode
         state["opponent_model_state_count"] = self.state_count
-        return probabilities
+        state["opponent_model_metadata"] = {
+            "model_version": MODEL_VERSION,
+            "game_id": self._game_id,
+            "observer_player": self._observer_player,
+            "processed_history_length": self._processed_history_length,
+        }
+
+        return OpponentModelUpdate(
+            probabilities=probabilities,
+            new_snapshots=tuple(self._current_update_snapshots),
+            completed_turn_traces=tuple(self._current_update_traces),
+            mode=self.mode,
+            switched_this_update=self._switched_this_update,
+        )
 
     def _validate_state(self, state: dict) -> None:
         missing: list[str] = []
@@ -903,73 +879,183 @@ class ExactOpponentModel:
             )
 
     def _reset_from_state(self, state: dict) -> None:
+        self.reset()
         observer_player = int(
             state.get("observer_player", state.get("current_player", 0))
         )
-        observer_initial_hand = state["current_player_initial_hand"]
-        initial_opponent_hand_size = int(
-            state.get("initial_hand_size", INITIAL_HAND_SIZE)
-        )
-        rng = random.Random(
-            _stable_seed(
-                self.seed,
-                state.get("game_id"),
-                observer_player,
-                observer_initial_hand,
-            )
-        )
-
-        self._belief = CompactOpponentBelief(
-            observer_initial_hand,
-            opponent_hand_size=initial_opponent_hand_size,
-            rng=rng,
-            max_enumerated_hands=self.max_enumerated_hands,
-            particle_count=self.particle_count,
+        self._belief = SlotOpponentBelief(
+            state["current_player_initial_hand"],
+            opponent_hand_size=int(
+                state.get("initial_hand_size", INITIAL_HAND_SIZE)
+            ),
         )
         self._game_id = state.get("game_id")
         self._observer_player = observer_player
-        self._processed_history_length = 0
-        self._own_draws_consumed = 0
-        self._last_action_by_player = {}
+
+    def _start_or_get_trace(self, entry: PublicAction) -> OpponentTurnTrace:
+        if self._pending_trace is None:
+            self._pending_trace = OpponentTurnTrace(
+                public_turn=entry.public_turn,
+                actor=entry.actor,
+            )
+        elif (
+            self._pending_trace.public_turn != entry.public_turn
+            or self._pending_trace.actor != entry.actor
+        ):
+            raise ValueError(
+                "Public history advanced before a pending draw turn was completed."
+            )
+        return self._pending_trace
 
     def _process_entry(
         self,
         entry: PublicAction,
         observer_player: int,
         own_draws: Sequence[tuple[int, int]],
+        *,
+        terminal_turn: bool,
     ) -> None:
         if self._belief is None:
             raise RuntimeError("Opponent belief is not initialized.")
 
-        actor = entry.actor
+        trace = self._start_or_get_trace(entry)
         action = entry.action
-        previous_actor_action = self._last_action_by_player.get(actor)
+        actor_is_opponent = entry.actor != observer_player
 
-        if actor == observer_player:
-            if _is_draw(action):
+        if _is_draw(action):
+            if actor_is_opponent:
+                if entry.ends_before is not None:
+                    self._belief.condition_no_legal(*entry.ends_before)
+                    trace.after_negative_evidence = self._record_snapshot(
+                        entry,
+                        ProbabilityStage.AFTER_NEGATIVE_EVIDENCE,
+                        entry.ends_before,
+                    )
+
+                self._belief.opponent_hidden_draw()
+                trace.after_draw = self._record_snapshot(
+                    entry,
+                    ProbabilityStage.AFTER_DRAW,
+                    entry.ends_after,
+                )
+            else:
                 if self._own_draws_consumed >= len(own_draws):
                     raise ValueError("Missing private identity for an observer draw.")
                 self._belief.observer_known_draw(
                     own_draws[self._own_draws_consumed]
                 )
                 self._own_draws_consumed += 1
-            elif _is_tile_play(action):
-                self._belief.observer_known_play(action[0])
-        else:
-            if _is_draw(action):
+            return
+
+        same_as_previous = False
+        if actor_is_opponent:
+            if _is_pass(action):
                 if entry.ends_before is not None:
                     self._belief.condition_no_legal(*entry.ends_before)
-                self._belief = self._belief.opponent_hidden_draw()
-            elif _is_pass(action):
-                if (
-                    previous_actor_action != ("DRAW", None)
-                    and entry.ends_before is not None
-                ):
-                    self._belief.condition_no_legal(*entry.ends_before)
+                    if trace.after_negative_evidence is None:
+                        trace.after_negative_evidence = self._record_snapshot(
+                            entry,
+                            ProbabilityStage.AFTER_NEGATIVE_EVIDENCE,
+                            entry.ends_before,
+                        )
+                        same_as_previous = True
             elif _is_tile_play(action):
                 self._belief.opponent_reveals_and_plays(action[0])
+        elif _is_tile_play(action):
+            self._belief.observer_known_play(action[0])
 
-        self._last_action_by_player[actor] = action
+        trace.end_turn = self._record_snapshot(
+            entry,
+            ProbabilityStage.END_TURN,
+            entry.ends_after,
+            same_as_previous=same_as_previous,
+        )
+        self._complete_turn_trace(trace, terminal_turn=terminal_turn)
+
+    def _record_snapshot(
+        self,
+        entry: PublicAction,
+        stage: ProbabilityStage,
+        ends: tuple[int, int] | None,
+        *,
+        same_as_previous: bool = False,
+    ) -> ProbabilitySnapshot:
+        if self._belief is None:
+            raise RuntimeError("Opponent belief is not initialized.")
+
+        snapshot = ProbabilitySnapshot(
+            public_turn=entry.public_turn,
+            history_action_index=entry.history_action_index,
+            actor=entry.actor,
+            stage=stage,
+            probabilities=tuple(self._belief.suit_probabilities()),
+            mode=self.mode,
+            ends=ends,
+            opponent_hand_size=self.opponent_hand_size,
+            unknown_count=self.unknown_count,
+            state_count=self.state_count,
+            profile_count=self.profile_count,
+            mu_hand_count=self.mu_hand_count,
+            total_weight=self.total_weight,
+            raw_hand_upper_bound=self._belief.raw_hand_upper_bound,
+            action=entry.action,
+            same_as_previous=same_as_previous,
+        )
+        self._last_snapshot = snapshot
+        self._new_snapshots.append(snapshot)
+        self._current_update_snapshots.append(snapshot)
+        return snapshot
+
+    def _complete_turn_trace(
+        self,
+        trace: OpponentTurnTrace,
+        *,
+        terminal_turn: bool,
+    ) -> None:
+        if trace.end_turn is None:
+            raise RuntimeError("Cannot complete a public turn without END_TURN.")
+        self._last_completed_turn_trace = trace
+        self._turn_trace_history.append(trace)
+        self._current_update_traces.append(trace)
+        self._pending_trace = None
+        self._maybe_switch_to_mu(trace.public_turn, terminal_turn=terminal_turn)
+
+    def _maybe_switch_to_mu(self, public_turn: int, *, terminal_turn: bool) -> None:
+        if (
+            terminal_turn
+            or self._switched_to_mu
+            or not isinstance(self._belief, SlotOpponentBelief)
+        ):
+            return
+
+        upper_bound = self._belief.raw_hand_upper_bound
+        if upper_bound > self.switch_to_mu_max_hands:
+            return
+
+        slot_probabilities = self._belief.suit_probabilities()
+        started = perf_counter()
+        weights = self._belief.to_hand_weights_dp()
+        mu_belief = MuOpponentBelief.from_weights(
+            unknown_mask=self._belief.unknown_mask,
+            opponent_hand_size=self._belief.opponent_hand_size,
+            weights=weights,
+        )
+        conversion_time_ms = (perf_counter() - started) * 1000.0
+
+        mu_probabilities = mu_belief.suit_probabilities()
+        if any(
+            abs(slot_value - mu_value) > 1e-12
+            for slot_value, mu_value in zip(slot_probabilities, mu_probabilities)
+        ):
+            raise AssertionError("Slot-to-mu conversion changed exact probabilities.")
+
+        self._belief = mu_belief
+        self._switched_to_mu = True
+        self._switched_this_update = True
+        self._switch_turn = int(public_turn)
+        self._switch_upper_bound = int(upper_bound)
+        self._switch_mu_state_count = len(weights)
+        self._switch_conversion_time_ms = conversion_time_ms
 
     def suit_probabilities(self) -> list[float]:
         if self._belief is None:
@@ -977,9 +1063,16 @@ class ExactOpponentModel:
         return self._belief.suit_probabilities()
 
     def probability_can_play(self, ends: Sequence[int]) -> float:
+        """Return exact response probability from the joint hand posterior."""
         if self._belief is None:
             return 1.0
         return self._belief.probability_can_play(ends)
+
+    def consume_new_snapshots(self) -> list[ProbabilitySnapshot]:
+        """Return and clear snapshots not previously consumed by a UI/logger."""
+        snapshots = list(self._new_snapshots)
+        self._new_snapshots.clear()
+        return snapshots
 
     @property
     def mode(self) -> str:
@@ -989,26 +1082,85 @@ class ExactOpponentModel:
     def state_count(self) -> int:
         return 0 if self._belief is None else self._belief.state_count
 
+    @property
+    def profile_count(self) -> int | None:
+        if isinstance(self._belief, SlotOpponentBelief):
+            return self._belief.profile_count
+        return None
 
-HybridOpponentModel = ExactOpponentModel
+    @property
+    def mu_hand_count(self) -> int | None:
+        if isinstance(self._belief, MuOpponentBelief):
+            return self._belief.state_count
+        return None
+
+    @property
+    def unknown_count(self) -> int:
+        return 0 if self._belief is None else self._belief.unknown_mask.bit_count()
+
+    @property
+    def opponent_hand_size(self) -> int:
+        return 0 if self._belief is None else self._belief.opponent_hand_size
+
+    @property
+    def total_weight(self) -> int:
+        return 0 if self._belief is None else self._belief.total_weight
+
+    @property
+    def switched_to_mu(self) -> bool:
+        return self._switched_to_mu
+
+    @property
+    def switch_turn(self) -> int | None:
+        return self._switch_turn
+
+    @property
+    def switch_upper_bound(self) -> int | None:
+        return self._switch_upper_bound
+
+    @property
+    def switch_mu_state_count(self) -> int | None:
+        return self._switch_mu_state_count
+
+    @property
+    def switch_conversion_time_ms(self) -> float | None:
+        return self._switch_conversion_time_ms
+
+    @property
+    def last_snapshot(self) -> ProbabilitySnapshot | None:
+        return self._last_snapshot
+
+    @property
+    def last_completed_turn_trace(self) -> OpponentTurnTrace | None:
+        return self._last_completed_turn_trace
+
+    @property
+    def turn_trace_history(self) -> list[OpponentTurnTrace]:
+        return list(self._turn_trace_history)
+
+# Stable public names used by agents, UI code, and older imports.
+ExactOpponentModel = HybridExactOpponentModel
+HybridOpponentModel = HybridExactOpponentModel
+EnumeratedOpponentBelief = MuOpponentBelief
+CompactOpponentBelief = SlotOpponentBelief
 
 
 def compute_opponent_suit_probabilities(state: dict) -> list[float]:
-    """Strict one-shot compatibility wrapper.
+    """Replay one observer state through a fresh exact hybrid model.
 
-    Prefer a persistent ``ExactOpponentModel`` instance in agents. This wrapper
-    has no snapshot fallback and raises when required private observer fields are
-    absent. Cached probabilities in ``state`` are returned immediately.
+    Persistent agents should keep one ``ExactOpponentModel`` per observer and
+    game. This one-shot wrapper intentionally ignores probability values already
+    stored in ``state`` so stale output cannot suppress new history processing.
     """
-    model = ExactOpponentModel()
+    model = HybridExactOpponentModel()
     return model.update(state)
 
 
-def response_probability_from_marginals(
+def approximate_response_probability_from_marginals(
     probabilities: Sequence[float],
     ends: Sequence[int],
 ) -> float:
-    """Approximate the chance that the opponent can answer the two board ends."""
+    """Approximate response chance assuming independent suit marginals."""
     if not ends:
         return 1.0
 
@@ -1021,3 +1173,11 @@ def response_probability_from_marginals(
         - (1.0 - float(probabilities[left]))
         * (1.0 - float(probabilities[right]))
     )
+
+
+def response_probability_from_marginals(
+    probabilities: Sequence[float],
+    ends: Sequence[int],
+) -> float:
+    """Deprecated wrapper for the explicitly approximate marginal formula."""
+    return approximate_response_probability_from_marginals(probabilities, ends)

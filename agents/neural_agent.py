@@ -16,7 +16,11 @@ else:
 
 
 class NeuralAgent(Agent):
-    """Load an SL checkpoint and choose tile plays with legal-action masking."""
+    """Choose real tile-play decisions from a supervised policy checkpoint.
+
+    Draw, pass, and single-option tile plays are forced by the rules engine and
+    bypass both opponent inference and the neural network.
+    """
 
     def __init__(self, network, epsilon=0.0):
         self.network = network
@@ -63,6 +67,9 @@ class NeuralAgent(Agent):
         policy_actions = [move for move in legal_actions if self.encoder.is_policy_action(move)]
         if not policy_actions:
             return legal_actions[0]
+
+        if len(policy_actions) == 1:
+            return policy_actions[0]
 
         if self.epsilon > 0.0 and np.random.rand() < self.epsilon:
             return random.choice(policy_actions)

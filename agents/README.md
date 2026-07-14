@@ -10,11 +10,22 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 | `heuristic_agent.py` | `StrategicAgent`, the exact-probability rule-based teacher used for supervised labels and benchmarks. |
 | `nn.py` | Supervised MLP backend. Uses CuPy automatically when installed, otherwise NumPy. |
 | `neural_agent.py` | Loads `models/domino_sl_weights.npz` and plays the supervised policy. |
-| `rl_nn.py` | Policy network with REINFORCE gradients, entropy regularization, and value baseline. |
+| `random_neural_agent.py` | Uses the same supervised architecture with fixed random initialization and no checkpoint. |
+| `rl_nn.py` | Masked REINFORCE network with entropy regularization and an optional value head. |
 | `rl_agent.py` | Wraps `PolicyNetwork` for training trajectories or deterministic evaluation play. |
 
 The opponent belief model lives in `middleware/opponent_model.py` because it is
 shared by agents, training, diagnostics, and the UI.
+
+During supervised training, `nn.py` receives NumPy arrays backed by system RAM
+and transfers only the active mini-batch to CuPy. Inference still accepts either
+NumPy or CuPy inputs and converts them to the active backend internally.
+Optional supervised weight decay applies only to `W1`, `W2`, and `W3`; bias
+vectors are never regularized.
+
+`RandomNeuralAgent` is an untrained control for diagnostics. Seed `0` is local
+to its network initialization, so every matchup uses the same random policy and
+does not perturb the random sequence used to shuffle and play games.
 
 ## State Encoding
 
@@ -38,13 +49,16 @@ shared by agents, training, diagnostics, and the UI.
 The opponent probability feature is bounded in `[0, 1]`: `0.0` means the
 opponent is known not to hold that suit, and `1.0` means the opponent is known
 to hold it. For two-player games, the model replays public history with the
-observer's private initial hand and draw history. Older states without those
-private observer fields use a snapshot combinatorial fallback.
+observer's private initial hand and draw history. States without those private
+observer fields are rejected because exact temporal reconstruction is not
+possible.
 
-`StrategicAgent` uses those probabilities as marginal presence estimates. It
-filters moves by lowest approximate opponent response chance, then by near-best
-normalized mobility, then by highest pip sum, with deterministic legal-action
-order as the final tie-breaker.
+The shared exact model starts with temporal slot/cohort profiles and switches
+once to integer `mu(H)` hand weights when `comb(|U|, h) <= 500`. It never uses a
+particle fallback. `StrategicAgent` filters moves by the exact joint probability
+that the opponent can answer the resulting ends, then by near-best normalized
+mobility, then by highest pip sum, with deterministic legal-action order as the
+final tie-breaker.
 
 ## Action Encoding
 
@@ -54,14 +68,32 @@ The neural output space now has 56 actions:
 - 28 tile actions on the right end.
 
 Draw, pass, and single-option tile plays are forced by the current rules
-engine. They are not learned RL decisions. If a turn has fewer than two legal
-tile-play actions, `RLAgent` returns the forced action directly without calling
-the network or saving a trajectory step.
+engine. `NeuralAgent`, `RandomNeuralAgent`, and `RLAgent` return them directly
+without calling the network. They are not learned RL decisions, and `RLAgent`
+does not save a trajectory step for them.
+
+`RLAgent` has three explicit policy modes:
+
+| Mode | Legal policy choice | Stores trajectory |
+|---|---|---|
+| `training` | Samples from the masked distribution | Yes |
+| `stochastic_evaluation` | Samples from the masked distribution | No |
+| `evaluation` | Selects the largest masked probability | No |
+
+Self-play pool opponents use stochastic evaluation. UI play, diagnostics, and
+checkpoint evaluation use deterministic evaluation.
 
 RL trajectory steps store the encoded state, sampled action index, legal-action
-mask, and shaped reward. The policy-gradient backward pass uses that mask to
+mask, decision turn, option count, and local reward accumulator. During
+self-play, draw/pass events are distributed to earlier real decisions with
+temporal decay. The policy-gradient backward pass uses the saved mask to
 renormalize the softmax over legal actions only, so illegal actions receive no
 direct policy or entropy gradient.
+
+`PolicyNetwork` is policy-only by default. Optional value-head training adds a
+linear `V(s)` prediction from the second hidden layer and stores `Wv`/`bv` next
+to `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`. Policy-only loading ignores those
+extra arrays, while value-head loading initializes them to zero when absent.
 
 Because the input/output shapes changed from the old 86/58 encoder to the new
 168/56 encoder, old `domino_sl_weights.npz` and `domino_rl_weights.npz`

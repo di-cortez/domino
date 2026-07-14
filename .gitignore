@@ -47,7 +47,7 @@ Thumbs.db
 *.log
 *.prof
 
-diagnostico/*
+
 diagnostics/results/
 
 dataset/*
@@ -58,4 +58,4 @@ models/*
 
 references/*
 
-melhorias.txt
+improvements.txt

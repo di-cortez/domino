@@ -120,7 +120,11 @@ class DominoEncoder:
             vector[self.DRAW_COUNT_OFFSET + i, 0] = draw_counts[i] / 14.0
             vector[self.PASS_COUNT_OFFSET + i, 0] = pass_counts[i] / self.MAX_TURN
 
-        probabilities = compute_opponent_suit_probabilities(state)
+        # Persistent agents place the exact result in the state immediately
+        # before encoding. One-shot callers still reconstruct it from history.
+        probabilities = state.get("opponent_suit_probabilities")
+        if probabilities is None:
+            probabilities = compute_opponent_suit_probabilities(state)
         for suit, value in enumerate(probabilities):
             vector[self.OPPONENT_SUIT_PROBABILITY_OFFSET + suit, 0] = value
 

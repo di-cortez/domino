@@ -294,53 +294,6 @@ def plot_choice_opportunities(summary, path, subtitle):
     _save_figure(fig, path)
 
 
-def plot_first_stock_draw_turns(summary, path, subtitle):
-    """Plot the turn where the first stock draw happened in each game."""
-    first_draw = summary.get("first_stock_draw", summary)
-    histogram = first_draw.get("turn_histogram", {})
-
-    fig, ax = _new_figure(width=8.0, height=4.0)
-    _prepare_axis(ax, f"First stock draw turn - {subtitle}")
-
-    if not histogram:
-        ax.grid(visible=False)
-        ax.text(
-            0.5,
-            0.5,
-            "No stock draws recorded",
-            transform=ax.transAxes,
-            ha="center",
-            va="center",
-            color=SECONDARY_INK,
-            fontsize=11,
-        )
-        ax.set_xticks([])
-        ax.set_yticks([])
-        _save_figure(fig, path)
-        return
-
-    turns = [int(turn) for turn in sorted(histogram, key=int)]
-    counts = [histogram[str(turn)] for turn in turns]
-    ax.bar(turns, counts, color=COLOR["draw"], edgecolor=SURFACE, linewidth=1, width=0.82)
-
-    mean_turn = first_draw.get("mean_turn")
-    if mean_turn is not None:
-        ax.axvline(mean_turn, color=SECONDARY_INK, linewidth=1, linestyle="--")
-        ax.annotate(
-            f"mean {mean_turn:.1f}",
-            xy=(mean_turn, ax.get_ylim()[1]),
-            xytext=(6, -12),
-            textcoords="offset points",
-            color=SECONDARY_INK,
-            fontsize=9,
-        )
-
-    ax.set_xlim(min(turns) - 0.8, max(turns) + 0.8)
-    ax.set_xlabel("First stock draw turn")
-    ax.set_ylabel("Games")
-    _save_figure(fig, path)
-
-
 def generate_plots(games, summary, folder):
     """Generate all diagnostic PNGs in the target folder."""
     import matplotlib
@@ -353,7 +306,6 @@ def generate_plots(games, summary, folder):
     plot_by_position(summary, folder / "wins_by_position.png", subtitle)
     plot_game_lengths(games, folder / "game_lengths.png", subtitle)
     plot_choice_opportunities(summary, folder / "choice_opportunities.png", subtitle)
-    plot_first_stock_draw_turns(summary, folder / "first_stock_draw_turns.png", subtitle)
 
 
 def plot_all_pairs_table(summaries, agents, path):
@@ -394,10 +346,11 @@ def plot_all_pairs_table(summaries, agents, path):
         pad=18,
     )
 
+    display_names = [agent.replace("_", " ") for agent in agents]
     table = ax.table(
         cellText=cell_text,
-        rowLabels=agents,
-        colLabels=agents,
+        rowLabels=display_names,
+        colLabels=display_names,
         bbox=[0, 0.24, 1, 0.58],
         cellLoc="center",
         rowLoc="center",
@@ -447,8 +400,3 @@ def plot_aggregate_choice_opportunities(choice_info, path):
         "game_count": choice_info.get("matchups", 0),
     }
     plot_choice_opportunities(summary, path, "all evaluated pairs")
-
-
-def plot_aggregate_first_stock_draws(first_draw_info, path):
-    """Plot the aggregate first-stock-draw histogram for all evaluated pairs."""
-    plot_first_stock_draw_turns(first_draw_info, path, "all evaluated pairs")

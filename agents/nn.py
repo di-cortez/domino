@@ -22,16 +22,28 @@ class SupervisedNeuralNetwork:
         hidden2_size=128,
         output_size=56,
         learning_rate=0.01,
+        random_seed=None,
         weight_decay=0.0,
     ):
         self.lr = learning_rate
         self.weight_decay = weight_decay
+        random_source = (
+            np.random
+            if random_seed is None
+            else np.random.RandomState(random_seed)
+        )
 
-        self.W1 = np.random.randn(hidden1_size, input_size) * np.sqrt(2.0 / input_size)
+        self.W1 = random_source.randn(hidden1_size, input_size) * np.sqrt(
+            2.0 / input_size
+        )
         self.b1 = np.zeros((hidden1_size, 1))
-        self.W2 = np.random.randn(hidden2_size, hidden1_size) * np.sqrt(2.0 / hidden1_size)
+        self.W2 = random_source.randn(hidden2_size, hidden1_size) * np.sqrt(
+            2.0 / hidden1_size
+        )
         self.b2 = np.zeros((hidden2_size, 1))
-        self.W3 = np.random.randn(output_size, hidden2_size) * np.sqrt(1.0 / hidden2_size)
+        self.W3 = random_source.randn(output_size, hidden2_size) * np.sqrt(
+            1.0 / hidden2_size
+        )
         self.b3 = np.zeros((output_size, 1))
         self.cache = {}
 
@@ -46,7 +58,7 @@ class SupervisedNeuralNetwork:
         return exp_z / np.sum(exp_z, axis=0, keepdims=True)
 
     def _to_backend(self, array):
-        """Move a host-memory batch onto the active backend (no-op on CPU)."""
+        """Move one host-memory batch to the active NumPy/CuPy backend."""
         return np.asarray(array)
 
     def forward(self, x):
@@ -83,7 +95,6 @@ class SupervisedNeuralNetwork:
         dW1 = (1.0 / m) * np.dot(dz1, x.T)
         db1 = (1.0 / m) * np.sum(dz1, axis=1, keepdims=True)
 
-        # L2 weight decay applies to weights only, never biases.
         self.W3 -= self.lr * (dW3 + self.weight_decay * self.W3)
         self.b3 -= self.lr * db3
         self.W2 -= self.lr * (dW2 + self.weight_decay * self.W2)
@@ -130,26 +141,23 @@ class SupervisedNeuralNetwork:
         epochs=1500,
         batch_size=128,
         on_validation=None,
+        progress_callback=None,
+        quiet=False,
         early_stopping_patience=None,
         lr_decay_factor=None,
     ):
         """
         Train with mini-batch SGD.
 
-        ``x_train``/``y_train``/``x_val``/``y_val`` are expected to stay in host
-        (NumPy) memory. The shuffle step keeps only index arrays in memory, and
-        each batch is converted to the active backend (GPU, when CuPy is
-        installed) only when it is sliced out and passed to ``forward``. This
-        keeps GPU memory proportional to ``batch_size`` instead of dataset size.
+        Training and validation arrays remain in host NumPy memory. Shuffle
+        indices and slices are created on the host, and ``forward``/``backward``
+        move only the current mini-batch to the active backend. GPU memory usage
+        therefore scales with batch size instead of total dataset size.
 
-        ``early_stopping_patience`` counts validation checks (every 10 epochs)
-        without improvement in validation loss before the loop stops early.
-        ``None`` (the default) disables early stopping and always runs every
-        requested epoch. Has no effect when ``x_val``/``y_val`` are not given.
-
-        ``lr_decay_factor`` multiplies the learning rate on every validation
-        check that fails to improve the best validation loss. ``None`` keeps
-        the learning rate constant.
+        ``early_stopping_patience`` counts validation checks without an
+        improvement before stopping. ``lr_decay_factor`` multiplies the
+        learning rate after each failed validation check. Both are disabled
+        when ``None`` so the default learning rate remains fixed.
         """
         loss_history = []
         sample_count = x_train.shape[1]
@@ -157,8 +165,6 @@ class SupervisedNeuralNetwork:
         checks_without_improvement = 0
 
         for epoch in range(epochs):
-            # x_train/y_train live in host memory (see docstring above), so the
-            # shuffle indices must be host NumPy too, even when np is CuPy.
             permutation = host_np.random.permutation(sample_count)
             epoch_loss = 0.0
             batch_counter = 0
@@ -195,22 +201,28 @@ class SupervisedNeuralNetwork:
                         checks_without_improvement += 1
                         if lr_decay_factor is not None:
                             self.lr *= lr_decay_factor
-                            print(
-                                f"  -> No validation improvement; learning rate "
-                                f"decayed to {self.lr:.6f}."
-                            )
+                            if not quiet:
+                                print(
+                                    "  -> Validation did not improve; "
+                                    f"learning rate reduced to {self.lr:.8f}."
+                                )
 
-                print(f"Epoch {epoch} | training loss: {mean_loss:.4f}{validation_text}")
+                if not quiet:
+                    print(f"Epoch {epoch} | training loss: {mean_loss:.4f}{validation_text}")
 
-                if (
-                    early_stopping_patience is not None
-                    and checks_without_improvement >= early_stopping_patience
-                ):
+            if progress_callback is not None:
+                progress_callback(epoch + 1, epochs)
+
+            if (
+                early_stopping_patience is not None
+                and checks_without_improvement >= early_stopping_patience
+            ):
+                if not quiet:
                     print(
-                        f"Early stopping: validation loss did not improve for "
-                        f"{early_stopping_patience} checks "
-                        f"({early_stopping_patience * 10} epochs). Stopping at epoch {epoch}."
+                        "Early stopping: validation loss did not improve for "
+                        f"{early_stopping_patience} checks. Stopped after "
+                        f"epoch {epoch}."
                     )
-                    break
+                break
 
         return loss_history

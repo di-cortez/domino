@@ -39,6 +39,8 @@ and visual UI can be changed independently.
 | `training/self_play.py` | Refines the RL policy with direct REINFORCE and decayed draw/pass reward shaping. |
 | `diagnostics/evaluate.py` | Runs the upper-triangle all-pairs diagnostic matrix. |
 | `diagnostics/pairwise.py` | Helper for evaluating one agent against another and writing `summary.json`, `games.csv`, and plots. |
+| `diagnostics/hyperparameter_sweep.py` | Trains an RL checkpoint per sweep point (one hyperparameter varied at a time, critic on and off) and appends its diagnostics to a single JSON log. |
+| `diagnostics/rl_sweep_table.py` | Joins each `train_script/run_rl_parameter_sweep.sh` sweep point's hyperparameters with its rl-vs-random results into one comparative CSV/JSON/PNG table. |
 | `ui/visual_main.py` | Starts the visual simulator. |
 
 ## Setup

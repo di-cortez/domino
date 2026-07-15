@@ -215,8 +215,8 @@ python -m training.self_play --value-head
 
 This adds a linear `V(s)` head over the second hidden layer. The current
 finalized policy reward is the value target, and the masked policy update uses
-`reward - V(s)` as its advantage. The value-loss coefficient is `0.5`. In this
-mode checkpoints also contain `Wv` and `bv`.
+`reward - V(s)` as its advantage. The value-loss coefficient defaults to `0.5`
+(`--value-coef`). In this mode checkpoints also contain `Wv` and `bv`.
 
 `run_pipeline.py` forwards the same flag to RL training:
 
@@ -228,6 +228,66 @@ Policy-only loading ignores `Wv`/`bv`, while value-head loading initializes
 them to zero when they are absent. This permits mode changes without changing
 the policy architecture, but clean comparisons should still start from the
 same supervised checkpoint and use separately archived RL outputs.
+
+### Optional RL controls
+
+The default command reproduces the original fixed training behavior exactly:
+no terminal-reward discount, the original reward constants, gradient clipping
+at norm `5.0`, no advantage normalization, and unseeded randomness. Every
+control below is opt-in and defaults to that behavior, so omitting all of them
+changes nothing:
+
+| Flag | Meaning | Default |
+|---|---|---:|
+| `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
+| `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/tie/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
+| `--clip-grad-norm` | Gradient-norm clipping threshold for the policy-gradient update | `5.0` |
+| `--normalize-advantages` / `--no-normalize-advantages` | Standardize the policy signal per batch (mean 0, std 1) before the gradient step | off |
+| `--moving-average-window` | Trailing-iteration window for the value-loss/win-rate moving averages printed in the iteration log | `10` |
+| `--seed` | Fix `random`/NumPy state, for reproducible comparisons between hyperparameter configurations | unset |
+| `--device` | Array backend: `auto` matches `GPU_ENABLED` exactly (CuPy when installed, else NumPy); `cpu`/`gpu` force one backend regardless of what's installed/enabled globally | `auto` |
+
+```bash
+python -m training.self_play --gamma 0.97 --reward-schema shaped --seed 42
+```
+
+A point-in-time value loss or win rate is dominated by batch noise; the
+iteration log always reports `reward mean/std/min/max` and a trailing moving
+average of value loss and win rate next to the raw values, so a plateau can be
+judged from the average rather than a single noisy line (see
+`references/explicacoes/relatorios/relatorio_1407` for the methodology this
+follows).
+
+### Device selection (`--device`)
+
+`--device auto` (the default) reproduces the original behavior exactly:
+CuPy when installed, NumPy otherwise, same as `GPU_ENABLED` elsewhere in the
+project. `--device cpu` or `--device gpu` force one backend for that run
+regardless of what's installed, independently of the parent
+`SupervisedNeuralNetwork` class used by supervised training (which is
+unaffected and still always follows `GPU_ENABLED`). `--device gpu` raises a
+clear error if CuPy isn't installed. This is useful because, empirically, RL
+self-play is dominated by the exact opponent-hand inference in
+`middleware/opponent_model.py` (>80% of iteration time, profiled) rather than
+the policy network's forward/backward passes, so CuPy's per-decision
+transfer/kernel-launch overhead during rollout can make GPU measurably
+*slower* than CPU for this stage specifically -- `--device cpu` is worth
+trying if RL training feels slow.
+
+`training.self_play` also accepts `--iterations`, `--games-per-iteration`,
+`--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
+`--checkpoint-interval`, `--pool-interval`, `--max-pool-size`,
+`--evaluation-games`, `--sl-weights-path`, and `--rl-weights-path`; see
+`training/self_play.py:add_optional_rl_arguments` for the authoritative
+definitions, or run `python -m training.self_play --help`.
+
+`train()` also accepts a programmatic-only `sl_weights_data` parameter (no
+CLI flag): a pre-loaded mapping of SL weight arrays, for a caller that runs
+many training calls back-to-back from the same SL checkpoint (e.g. a
+hyperparameter sweep) and wants to read it from disk once instead of on
+every call -- see `train_script/run_rl_parameter_sweep.py`, which loads it
+once and reuses it across all 72 of its sweep points. `None` (the default)
+reproduces the normal read-from-`sl_weights_path` behavior.
 
 `TRAINING_OPPONENT` at the top of `self_play.py` controls the training opponent:
 
@@ -245,10 +305,13 @@ c_e * EVENT_REWARD_DECAY ** (t_e - d_i - 1)
 ```
 
 with `EVENT_REWARD_DECAY = 0.90`. An immediately following event therefore has
-exponent `0` and receives the full event reward. The terminal result is not
-decayed and is applied uniformly to every real decision in the game.
+exponent `0` and receives the full event reward. By default (`--gamma 1.0`)
+the terminal result is not discounted and is applied uniformly to every real
+decision in the game; passing `--gamma` below `1.0` discounts it per
+remaining real decision instead (see "Optional RL controls" above).
 
-Reward constants:
+Reward constants (the `default` reward schema; `--reward-schema` selects an
+alternate preset, see above):
 
 | Event | Reward |
 |---|---:|

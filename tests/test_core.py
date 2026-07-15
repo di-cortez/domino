@@ -91,6 +91,8 @@ class NetworkThatMustNotRun:
 
 
 class UniformPolicyNetwork:
+    xp = host_np
+
     def forward(self, x):
         return host_np.ones((DominoEncoder.ACTION_SIZE, 1), dtype=float) / DominoEncoder.ACTION_SIZE
 
@@ -137,6 +139,8 @@ def _small_policy_network(
 ):
     """Build a deterministic tiny policy network without invoking backend RNG."""
     network = PolicyNetwork.__new__(PolicyNetwork)
+    network.xp = xp
+    network.device = "gpu" if GPU_ENABLED else "cpu"
     network.lr = learning_rate
     network.W1 = xp.zeros((hidden1_size, input_size))
     network.b1 = xp.zeros((hidden1_size, 1))
@@ -237,6 +241,61 @@ def test_engine_game_ids_are_unique_across_instances():
     second = DominoEngine(player_count=2)
 
     assert first.game_id != second.game_id
+
+
+def test_engine_final_stock_draw_unplayable_tile_requires_pass_before_blocked_game():
+    """Drawing the last, unplayable stock tile must not end the game immediately.
+
+    consecutive_passes is already at the blocked-game threshold before the
+    draw. The draw empties the stock, but the current player must still be
+    offered the forced PASS before the blocked-game outcome is decided (see
+    domino_final_stock_draw_bug_report.txt).
+    """
+    engine = DominoEngine(player_count=2)
+    engine.ends = [1, 1]
+    engine.hands = [[(4, 4), (2, 5)], [(0, 0)]]
+    engine.stock = [(3, 5)]
+    engine.current_player = 0
+    engine.consecutive_passes = 2
+    engine.drew_this_turn = {0: False, 1: False}
+
+    _state, game_over, _info = engine.step(("DRAW", None))
+    assert game_over is False
+    assert engine.game_over is False
+    assert engine.current_player == 0
+    assert engine.valid_actions(0) == [None]
+
+    _state, game_over, _info = engine.step(None)
+    assert game_over is True
+    assert engine.game_over is True
+    assert engine.winner is not None
+
+
+def test_engine_final_stock_draw_playable_tile_can_be_played_immediately():
+    """Drawing a playable final stock tile must let the same player play it.
+
+    consecutive_passes is already at the blocked-game threshold before the
+    draw, so the pre-fix engine would end the game the instant the stock
+    emptied instead of offering the drawn tile as a legal play.
+    """
+    engine = DominoEngine(player_count=2)
+    engine.ends = [6, 5]
+    engine.hands = [[(4, 4), (1, 1)], [(0, 0)]]
+    engine.stock = [(5, 6)]
+    engine.current_player = 0
+    engine.consecutive_passes = 2
+    engine.drew_this_turn = {0: False, 1: False}
+
+    _state, game_over, _info = engine.step(("DRAW", None))
+    assert game_over is False
+    assert engine.game_over is False
+
+    legal_actions = engine.valid_actions(0)
+    assert ((5, 6), 0) in legal_actions or ((5, 6), 1) in legal_actions
+
+    engine.step(((5, 6), 0))
+    assert engine.game_over is False
+    assert engine.consecutive_passes == 0
 
 
 def test_infer_dead_suits_from_draw_and_pass_history():
@@ -1281,6 +1340,14 @@ def main():
         ),
         ("opening double rule", test_engine_requires_highest_opening_double_when_present),
         ("unique game ids", test_engine_game_ids_are_unique_across_instances),
+        (
+            "final stock draw unplayable tile requires pass",
+            test_engine_final_stock_draw_unplayable_tile_requires_pass_before_blocked_game,
+        ),
+        (
+            "final stock draw playable tile can be played",
+            test_engine_final_stock_draw_playable_tile_can_be_played_immediately,
+        ),
         ("dead suit inference", test_infer_dead_suits_from_draw_and_pass_history),
         ("training history shape", test_game_manager_training_history_uses_compact_engine_state),
         (

@@ -197,7 +197,11 @@ class DominoEngine:
         if len(hand) == 0:
             self.game_over = True
             self.winner = self.current_player
-        elif self.consecutive_passes >= self.player_count and not self.stock:
+        elif (
+            action is None
+            and self.consecutive_passes >= self.player_count
+            and not self.stock
+        ):
             self.game_over = True
             totals = [sum(tile[0] + tile[1] for tile in hand) for hand in self.hands]
             lowest_total = min(totals)

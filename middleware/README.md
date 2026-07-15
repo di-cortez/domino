@@ -83,3 +83,22 @@ Every action uses one of these shapes:
 
 The same format is consumed by `DominoEngine.step`, `DominoEngine.valid_actions`,
 and `DominoEncoder`.
+
+## Game Termination
+
+A game ends one of two ways: a player empties their hand (that player wins),
+or the game is blocked -- every player has passed consecutively
+(`consecutive_passes >= player_count`) with an empty stock, decided by
+comparing each hand's remaining pip total (lowest wins; a tie is a draw,
+`winner == -1`).
+
+The blocked-game check only fires when the action that just completed was a
+`PASS` (`action is None`). A `DRAW` never triggers it, even if it empties the
+stock and `consecutive_passes` already meets the threshold from earlier
+passes: the current player keeps the turn after drawing and must still
+receive the resulting `valid_actions()` (play the drawn tile if it connects,
+otherwise pass) before the engine evaluates whether the game is blocked. See
+`domino_final_stock_draw_bug_report.txt` for the reproduction cases this
+guards against and `tests/test_core.py`'s
+`test_engine_final_stock_draw_unplayable_tile_requires_pass_before_blocked_game`
+/ `test_engine_final_stock_draw_playable_tile_can_be_played_immediately`.

@@ -4,14 +4,8 @@ from dataclasses import dataclass
 
 from agents.agent import Agent
 from agents.encoder import DominoEncoder
-from agents.nn import GPU_ENABLED
 from agents.rl_nn import PolicyNetwork
 from middleware.opponent_model import ExactOpponentModel
-
-if GPU_ENABLED:
-    import cupy as xp
-else:
-    import numpy as xp
 
 
 @dataclass
@@ -81,8 +75,9 @@ class RLAgent(Agent):
 
         state["opponent_suit_probabilities"] = self.opponent_model.update(state)
         x = self.encoder.encode_state(state)
-        if GPU_ENABLED:
-            x = xp.array(x)
+        # Match the network's own resolved backend (agents/rl_nn.py's
+        # `device` toggle), not just whether GPU_ENABLED is true globally.
+        x = self.network.xp.asarray(x)
 
         probabilities = self.network.forward(x)
         if hasattr(probabilities, "get"):
@@ -92,8 +87,7 @@ class RLAgent(Agent):
             move, action_index = self.encoder.sample_action(probabilities, policy_actions)
             if self.mode == "training":
                 legal_mask = self.encoder.policy_action_mask(policy_actions)
-                if GPU_ENABLED:
-                    legal_mask = xp.array(legal_mask)
+                legal_mask = self.network.xp.asarray(legal_mask)
                 self.trajectory.append(
                     TrajectoryStep(
                         x=x,

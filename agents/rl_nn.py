@@ -6,13 +6,34 @@ import numpy as np
 
 from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
 
-if GPU_ENABLED:
-    import cupy as xp
-else:
-    import numpy as xp
+try:
+    import cupy as _cupy
+except ImportError:
+    _cupy = None
 
 _POLICY_WEIGHTS = ("W1", "b1", "W2", "b2", "W3", "b3")
 _VALUE_WEIGHTS = ("Wv", "bv")
+
+DEVICES = ("auto", "cpu", "gpu")
+
+
+def _resolve_device(device):
+    """Return (array_module, resolved_device_name) for 'auto'/'cpu'/'gpu'.
+
+    'auto' reproduces the project-wide default: CuPy when GPU_ENABLED (i.e.
+    when CuPy is installed), NumPy otherwise. 'cpu'/'gpu' force one backend
+    regardless of GPU_ENABLED, so a training run can be pinned to CPU (or
+    GPU) explicitly instead of only following whatever's installed.
+    """
+    if device in (None, "auto"):
+        return (_cupy if GPU_ENABLED else np), ("gpu" if GPU_ENABLED else "cpu")
+    if device == "cpu":
+        return np, "cpu"
+    if device == "gpu":
+        if _cupy is None:
+            raise ValueError("device='gpu' requested but CuPy is not installed.")
+        return _cupy, "gpu"
+    raise ValueError(f"Unknown device {device!r}; expected one of {DEVICES}.")
 
 
 class PolicyNetwork(SupervisedNeuralNetwork):
@@ -21,19 +42,58 @@ class PolicyNetwork(SupervisedNeuralNetwork):
     Direct REINFORCE is the default and keeps exactly the six supervised policy
     weights. ``use_value_head=True`` adds a linear ``V(s)`` head over the second
     hidden layer so the policy can train from reward-minus-value advantages.
+
+    ``device`` selects the array backend independently of the parent class:
+    ``"auto"`` (default) matches ``GPU_ENABLED`` exactly, reproducing prior
+    behavior; ``"cpu"``/``"gpu"`` force one backend regardless of what's
+    installed/enabled globally.
     """
 
-    def __init__(self, *args, use_value_head=False, **kwargs):
+    def __init__(self, *args, use_value_head=False, device="auto", **kwargs):
         super().__init__(*args, **kwargs)
+        self.xp, self.device = _resolve_device(device)
+        self._cast_weights_to_device()
         self.use_value_head = use_value_head
         if use_value_head:
             hidden2_size = self.W3.shape[1]
-            self.Wv = xp.zeros((1, hidden2_size))
-            self.bv = xp.zeros((1, 1))
+            self.Wv = self.xp.zeros((1, hidden2_size))
+            self.bv = self.xp.zeros((1, 1))
+
+    def _cast_weights_to_device(self):
+        """Move the six policy weights (built by the parent class) to ``self.xp``."""
+        for name in _POLICY_WEIGHTS:
+            value = getattr(self, name, None)
+            if value is None:
+                continue
+            if hasattr(value, "get"):
+                value = value.get()
+            setattr(self, name, self.xp.array(value))
+
+    def forward(self, x):
+        """Same three-layer forward pass as the parent class, pinned to ``self.xp``."""
+        x = self.xp.asarray(x)
+        z1 = self.xp.dot(self.W1, x) + self.b1
+        a1 = self.xp.maximum(0, z1)
+        z2 = self.xp.dot(self.W2, a1) + self.b2
+        a2 = self.xp.maximum(0, z2)
+        z3 = self.xp.dot(self.W3, a2) + self.b3
+        exp_z = self.xp.exp(z3 - self.xp.max(z3, axis=0, keepdims=True))
+        a3 = exp_z / self.xp.sum(exp_z, axis=0, keepdims=True)
+
+        self.cache = {"X": x, "Z1": z1, "A1": a1, "Z2": z2, "A2": a2, "Z3": z3, "A3": a3}
+        return a3
 
     @classmethod
-    def _load_npz_weights(cls, path, learning_rate, use_value_head=False):
-        data = np.load(path)
+    def _load_npz_weights(cls, path, learning_rate, use_value_head=False, device="auto", data=None):
+        """Build a network from an ``.npz`` checkpoint.
+
+        ``data`` accepts an already-loaded mapping of arrays (e.g. a plain
+        dict, or an open ``np.load`` result) to skip reading ``path`` from
+        disk again -- see ``load_from_sl``'s ``data`` parameter for the
+        caller-facing version of this.
+        """
+        if data is None:
+            data = np.load(path)
         hidden1_size, input_size = data["W1"].shape
         hidden2_size, _ = data["W2"].shape
         output_size, _ = data["W3"].shape
@@ -45,12 +105,13 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             output_size=output_size,
             learning_rate=learning_rate,
             use_value_head=use_value_head,
+            device=device,
         )
         for name in _POLICY_WEIGHTS:
-            setattr(network, name, xp.array(data[name]))
+            setattr(network, name, network.xp.array(data[name]))
         if use_value_head and all(name in data for name in _VALUE_WEIGHTS):
             for name in _VALUE_WEIGHTS:
-                setattr(network, name, xp.array(data[name]))
+                setattr(network, name, network.xp.array(data[name]))
         return network
 
     @classmethod
@@ -59,21 +120,33 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         sl_weights_path="models/domino_sl_weights.npz",
         learning_rate=0.001,
         use_value_head=False,
+        device="auto",
+        data=None,
     ):
-        """Use a supervised-learning checkpoint as the initial RL policy."""
+        """Use a supervised-learning checkpoint as the initial RL policy.
+
+        Pass a pre-loaded ``data`` mapping (e.g. from
+        ``np.load(sl_weights_path)`` or a plain ``{name: array}`` dict) to
+        initialize many networks from the same checkpoint without re-reading
+        it from disk each time -- useful for a hyperparameter sweep that
+        warm-starts every run from one shared SL checkpoint.
+        """
         return cls._load_npz_weights(
             sl_weights_path,
             learning_rate,
             use_value_head=use_value_head,
+            device=device,
+            data=data,
         )
 
     @classmethod
-    def load(cls, rl_weights_path, learning_rate=0.001, use_value_head=False):
+    def load(cls, rl_weights_path, learning_rate=0.001, use_value_head=False, device="auto"):
         """Load policy weights and optionally restore a saved value head."""
         return cls._load_npz_weights(
             rl_weights_path,
             learning_rate,
             use_value_head=use_value_head,
+            device=device,
         )
 
     def save(self, weights_path):
@@ -103,6 +176,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             output_size=self.W3.shape[0],
             learning_rate=self.lr,
             use_value_head=getattr(self, "use_value_head", False),
+            device=self.device,
         )
         weight_names = _POLICY_WEIGHTS
         if clone.use_value_head:
@@ -116,7 +190,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         if not getattr(self, "use_value_head", False):
             raise RuntimeError("The value head is not enabled for this network.")
         self.forward(x)
-        return xp.dot(self.Wv, self.cache["A2"]) + self.bv
+        return self.xp.dot(self.Wv, self.cache["A2"]) + self.bv
 
     def backward_policy_gradient(
         self,
@@ -129,6 +203,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         value_coef=0.5,
     ):
         """Apply masked REINFORCE, optionally updating a value baseline."""
+        xp = self.xp
         z3 = self.cache["Z3"]
         a2 = self.cache["A2"]
         a1 = self.cache["A1"]

@@ -400,3 +400,95 @@ def plot_aggregate_choice_opportunities(choice_info, path):
         "game_count": choice_info.get("matchups", 0),
     }
     plot_choice_opportunities(summary, path, "all evaluated pairs")
+
+
+SWEEP_TABLE_COLUMNS = (
+    ("run_name", "Run"),
+    ("critic", "Critic"),
+    ("varied_parameter", "Varied"),
+    ("learning_rate", "LR"),
+    ("gamma", "Gamma"),
+    ("games_per_iteration", "Games/Iter"),
+    ("value_coef", "ValueCoef"),
+    ("win_rate_pct", "Win %"),
+    ("draw_rate_pct", "Draw %"),
+    ("games", "Games"),
+)
+
+
+def plot_sweep_comparison_table(rows, path):
+    """Render one row per RL sweep point (hyperparameters + vs-random results).
+
+    Mirrors ``plot_all_pairs_table``'s look (same palette, same
+    ``ax.table``-based rendering), shaped for a list of sweep runs instead of
+    a square agent matrix.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    field_names = [field for field, _ in SWEEP_TABLE_COLUMNS]
+    headers = [label for _, label in SWEEP_TABLE_COLUMNS]
+    cell_text = [[str(row.get(field, "")) for field in field_names] for row in rows]
+    win_rate_column = field_names.index("win_rate_pct")
+
+    # Proportional column widths from the longest cell (header or value) in
+    # each column, so long run names don't get clipped by equal-width cells.
+    col_chars = [
+        max(
+            [len(headers[i])] + [len(text_row[i]) for text_row in cell_text]
+        )
+        for i in range(len(headers))
+    ]
+    total_chars = sum(col_chars)
+    col_widths = [chars / total_chars for chars in col_chars]
+
+    width = max(13.0, 0.16 * total_chars)
+    height = max(2.6, 0.42 * (len(rows) + 2))
+    fig, ax = plt.subplots(figsize=(width, height), facecolor=SURFACE, dpi=160)
+    ax.set_facecolor(SURFACE)
+    ax.axis("off")
+    ax.set_title(
+        "RL hyperparameter sweep vs random (win %)",
+        color=INK,
+        fontsize=14,
+        loc="left",
+        pad=14,
+    )
+
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=headers,
+        colWidths=col_widths,
+        cellLoc="center",
+        bbox=[0, 0, 1, 0.88],
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.4)
+
+    for (row, col), cell in table.get_celld().items():
+        cell.set_edgecolor(AXIS)
+        cell.set_linewidth(0.8)
+        if row == 0:
+            cell.set_facecolor("#efeee8")
+            cell.set_text_props(color=INK, weight="bold")
+            continue
+        if col == win_rate_column:
+            try:
+                rate = float(cell_text[row - 1][col])
+            except ValueError:
+                rate = None
+            if rate is not None and rate >= 60:
+                cell.set_facecolor("#e6f1fb")
+            elif rate is not None and rate <= 40:
+                cell.set_facecolor("#f9ead9")
+            else:
+                cell.set_facecolor(SURFACE)
+            cell.set_text_props(color=INK, weight="bold")
+        else:
+            cell.set_facecolor(SURFACE)
+            cell.set_text_props(color=SECONDARY_INK)
+
+    _save_figure(fig, path)

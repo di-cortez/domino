@@ -102,3 +102,42 @@ treated as inconclusive.
 The `self_play_evaluation/` subfolder contains a helper script for comparing
 two RL training regimes: pure self-play and direct training against the
 heuristic agent.
+
+## RL Hyperparameter Sweep
+
+`hyperparameter_sweep.py` trains a fresh RL checkpoint per sweep point (one
+axis of `training.self_play`'s hyperparameters varied at a time: learning
+rate, reward schema, or gamma, holding the other two at their baseline), runs
+the whole sweep once with the actor-critic value head on and once off, and
+benchmarks `heuristic`, `neural`, and each freshly trained `rl` checkpoint
+against `random` and in self-play:
+
+```bash
+python -m diagnostics.hyperparameter_sweep
+python -m diagnostics.hyperparameter_sweep --rl-iterations 300 --diagnostic-games 1000
+```
+
+Every record — the exact RL hyperparameters used plus every matchup's
+win/draw/loss rates — is appended to a single JSON array on disk
+(`--output`, default `diagnostics/results/hyperparameter_sweep.json`), so
+repeated invocations accumulate a growing log instead of overwriting it.
+Trained checkpoints are written under `--checkpoint-dir` (default
+`models/hyperparameter_sweep/`). Run `python -m diagnostics.hyperparameter_sweep
+--help` for the full flag list.
+
+### RL Sweep Comparative Table
+
+`rl_sweep_table.py` is the counterpart for `train_script/run_rl_parameter_sweep.sh`
+(a separate, bash-driven sweep — see `train_script/README.md`): that script
+writes one `sweep_run.json` (hyperparameters) + `summary.json` (rl-vs-random
+results) pair per sweep point under `diagnostics/results/<run_name>/`. This
+module discovers every such pair, joins them into one row per run, and writes
+a comparative CSV/JSON/PNG table plus a console summary:
+
+```bash
+python -m diagnostics.rl_sweep_table
+python -m diagnostics.rl_sweep_table --results-dir diagnostics/results --output-dir /tmp/report
+```
+
+Output defaults to `diagnostics/results/rl_sweep_table/`. `train_script/run_rl_parameter_sweep.sh`
+invokes this automatically as its final stage (`--skip-report` to opt out).

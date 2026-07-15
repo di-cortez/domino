@@ -1,5 +1,7 @@
 """Small NumPy/CuPy multilayer perceptron used by the domino agents."""
 
+import os
+
 import numpy as host_np
 
 try:
@@ -10,6 +12,19 @@ except ImportError:
     import numpy as np
 
     GPU_ENABLED = False
+
+if GPU_ENABLED:
+    # Hard VRAM cap for this process's CuPy default memory pool, read from
+    # DOMINO_VRAM_LIMIT_MB (megabytes). Unset (the default) means no limit,
+    # unchanged from prior behavior. Set by
+    # train_script/run_rl_parameter_sweep.sh when running multiple concurrent
+    # training subprocesses (--jobs > 1) that share one GPU, so no single
+    # process can exhaust VRAM the others need. Once the pool would exceed
+    # this size, CuPy itself raises cupy.cuda.memory.OutOfMemoryError -- a
+    # real allocator-level limit, not an approximation.
+    _vram_limit_mb = os.environ.get("DOMINO_VRAM_LIMIT_MB")
+    if _vram_limit_mb:
+        np.get_default_memory_pool().set_limit(size=int(float(_vram_limit_mb) * 1024 * 1024))
 
 
 class SupervisedNeuralNetwork:

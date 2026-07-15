@@ -14,19 +14,21 @@ from dataclasses import dataclass
 import random
 import time
 
+import numpy as np
+
 from agents.encoder import DominoEncoder
 from agents.heuristic_agent import StrategicAgent
-from agents.nn import GPU_ENABLED
 from agents.rl_agent import RLAgent
-from agents.rl_nn import PolicyNetwork
+from agents.rl_nn import DEVICES, PolicyNetwork
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
 from utils.runtime_status import format_duration, print_memory_report
 
-if GPU_ENABLED:
-    import cupy as xp
-else:
-    import numpy as xp
+# The array backend for a given run is resolved once, inside train(), from
+# the `device` parameter (see agents/rl_nn.py::_resolve_device) -- it always
+# matches whatever PolicyNetwork itself is using, rather than being fixed at
+# import time.
+DEFAULT_DEVICE = "auto"
 
 SL_WEIGHTS = "models/domino_sl_weights.npz"
 RL_WEIGHTS = "models/domino_rl_weights.npz"
@@ -54,6 +56,57 @@ CHOICE_MULTIPLIER_5_PLUS_OPTIONS = 10.0
 
 REWARD_ZERO_EPSILON = 1e-8
 VALUE_COEF = 0.5
+DEFAULT_CLIP_GRAD_NORM = 5.0
+DEFAULT_MOVING_AVERAGE_WINDOW = 10
+# Off by default: this is a training-dynamics change (P1 in the historical
+# reports), not pure instrumentation, so it must not silently change the
+# default behavior of existing callers (run_pipeline.py, train_script/, the
+# hyperparameter sweep). Opt in with --normalize-advantages.
+DEFAULT_NORMALIZE_ADVANTAGES = False
+
+# Named presets for the terminal/event reward constants above, selectable at
+# training time so hyperparameter sweeps can vary reward shaping without
+# editing source. "default" reproduces the fixed constants exactly.
+REWARD_SCHEMAS = {
+    "default": {
+        "terminal_win": TERMINAL_WIN_REWARD,
+        "terminal_tie": TERMINAL_TIE_REWARD,
+        "terminal_loss": TERMINAL_LOSS_REWARD,
+        "final_pip_penalty": FINAL_PIP_PENALTY,
+        "opponent_draw": OPPONENT_DRAW_REWARD,
+        "learner_draw": LEARNER_DRAW_PENALTY,
+        "opponent_pass": OPPONENT_PASS_REWARD,
+        "learner_pass": LEARNER_PASS_PENALTY,
+        "event_decay": EVENT_REWARD_DECAY,
+    },
+    "sparse": {
+        "terminal_win": TERMINAL_WIN_REWARD,
+        "terminal_tie": TERMINAL_TIE_REWARD,
+        "terminal_loss": TERMINAL_LOSS_REWARD,
+        "final_pip_penalty": 0.0,
+        "opponent_draw": 0.0,
+        "learner_draw": 0.0,
+        "opponent_pass": 0.0,
+        "learner_pass": 0.0,
+        "event_decay": EVENT_REWARD_DECAY,
+    },
+    "shaped": {
+        "terminal_win": TERMINAL_WIN_REWARD,
+        "terminal_tie": TERMINAL_TIE_REWARD,
+        "terminal_loss": TERMINAL_LOSS_REWARD,
+        "final_pip_penalty": FINAL_PIP_PENALTY,
+        "opponent_draw": OPPONENT_DRAW_REWARD * 2.0,
+        "learner_draw": LEARNER_DRAW_PENALTY * 2.0,
+        "opponent_pass": OPPONENT_PASS_REWARD * 2.0,
+        "learner_pass": LEARNER_PASS_PENALTY * 2.0,
+        "event_decay": EVENT_REWARD_DECAY,
+    },
+}
+DEFAULT_REWARD_SCHEMA = "default"
+
+# Terminal-reward discount applied per remaining real decision (1.0 = no
+# discount, i.e. the previous fixed behavior).
+DEFAULT_GAMMA = 1.0
 
 
 @dataclass
@@ -109,22 +162,26 @@ def _choice_multiplier(option_count):
     return CHOICE_MULTIPLIER_2_OPTIONS
 
 
-def _event_reward_for_action(current_player, learner_position, action, event_stats):
+def _event_reward_for_action(
+    current_player, learner_position, action, event_stats, schema=None
+):
     """Return the local event reward for draw/pass actions and update counts."""
+    if schema is None:
+        schema = REWARD_SCHEMAS[DEFAULT_REWARD_SCHEMA]
     if current_player != learner_position:
         if action == ("DRAW", None):
             event_stats.opponent_draws += 1
-            return OPPONENT_DRAW_REWARD
+            return schema["opponent_draw"]
         if action is None:
             event_stats.opponent_passes += 1
-            return OPPONENT_PASS_REWARD
+            return schema["opponent_pass"]
     else:
         if action == ("DRAW", None):
             event_stats.learner_draws += 1
-            return LEARNER_DRAW_PENALTY
+            return schema["learner_draw"]
         if action is None:
             event_stats.learner_passes += 1
-            return LEARNER_PASS_PENALTY
+            return schema["learner_pass"]
     return None
 
 
@@ -132,36 +189,46 @@ def _remaining_pips(hand):
     return sum(tile[0] + tile[1] for tile in hand)
 
 
-def _terminal_reward(engine, learner_position):
+def _terminal_reward(engine, learner_position, schema):
     """Return terminal outcome reward plus final remaining-pip penalty."""
     winner = engine.winner
     if winner == -1:
-        outcome_reward = TERMINAL_TIE_REWARD
+        outcome_reward = schema["terminal_tie"]
     elif winner == learner_position:
-        outcome_reward = TERMINAL_WIN_REWARD
+        outcome_reward = schema["terminal_win"]
     else:
-        outcome_reward = TERMINAL_LOSS_REWARD
+        outcome_reward = schema["terminal_loss"]
 
-    pip_penalty = FINAL_PIP_PENALTY * _remaining_pips(engine.hands[learner_position])
+    pip_penalty = schema["final_pip_penalty"] * _remaining_pips(engine.hands[learner_position])
     return outcome_reward - pip_penalty
 
 
-def _finish_episode_with_rewards(learner_agent, terminal_reward):
-    """Finalize one learner trajectory into policy-gradient training samples."""
+def _finish_episode_with_rewards(learner_agent, terminal_reward, gamma=DEFAULT_GAMMA):
+    """Finalize one learner trajectory into policy-gradient training samples.
+
+    ``gamma`` discounts the terminal-reward component per remaining real
+    decision, so earlier decisions in the trajectory receive a more heavily
+    discounted share of the final outcome than the last one. Local event
+    rewards already carry their own temporal decay and are not affected.
+    """
     finished_steps = learner_agent.finish_episode(terminal_reward)
+    step_count = len(finished_steps)
     samples = []
-    for step in finished_steps:
+    for index, step in enumerate(finished_steps):
+        remaining_after = step_count - 1 - index
+        discounted_terminal = step.terminal_reward * (gamma ** remaining_after)
+        raw_reward = discounted_terminal + step.local_reward
         multiplier = _choice_multiplier(step.option_count)
-        policy_reward = step.raw_reward * multiplier
+        policy_reward = raw_reward * multiplier
         samples.append(
             TrainingSample(
                 x=step.x,
                 action_index=step.action_index,
                 legal_mask=step.legal_mask,
                 policy_reward=policy_reward,
-                raw_reward=step.raw_reward,
+                raw_reward=raw_reward,
                 local_reward=step.local_reward,
-                terminal_reward=step.terminal_reward,
+                terminal_reward=discounted_terminal,
                 multiplier=multiplier,
                 option_count=step.option_count,
             )
@@ -169,8 +236,22 @@ def _finish_episode_with_rewards(learner_agent, terminal_reward):
     return samples
 
 
-def _reward_signal_summary(samples):
-    """Return compact diagnostics for finalized decision rewards."""
+def _reward_signal_summary(samples, xp=None):
+    """Return compact diagnostics for finalized decision rewards.
+
+    ``reward_std`` disambiguates a falling value loss from a merely
+    low-variance batch: since a value head that has not learned anything
+    predicts close to the batch mean, its loss is approximately
+    ``0.5 * reward_std ** 2`` — logging the standard deviation next to the
+    loss makes that identity checkable instead of hidden behind a noisy
+    scalar (see references/explicacoes/relatorios/relatorio_1407).
+
+    ``xp`` should be the training run's resolved array backend (``train()``
+    passes ``network.xp``); it defaults to NumPy for direct callers, which is
+    fine here since this is small-scale summary math, not the training path.
+    """
+    if xp is None:
+        xp = np
     rewards = xp.asarray([sample.policy_reward for sample in samples], dtype=float)
     local_rewards = xp.asarray([sample.local_reward for sample in samples], dtype=float)
     total = rewards.size
@@ -181,6 +262,7 @@ def _reward_signal_summary(samples):
 
     return {
         "reward_mean": float(xp.mean(rewards)),
+        "reward_std": float(xp.std(rewards)),
         "reward_min": float(xp.min(rewards)),
         "reward_max": float(xp.max(rewards)),
         "local_mean": float(xp.mean(local_rewards)),
@@ -204,7 +286,7 @@ def _play_game(agents):
     return info["winner"]
 
 
-def _play_training_game(agents, learner_position, learner_agent):
+def _play_training_game(agents, learner_position, learner_agent, schema):
     """Play one RL training game and attach decayed local event rewards."""
     engine = DominoEngine(player_count=len(agents))
     event_stats = EventStats()
@@ -225,12 +307,13 @@ def _play_training_game(agents, learner_position, learner_agent):
             learner_position,
             action,
             event_stats,
+            schema,
         )
         if event_reward is not None:
             learner_agent.add_decayed_event_reward(
                 event_turn=state["turn"],
                 base_reward=event_reward,
-                decay_lambda=EVENT_REWARD_DECAY,
+                decay_lambda=schema["event_decay"],
             )
 
         engine.step(action)
@@ -238,7 +321,7 @@ def _play_training_game(agents, learner_position, learner_agent):
     return engine, event_stats
 
 
-def _collect_self_play_steps(network, pool):
+def _collect_self_play_steps(network, pool, schema, gamma):
     """Play one game against a frozen policy snapshot and collect learner samples."""
     learner_position = random.randint(0, 1)
     opponent_network = random.choice(pool) if pool else network
@@ -249,13 +332,13 @@ def _collect_self_play_steps(network, pool):
     agents[learner_position] = learner
     agents[1 - learner_position] = opponent
 
-    engine, event_stats = _play_training_game(agents, learner_position, learner)
-    reward = _terminal_reward(engine, learner_position)
-    samples = _finish_episode_with_rewards(learner, reward)
+    engine, event_stats = _play_training_game(agents, learner_position, learner, schema)
+    reward = _terminal_reward(engine, learner_position, schema)
+    samples = _finish_episode_with_rewards(learner, reward, gamma)
     return samples, event_stats, engine.winner, learner_position
 
 
-def _collect_steps_vs_heuristic(network):
+def _collect_steps_vs_heuristic(network, schema, gamma):
     """Play one training game against the fixed heuristic agent."""
     learner_position = random.randint(0, 1)
     learner = RLAgent(network, mode="training")
@@ -263,9 +346,9 @@ def _collect_steps_vs_heuristic(network):
     agents[learner_position] = learner
     agents[1 - learner_position] = StrategicAgent()
 
-    engine, event_stats = _play_training_game(agents, learner_position, learner)
-    reward = _terminal_reward(engine, learner_position)
-    samples = _finish_episode_with_rewards(learner, reward)
+    engine, event_stats = _play_training_game(agents, learner_position, learner, schema)
+    reward = _terminal_reward(engine, learner_position, schema)
+    samples = _finish_episode_with_rewards(learner, reward, gamma)
     return samples, event_stats, engine.winner, learner_position
 
 
@@ -303,13 +386,23 @@ def _load_initial_network(
     rl_weights_path,
     quiet=False,
     use_value_head=False,
+    device=DEFAULT_DEVICE,
+    sl_weights_data=None,
 ):
-    """Load a compatible RL checkpoint or initialize from compatible SL weights."""
+    """Load a compatible RL checkpoint or initialize from compatible SL weights.
+
+    ``sl_weights_data`` accepts a pre-loaded mapping of SL weight arrays (see
+    ``PolicyNetwork.load_from_sl``), so a caller warm-starting many runs from
+    the same SL checkpoint (e.g. a hyperparameter sweep) can read it from
+    disk once and reuse it, instead of every run re-reading
+    ``sl_weights_path``. Unused when resuming from an existing RL checkpoint.
+    """
     try:
         network = PolicyNetwork.load(
             rl_weights_path,
             learning_rate=learning_rate,
             use_value_head=use_value_head,
+            device=device,
         )
         if not _checkpoint_matches_encoder(network):
             raise ValueError(
@@ -327,6 +420,8 @@ def _load_initial_network(
         sl_weights_path,
         learning_rate=learning_rate,
         use_value_head=use_value_head,
+        device=device,
+        data=sl_weights_data,
     )
     if not _checkpoint_matches_encoder(network):
         raise ValueError(
@@ -357,6 +452,14 @@ def train(
     progress_callback=None,
     use_value_head=False,
     value_coef=VALUE_COEF,
+    gamma=DEFAULT_GAMMA,
+    reward_schema=DEFAULT_REWARD_SCHEMA,
+    clip_grad_norm=DEFAULT_CLIP_GRAD_NORM,
+    normalize_advantages=DEFAULT_NORMALIZE_ADVANTAGES,
+    moving_average_window=DEFAULT_MOVING_AVERAGE_WINDOW,
+    seed=None,
+    device=DEFAULT_DEVICE,
+    sl_weights_data=None,
 ):
     """Train with direct REINFORCE or an optional learned value baseline.
 
@@ -366,9 +469,49 @@ def train(
     extra prediction target beyond the masked policy. With
     ``use_value_head=True``, the same finalized policy rewards become value
     targets and the policy update uses ``reward - V(s)`` advantages.
+
+    ``gamma`` discounts the terminal-reward component per remaining real
+    decision (``1.0`` is the previous fixed behavior: no discount).
+    ``reward_schema`` selects one of the named presets in ``REWARD_SCHEMAS``
+    for the terminal/event reward constants.
+
+    Convergence-monitoring behavior (validated in
+    ``references/explicacoes/relatorios/relatorio_1407``): a point-in-time
+    value loss or win rate is dominated by batch noise, so ``moving_average_window``
+    controls a trailing average of both, logged next to the raw values.
+    ``normalize_advantages`` standardizes the policy signal per batch (mean 0,
+    std 1) before the gradient step, which keeps the effective step size
+    comparable across iterations regardless of reward-schema/multiplier scale;
+    it is off by default (matching prior behavior) and does not affect the
+    value head's regression target, which keeps learning from raw rewards.
+    ``clip_grad_norm`` bounds the update's
+    gradient norm. ``seed`` fixes ``random``/``numpy`` state for reproducible
+    comparisons between hyperparameter configurations.
+
+    ``device`` selects the array backend: ``"auto"`` (default) matches
+    ``GPU_ENABLED`` exactly, i.e. CuPy when installed, otherwise NumPy --
+    unchanged from prior behavior. ``"cpu"``/``"gpu"`` force one backend
+    regardless of what's installed/enabled globally (see
+    ``agents/rl_nn.py::_resolve_device``); ``"gpu"`` raises if CuPy isn't
+    installed.
+
+    ``sl_weights_data`` accepts a pre-loaded mapping of SL weight arrays so a
+    caller running many training calls back-to-back (e.g. a hyperparameter
+    sweep) can read ``sl_weights_path`` from disk once and pass the result to
+    every call, instead of re-reading it each time. Ignored when resuming
+    from an existing ``rl_weights_path`` checkpoint.
     """
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
+    if reward_schema not in REWARD_SCHEMAS:
+        raise ValueError(
+            f"Unknown reward_schema {reward_schema!r}; expected one of "
+            f"{sorted(REWARD_SCHEMAS)}."
+        )
+    schema = REWARD_SCHEMAS[reward_schema]
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
 
     if not quiet:
         print_memory_report("RL self-play startup memory")
@@ -378,12 +521,20 @@ def train(
         rl_weights_path,
         quiet=quiet,
         use_value_head=use_value_head,
+        device=device,
+        sl_weights_data=sl_weights_data,
     )
+    xp = network.xp
+    if not quiet:
+        print(f"RL self-play array backend: {xp.__name__} (device={network.device!r})")
 
     pool = None
     if training_opponent == "self_play":
         pool = deque(maxlen=max_pool_size)
         pool.append(network.clone())
+
+    value_loss_window = deque(maxlen=moving_average_window)
+    win_rate_window = deque(maxlen=moving_average_window)
 
     start_time = time.time()
     last_checkpoint_time = start_time
@@ -397,15 +548,19 @@ def train(
                 samples, event_stats, winner, learner_position = _collect_self_play_steps(
                     network,
                     pool,
+                    schema,
+                    gamma,
                 )
             else:
                 samples, event_stats, winner, learner_position = _collect_steps_vs_heuristic(
-                    network
+                    network, schema, gamma
                 )
             batch.extend(samples)
             event_totals.add(event_stats)
             if winner == learner_position:
                 wins += 1
+
+        win_rate_window.append(wins / games_per_iteration)
 
         if not batch:
             if progress_callback is not None:
@@ -432,6 +587,11 @@ def train(
         else:
             network.forward(x_batch)
 
+        if normalize_advantages:
+            signal_std = float(xp.std(policy_signal))
+            if signal_std > REWARD_ZERO_EPSILON:
+                policy_signal = (policy_signal - float(xp.mean(policy_signal))) / signal_std
+
         metrics = network.backward_policy_gradient(
             action_indices,
             policy_signal,
@@ -439,25 +599,33 @@ def train(
             entropy_coef=entropy_coef,
             value_returns=value_returns,
             value_coef=value_coef,
+            clip_grad_norm=clip_grad_norm,
         )
+
+        if use_value_head:
+            value_loss_window.append(metrics["value_loss"])
 
         if training_opponent == "self_play" and iteration % pool_interval == 0:
             pool.append(network.clone())
 
         if iteration % log_interval == 0 and not quiet:
-            reward_summary = _reward_signal_summary(batch)
+            reward_summary = _reward_signal_summary(batch, xp)
             win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
             pool_suffix = f" | pool: {len(pool)}" if training_opponent == "self_play" else ""
+            win_rate_moving_avg = sum(win_rate_window) / len(win_rate_window)
             value_suffix = ""
             if use_value_head:
+                value_loss_moving_avg = sum(value_loss_window) / len(value_loss_window)
                 value_suffix = (
                     f" | value loss: {metrics['value_loss']:.3f}"
+                    f" (avg/{len(value_loss_window)}: {value_loss_moving_avg:.3f})"
                     f" | advantage mean: {float(xp.mean(policy_signal)):+.3f}"
                 )
             print(
                 f"Iteration {iteration} | decisions: {len(batch)} | "
-                "reward mean/min/max: "
+                "reward mean/std/min/max: "
                 f"{reward_summary['reward_mean']:+.2f}/"
+                f"{reward_summary['reward_std']:.2f}/"
                 f"{reward_summary['reward_min']:+.2f}/"
                 f"{reward_summary['reward_max']:+.2f} | "
                 "good/neutral/bad: "
@@ -468,7 +636,8 @@ def train(
                 "opp D/P: "
                 f"{event_totals.opponent_draws}/{event_totals.opponent_passes}, "
                 f"self D/P: {event_totals.learner_draws}/{event_totals.learner_passes} | "
-                f"wins {win_label}: {wins}/{games_per_iteration}{pool_suffix} | "
+                f"wins {win_label}: {wins}/{games_per_iteration}"
+                f" (avg/{len(win_rate_window)}: {win_rate_moving_avg:.1%}){pool_suffix} | "
                 f"grad: {_gradient_log_text(metrics)}{value_suffix}"
             )
 
@@ -499,23 +668,109 @@ def train(
         "iterations": iterations,
         "games_per_iteration": games_per_iteration,
         "training_opponent": training_opponent,
+        "learning_rate": learning_rate,
+        "entropy_coef": entropy_coef,
         "use_value_head": use_value_head,
         "value_coef": value_coef if use_value_head else None,
+        "gamma": gamma,
+        "reward_schema": reward_schema,
+        "clip_grad_norm": clip_grad_norm,
+        "normalize_advantages": normalize_advantages,
+        "moving_average_window": moving_average_window,
+        "seed": seed,
+        "device": network.device,
         "rl_weights_path": rl_weights_path,
         "duration_s": elapsed_time,
     }
 
 
 def add_optional_rl_arguments(parser):
-    """Add the opt-in learned value baseline flag to ``parser``."""
+    """Add opt-in self-play hyperparameter flags to ``parser``.
+
+    Every flag defaults to the matching keyword default on ``train()``, so
+    omitting all of them reproduces the previous fixed behavior exactly.
+    """
     group = parser.add_argument_group("optional reinforcement-learning controls")
+    group.add_argument("--iterations", type=int, default=1000, help="Training iterations.")
+    group.add_argument(
+        "--games-per-iteration", type=int, default=40, help="Games played per iteration."
+    )
+    group.add_argument(
+        "--training-opponent",
+        choices=("self_play", "heuristic"),
+        default=TRAINING_OPPONENT,
+        help="Play against a pool of frozen snapshots or the fixed heuristic agent.",
+    )
+    group.add_argument("--learning-rate", type=float, default=0.001)
+    group.add_argument("--entropy-coef", type=float, default=0.01)
+    group.add_argument("--log-interval", type=int, default=10)
+    group.add_argument("--checkpoint-interval", type=int, default=50)
+    group.add_argument("--pool-interval", type=int, default=10)
+    group.add_argument("--max-pool-size", type=int, default=50)
+    group.add_argument("--evaluation-games", type=int, default=200)
+    group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
+    group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
     group.add_argument(
         "--value-head",
         action="store_true",
         help=(
-            "Train a linear V(s) baseline and use reward-minus-value policy "
-            "advantages. Direct REINFORCE remains the default."
+            "Train a linear V(s) baseline (the critic) and use reward-minus-value "
+            "policy advantages. Direct REINFORCE (critic off) remains the default."
         ),
+    )
+    group.add_argument("--value-coef", type=float, default=VALUE_COEF)
+    group.add_argument(
+        "--gamma",
+        type=float,
+        default=DEFAULT_GAMMA,
+        help="Terminal-reward discount per remaining real decision (1.0 = no discount).",
+    )
+    group.add_argument(
+        "--reward-schema",
+        choices=tuple(REWARD_SCHEMAS),
+        default=DEFAULT_REWARD_SCHEMA,
+        help="Named preset for the terminal/event reward constants.",
+    )
+    group.add_argument(
+        "--clip-grad-norm",
+        type=float,
+        default=DEFAULT_CLIP_GRAD_NORM,
+        help="Gradient-norm clipping threshold for the policy-gradient update.",
+    )
+    group.add_argument(
+        "--normalize-advantages",
+        dest="normalize_advantages",
+        action="store_true",
+        default=DEFAULT_NORMALIZE_ADVANTAGES,
+        help="Standardize the policy signal per batch (mean 0, std 1) before the "
+        "gradient step. Off by default (matching prior behavior).",
+    )
+    group.add_argument(
+        "--no-normalize-advantages",
+        dest="normalize_advantages",
+        action="store_false",
+        help="Disable per-batch advantage normalization.",
+    )
+    group.add_argument(
+        "--moving-average-window",
+        type=int,
+        default=DEFAULT_MOVING_AVERAGE_WINDOW,
+        help="Trailing-iteration window for the value-loss/win-rate moving averages "
+        "in the log (point values are noisy; use this for judging a plateau).",
+    )
+    group.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Fix random/numpy state for reproducible comparisons between configurations.",
+    )
+    group.add_argument(
+        "--device",
+        choices=DEVICES,
+        default=DEFAULT_DEVICE,
+        help="Array backend: 'auto' matches GPU_ENABLED (CuPy when installed, "
+        "else NumPy) -- unchanged from prior behavior. 'cpu'/'gpu' force one "
+        "backend regardless of what's installed/enabled globally.",
     )
     return parser
 
@@ -532,7 +787,29 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    train(use_value_head=args.value_head)
+    train(
+        iterations=args.iterations,
+        games_per_iteration=args.games_per_iteration,
+        training_opponent=args.training_opponent,
+        learning_rate=args.learning_rate,
+        entropy_coef=args.entropy_coef,
+        log_interval=args.log_interval,
+        checkpoint_interval=args.checkpoint_interval,
+        pool_interval=args.pool_interval,
+        max_pool_size=args.max_pool_size,
+        evaluation_games=args.evaluation_games,
+        sl_weights_path=args.sl_weights_path,
+        rl_weights_path=args.rl_weights_path,
+        use_value_head=args.value_head,
+        value_coef=args.value_coef,
+        gamma=args.gamma,
+        reward_schema=args.reward_schema,
+        clip_grad_norm=args.clip_grad_norm,
+        normalize_advantages=args.normalize_advantages,
+        moving_average_window=args.moving_average_window,
+        seed=args.seed,
+        device=args.device,
+    )
 
 
 if __name__ == "__main__":

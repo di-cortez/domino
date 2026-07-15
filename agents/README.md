@@ -23,6 +23,24 @@ NumPy or CuPy inputs and converts them to the active backend internally.
 Optional supervised weight decay applies only to `W1`, `W2`, and `W3`; bias
 vectors are never regularized.
 
+If the `DOMINO_VRAM_LIMIT_MB` environment variable is set when `nn.py` is
+first imported and CuPy is active, it caps that process's CuPy default
+memory pool (`cupy.get_default_memory_pool().set_limit`) at that many
+mebibytes; exceeding it raises `cupy.cuda.memory.OutOfMemoryError` instead of
+growing unbounded. Unset (the default) means no limit, unchanged from prior
+behavior. `train_script/run_rl_parameter_sweep.sh` sets this automatically,
+sized from detected total GPU memory divided by `--jobs`, so several
+concurrent training subprocesses sharing one GPU can't collectively exceed
+its VRAM.
+
+`rl_nn.py::PolicyNetwork` resolves its own array backend independently of
+`nn.py`'s module-wide `GPU_ENABLED` via a `device` parameter (`"auto"`
+matches `GPU_ENABLED`; `"cpu"`/`"gpu"` force one regardless), so an RL run
+can be pinned to CPU while supervised training elsewhere in the same process
+still uses the GPU, or vice versa. `PolicyNetwork.load_from_sl` also accepts
+a pre-loaded `data` mapping of SL weight arrays, to warm-start many networks
+from the same checkpoint without re-reading it from disk each time.
+
 `RandomNeuralAgent` is an untrained control for diagnostics. Seed `0` is local
 to its network initialization, so every matchup uses the same random policy and
 does not perturb the random sequence used to shuffle and play games.

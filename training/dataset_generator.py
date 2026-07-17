@@ -18,7 +18,7 @@ try:
 except ImportError:
     tqdm = None
 
-DEFAULT_GAME_COUNT = 10000
+DEFAULT_GAME_COUNT = 30000
 DEFAULT_OUTPUT_FILE = "dataset/supervised_dataset.jsonl"
 
 

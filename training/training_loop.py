@@ -28,7 +28,7 @@ except ImportError:
     USE_GPU = False
     print("CuPy not found. Training on CPU.")
 
-EPOCHS = 1000
+EPOCHS = 2000
 BATCH_SIZE = 1024
 DEFAULT_WEIGHT_DECAY = 0.0001
 DEFAULT_EARLY_STOPPING_PATIENCE = 5

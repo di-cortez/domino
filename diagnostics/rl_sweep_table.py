@@ -4,7 +4,8 @@ Build a comparative table from ``train_script/run_rl_parameter_sweep.sh`` output
 Each RL sweep point directory under ``diagnostics/results/`` (one per
 training+diagnostics run, e.g. ``domino_rl[_critic]_default/``,
 ``domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>/`` for the grid search, or
-``domino_rl[_critic]_value_coef_<VC>/``) contains two JSON files written by
+``domino_rl_critic_<grid tag>_vc<VC>/`` for the critic-on value_coef axis)
+contains two JSON files written by
 that script: ``sweep_run.json`` (the exact RL hyperparameters used) and
 ``summary.json`` (the rl-vs-random win/draw/loss rates from
 ``diagnostics.pairwise``). This module discovers every such directory, joins
@@ -13,7 +14,7 @@ CSV, an aggregate JSON, a console summary, and a PNG image table -- mirroring
 ``diagnostics/evaluate.py``'s all-pairs matrix output (``_matrix_rows`` /
 ``_save_matrix_csv`` / ``plot_all_pairs_table``). Rows are sorted directly on
 the four numeric hyperparameters (not by parsing the tag string), so both the
-grid-search rows and the single-axis value_coef rows sort sensibly together.
+grid-search rows and the value_coef-axis rows sort sensibly together.
 
 Usage:
     python -m diagnostics.rl_sweep_table

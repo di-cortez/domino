@@ -3,11 +3,25 @@
 # RL-only hyperparameter sweep: train a dedicated self-play RL checkpoint for
 # every point in a full grid search over the three main hyperparameters
 # (learning_rate x gamma x games_per_iteration, 3x3x3 = 27 combinations),
-# then diagnose it against the random agent. value_coef is swept separately
-# (one-at-a-time, holding learning_rate/gamma/games_per_iteration at
-# baseline) since it only affects the actor-critic value head. The whole
-# sweep runs twice: once with the critic off, once on, with every point
-# identical between the two, so the two policies can be compared directly.
+# then diagnose it against the random agent. The full grid runs for both
+# policies -- critic off (direct REINFORCE) and critic on (actor-critic) at
+# the baseline value_coef -- with every base combination identical between
+# the two, so the two policies can be compared directly.
+#
+# value_coef only affects the actor-critic value head -- it enters the
+# gradient exclusively inside PolicyNetwork.backward_policy_gradient's
+# use_value_head branch and has no effect on direct REINFORCE -- so it is
+# swept with the critic ON only. Its sweep: VC_SAMPLE_COUNT base combinations
+# are drawn at random (seeded with --seed, so reproducible) from the grid,
+# and each sampled combination is trained once per value_coef value. The
+# same sampled combinations are reused for every value_coef value; a
+# value_coef equal to the baseline is skipped because the critic-on grid run
+# of that combination already covers it.
+#
+# Loop structure: one pass over the full cross-product grid; per base
+# combination, run it critic-off, then critic-on at baseline value_coef,
+# then (if the combination was sampled for the value_coef axis) once more
+# per remaining value_coef value, before moving to the next combination.
 #
 # Baselines and the learning-rate/gamma sweep values mirror
 # diagnostics/hyperparameter_sweep.py: BASELINE_LEARNING_RATE, BASELINE_GAMMA,
@@ -16,27 +30,19 @@
 # DEFAULT_RL_GAMES_PER_ITERATION as a single baseline value, not a sweep
 # tuple, so this script supplies its candidate range from the historical
 # sweep table in references/explicacoes/relatorios/teste_1/plano_correcao.tex
-# (Section 2): games-per-iteration in {40, 80, 160}. value_coef uses 10
-# evenly spaced values from 0.1 to 1.0 (baseline 0.5 included).
-#
-# value_coef has no effect on direct REINFORCE (critic off) -- it only enters
-# the gradient inside PolicyNetwork.backward_policy_gradient's use_value_head
-# branch -- so its critic-off runs are expected to reproduce the grid's
-# baseline ("default") checkpoint exactly (same seed, same everything else).
-# It is still swept for both critic settings, for structural symmetry.
+# (Section 2): games-per-iteration in {40, 80, 160}.
 #
 # Every sweep point is one training run (per the baseline
 # training-opponent/reward-schema/etc. defaults in training/self_play.py)
 # followed by one diagnostics matchup against the random agent
 # (diagnostics.pairwise). The grid combination that matches every baseline
 # value exactly is tagged "default" rather than spelling out all three
-# values; a value_coef sweep point equal to the baseline is skipped -- it is
-# already covered by that "default" run.
+# values.
 #
 # Naming (models and diagnostics share one name per run):
 #   models/rl_test/domino_rl[_critic]_default.npz                       (lr/gamma/gpi all at baseline)
 #   models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>.npz  (every other grid point)
-#   models/rl_test/domino_rl[_critic]_value_coef_<VC>.npz               (value_coef axis)
+#   models/rl_test/domino_rl_critic_<grid tag>_vc<VC>.npz               (value_coef axis, critic-on only)
 #   diagnostics/results/domino_rl[_critic]_<same tag>/
 #
 # Reports total elapsed wall-clock time at the very end.
@@ -58,9 +64,9 @@ SWEEP_START_EPOCH=$(date +%s)
 # Defaults
 # ------------------------------------------------------------------
 
-RL_ITERATIONS=10
+RL_ITERATIONS=2000
 SL_WEIGHTS_PATH="models/domino_sl_weights.npz"
-DIAGNOSTIC_GAMES=100
+DIAGNOSTIC_GAMES=200
 SEED=42
 MODEL_DIR="models/rl_test"
 RESUME=0
@@ -78,7 +84,7 @@ DEVICE="auto"
 # memory divided by --jobs -- always, not only when --jobs > 1, as a general
 # OOM backstop (see the "Concurrency and memory limits" block below for the
 # exact formula and enforcement mechanism).
-JOBS=5
+JOBS=10
 RAM_LIMIT_MB=""
 VRAM_LIMIT_MB=""
 RUN_LOG_DIR=""  # computed from RESULTS_DIR after argument parsing, below
@@ -101,31 +107,38 @@ BASELINE_VALUE_COEF=0.5
 # games-per-iteration is not a tuple there (see header comment above) -- its
 # range comes from the historical report instead.
 LR_VALUES=(0.0005 0.001 0.005)
-GAMMA_VALUES=(1.0 0.97 0.9)
+GAMMA_VALUES=(1.0 0.97 0.95 0.92)
 GAMES_PER_ITERATION_VALUES=(40 80 160)
 
-# value_coef axis (swept separately, one-at-a-time, not part of the grid):
-# exactly 10 values, evenly spaced from 0.1 to 1.0, baseline (0.5) included.
+# value_coef axis (critic-on only; value_coef has no effect with the critic
+# off). Swept over VC_SAMPLE_COUNT base combinations drawn at random from the
+# grid -- the same sampled combinations for every value_coef value. The
+# baseline (0.5) is included in the list but skipped during the axis sweep:
+# the critic-on grid run already covers it.
 VALUE_COEF_VALUES=(0.25 0.5 0.75)
+VC_SAMPLE_COUNT=10
 
 usage() {
     cat <<EOF
 Train a dedicated RL self-play checkpoint ($RL_ITERATIONS iterations) per
-sweep point: a full grid search over learning_rate x gamma x
-games_per_iteration (3x3x3 = 27 combinations), plus a separate value_coef
-sweep (10 values, one-at-a-time). Runs the full sweep with the critic off,
-then again with it on -- every point identical between the two. Reports
-total elapsed wall-clock time at the end.
+sweep point. The full learning_rate x gamma x games_per_iteration grid
+(3x3x3 = 27 combinations) runs for both policies -- critic off and critic on
+at the baseline value_coef -- with every base combination identical between
+the two. The value_coef axis runs with the critic ON only (it has no effect
+otherwise): $VC_SAMPLE_COUNT base combinations are sampled at random (seeded)
+from the grid, and each sampled combination is trained once per value_coef
+value, reusing the exact same combinations for every value. Reports total
+elapsed wall-clock time at the end.
 
 Usage: $(basename "$0") [options]
 
-Grid search axes (cross product, 27 combinations):
+Grid search axes (cross product, 27 combinations, both critic settings):
   learning_rate        ${LR_VALUES[*]} (baseline: $BASELINE_LEARNING_RATE)
   gamma                 ${GAMMA_VALUES[*]} (baseline: $BASELINE_GAMMA)
   games_per_iteration   ${GAMES_PER_ITERATION_VALUES[*]} (baseline: $BASELINE_GAMES_PER_ITERATION)
 
-Separate axis (learning_rate/gamma/games_per_iteration held at baseline):
-  value_coef            ${VALUE_COEF_VALUES[*]} (baseline: $BASELINE_VALUE_COEF; no effect when critic is off)
+value_coef axis (critic on only, over $VC_SAMPLE_COUNT sampled grid combinations):
+  value_coef            ${VALUE_COEF_VALUES[*]} (baseline: $BASELINE_VALUE_COEF, covered by the critic-on grid run)
 
 Options:
   --rl-iterations N       RL training iterations per sweep point (default: $RL_ITERATIONS)
@@ -136,6 +149,7 @@ Options:
   --resume                Skip training a checkpoint that already exists on disk; still (re)run its diagnostics
   --diag-no-plots         Skip the per-run diagnostic PNG plots (CSV/JSON are always written)
   --device {auto,cpu,gpu} Array backend for every sweep point; "auto" matches GPU_ENABLED (default: $DEVICE)
+  --vc-sample-count N     Number of grid combinations sampled for the value_coef axis (default: $VC_SAMPLE_COUNT)
   --results-dir PATH      Output directory for per-run diagnostics subdirectories (default: $RESULTS_DIR)
   --report-output-dir PATH  Where the final comparative table is written (default: $REPORT_OUTPUT_DIR)
   --skip-report           Skip the final comparative-table stage
@@ -159,6 +173,7 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=1; shift ;;
         --diag-no-plots) DIAG_PLOTS=0; shift ;;
         --device) DEVICE="$2"; shift 2 ;;
+        --vc-sample-count) VC_SAMPLE_COUNT="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --report-output-dir) REPORT_OUTPUT_DIR="$2"; shift 2 ;;
         --skip-report) SKIP_REPORT=1; shift ;;
@@ -176,6 +191,11 @@ done
 
 if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [[ "$JOBS" -lt 1 ]]; then
     echo "--jobs must be a positive integer, got: $JOBS" >&2
+    exit 1
+fi
+
+if ! [[ "$VC_SAMPLE_COUNT" =~ ^[0-9]+$ ]]; then
+    echo "--vc-sample-count must be a non-negative integer, got: $VC_SAMPLE_COUNT" >&2
     exit 1
 fi
 
@@ -271,6 +291,29 @@ fi
 mkdir -p "$MODEL_DIR"
 if [[ "$JOBS" -gt 1 ]]; then
     mkdir -p "$RUN_LOG_DIR"
+fi
+
+# ------------------------------------------------------------------
+# value_coef axis: seeded random sample of grid combinations
+# ------------------------------------------------------------------
+#
+# Draw VC_SAMPLE_COUNT base combinations (without replacement) from the full
+# lr x gamma x gpi grid, seeded with --seed so the sample is reproducible and
+# identical for every value_coef value. Python's random.Random is used
+# instead of shuf because shuf offers no portable way to seed. Values travel
+# as strings end to end, so they come back byte-identical to the bash arrays.
+declare -A VC_SAMPLED_LOOKUP=()
+if [[ "$VC_SAMPLE_COUNT" -gt 0 ]]; then
+    while IFS= read -r combo; do
+        VC_SAMPLED_LOOKUP["$combo"]=1
+    done < <("$PYTHON_BIN" -c '
+import itertools, random, sys
+seed, count = int(sys.argv[1]), int(sys.argv[2])
+lrs, gammas, gpis = (arg.split() for arg in sys.argv[3:6])
+combos = list(itertools.product(lrs, gammas, gpis))
+for combo in random.Random(seed).sample(combos, min(count, len(combos))):
+    print(" ".join(combo))
+' "$SEED" "$VC_SAMPLE_COUNT" "${LR_VALUES[*]}" "${GAMMA_VALUES[*]}" "${GAMES_PER_ITERATION_VALUES[*]}")
 fi
 
 section() {
@@ -434,44 +477,50 @@ launch_point() {
 # ------------------------------------------------------------------
 
 grid_point_count=$((${#LR_VALUES[@]} * ${#GAMMA_VALUES[@]} * ${#GAMES_PER_ITERATION_VALUES[@]}))
-total_points=0
-for critic in 0 1; do
-    total_points=$((total_points + grid_point_count))
-    for vc in "${VALUE_COEF_VALUES[@]}"; do
-        [[ "$vc" == "$BASELINE_VALUE_COEF" ]] || total_points=$((total_points + 1))
-    done
+vc_extra_values=0
+for vc in "${VALUE_COEF_VALUES[@]}"; do
+    [[ "$vc" == "$BASELINE_VALUE_COEF" ]] || vc_extra_values=$((vc_extra_values + 1))
 done
+total_points=$((grid_point_count * 2 + ${#VC_SAMPLED_LOOKUP[@]} * vc_extra_values))
 
-section "RL parameter sweep: $total_points training+diagnostics runs ($RL_ITERATIONS iterations each: $grid_point_count-point grid x 2 critic settings, plus the value_coef axis)"
+section "RL parameter sweep: $total_points training+diagnostics runs ($RL_ITERATIONS iterations each: $grid_point_count-point grid x 2 critic settings, plus ${#VC_SAMPLED_LOOKUP[@]} sampled combinations x $vc_extra_values non-baseline value_coef values, critic on)"
+if [[ "${#VC_SAMPLED_LOOKUP[@]}" -gt 0 ]]; then
+    echo "value_coef axis combinations (lr gamma gpi), sampled with seed $SEED:"
+    printf '  %s\n' "${!VC_SAMPLED_LOOKUP[@]}" | sort
+fi
 
 # ------------------------------------------------------------------
 # Sweep
 # ------------------------------------------------------------------
 
-for CRITIC in 0 1; do
-    # Full grid search: every combination of learning_rate x gamma x
-    # games_per_iteration, run for both critic settings.
-    for LR in "${LR_VALUES[@]}"; do
-        for GAMMA in "${GAMMA_VALUES[@]}"; do
-            for GPI in "${GAMES_PER_ITERATION_VALUES[@]}"; do
-                if [[ "$LR" == "$BASELINE_LEARNING_RATE" && "$GAMMA" == "$BASELINE_GAMMA" && "$GPI" == "$BASELINE_GAMES_PER_ITERATION" ]]; then
-                    TAG="default"
-                else
-                    TAG="lr${LR}_gamma${GAMMA}_gpi${GPI}"
-                fi
-                launch_point "$TAG" "$CRITIC" "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
-            done
-        done
-    done
+# One pass over the full cross-product grid. Per base combination: run it
+# critic-off, then critic-on at the baseline value_coef -- the exact same
+# base combinations for both policies -- then, if the combination was
+# sampled for the value_coef axis, once more per remaining value_coef value
+# (critic on only: value_coef has no effect with the critic off). The
+# baseline value_coef is skipped there because the critic-on grid run just
+# above already covers it.
+for LR in "${LR_VALUES[@]}"; do
+    for GAMMA in "${GAMMA_VALUES[@]}"; do
+        for GPI in "${GAMES_PER_ITERATION_VALUES[@]}"; do
+            if [[ "$LR" == "$BASELINE_LEARNING_RATE" && "$GAMMA" == "$BASELINE_GAMMA" && "$GPI" == "$BASELINE_GAMES_PER_ITERATION" ]]; then
+                TAG="default"
+            else
+                TAG="lr${LR}_gamma${GAMMA}_gpi${GPI}"
+            fi
 
-    # value_coef axis: separate from the grid, learning_rate/gamma/
-    # games_per_iteration held at baseline. A value equal to the baseline
-    # duplicates the grid's "default" point, so it's skipped.
-    for VC in "${VALUE_COEF_VALUES[@]}"; do
-        if [[ "$VC" == "$BASELINE_VALUE_COEF" ]]; then
-            continue
-        fi
-        launch_point "value_coef_${VC}" "$CRITIC" "$BASELINE_LEARNING_RATE" "$BASELINE_GAMMA" "$BASELINE_GAMES_PER_ITERATION" "$VC"
+            launch_point "$TAG" 0 "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
+            launch_point "$TAG" 1 "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
+
+            if [[ -n "${VC_SAMPLED_LOOKUP["$LR $GAMMA $GPI"]:-}" ]]; then
+                for VC in "${VALUE_COEF_VALUES[@]}"; do
+                    if [[ "$VC" == "$BASELINE_VALUE_COEF" ]]; then
+                        continue
+                    fi
+                    launch_point "${TAG}_vc${VC}" 1 "$LR" "$GAMMA" "$GPI" "$VC"
+                done
+            fi
+        done
     done
 done
 

@@ -1,5 +1,18 @@
 # Domino - Neural vs Heuristic
 
+## Repository Maintenance Policy
+
+**Keep everything in this repository in English.** This requirement applies to
+source code, filenames, directory names, variables, functions, classes, command
+line options, log messages, comments, docstrings, tests, generated report
+labels, and documentation.
+
+All code must remain clearly documented with useful comments and docstrings,
+especially around non-obvious algorithms, resource safeguards, concurrency,
+and public interfaces. Update every affected README whenever behavior,
+commands, configuration, outputs, or architecture change. A code change is not
+complete until its documentation is current.
+
 Interactive two-player domino simulator with a 3D OpenGL board, a rule-based
 heuristic agent, a supervised neural agent, and an RL agent refined by self-play.
 An untrained neural baseline is also available for measuring whether learned
@@ -34,7 +47,8 @@ and visual UI can be changed independently.
 | `agents/rl_agent.py` | `RLAgent`, which plays a `PolicyNetwork` in training or evaluation mode. |
 | `agents/nn.py` | NumPy/CuPy MLP for supervised learning. CuPy is selected automatically when available. |
 | `agents/rl_nn.py` | Policy-only network with masked REINFORCE gradients for self-play RL. |
-| `training/dataset_generator.py` | Generates JSONL `(state, target_action)` examples from heuristic-vs-heuristic games. |
+| `training/dataset_generator.py` | Coordinates deterministic dataset generation, retained worker tuning, bounded SQLite aggregation, and atomic JSONL output. |
+| `training/dataset_parallel.py` | Plays independent heuristic-vs-heuristic dataset games in a bounded CPU-only worker pool. |
 | `training/training_loop.py` | Trains supervised weights, skips forced labels, and saves the best validation checkpoint. |
 | `training/self_play.py` | Refines the RL policy with direct REINFORCE and decayed draw/pass reward shaping. |
 | `diagnostics/evaluate.py` | Runs the upper-triangle all-pairs diagnostic matrix. |
@@ -152,13 +166,26 @@ modes are selected automatically: `small` uses `fast` (2 matchups), the default
 pipeline uses `default` (10), and `big`/`huge` use `complete` (15). Diagnostic
 game counts are always specified per matchup.
 
+Dataset generation and diagnostics automatically benchmark CPU-only worker
+counts 1, 2, 4, 6, ... up to the hard limit of 20. Dataset attempts each use
+and retain 1% of all requested dataset games. Diagnostics tune every matchup
+independently because agent combinations have different costs; every attempt
+uses and retains 1% of that matchup's games. Testing stops on a memory/error
+guard or below 10% marginal gain. Override either tuner with
+`--dataset-workers N` or `--diagnostic-workers N`; the corresponding
+`--*-memory-reserve-mb` options control their RAM reserves.
+
 Generate supervised data:
 
 ```bash
 python -m training.dataset_generator
+python -m training.dataset_generator --workers auto --seed 123
 ```
 
-Dataset generation shows a progress bar and prints total elapsed time.
+Dataset generation uses a bounded dynamic queue and writes completed games to a
+temporary SQLite database in the parent process. It emits the final JSONL in
+stable game-id order, atomically replaces the old dataset only after success,
+shows a progress bar, and prints total elapsed time.
 
 Train the supervised neural agent:
 
@@ -169,6 +196,11 @@ python -m training.training_loop
 Supervised training keeps the complete encoded dataset in RAM and transfers
 only mini-batches of 1024 examples to the GPU. It reports startup memory,
 checkpoint-to-checkpoint time, and total elapsed time.
+
+The dataset encoder uses a two-pass preallocated `float32` representation and
+checks cgroup-aware RAM headroom before loading/encoding. RL also validates host
+workspace and effective free VRAM before large batch assembly; automatic device
+selection falls back to CPU when VRAM is below its safety minimum.
 
 Weight decay, early stopping, and learning-rate decay are optional. The default
 keeps the learning rate fixed; see `training/README.md` for the three flags and
@@ -216,6 +248,7 @@ python -m diagnostics.evaluate
 python -m diagnostics.evaluate fast
 python -m diagnostics.evaluate complete
 python -m diagnostics.evaluate complete -n 5000
+python -m diagnostics.evaluate fast --workers auto --seed 123
 ```
 
 Supported names are `rl`, `neural`, `random_nn`, `heuristic`, and `random`.
@@ -225,8 +258,9 @@ of diagnostics. The `random_nn` agent enters the automatic matrix only in
 `complete` mode, but remains available to the pairwise helper in every mode.
 
 The full diagnostic writes to `diagnostics/results/all_pairs/` unless `--output`
-is provided. Pair evaluation uses a progress bar, and both pair summaries and
-the aggregate summary include `duration_s`:
+is provided. Pair evaluation uses a progress bar. The aggregate report records
+`selected_workers_by_matchup`, retained tuning details for every matchup, and
+`duration_s`; pair summaries also include `duration_s`:
 
 - `all_pairs_table.png`
 - `choice_opportunities.png`
@@ -249,6 +283,8 @@ Run the core tests:
 
 ```bash
 python tests/test_core.py
+python tests/test_parallel_dataset.py
+python tests/test_parallel_diagnostics.py
 ```
 
 Run the UI/controller tests:

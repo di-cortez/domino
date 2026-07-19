@@ -36,8 +36,17 @@ python -m diagnostics.evaluate fast -n 5000
 python -m diagnostics.evaluate complete -n 5000
 ```
 
-Each matchup displays a `tqdm` progress bar. The command also prints a startup
-RAM/GPU memory snapshot and writes elapsed seconds as `duration_s`.
+Diagnostics use CPU-only multiprocessing by default. Immediately before each
+matchup, an independent online benchmark tries 1, 2, 4, 6, 8, 10, ... workers
+(never more than 20), stopping on an error/memory guard or when marginal
+throughput gain is below 10%. Each attempt plays 1% of that matchup's requested
+games, and those games remain in that matchup's final result. Computationally
+different matchups may therefore select different worker counts. Stable
+matchup and absolute-game seeds ensure that scheduling and worker fallback do
+not alter results.
+
+Each matchup displays a `tqdm` progress bar. The command also prints a cgroup-
+aware RAM/GPU memory snapshot and writes elapsed seconds as `duration_s`.
 
 Useful options:
 
@@ -49,7 +58,16 @@ python -m diagnostics.evaluate --no-pair-plots
 python -m diagnostics.evaluate --output /tmp/domino_all_pairs
 python -m diagnostics.evaluate --neural-weights models/domino_sl_weights.npz
 python -m diagnostics.evaluate --rl-weights models/domino_rl_weights.npz
+python -m diagnostics.evaluate --workers 4
+python -m diagnostics.evaluate --workers auto --autotune-fraction 0.01
+python -m diagnostics.evaluate --memory-reserve-mb 1024
 ```
+
+Worker subprocesses cannot see the GPU, use a bounded dynamic job queue, and
+return records to the parent for aggregation/writing. RAM is checked before a
+pool starts and while it runs. Under pressure, unfinished game ids are retried
+with half as many workers while completed records are kept. Output directories
+are replaced atomically only after all files and plots have been produced.
 
 The output folder defaults to `diagnostics/results/all_pairs/`.
 Reusing that folder replaces the aggregate report and removes pair folders that
@@ -60,7 +78,7 @@ do not belong to the selected mode, keeping its contents internally consistent.
 | `all_pairs_table.png` | Triangular image table with one win-rate number per evaluated matchup. |
 | `choice_opportunities.png` | Aggregate histogram of draw/pass/choice opportunities across all evaluated matchups. |
 | `all_pairs_matrix.csv` | One row per evaluated matchup. |
-| `all_pairs_summary.json` | Full aggregate report with accumulated choice-opportunity stats, `duration_s`, and all pairwise summaries. |
+| `all_pairs_summary.json` | Full aggregate report with `selected_workers_by_matchup`, per-matchup retained autotuning reports, accumulated choice-opportunity stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
 
 ## Pairwise Helper
@@ -71,6 +89,7 @@ Use the helper directly when only one matchup is needed:
 python -m diagnostics.pairwise --agent heuristic --opponent random
 python -m diagnostics.pairwise --agent rl --opponent neural
 python -m diagnostics.pairwise --agent neural --opponent random_nn
+python -m diagnostics.pairwise --agent heuristic --opponent random -j 4
 ```
 
 The evaluated agent alternates between player 0 and player 1 to reduce

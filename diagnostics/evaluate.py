@@ -11,8 +11,10 @@ check, the historical four-agent matrix, or the complete five-agent matrix.
 import argparse
 import csv
 import json
+import secrets
 import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,14 +25,31 @@ if str(ROOT) not in sys.path:
 from diagnostics.pairwise import (
     CANONICAL_AGENTS,
     DEFAULT_GAME_COUNT,
+    _atomic_replace_directory,
     remove_legacy_artifacts,
+    resolve_weights_path,
     run_pairwise,
+)
+from diagnostics.parallel_runner import (
+    DEFAULT_ESTIMATED_WORKER_MB,
+    DEFAULT_MAX_WORKER_RSS_MB,
+    DEFAULT_MEMORY_RESERVE_MB,
+    MAX_DIAGNOSTIC_WORKERS,
+    ParallelSafetyConfig,
+    game_seed,
+    safety_cap_workers,
 )
 from diagnostics.plots import (
     plot_aggregate_choice_opportunities,
     plot_all_pairs_table,
 )
 from utils.runtime_status import format_duration, print_memory_report
+from diagnostics.worker_autotune import (
+    DEFAULT_AUTOTUNE_FRACTION,
+    DEFAULT_MINIMUM_GAIN,
+    MatchupSpec,
+    autotune_diagnostic_workers,
+)
 
 DEFAULT_OUTPUT_DIR = ROOT / "diagnostics" / "results" / "all_pairs"
 DEFAULT_DIAGNOSTIC_MODE = "default"
@@ -38,6 +57,7 @@ DIAGNOSTIC_MODES = ("default", "fast", "complete")
 DEFAULT_MATRIX_AGENTS = ("rl", "neural", "heuristic", "random")
 FAST_MATRIX_AGENTS = ("rl", "heuristic", "random")
 FAST_MATCHUPS = (("rl", "random"), ("heuristic", "random"))
+DEFAULT_DIAGNOSTIC_WORKERS = "auto"
 
 
 def _weights_for(agent_name, rl_weights=None, neural_weights=None):
@@ -165,12 +185,19 @@ def run_all_pairs(
     quiet=False,
     progress_callback=None,
     diagnostic_mode=DEFAULT_DIAGNOSTIC_MODE,
+    workers=DEFAULT_DIAGNOSTIC_WORKERS,
+    safety_config=None,
+    autotune_fraction=DEFAULT_AUTOTUNE_FRACTION,
+    autotune_minimum_gain=DEFAULT_MINIMUM_GAIN,
+    status_callback=None,
 ):
     """Evaluate one diagnostics mode and write its aggregate artifacts.
 
     Passing ``agents`` retains support for custom upper-triangle matrices. When
     omitted, ``diagnostic_mode`` selects one of the standard plans.
     """
+    if game_count < 1:
+        raise ValueError("game_count must be positive")
     if agents is None:
         agents, pairs = diagnostic_plan(diagnostic_mode)
         report_mode = diagnostic_mode
@@ -179,12 +206,17 @@ def run_all_pairs(
         pairs = tuple(_selected_pairs(agents))
         report_mode = "custom"
 
-    output_dir = Path(output_dir)
-    pairs_dir = output_dir / "pairs"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    pairs_dir.mkdir(parents=True, exist_ok=True)
-    remove_legacy_artifacts(output_dir)
-    _remove_stale_pair_outputs(pairs_dir, pairs)
+    if workers != "auto":
+        workers = int(workers)
+        if not 1 <= workers <= MAX_DIAGNOSTIC_WORKERS:
+            raise ValueError(
+                f"workers must be 'auto' or between 1 and {MAX_DIAGNOSTIC_WORKERS}"
+            )
+    safety_config = safety_config or ParallelSafetyConfig()
+    effective_seed = int(seed) if seed is not None else secrets.randbits(63)
+
+    final_output_dir = Path(output_dir)
+    final_output_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if not quiet:
         print_memory_report("All-pairs diagnostics startup memory")
@@ -193,6 +225,53 @@ def run_all_pairs(
     total_pairs = len(pairs)
     completed_games = 0
     start_time = time.time()
+
+    matchup_specs = []
+    for agent, opponent in pairs:
+        agent_weights = _weights_for(
+            agent,
+            rl_weights=rl_weights,
+            neural_weights=neural_weights,
+        )
+        resolved_opponent_weights = _weights_for(
+            opponent,
+            rl_weights=rl_weights,
+            neural_weights=neural_weights,
+        )
+        matchup_specs.append(MatchupSpec(
+            agent=agent,
+            opponent=opponent,
+            weights=resolve_weights_path(agent, agent_weights),
+            opponent_weights=resolve_weights_path(opponent, resolved_opponent_weights),
+        ))
+    matchup_specs = tuple(matchup_specs)
+
+    output_dir = Path(tempfile.mkdtemp(
+        prefix=f".{final_output_dir.name}.tmp-",
+        dir=final_output_dir.parent,
+    ))
+    pairs_dir = output_dir / "pairs"
+    pairs_dir.mkdir(parents=True, exist_ok=True)
+    remove_legacy_artifacts(output_dir)
+
+    fixed_workers = None
+    if workers != "auto":
+        fixed_workers, fixed_was_capped, fixed_cap_reason = safety_cap_workers(
+            workers,
+            safety_config,
+        )
+        if fixed_was_capped:
+            emit_status = status_callback or (
+                lambda message: print(message, flush=True)
+            )
+            emit_status(
+                f"Fixed workers reduced from {workers} to {fixed_workers} by "
+                f"resource preflight: {fixed_cap_reason}."
+            )
+
+    selected_workers_by_matchup = {}
+    autotune_by_matchup = {}
+    total_reused_games = 0
 
     for index, (agent, opponent) in enumerate(pairs, start=1):
         if not quiet:
@@ -205,29 +284,81 @@ def run_all_pairs(
             if progress_callback is not None:
                 progress_callback(completed_games, total_pairs * game_count)
 
-        result = run_pairwise(
-            agent,
-            opponent,
-            game_count=game_count,
-            weights=_weights_for(agent, rl_weights=rl_weights, neural_weights=neural_weights),
-            opponent_weights=_weights_for(
+        matchup = matchup_specs[index - 1]
+        matchup_report_key = f"{agent}_vs_{opponent}"
+        pair_seed = game_seed(effective_seed, index - 1)
+        try:
+            if workers == "auto":
+                tuning_progress_previous = 0
+
+                def tuning_progress(done, _total):
+                    nonlocal tuning_progress_previous, completed_games
+                    increment = max(0, done - tuning_progress_previous)
+                    tuning_progress_previous = done
+                    completed_games += increment
+                    if progress_callback is not None:
+                        progress_callback(
+                            completed_games,
+                            total_pairs * game_count,
+                        )
+
+                tuning = autotune_diagnostic_workers(
+                    matchups=(matchup,),
+                    game_count=game_count,
+                    base_seed=effective_seed,
+                    safety=safety_config,
+                    benchmark_fraction=autotune_fraction,
+                    minimum_gain=autotune_minimum_gain,
+                    progress_callback=tuning_progress,
+                    status_callback=status_callback,
+                    pair_seed_overrides={matchup.key: pair_seed},
+                )
+                selected_workers = tuning["optimal_workers"]
+                retained_games = tuning["precomputed_games"].pop(matchup.key)
+                retained_duration = tuning["durations_by_matchup"].pop(matchup.key)
+                total_reused_games += tuning["reused_game_count"]
+                autotune_by_matchup[matchup_report_key] = {
+                    "optimal_workers": tuning["optimal_workers"],
+                    "candidate_workers": tuning["candidate_workers"],
+                    "games_per_test": tuning["games_per_test"],
+                    "reused_game_count": tuning["reused_game_count"],
+                    "attempts": tuning["attempts"],
+                }
+            else:
+                selected_workers = fixed_workers
+                retained_games = []
+                retained_duration = 0.0
+
+            selected_workers_by_matchup[matchup_report_key] = selected_workers
+            result = run_pairwise(
+                agent,
                 opponent,
-                rl_weights=rl_weights,
-                neural_weights=neural_weights,
-            ),
-            seed=seed,
-            output_dir=pair_output,
-            generate_plots=generate_pair_plots,
-            print_console_summary=not quiet,
-            print_memory_summary=False,
-            progress_callback=pair_progress,
-        )
+                game_count=game_count,
+                weights=matchup.weights,
+                opponent_weights=matchup.opponent_weights,
+                seed=seed,
+                output_dir=pair_output,
+                generate_plots=generate_pair_plots,
+                print_console_summary=not quiet,
+                print_memory_summary=False,
+                progress_callback=pair_progress,
+                workers=selected_workers,
+                safety_config=safety_config,
+                precomputed_games=retained_games,
+                precomputed_duration_s=retained_duration,
+                effective_seed=pair_seed,
+                display_output_dir=(
+                    final_output_dir / "pairs" / f"{agent}_vs_{opponent}"
+                ),
+            )
+        except BaseException:
+            shutil.rmtree(output_dir, ignore_errors=True)
+            raise
         summaries.append(result["summary"])
+        del result, retained_games
 
     rows = _matrix_rows(summaries)
-    _save_matrix_csv(rows, output_dir / "all_pairs_matrix.csv")
     choice_opportunities = _aggregate_choice_opportunities(summaries)
-
     report = {
         "choice_opportunities": choice_opportunities,
         "diagnostic_mode": report_mode,
@@ -236,21 +367,54 @@ def run_all_pairs(
         "evaluated_matchups": total_pairs,
         "unevaluated_matrix_matchups": len(agents) * len(agents) - total_pairs,
         "seed": seed,
+        "effective_seed": effective_seed,
+        "requested_workers": workers,
+        "selected_workers_by_matchup": selected_workers_by_matchup,
+        "autotune": {
+            "scope": "per_matchup",
+            "benchmark_fraction": (
+                autotune_fraction if workers == "auto" else 0.0
+            ),
+            "minimum_gain": autotune_minimum_gain,
+            "reused_game_count": total_reused_games,
+            "matchups": autotune_by_matchup,
+        },
         "duration_s": time.time() - start_time,
         "summaries": summaries,
     }
-    with open(output_dir / "all_pairs_summary.json", "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, ensure_ascii=False)
-
-    plot_all_pairs_table(summaries, agents, output_dir / "all_pairs_table.png")
-    plot_aggregate_choice_opportunities(
-        choice_opportunities,
-        output_dir / "choice_opportunities.png",
-    )
+    try:
+        _save_matrix_csv(rows, output_dir / "all_pairs_matrix.csv")
+        with open(output_dir / "all_pairs_summary.json", "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        plot_all_pairs_table(summaries, agents, output_dir / "all_pairs_table.png")
+        plot_aggregate_choice_opportunities(
+            choice_opportunities,
+            output_dir / "choice_opportunities.png",
+        )
+        _atomic_replace_directory(output_dir, final_output_dir)
+    except BaseException:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
     return report
 
 
+def _worker_count(value):
+    """Parse ``auto`` or a diagnostic worker count within the hard limit."""
+    if value == "auto":
+        return value
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("workers must be 'auto' or an integer") from exc
+    if not 1 <= parsed <= MAX_DIAGNOSTIC_WORKERS:
+        raise argparse.ArgumentTypeError(
+            f"workers must be between 1 and {MAX_DIAGNOSTIC_WORKERS}"
+        )
+    return parsed
+
+
 def main():
+    """Parse the diagnostics CLI and run the selected matchup matrix."""
     parser = argparse.ArgumentParser(
         description="Evaluate a selected matrix of supported domino agents.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -281,6 +445,18 @@ def main():
         action="store_true",
         help="Skip the per-matchup PNG plots. The aggregate table image is still generated.",
     )
+    parser.add_argument(
+        "-j",
+        "--workers",
+        type=_worker_count,
+        default=DEFAULT_DIAGNOSTIC_WORKERS,
+        help=f"CPU-only workers or 'auto' for online tuning (maximum {MAX_DIAGNOSTIC_WORKERS}).",
+    )
+    parser.add_argument("--autotune-fraction", type=float, default=DEFAULT_AUTOTUNE_FRACTION)
+    parser.add_argument("--autotune-min-gain", type=float, default=DEFAULT_MINIMUM_GAIN)
+    parser.add_argument("--memory-reserve-mb", type=int, default=DEFAULT_MEMORY_RESERVE_MB)
+    parser.add_argument("--estimated-worker-mb", type=int, default=DEFAULT_ESTIMATED_WORKER_MB)
+    parser.add_argument("--max-worker-rss-mb", type=int, default=DEFAULT_MAX_WORKER_RSS_MB)
     args = parser.parse_args()
 
     report = run_all_pairs(
@@ -291,6 +467,14 @@ def main():
         neural_weights=args.neural_weights,
         generate_pair_plots=not args.no_pair_plots,
         diagnostic_mode=args.mode,
+        workers=args.workers,
+        safety_config=ParallelSafetyConfig(
+            memory_reserve_mb=args.memory_reserve_mb,
+            estimated_worker_mb=args.estimated_worker_mb,
+            max_worker_rss_mb=args.max_worker_rss_mb,
+        ),
+        autotune_fraction=args.autotune_fraction,
+        autotune_minimum_gain=args.autotune_min_gain,
     )
 
     print("\n===== All-pairs diagnostics complete =====")
@@ -300,6 +484,9 @@ def main():
     print(f"Evaluated matchups: {report['evaluated_matchups']}")
     print(f"Unevaluated matrix matchups: {report['unevaluated_matrix_matchups']}")
     print(f"Elapsed time: {format_duration(report['duration_s'])}")
+    print("Diagnostic workers selected per matchup:")
+    for matchup, worker_count in report["selected_workers_by_matchup"].items():
+        print(f"  {matchup}: {worker_count}")
     print(f"Results saved in {Path(args.output)}/")
     print("  all_pairs_table.png")
     print("  choice_opportunities.png")

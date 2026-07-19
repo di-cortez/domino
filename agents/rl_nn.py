@@ -92,27 +92,32 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         disk again -- see ``load_from_sl``'s ``data`` parameter for the
         caller-facing version of this.
         """
-        if data is None:
-            data = np.load(path)
-        hidden1_size, input_size = data["W1"].shape
-        hidden2_size, _ = data["W2"].shape
-        output_size, _ = data["W3"].shape
+        owns_data = data is None
+        if owns_data:
+            data = np.load(path, allow_pickle=False)
+        try:
+            hidden1_size, input_size = data["W1"].shape
+            hidden2_size, _ = data["W2"].shape
+            output_size, _ = data["W3"].shape
 
-        network = cls(
-            input_size=input_size,
-            hidden1_size=hidden1_size,
-            hidden2_size=hidden2_size,
-            output_size=output_size,
-            learning_rate=learning_rate,
-            use_value_head=use_value_head,
-            device=device,
-        )
-        for name in _POLICY_WEIGHTS:
-            setattr(network, name, network.xp.array(data[name]))
-        if use_value_head and all(name in data for name in _VALUE_WEIGHTS):
-            for name in _VALUE_WEIGHTS:
+            network = cls(
+                input_size=input_size,
+                hidden1_size=hidden1_size,
+                hidden2_size=hidden2_size,
+                output_size=output_size,
+                learning_rate=learning_rate,
+                use_value_head=use_value_head,
+                device=device,
+            )
+            for name in _POLICY_WEIGHTS:
                 setattr(network, name, network.xp.array(data[name]))
-        return network
+            if use_value_head and all(name in data for name in _VALUE_WEIGHTS):
+                for name in _VALUE_WEIGHTS:
+                    setattr(network, name, network.xp.array(data[name]))
+            return network
+        finally:
+            if owns_data:
+                data.close()
 
     @classmethod
     def load_from_sl(

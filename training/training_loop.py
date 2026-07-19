@@ -15,6 +15,7 @@ import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.nn import SupervisedNeuralNetwork
+from utils.resource_limits import ensure_ram_available
 from utils.runtime_status import format_duration, print_memory_report
 
 try:
@@ -38,7 +39,9 @@ CHECKPOINT_EVERY = 10
 CHECKPOINT_DIR = "models/supervised_checkpoints"
 MAX_SUPERVISED_CHECKPOINTS = 10
 ENCODED_CACHE_FILE = "dataset/supervised_dataset_encoded.npz"
-ENCODED_FEATURE_VERSION = "opponent_suit_presence_v1"
+ENCODED_FEATURE_VERSION = "opponent_suit_presence_float32_v2"
+DATASET_DTYPE = np.float32
+DATASET_MEMORY_RESERVE_MB = 512
 
 
 def to_backend_array(matrix):
@@ -147,6 +150,8 @@ def _save_encoded_cache(cache_file, x, y, metadata, quiet=False):
         cache_file,
         X=x,
         Y=y,
+        encoded_example_count=x.shape[1],
+        encoded_bytes=x.nbytes + y.nbytes,
         **metadata,
     )
     if not quiet:
@@ -161,6 +166,12 @@ def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE, qui
         try:
             with np.load(cache_file, allow_pickle=False) as cache_data:
                 if _cache_matches(cache_data, metadata):
+                    if "encoded_bytes" in cache_data:
+                        ensure_ram_available(
+                            int(cache_data["encoded_bytes"].item()),
+                            DATASET_MEMORY_RESERVE_MB,
+                            "loading the encoded supervised dataset",
+                        )
                     x = cache_data["X"]
                     y = cache_data["Y"]
                     if not quiet:
@@ -180,14 +191,19 @@ def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE, qui
 
 
 def load_dataset(file_path, encoder, quiet=False):
-    """Load JSONL tile-play examples into ``X`` and one-hot ``Y`` matrices."""
-    x_rows = []
-    y_rows = []
+    """Load JSONL examples with a two-pass, preallocated float32 encoder.
+
+    The previous list-of-column-arrays approach retained one Python/NumPy
+    object per example and then duplicated all data during ``hstack``.  A
+    counting pass lets us validate RAM headroom and allocate the two final
+    matrices exactly once.
+    """
     skipped_draw_pass = 0
     skipped_single_option = 0
+    example_count = 0
 
     if not quiet:
-        print(f"Loading dataset from {file_path}...")
+        print(f"Scanning dataset from {file_path}...")
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -205,21 +221,52 @@ def load_dataset(file_path, encoder, quiet=False):
                 skipped_single_option += 1
                 continue
 
-            action_index = encoder._action_index(target_action)
+            example_count += 1
 
-            x_rows.append(encoder.encode_state(state))
-            y = np.zeros((len(encoder.all_actions), 1))
-            y[action_index, 0] = 1.0
-            y_rows.append(y)
-
-    if not x_rows:
+    if not example_count:
         raise ValueError(
             "The dataset contains no real tile-play decisions after filtering "
             "draw/pass and single-option tile-play actions."
         )
 
-    x = np.hstack(x_rows)
-    y = np.hstack(y_rows)
+    required_bytes = example_count * (
+        encoder.VECTOR_SIZE + len(encoder.all_actions)
+    ) * np.dtype(DATASET_DTYPE).itemsize
+    ensure_ram_available(
+        required_bytes,
+        DATASET_MEMORY_RESERVE_MB,
+        "encoding the supervised dataset",
+    )
+    x = np.empty((encoder.VECTOR_SIZE, example_count), dtype=DATASET_DTYPE)
+    y = np.zeros((len(encoder.all_actions), example_count), dtype=DATASET_DTYPE)
+
+    if not quiet:
+        print(
+            f"Encoding {example_count} examples into one "
+            f"{required_bytes / (1024 * 1024):.1f} MiB allocation..."
+        )
+    column = 0
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+
+            record = json.loads(line)
+            state = record["state"]
+            target_action = _normalize_action(record["target_action"])
+            if target_action is None or not _is_real_decision_state(state):
+                continue
+
+            action_index = encoder._action_index(target_action)
+            x[:, column] = encoder.encode_state(state)[:, 0]
+            y[action_index, column] = 1.0
+            column += 1
+
+    if column != example_count:
+        raise RuntimeError(
+            f"dataset changed while it was being encoded: expected "
+            f"{example_count} examples, read {column}"
+        )
     if not quiet:
         print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
         print(f"Skipped forced draw/pass examples: {skipped_draw_pass}")
@@ -254,17 +301,13 @@ def train_supervised(
 
     total_examples = x_full.shape[1]
     train_count = int(total_examples * 0.85)
-    indices = np.random.permutation(total_examples)
-    train_indices = indices[:train_count]
-    validation_indices = indices[train_count:]
-
-    # Keep complete splits in host memory. SupervisedNeuralNetwork transfers
-    # only the current train/validation mini-batch to CuPy when a GPU is active.
-    x_train = x_full[:, train_indices]
-    y_train = y_full[:, train_indices]
-    x_val = x_full[:, validation_indices]
-    y_val = y_full[:, validation_indices]
-    del x_full, y_full, indices, train_indices, validation_indices
+    # Dataset games and actions are already generated in randomized order.
+    # Contiguous views avoid duplicating all four split matrices at peak RAM;
+    # the network still shuffles the training columns independently each epoch.
+    x_train = x_full[:, :train_count]
+    y_train = y_full[:, :train_count]
+    x_val = x_full[:, train_count:]
+    y_val = y_full[:, train_count:]
     if not quiet:
         print(f"Split complete: {x_train.shape[1]} train | {x_val.shape[1]} validation")
 
@@ -281,31 +324,30 @@ def train_supervised(
         if not quiet:
             print(f"Existing supervised model found at {weights_file}. Resuming training.")
 
-        weights = np.load(weights_file)
+        with np.load(weights_file, allow_pickle=False) as weights:
+            expected_shapes = {
+                "W1": network.W1.shape,
+                "b1": network.b1.shape,
+                "W2": network.W2.shape,
+                "b2": network.b2.shape,
+                "W3": network.W3.shape,
+                "b3": network.b3.shape,
+            }
 
-        expected_shapes = {
-            "W1": network.W1.shape,
-            "b1": network.b1.shape,
-            "W2": network.W2.shape,
-            "b2": network.b2.shape,
-            "W3": network.W3.shape,
-            "b3": network.b3.shape,
-        }
+            for name, expected_shape in expected_shapes.items():
+                if weights[name].shape != expected_shape:
+                    raise ValueError(
+                        f"Cannot resume from {weights_file}: {name} has shape "
+                        f"{weights[name].shape}, but expected {expected_shape}. "
+                        "Delete or move the old checkpoint and retrain from scratch."
+                    )
 
-        for name, expected_shape in expected_shapes.items():
-            if weights[name].shape != expected_shape:
-                raise ValueError(
-                    f"Cannot resume from {weights_file}: {name} has shape "
-                    f"{weights[name].shape}, but expected {expected_shape}. "
-                    "Delete or move the old checkpoint and retrain from scratch."
-                )
-
-        network.W1 = to_backend_array(weights["W1"])
-        network.b1 = to_backend_array(weights["b1"])
-        network.W2 = to_backend_array(weights["W2"])
-        network.b2 = to_backend_array(weights["b2"])
-        network.W3 = to_backend_array(weights["W3"])
-        network.b3 = to_backend_array(weights["b3"])
+            network.W1 = to_backend_array(weights["W1"])
+            network.b1 = to_backend_array(weights["b1"])
+            network.W2 = to_backend_array(weights["W2"])
+            network.b2 = to_backend_array(weights["b2"])
+            network.W3 = to_backend_array(weights["W3"])
+            network.b3 = to_backend_array(weights["b3"])
     else:
         if not quiet:
             print("No existing supervised model found. Training from scratch.")

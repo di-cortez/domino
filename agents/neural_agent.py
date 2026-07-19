@@ -31,32 +31,31 @@ class NeuralAgent(Agent):
     @classmethod
     def load(cls, weights_path="models/domino_sl_weights.npz", epsilon=0.0):
         """Build an agent from a NumPy ``.npz`` checkpoint."""
-        data = np.load(weights_path)
+        with np.load(weights_path, allow_pickle=False) as data:
+            hidden1_size, input_size = data["W1"].shape
+            hidden2_size, _ = data["W2"].shape
+            output_size, _ = data["W3"].shape
 
-        hidden1_size, input_size = data["W1"].shape
-        hidden2_size, _ = data["W2"].shape
-        output_size, _ = data["W3"].shape
+            encoder = DominoEncoder()
+            if input_size != encoder.VECTOR_SIZE:
+                raise ValueError(
+                    f"Checkpoint expects input_size={input_size}, "
+                    f"but DominoEncoder produces {encoder.VECTOR_SIZE}."
+                )
+            if output_size != len(encoder.all_actions):
+                raise ValueError(
+                    f"Checkpoint output_size={output_size}, "
+                    f"but the action space has {len(encoder.all_actions)} actions."
+                )
 
-        encoder = DominoEncoder()
-        if input_size != encoder.VECTOR_SIZE:
-            raise ValueError(
-                f"Checkpoint expects input_size={input_size}, "
-                f"but DominoEncoder produces {encoder.VECTOR_SIZE}."
+            network = SupervisedNeuralNetwork(
+                input_size=input_size,
+                hidden1_size=hidden1_size,
+                hidden2_size=hidden2_size,
+                output_size=output_size,
             )
-        if output_size != len(encoder.all_actions):
-            raise ValueError(
-                f"Checkpoint output_size={output_size}, "
-                f"but the action space has {len(encoder.all_actions)} actions."
-            )
-
-        network = SupervisedNeuralNetwork(
-            input_size=input_size,
-            hidden1_size=hidden1_size,
-            hidden2_size=hidden2_size,
-            output_size=output_size,
-        )
-        for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
-            setattr(network, name, xp.array(data[name]))
+            for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
+                setattr(network, name, xp.array(data[name]))
 
         return cls(network, epsilon=epsilon)
 

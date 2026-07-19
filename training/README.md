@@ -36,7 +36,8 @@ diagnostic games in total.
 
 | File | Purpose |
 |---|---|
-| `dataset_generator.py` | Simulates games and writes only real decisions to `dataset/supervised_dataset.jsonl`. |
+| `dataset_generator.py` | Coordinates retained worker tuning, bounded SQLite aggregation, and atomic ordered JSONL output. |
+| `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
 | `training_loop.py` | Loads the JSONL dataset, trains `SupervisedNeuralNetwork`, and saves `models/domino_sl_weights.npz`. Forced draw/pass and single-option labels are skipped defensively. |
 | `self_play.py` | Loads the supervised policy or an existing RL checkpoint, then trains `PolicyNetwork` from real learner decisions with reward shaping and option-count multipliers. |
 
@@ -67,13 +68,28 @@ Run:
 
 ```bash
 python -m training.dataset_generator
+python -m training.dataset_generator --workers auto --seed 123
+python -m training.dataset_generator --workers 4 --games 5000
 ```
 
 The generator records `(state, target_action)` pairs from games played by
 `StrategicAgent` against itself. Engine states are already compact and do not
 include rendering metadata. The command prints a startup RAM/GPU memory
-snapshot, shows a progress bar, and reports total elapsed time. Its default is
-10,000 games.
+snapshot, shows a progress bar, and reports total elapsed time. The standalone
+command defaults to 30,000 games; the default full pipeline requests 10,000.
+
+Automatic mode benchmarks 1, 2, 4, 6, ... CPU-only workers, capped at 20.
+Every attempt generates and retains 1% of the requested games. Testing stops on
+a memory/error guard or below 10% marginal gain, then the remaining absolute
+game ids run with the selected count. Per-game seeds make fixed-worker and
+automatic runs identical for the same `--seed`, regardless of scheduling or a
+runtime fallback. Use `--help` for benchmark fractions, RAM reserve, per-worker
+RSS, and estimated-worker-memory controls.
+
+Workers serialize one compact payload per game. Only the parent writes those
+payloads to a disposable SQLite database, keeping RAM bounded while results
+arrive out of order. Final rows are emitted in game-id order, and the existing
+JSONL is replaced atomically only after every requested game succeeds.
 
 `StrategicAgent` now uses the exact two-player opponent model from
 `middleware/opponent_model.py`. Dataset generation is therefore slower than the
@@ -104,10 +120,12 @@ The loop:
 - reads `dataset/supervised_dataset.jsonl`;
 - filters out forced draw/pass examples;
 - filters out single-option tile-play examples;
+- scans the JSONL twice and preallocates encoded `float32` arrays once;
+- checks cgroup-aware host RAM before loading or encoding the dataset;
 - encodes states and tile-play actions with `DominoEncoder`;
 - saves/loads `dataset/supervised_dataset_encoded.npz` to skip repeated JSONL encoding;
 - splits data into training and validation sets;
-- keeps the encoded dataset and both splits in NumPy host memory;
+- keeps the encoded dataset and zero-copy split views in NumPy host memory;
 - trains the MLP in mini-batches of 1024 examples;
 - keeps the best validation checkpoint in memory;
 - keeps only the 10 most recent archival checkpoints;
@@ -123,6 +141,18 @@ so repeated or large training runs retain at most 10 of them.
 
 The encoded cache is rebuilt automatically when the source JSONL file changes,
 the encoder input/output dimensions change, or the feature-version tag changes.
+
+RL self-play performs a host-memory preflight for the snapshot pool and expected
+batch, then checks the actual workspace before each `hstack`. With
+`--device auto`, less than 256 MiB of effective free VRAM causes an announced
+CPU fallback; explicit `--device gpu` fails early instead. Diagnostics later
+run in separate CPU-only processes and never consume training VRAM.
+
+The Python pipeline exposes independent dataset and diagnostic worker controls.
+Dataset generation tunes once for the dataset workload. Diagnostics tune each
+matchup separately so random, heuristic, and neural combinations may select
+different optimal worker counts. Both tuners retain their benchmark games and
+enforce the same hard limit of 20 workers.
 
 ### Optional SL controls
 

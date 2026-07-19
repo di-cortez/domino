@@ -4,8 +4,8 @@ Personal batch-training driver for the full pipeline described in
 `training/README.md` and the top-level `README.md`:
 
 1. generate supervised examples from heuristic-vs-heuristic games, using the
-   `training.dataset_generator` module defaults (no CLI flags exist for this
-   stage);
+   `training.dataset_generator` module defaults, including retained automatic
+   dataset-worker tuning;
 2. train the supervised neural policy, using the `training.training_loop`
    module defaults (no CLI flags exist for this stage either);
 3. refine that policy with a **BIG-scale** self-play reinforcement-learning
@@ -27,13 +27,14 @@ Personal batch-training driver for the full pipeline described in
    batch runs that vary RL hyperparameters keep separate diagnostics output
    instead of overwriting a shared directory.
 
-Stage 1 (dataset generation) is left unparameterized: `training.dataset_generator`
-accepts no CLI flags for dataset size or output path. Stage 2 (supervised
-training) runs bare by default too, but accepts three opt-in convergence
-flags (below) that map straight to `training.training_loop`'s own optional
-flags. Use `--skip-dataset`/`--skip-sl`/`--skip-rl`/`--skip-diagnostics` to
-reuse existing artifacts across batch runs that only sweep RL
-hyperparameters.
+Stage 1 (dataset generation) is left unparameterized by this wrapper, so it
+uses the standalone command's 30,000-game default and automatic worker tuner.
+The Python module itself accepts `--games`, `--output`, `--workers`, `--seed`,
+and memory-safety options when called directly. Stage 2 (supervised training)
+runs bare by default too, but accepts three opt-in convergence flags (below)
+that map straight to `training.training_loop`'s own optional flags. Use
+`--skip-dataset`/`--skip-sl`/`--skip-rl`/`--skip-diagnostics` to reuse existing
+artifacts across batch runs that only sweep RL hyperparameters.
 
 ## Convergence criteria (from the archived test reports)
 
@@ -126,8 +127,9 @@ train_script/run_training_pipeline.sh --skip-dataset --skip-sl \
 
 Every RL flag forwards directly to `python -m training.self_play`, which also
 accepts these same flags (see `training/self_play.py:add_optional_rl_arguments`).
-Dataset generation and supervised training take no flags at all in this
-script — they run exactly as `README.md` documents.
+This wrapper does not expose dataset-generation controls; that stage uses the
+documented module defaults. Supervised training exposes only the three SL
+controls listed below.
 
 | Flag | Stage | Meaning | Default |
 |---|---|---|---|
@@ -190,15 +192,17 @@ This was verified end-to-end with a tiny run (`--rl-iterations 2
 
 ### Device selection (`--rl-device`)
 
-`--rl-device auto` (the default) reproduces the original behavior exactly:
-CuPy when installed, NumPy otherwise. `--rl-device cpu`/`--rl-device gpu`
-force one backend for the RL stage regardless of what's installed, without
-touching supervised training's own GPU selection. Worth trying `--rl-device
-cpu` if RL training feels slow: profiling shows RL self-play is dominated by
-the exact opponent-hand inference in `middleware/opponent_model.py` (>80% of
+`--rl-device auto` (the default) uses CuPy when available and at least 256 MiB
+of effective VRAM is free; otherwise it announces a safe NumPy/CPU fallback.
+`--rl-device cpu` forces host execution. `--rl-device gpu` requires a usable
+GPU and fails before training when VRAM is below the safety threshold, rather
+than risking an out-of-memory failure mid-batch. These controls do not change
+supervised training's own backend selection. Worth trying `--rl-device cpu`
+if RL training feels slow: profiling shows RL self-play is dominated by the
+exact opponent-hand inference in `middleware/opponent_model.py` (>80% of
 iteration time), not the policy network, so CuPy's per-decision transfer
-overhead during rollout can make GPU measurably slower than CPU for this
-stage specifically. Verified end-to-end with a tiny run (`--rl-device cpu`,
+overhead during rollout can make GPU measurably slower than CPU for this stage
+specifically. Verified end-to-end with a tiny run (`--rl-device cpu`,
 `--rl-iterations 3 --rl-games-per-iteration 4`): the run logged `RL self-play
 array backend: numpy (device='cpu')` and completed correctly.
 
@@ -210,6 +214,12 @@ passing `--rl-weights`/`--neural-weights` explicitly so it evaluates the exact
 checkpoints this invocation trained or reused, rather than falling back to
 `diagnostics.pairwise`'s hardcoded `models/domino_rl_weights.npz` /
 `models/domino_sl_weights.npz` defaults.
+
+With no fixed worker option supplied by this wrapper, diagnostics benchmark
+1, 2, 4, 6, ... CPU-only workers independently for every matchup, retain each
+benchmark game's result, stop below 10% marginal gain or on a memory guard,
+and never exceed 20 workers. The aggregate JSON report records the selected
+count for each matchup.
 
 Every invocation gets its own output directory —
 `diagnostics/results/<rl-weights-basename>/` (the `.npz` suffix stripped from

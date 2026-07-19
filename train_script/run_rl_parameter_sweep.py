@@ -88,7 +88,7 @@ def load_sl_weights_once(sl_weights_path):
     ``np.load`` zip file open) keeps this safe to reuse across an arbitrary
     number of training calls.
     """
-    with np.load(sl_weights_path) as npz:
+    with np.load(sl_weights_path, allow_pickle=False) as npz:
         return {name: npz[name] for name in npz.files}
 
 

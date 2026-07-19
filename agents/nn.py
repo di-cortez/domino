@@ -5,6 +5,8 @@ import os
 import numpy as host_np
 
 try:
+    if os.environ.get("DOMINO_FORCE_CPU") == "1":
+        raise ImportError("CPU forced by DOMINO_FORCE_CPU")
     import cupy as np
 
     GPU_ENABLED = True

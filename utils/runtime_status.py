@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from utils.resource_limits import gpu_memory_info, process_rss_bytes, system_memory_info
 
 
 def format_duration(seconds):
@@ -30,46 +30,37 @@ def _format_bytes(byte_count):
 
 def _process_rss_bytes():
     """Return current process RSS on Linux, or ``None`` when unavailable."""
-    try:
-        with open("/proc/self/statm", "r", encoding="utf-8") as f:
-            pages = int(f.read().split()[1])
-        return pages * os.sysconf("SC_PAGE_SIZE")
-    except (OSError, IndexError, ValueError):
-        return None
+    return process_rss_bytes()
 
 
 def _system_memory_bytes():
     """Return ``(used, total)`` system RAM bytes from Linux meminfo."""
-    try:
-        values = {}
-        with open("/proc/meminfo", "r", encoding="utf-8") as f:
-            for line in f:
-                key, raw_value = line.split(":", 1)
-                values[key] = int(raw_value.strip().split()[0]) * 1024
-
-        total = values["MemTotal"]
-        available = values.get("MemAvailable", values.get("MemFree", 0))
-        return total - available, total
-    except (OSError, KeyError, ValueError):
-        return None
+    info = system_memory_info()
+    return None if info is None else (info.used, info.total)
 
 
 def _gpu_memory_bytes():
     """Return CuPy/CUDA memory info, or ``None`` when no GPU backend is available."""
+    info = gpu_memory_info()
+    if info is None:
+        return None
+    pool_used = 0
+    pool_total = 0
     try:
         import cupy
 
-        free_bytes, total_bytes = cupy.cuda.runtime.memGetInfo()
         pool = cupy.get_default_memory_pool()
-        return {
-            "used": total_bytes - free_bytes,
-            "free": free_bytes,
-            "total": total_bytes,
-            "pool_used": pool.used_bytes(),
-            "pool_total": pool.total_bytes(),
-        }
+        pool_used = pool.used_bytes()
+        pool_total = pool.total_bytes()
     except Exception:
-        return None
+        pass
+    return {
+        "used": info.used,
+        "free": info.available,
+        "total": info.total,
+        "pool_used": pool_used,
+        "pool_total": pool_total,
+    }
 
 
 def memory_report():

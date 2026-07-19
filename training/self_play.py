@@ -22,6 +22,13 @@ from agents.rl_agent import RLAgent
 from agents.rl_nn import DEVICES, PolicyNetwork
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
+from utils.resource_limits import (
+    MIB,
+    MemorySafetyError,
+    choose_safe_rl_device,
+    effective_gpu_available_bytes,
+    ensure_ram_available,
+)
 from utils.runtime_status import format_duration, print_memory_report
 
 # The array backend for a given run is resolved once, inside train(), from
@@ -513,8 +520,31 @@ def train(
         random.seed(seed)
         np.random.seed(seed)
 
+    requested_device = device
+    device, device_fallback_reason = choose_safe_rl_device(device)
+    # Conservative upper bound: policy snapshots plus one full 52-decision
+    # trajectory per game and several matrix/gradient copies during hstack.
+    estimated_pool_bytes = (max_pool_size + 4) * 2 * MIB
+    estimated_batch_bytes = games_per_iteration * 52 * 4096
+    estimated_peak_bytes = estimated_pool_bytes + estimated_batch_bytes
+    ensure_ram_available(
+        estimated_peak_bytes,
+        512,
+        "RL self-play preflight",
+    )
+    if device_fallback_reason:
+        print(
+            "RL memory safety: automatic GPU selection fell back to CPU because "
+            f"{device_fallback_reason}.",
+            flush=True,
+        )
     if not quiet:
         print_memory_report("RL self-play startup memory")
+        print(
+            "RL resource preflight: "
+            f"requested device={requested_device!r}, selected device={device!r}, "
+            f"estimated peak host allocation {estimated_peak_bytes / MIB:.1f} MiB."
+        )
     network = _load_initial_network(
         learning_rate,
         sl_weights_path,
@@ -566,6 +596,30 @@ def train(
             if progress_callback is not None:
                 progress_callback(iteration, iterations)
             continue
+
+        exact_sample_bytes = 0
+        for sample in batch:
+            exact_sample_bytes += int(getattr(sample.x, "nbytes", 0))
+            exact_sample_bytes += int(getattr(sample.legal_mask, "nbytes", 0))
+        matrix_workspace_bytes = max(1, exact_sample_bytes * 4)
+        if network.device == "cpu":
+            ensure_ram_available(
+                matrix_workspace_bytes,
+                512,
+                f"RL iteration {iteration} batch assembly",
+            )
+        else:
+            effective_gpu_bytes = effective_gpu_available_bytes()
+            if (
+                effective_gpu_bytes is not None
+                and effective_gpu_bytes < matrix_workspace_bytes
+            ):
+                raise MemorySafetyError(
+                    f"RL iteration {iteration} needs about "
+                    f"{matrix_workspace_bytes / MIB:.1f} MiB of GPU workspace, "
+                    f"but only {effective_gpu_bytes / MIB:.1f} MiB is effectively free. "
+                    "Restart with --device cpu or a smaller games-per-iteration."
+                )
 
         x_batch = xp.hstack([sample.x for sample in batch])
         action_indices = [sample.action_index for sample in batch]
@@ -679,6 +733,8 @@ def train(
         "moving_average_window": moving_average_window,
         "seed": seed,
         "device": network.device,
+        "requested_device": requested_device,
+        "device_fallback_reason": device_fallback_reason,
         "rl_weights_path": rl_weights_path,
         "duration_s": elapsed_time,
     }

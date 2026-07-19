@@ -117,9 +117,31 @@ def _run_stage(label, total, unit, runner, summary_text):
     return summary
 
 
-def _run_dataset(config):
+def _diagnostic_summary_text(summary):
+    """Format independently selected matchup worker counts for the pipeline."""
+    worker_text = ", ".join(
+        f"{matchup}={worker_count}"
+        for matchup, worker_count in summary[
+            "selected_workers_by_matchup"
+        ].items()
+    )
+    return (
+        f"{summary['evaluated_matchups']} matchups x "
+        f"{summary['game_count_per_matchup']} games = "
+        f"{summary['evaluated_matchups'] * summary['game_count_per_matchup']} "
+        f"total games | workers: {worker_text}"
+    )
+
+
+def _run_dataset(config, args):
     """Generate the supervised JSONL dataset."""
     dataset_generator = importlib.import_module("training.dataset_generator")
+
+    def dataset_status(message):
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
 
     return _run_stage(
         "Dataset generation",
@@ -130,10 +152,21 @@ def _run_dataset(config):
             output_file="dataset/supervised_dataset.jsonl",
             quiet=True,
             progress_callback=progress,
+            workers=args.dataset_workers,
+            safety_config=dataset_generator.ParallelSafetyConfig(
+                memory_reserve_mb=args.dataset_memory_reserve_mb,
+                estimated_worker_mb=args.dataset_estimated_worker_mb,
+                max_worker_rss_mb=args.dataset_max_worker_rss_mb,
+            ),
+            autotune_fraction=args.dataset_autotune_fraction,
+            autotune_minimum_gain=args.dataset_autotune_min_gain,
+            seed=args.dataset_seed,
+            status_callback=dataset_status,
         ),
         lambda summary: (
             f"{summary['saved_turn_count']} real decisions, "
-            f"{summary['skipped_turn_count']} forced turns skipped"
+            f"{summary['skipped_turn_count']} forced turns skipped, "
+            f"{summary['selected_workers']} worker(s)"
         ),
     )
 
@@ -168,7 +201,7 @@ def _run_supervised_training(
     )
 
 
-def _run_rl_training(config, use_value_head=False):
+def _run_rl_training(config, args):
     """Run reinforcement-learning self-play with compact iteration progress."""
     self_play = importlib.import_module("training.self_play")
 
@@ -179,9 +212,27 @@ def _run_rl_training(config, use_value_head=False):
         lambda progress: self_play.train(
             iterations=config.rl_iterations,
             games_per_iteration=config.rl_games_per_iteration,
+            training_opponent=args.training_opponent,
+            learning_rate=args.learning_rate,
+            entropy_coef=args.entropy_coef,
+            log_interval=args.log_interval,
+            checkpoint_interval=args.checkpoint_interval,
+            pool_interval=args.pool_interval,
+            max_pool_size=args.max_pool_size,
+            evaluation_games=args.evaluation_games,
+            sl_weights_path=args.sl_weights_path,
+            rl_weights_path=args.rl_weights_path,
             quiet=True,
             progress_callback=progress,
-            use_value_head=use_value_head,
+            use_value_head=args.value_head,
+            value_coef=args.value_coef,
+            gamma=args.gamma,
+            reward_schema=args.reward_schema,
+            clip_grad_norm=args.clip_grad_norm,
+            normalize_advantages=args.normalize_advantages,
+            moving_average_window=args.moving_average_window,
+            seed=args.seed,
+            device=args.device,
         ),
         lambda summary: (
             f"{summary['iterations']} iterations x "
@@ -200,9 +251,15 @@ def _diagnostic_workload(config):
     return evaluate, matchup_count, matchup_count * config.diagnostic_games
 
 
-def _run_diagnostics(config):
+def _run_diagnostics(config, args, rl_weights, neural_weights):
     """Run the all-pairs diagnostics matrix with one aggregate progress bar."""
     evaluate, matchup_count, total_games = _diagnostic_workload(config)
+
+    def diagnostic_status(message):
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
 
     return _run_stage(
         f"Diagnostics ({matchup_count} matchups)",
@@ -214,13 +271,20 @@ def _run_diagnostics(config):
             quiet=True,
             progress_callback=progress,
             diagnostic_mode=config.diagnostic_mode,
+            workers=args.diagnostic_workers,
+            safety_config=evaluate.ParallelSafetyConfig(
+                memory_reserve_mb=args.diagnostic_memory_reserve_mb,
+                estimated_worker_mb=args.diagnostic_estimated_worker_mb,
+                max_worker_rss_mb=args.diagnostic_max_worker_rss_mb,
+            ),
+            autotune_fraction=args.diagnostic_autotune_fraction,
+            autotune_minimum_gain=args.diagnostic_autotune_min_gain,
+            seed=args.diagnostic_seed,
+            rl_weights=rl_weights,
+            neural_weights=neural_weights,
+            status_callback=diagnostic_status,
         ),
-        lambda summary: (
-            f"{summary['evaluated_matchups']} matchups x "
-            f"{summary['game_count_per_matchup']} games = "
-            f"{summary['evaluated_matchups'] * summary['game_count_per_matchup']} "
-            "total games"
-        ),
+        _diagnostic_summary_text,
     )
 
 
@@ -243,10 +307,59 @@ def parse_args(argv=None):
             "and 'huge' is 20x larger than the defaults."
         ),
     )
+    dataset_generator = importlib.import_module("training.dataset_generator")
+    dataset = parser.add_argument_group("dataset multiprocessing controls")
+    dataset.add_argument(
+        "--dataset-workers",
+        type=dataset_generator._worker_count,
+        default=dataset_generator.DEFAULT_DATASET_WORKERS,
+        help="CPU-only dataset workers or 'auto' for retained online tuning.",
+    )
+    dataset.add_argument(
+        "--dataset-autotune-fraction",
+        type=float,
+        default=dataset_generator.DEFAULT_DATASET_AUTOTUNE_FRACTION,
+        help="Fraction of dataset games retained by each worker-count test.",
+    )
+    dataset.add_argument(
+        "--dataset-autotune-min-gain",
+        type=float,
+        default=dataset_generator.DEFAULT_DATASET_MINIMUM_GAIN,
+        help="Minimum marginal throughput gain required for a larger pool.",
+    )
+    dataset.add_argument("--dataset-memory-reserve-mb", type=int, default=512)
+    dataset.add_argument("--dataset-estimated-worker-mb", type=int, default=256)
+    dataset.add_argument("--dataset-max-worker-rss-mb", type=int, default=1024)
+    dataset.add_argument("--dataset-seed", type=int, default=None)
+
     training_loop = _silent_import("training.training_loop")
     training_loop.add_optional_training_arguments(parser)
     self_play = importlib.import_module("training.self_play")
     self_play.add_optional_rl_arguments(parser)
+    evaluate = _silent_import("diagnostics.evaluate")
+    diagnostics = parser.add_argument_group("diagnostic multiprocessing controls")
+    diagnostics.add_argument(
+        "--diagnostic-workers",
+        type=evaluate._worker_count,
+        default=evaluate.DEFAULT_DIAGNOSTIC_WORKERS,
+        help="CPU-only diagnostic workers or 'auto' for retained online tuning.",
+    )
+    diagnostics.add_argument(
+        "--diagnostic-autotune-fraction",
+        type=float,
+        default=evaluate.DEFAULT_AUTOTUNE_FRACTION,
+        help="Fraction of each matchup retained by each worker-count test.",
+    )
+    diagnostics.add_argument(
+        "--diagnostic-autotune-min-gain",
+        type=float,
+        default=evaluate.DEFAULT_MINIMUM_GAIN,
+        help="Minimum marginal throughput gain required to test a larger pool.",
+    )
+    diagnostics.add_argument("--diagnostic-memory-reserve-mb", type=int, default=512)
+    diagnostics.add_argument("--diagnostic-estimated-worker-mb", type=int, default=256)
+    diagnostics.add_argument("--diagnostic-max-worker-rss-mb", type=int, default=1024)
+    diagnostics.add_argument("--diagnostic-seed", type=int, default=None)
     return parser.parse_args(argv)
 
 
@@ -271,17 +384,44 @@ def main():
         f"{config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
+    if args.dataset_workers == "auto":
+        print(
+            "Dataset workers: automatic retained benchmark "
+            "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
+        )
+    else:
+        print(f"Dataset workers: fixed at {args.dataset_workers}.")
+    if args.diagnostic_workers == "auto":
+        print(
+            "Diagnostic workers: independent retained benchmark per matchup "
+            "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
+        )
+        print(
+            "Worker testing will start after RL so every benchmark game uses "
+            "the newly trained checkpoint and can remain in the final diagnostics."
+        )
+    else:
+        print(f"Diagnostic workers: fixed at {args.diagnostic_workers}.")
 
     start_time = time.time()
-    dataset_summary = _run_dataset(config)
+    dataset_summary = _run_dataset(config, args)
     supervised_summary = _run_supervised_training(
         config,
         weight_decay=args.weight_decay,
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,
     )
-    rl_summary = _run_rl_training(config, use_value_head=args.value_head)
-    diagnostics_summary = _run_diagnostics(config)
+    print(
+        "RL startup note: diagnostic worker autotuning is deferred until the "
+        "diagnostic stage; RL training itself remains serial."
+    )
+    rl_summary = _run_rl_training(config, args)
+    diagnostics_summary = _run_diagnostics(
+        config,
+        args,
+        rl_weights=rl_summary["rl_weights_path"],
+        neural_weights=supervised_summary["weights_file"],
+    )
     elapsed_time = time.time() - start_time
 
     print("\nPipeline complete")
@@ -289,12 +429,18 @@ def main():
     print(f"Dataset: {dataset_summary['output_file']}")
     print(f"Supervised weights: {supervised_summary['weights_file']}")
     print(f"RL weights: {rl_summary['rl_weights_path']}")
+    worker_text = ", ".join(
+        f"{matchup}={worker_count}"
+        for matchup, worker_count in diagnostics_summary[
+            "selected_workers_by_matchup"
+        ].items()
+    )
     print(
         "Diagnostics: "
         f"{diagnostics_summary['diagnostic_mode']} mode, "
         f"{diagnostics_summary['evaluated_matchups']} matchups x "
         f"{diagnostics_summary['game_count_per_matchup']} games in "
-        "diagnostics/results/all_pairs/"
+        f"diagnostics/results/all_pairs/ | workers: {worker_text}"
     )
 
 

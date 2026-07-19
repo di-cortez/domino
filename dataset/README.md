@@ -27,10 +27,19 @@ Generate the default dataset:
 
 ```bash
 python -m training.dataset_generator
+python -m training.dataset_generator --workers auto --seed 123
+python -m training.dataset_generator --workers 4 --games 5000
 ```
 
-Change `game_count` or `output_file` in `training/dataset_generator.py` when a
-smaller test dataset or a larger training dataset is needed.
+Use `--games` and `--output` for smaller tests or larger training datasets; no
+source edit is required. Automatic mode benchmarks CPU-only worker counts up to
+20. Every attempt retains 1% of the requested games, and stable per-game seeds
+make output independent of scheduling and worker fallback.
+
+Workers return compact per-game JSONL payloads to the parent, which aggregates
+them in a temporary SQLite database rather than holding the dataset in RAM.
+The final file is written in absolute game-id order and atomically replaces an
+existing JSONL only after all games complete successfully.
 
 The encoded cache is rebuilt automatically when the JSONL source file changes,
 the encoder dimensions change, or the feature-version tag changes.

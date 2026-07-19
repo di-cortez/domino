@@ -18,8 +18,10 @@ import contextlib
 import csv
 import io
 import json
-import random
+import secrets
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -27,10 +29,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import numpy as np
-
 from diagnostics.plots import LABEL, generate_plots as write_diagnostic_plots, summarize
+from diagnostics.parallel_runner import (
+    ESTIMATED_DIAGNOSTIC_RECORD_BYTES,
+    MAX_DIAGNOSTIC_WORKERS,
+    ParallelRunInfo,
+    ParallelSafetyConfig,
+    evaluate_game_specs,
+    game_seed,
+)
 from middleware.domino_engine import DominoEngine
+from utils.resource_limits import ensure_ram_available
 from utils.runtime_status import format_duration, print_memory_report
 
 try:
@@ -46,6 +55,7 @@ DEFAULT_AGENT_WEIGHTS = None
 DEFAULT_OPPONENT_WEIGHTS = None
 DEFAULT_OUTPUT_DIR = None
 DEFAULT_GENERATE_PLOTS = True
+DEFAULT_WORKERS = 1
 
 CANONICAL_AGENTS = ("rl", "neural", "random_nn", "heuristic", "random")
 LEGACY_AGENT_ALIASES = {
@@ -223,6 +233,11 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     }
 
 
+def _effective_seed(seed):
+    """Return the explicit run seed used to derive stable per-game seeds."""
+    return int(seed) if seed is not None else secrets.randbits(63)
+
+
 def evaluate_pair(
     agent_name,
     opponent_name,
@@ -232,30 +247,51 @@ def evaluate_pair(
     seed=None,
     progress_callback=None,
     suppress_agent_output=True,
+    workers=DEFAULT_WORKERS,
+    safety_config=None,
+    game_indices=None,
+    effective_seed=None,
+    return_run_info=False,
 ):
-    """Run a batch of games while alternating the evaluated agent's position."""
+    """Run deterministically seeded games in one or more CPU-only workers."""
     agent_name = normalize_agent_name(agent_name)
     opponent_name = normalize_agent_name(opponent_name)
-
-    if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
-
-    agent = create_agent(agent_name, weights)
-    opponent = create_agent(opponent_name, opponent_weights)
-
-    games = []
-    for i in range(game_count):
-        record = play_game(
-            agent,
-            opponent,
-            agent_position=i % 2,
-            suppress_agent_output=suppress_agent_output,
+    if game_count < 1:
+        raise ValueError("game_count must be positive")
+    workers = int(workers)
+    if not 1 <= workers <= MAX_DIAGNOSTIC_WORKERS:
+        raise ValueError(
+            f"workers must be between 1 and {MAX_DIAGNOSTIC_WORKERS}"
         )
-        record["game"] = i + 1
-        games.append(record)
-        if progress_callback:
-            progress_callback(i + 1, game_count)
+    resolved_weights = resolve_weights_path(agent_name, weights)
+    resolved_opponent_weights = resolve_weights_path(opponent_name, opponent_weights)
+    effective_seed = _effective_seed(seed) if effective_seed is None else int(effective_seed)
+    indices = list(range(game_count)) if game_indices is None else [int(i) for i in game_indices]
+    if any(index < 0 or index >= game_count for index in indices):
+        raise ValueError("game_indices must be inside the requested game_count")
+    if len(set(indices)) != len(indices):
+        raise ValueError("game_indices contains duplicates")
+    specs = [(index, game_seed(effective_seed, index)) for index in indices]
+
+    games, run_info = evaluate_game_specs(
+        agent_name=agent_name,
+        opponent_name=opponent_name,
+        game_specs=specs,
+        weights=resolved_weights,
+        opponent_weights=resolved_opponent_weights,
+        requested_workers=workers,
+        suppress_agent_output=suppress_agent_output,
+        progress_callback=progress_callback,
+        safety=safety_config or ParallelSafetyConfig(),
+    )
+
+    metadata = {
+        "requested_seed": seed,
+        "effective_seed": effective_seed,
+        "parallel": run_info.to_dict(),
+    }
+    if return_run_info:
+        return games, metadata
     return games
 
 
@@ -267,6 +303,7 @@ def save_csv(games, path):
     """Write compact per-game records to CSV."""
     fields = [
         "game",
+        "game_seed",
         "agent_position",
         "result",
         "turns",
@@ -281,9 +318,9 @@ def save_csv(games, path):
         writer.writerows(
             {
                 field: (
-                    json.dumps(game[field], separators=(",", ":"))
+                    json.dumps(game.get(field), separators=(",", ":"))
                     if field in {"agent_initial_hand", "opponent_initial_hand"}
-                    else game[field]
+                    else game.get(field)
                 )
                 for field in fields
             }
@@ -370,6 +407,27 @@ def remove_legacy_artifacts(output_dir):
         (output_dir / filename).unlink(missing_ok=True)
 
 
+def _atomic_replace_directory(staging_dir, output_dir):
+    """Commit a completed directory while preserving prior valid output."""
+    staging_dir = Path(staging_dir)
+    output_dir = Path(output_dir)
+    backup_dir = output_dir.with_name(f".{output_dir.name}.backup-{time.time_ns()}")
+    had_previous = output_dir.exists()
+    try:
+        if had_previous:
+            output_dir.rename(backup_dir)
+        staging_dir.rename(output_dir)
+    except BaseException:
+        if output_dir.exists() and not had_previous:
+            shutil.rmtree(output_dir, ignore_errors=True)
+        if backup_dir.exists() and not output_dir.exists():
+            backup_dir.rename(output_dir)
+        raise
+    else:
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+
 def run_pairwise(
     agent_name,
     opponent_name,
@@ -383,10 +441,23 @@ def run_pairwise(
     suppress_agent_output=True,
     print_memory_summary=True,
     progress_callback=None,
+    workers=DEFAULT_WORKERS,
+    safety_config=None,
+    precomputed_games=None,
+    precomputed_duration_s=0.0,
+    effective_seed=None,
+    display_output_dir=None,
 ):
-    """Run one matchup and write the standard pairwise artifacts."""
+    """Run one matchup and atomically write its standard artifacts."""
     agent_name = normalize_agent_name(agent_name)
     opponent_name = normalize_agent_name(opponent_name)
+    if game_count < 1:
+        raise ValueError("game_count must be positive")
+    workers = int(workers)
+    if not 1 <= workers <= MAX_DIAGNOSTIC_WORKERS:
+        raise ValueError(
+            f"workers must be between 1 and {MAX_DIAGNOSTIC_WORKERS}"
+        )
     output_dir = output_dir or (
         ROOT
         / "diagnostics"
@@ -395,12 +466,39 @@ def run_pairwise(
         / f"{agent_name}_vs_{opponent_name}"
     )
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    remove_legacy_artifacts(output_dir)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    precomputed_games = list(precomputed_games or [])
+    precomputed_by_index = {int(record["game"]) - 1: record for record in precomputed_games}
+    if len(precomputed_by_index) != len(precomputed_games):
+        raise ValueError("precomputed_games contains duplicate game ids")
+    if any(index < 0 or index >= game_count for index in precomputed_by_index):
+        raise ValueError("precomputed game id is outside game_count")
+    missing_indices = [index for index in range(game_count) if index not in precomputed_by_index]
+    # Results are deliberately aggregated in the parent, so reserve headroom
+    # for the missing Python records plus the small numeric vectors used by
+    # summaries/plots. Existing precomputed records are already reflected in
+    # the current available-RAM probe and must not be counted twice.
+    memory_reserve_mb = (
+        safety_config.memory_reserve_mb
+        if safety_config is not None
+        else ParallelSafetyConfig().memory_reserve_mb
+    )
+    estimated_new_result_bytes = (
+        len(missing_indices) * ESTIMATED_DIAGNOSTIC_RECORD_BYTES
+        + game_count * 256
+    )
+    ensure_ram_available(
+        estimated_new_result_bytes,
+        memory_reserve_mb,
+        f"retaining {game_count} diagnostic game records for "
+        f"{agent_name} vs {opponent_name}",
+    )
 
     if print_console_summary:
         print(
             f"Evaluating {agent_name} vs {opponent_name} over {game_count} games "
+            f"with {workers} worker(s) "
             "(starting position alternates every game)"
         )
     if print_console_summary and print_memory_summary:
@@ -413,47 +511,105 @@ def run_pairwise(
             desc=f"{agent_name} vs {opponent_name}",
             unit="game",
             leave=True,
+            initial=len(precomputed_games),
         )
 
     def progress(_done, _total):
         if progress_bar is not None:
-            progress_bar.update(1)
+            progress_bar.update(max(0, _done - (progress_bar.n - len(precomputed_games))))
         if progress_callback is not None:
             progress_callback(_done, _total)
 
     start_time = time.time()
     try:
-        games = evaluate_pair(
-            agent_name,
-            opponent_name,
-            game_count,
-            weights=weights,
-            opponent_weights=opponent_weights,
-            seed=seed,
-            progress_callback=progress,
-            suppress_agent_output=suppress_agent_output,
-        )
+        if missing_indices:
+            new_games, execution_metadata = evaluate_pair(
+                agent_name,
+                opponent_name,
+                game_count,
+                weights=weights,
+                opponent_weights=opponent_weights,
+                seed=seed,
+                progress_callback=progress,
+                suppress_agent_output=suppress_agent_output,
+                workers=workers,
+                safety_config=safety_config,
+                game_indices=missing_indices,
+                effective_seed=effective_seed,
+                return_run_info=True,
+            )
+        else:
+            new_games = []
+            resolved_seed = _effective_seed(seed) if effective_seed is None else int(effective_seed)
+            execution_metadata = {
+                "requested_seed": seed,
+                "effective_seed": resolved_seed,
+                "parallel": ParallelRunInfo(
+                    requested_workers=workers,
+                    initial_workers=workers,
+                    final_workers=workers,
+                ).to_dict(),
+            }
     finally:
         if progress_bar is not None:
             progress_bar.close()
 
-    duration = time.time() - start_time
+    games_by_index = dict(precomputed_by_index)
+    games_by_index.update({int(record["game"]) - 1: record for record in new_games})
+    if len(games_by_index) != game_count:
+        raise RuntimeError(
+            f"diagnostics produced {len(games_by_index)}/{game_count} unique games"
+        )
+    games = [games_by_index[index] for index in range(game_count)]
+    duration = float(precomputed_duration_s) + (time.time() - start_time)
 
-    summary = summarize(games, agent_name, opponent_name, seed)
+    summary = summarize(
+        games,
+        agent_name,
+        opponent_name,
+        execution_metadata["effective_seed"],
+    )
+    summary["requested_seed"] = execution_metadata["requested_seed"]
+    summary["effective_seed"] = execution_metadata["effective_seed"]
+    summary["parallel"] = execution_metadata["parallel"]
+    summary["precomputed_games"] = len(precomputed_games)
     summary = add_choice_summary(summary, games)
     summary["duration_s"] = duration
     if print_console_summary:
         print_summary(summary, duration)
+        parallel = summary["parallel"]
+        print(
+            "  Workers: "
+            f"requested {parallel['requested_workers']}, "
+            f"initial {parallel['initial_workers']}, final {parallel['final_workers']}"
+        )
+        if parallel["fallback_count"]:
+            print(f"  Memory/error fallbacks: {parallel['fallback_count']}")
+        print(
+            "  Peak worker RAM: "
+            f"{parallel['peak_worker_rss_mb']:.1f} MiB each, "
+            f"{parallel['peak_total_children_rss_mb']:.1f} MiB total"
+        )
 
-    save_csv(games, output_dir / "games.csv")
-    with open(output_dir / "summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
-
-    if generate_plots:
-        write_diagnostic_plots(games, summary, output_dir)
+    staging_dir = Path(tempfile.mkdtemp(
+        prefix=f".{output_dir.name}.tmp-",
+        dir=output_dir.parent,
+    ))
+    try:
+        remove_legacy_artifacts(staging_dir)
+        save_csv(games, staging_dir / "games.csv")
+        with open(staging_dir / "summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        if generate_plots:
+            write_diagnostic_plots(games, summary, staging_dir)
+        _atomic_replace_directory(staging_dir, output_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
 
     if print_console_summary:
-        print(f"\nResults saved in {output_dir}/")
+        shown_output_dir = Path(display_output_dir) if display_output_dir else output_dir
+        print(f"\nResults saved in {shown_output_dir}/")
         if generate_plots:
             print(
                 "  cumulative_rates.png, result_distribution.png, wins_by_position.png, "
@@ -503,6 +659,15 @@ def main():
         action="store_true",
         help="Do not suppress print calls made by the agents during evaluation.",
     )
+    parser.add_argument(
+        "-j",
+        "--workers",
+        type=int,
+        choices=range(1, MAX_DIAGNOSTIC_WORKERS + 1),
+        default=DEFAULT_WORKERS,
+        metavar="N",
+        help=f"CPU-only diagnostic workers (maximum {MAX_DIAGNOSTIC_WORKERS}).",
+    )
     args = parser.parse_args()
 
     run_pairwise(
@@ -515,6 +680,7 @@ def main():
         output_dir=args.output,
         generate_plots=not args.no_plots,
         suppress_agent_output=not args.show_agent_output,
+        workers=args.workers,
     )
 
 

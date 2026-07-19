@@ -53,6 +53,7 @@ and visual UI can be changed independently.
 | `training/supervised_runtime.py` | Retained CPU/GPU batch tuning, GPU dataset residency/windows, and supervised memory telemetry. |
 | `training/self_play.py` | Refines the RL policy with direct REINFORCE, parallel rollout orchestration, and parent-only gradient updates. |
 | `training/rl_parallel.py` | Generates deterministic RL trajectories in CPU-only workers backed by a bounded shared policy-snapshot bank. |
+| `utils/exact_update_timing.py` | Aggregates per-stage CPU time spent in `ExactOpponentModel.update()` across the pipeline parent and worker processes. |
 | `diagnostics/evaluate.py` | Evaluates all five supported agents against the common random baseline. |
 | `diagnostics/pairwise.py` | Helper for evaluating one agent against another and writing `summary.json`, `games.csv`, and plots. |
 | `diagnostics/hyperparameter_sweep.py` | Trains an RL checkpoint per sweep point (one hyperparameter varied at a time, critic on and off) and appends its diagnostics to a single JSON log. |
@@ -273,6 +274,18 @@ labels remain (`fast`, `default`, and `complete`), but every pipeline scale now
 uses the same five matchups: each of `rl`, `neural`, `random_nn`, `heuristic`,
 and `random` against `random`. Diagnostic game counts are specified per
 matchup.
+
+Each full pipeline run appends a timing record to
+`../exact_opponent_model_timing.json`, next to the repository. The report keeps
+separate entries for dataset generation, supervised training, RL self-play,
+and diagnostics. For every stage it records elapsed wall time and splits
+aggregate process CPU time into `ExactOpponentModel.update()` and everything
+else, including call counts and percentages. Aggregate CPU is the parent CPU
+plus all reaped worker CPU, so parallel worker times are intentionally summed.
+The report also includes the aggregate wall duration of exact-update calls as
+informational data; do not subtract it from stage wall time because concurrent
+worker calls overlap. The timing hook is inactive when modules are run outside
+`run_pipeline.py`, and it does not add console log lines.
 
 Dataset generation, RL rollouts, and diagnostics automatically benchmark
 CPU-only worker counts 1, 2, 4, 6, ... up to the hard limit of 20. Dataset and

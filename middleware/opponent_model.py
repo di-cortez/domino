@@ -24,6 +24,11 @@ from math import comb
 from time import perf_counter
 from typing import Iterable, Sequence
 
+from utils.exact_update_timing import (
+    begin_exact_update_timing,
+    end_exact_update_timing,
+)
+
 
 SWITCH_TO_MU_MAX_HANDS = 500
 MODEL_VERSION = "slots-mu-exact-v1"
@@ -799,7 +804,14 @@ class HybridExactOpponentModel:
 
     def update(self, state: dict) -> list[float]:
         """Process new history and return the current seven probabilities."""
-        return list(self.update_detailed(state).probabilities)
+        timing_token = begin_exact_update_timing()
+        try:
+            return list(self.update_detailed(state).probabilities)
+        finally:
+            # Timing is inactive outside a full pipeline run. When active, the
+            # finally block also records calls that fail without changing the
+            # model's exception behavior.
+            end_exact_update_timing(timing_token)
 
     def update_detailed(self, state: dict) -> OpponentModelUpdate:
         """Process new history and return probabilities plus labelled new traces."""

@@ -13,6 +13,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from utils.exact_update_timing import (
+    begin_pipeline_stage,
+    end_pipeline_stage,
+    exception_summary,
+    finish_pipeline_timing,
+    start_pipeline_timing,
+)
 from utils.runtime_status import format_duration, pipeline_compute_report
 
 try:
@@ -26,6 +33,7 @@ BASE_SUPERVISED_EPOCHS = 1000
 BASE_RL_ITERATIONS = 1000
 BASE_RL_GAMES_PER_ITERATION = 40
 BASE_DIAGNOSTIC_GAMES = 10000
+EXACT_UPDATE_TIMING_REPORT = ROOT.parent / "exact_opponent_model_timing.json"
 
 SCALE_FACTORS = {
     "default": 1.0,
@@ -103,12 +111,23 @@ def _progress(label, total, unit):
         yield callback
 
 
-def _run_stage(label, total, unit, runner, summary_text):
+def _run_stage(label, total, unit, runner, summary_text, *, timing_stage):
     """Run one pipeline stage with a progress bar and one compact summary line."""
     print(f"\n{label}")
     start_time = time.time()
-    with _progress(label, total, unit) as progress_callback:
-        summary = runner(progress_callback)
+    timing_token = begin_pipeline_stage(timing_stage)
+    try:
+        with _progress(label, total, unit) as progress_callback:
+            summary = runner(progress_callback)
+    except BaseException as error:
+        end_pipeline_stage(
+            timing_token,
+            status="failed",
+            error=exception_summary(error),
+        )
+        raise
+    else:
+        end_pipeline_stage(timing_token, status="completed")
     elapsed_time = time.time() - start_time
     print(
         f"{label} complete in {format_duration(elapsed_time)}"
@@ -168,6 +187,7 @@ def _run_dataset(config, args):
             f"{summary['skipped_turn_count']} forced turns skipped, "
             f"{summary['selected_workers']} worker(s)"
         ),
+        timing_stage="dataset_generation",
     )
 
 
@@ -206,6 +226,7 @@ def _run_supervised_training(config, args):
             f"best validation loss {summary['best_validation_loss']:.4f}, "
             f"{summary['total_examples']} examples"
         ),
+        timing_stage="supervised_training",
     )
 
 
@@ -264,6 +285,7 @@ def _run_rl_training(config, args):
             f"value head {'on' if summary['use_value_head'] else 'off'}, "
             f"weights {summary['rl_weights_path']}"
         ),
+        timing_stage="rl_self_play",
     )
 
 
@@ -309,6 +331,7 @@ def _run_diagnostics(config, args, rl_weights, neural_weights):
             status_callback=diagnostic_status,
         ),
         _diagnostic_summary_text,
+        timing_stage="diagnostics",
     )
 
 
@@ -457,40 +480,64 @@ def main():
     else:
         print(f"Diagnostic workers: fixed at {args.diagnostic_workers}.")
 
+    start_pipeline_timing(
+        EXACT_UPDATE_TIMING_REPORT,
+        {
+            "pipeline_scale": config.scale_name,
+            "scale_factor": config.scale_factor,
+            "dataset_games": config.dataset_games,
+            "supervised_epochs": config.supervised_epochs,
+            "rl_iterations": config.rl_iterations,
+            "rl_games_per_iteration": config.rl_games_per_iteration,
+            "diagnostic_games_per_matchup": config.diagnostic_games,
+            "diagnostic_matchups": diagnostic_matchups,
+            "diagnostic_mode": config.diagnostic_mode,
+        },
+    )
     start_time = time.time()
-    dataset_summary = _run_dataset(config, args)
-    supervised_summary = _run_supervised_training(config, args)
-    print(
-        "RL startup note: rollout workers are CPU-only; policy aggregation and "
-        "gradient updates remain in the main process."
-    )
-    rl_summary = _run_rl_training(config, args)
-    diagnostics_summary = _run_diagnostics(
-        config,
-        args,
-        rl_weights=rl_summary["rl_weights_path"],
-        neural_weights=supervised_summary["weights_file"],
-    )
-    elapsed_time = time.time() - start_time
+    try:
+        dataset_summary = _run_dataset(config, args)
+        supervised_summary = _run_supervised_training(config, args)
+        print(
+            "RL startup note: rollout workers are CPU-only; policy aggregation and "
+            "gradient updates remain in the main process."
+        )
+        rl_summary = _run_rl_training(config, args)
+        diagnostics_summary = _run_diagnostics(
+            config,
+            args,
+            rl_weights=rl_summary["rl_weights_path"],
+            neural_weights=supervised_summary["weights_file"],
+        )
+        elapsed_time = time.time() - start_time
 
-    print("\nPipeline complete")
-    print(f"Total elapsed time: {format_duration(elapsed_time)}")
-    print(f"Dataset: {dataset_summary['output_file']}")
-    print(f"Supervised weights: {supervised_summary['weights_file']}")
-    print(f"RL weights: {rl_summary['rl_weights_path']}")
-    worker_text = ", ".join(
-        f"{matchup}={worker_count}"
-        for matchup, worker_count in diagnostics_summary[
-            "selected_workers_by_matchup"
-        ].items()
-    )
-    print(
-        "Diagnostics: "
-        f"{diagnostics_summary['diagnostic_mode']} mode, "
-        f"{diagnostics_summary['evaluated_matchups']} matchups x "
-        f"{diagnostics_summary['game_count_per_matchup']} games in "
-        f"diagnostics/results/all_pairs/ | workers: {worker_text}"
-    )
+        print("\nPipeline complete")
+        print(f"Total elapsed time: {format_duration(elapsed_time)}")
+        print(f"Dataset: {dataset_summary['output_file']}")
+        print(f"Supervised weights: {supervised_summary['weights_file']}")
+        print(f"RL weights: {rl_summary['rl_weights_path']}")
+        worker_text = ", ".join(
+            f"{matchup}={worker_count}"
+            for matchup, worker_count in diagnostics_summary[
+                "selected_workers_by_matchup"
+            ].items()
+        )
+        print(
+            "Diagnostics: "
+            f"{diagnostics_summary['diagnostic_mode']} mode, "
+            f"{diagnostics_summary['evaluated_matchups']} matchups x "
+            f"{diagnostics_summary['game_count_per_matchup']} games in "
+            f"diagnostics/results/all_pairs/ | workers: {worker_text}"
+        )
+    except BaseException as error:
+        status = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
+        finish_pipeline_timing(
+            status=status,
+            error=exception_summary(error),
+        )
+        raise
+    else:
+        finish_pipeline_timing(status="completed")
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 from agents.encoder import DominoEncoder
 from agents.heuristic_agent import StrategicAgent
 from agents.neural_agent import NeuralAgent
-from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
+from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON, SupervisedNeuralNetwork
 from agents.random_neural_agent import RandomNeuralAgent
 from agents.rl_agent import RLAgent, TrajectoryStep
 from agents.rl_nn import PolicyNetwork
@@ -71,6 +71,7 @@ from training.training_loop import (
     parse_args as parse_supervised_args,
 )
 from run_pipeline import _build_config, parse_args as parse_pipeline_args
+from utils.runtime_status import pipeline_compute_report
 
 from math import comb, factorial
 
@@ -1330,6 +1331,22 @@ def test_pipeline_scales_select_expected_diagnostic_modes():
     assert _build_config("huge").diagnostic_mode == "complete"
 
 
+def test_pipeline_compute_report_names_backends_and_memory():
+    report = pipeline_compute_report("auto")
+
+    assert report.startswith("Pipeline compute resources: ")
+    if GPU_ENABLED:
+        assert "supervised=GPU" in report
+        assert GPU_UNAVAILABLE_REASON is None
+    else:
+        assert "supervised=CPU" in report
+        assert GPU_UNAVAILABLE_REASON
+    assert "RL parent=" in report
+    assert "dataset/RL rollout/diagnostic workers=CPU-only" in report
+    assert "system RAM" in report
+    assert "GPU VRAM" in report
+
+
 def main():
     tests = [
         ("encoder action space", test_encoder_action_space_excludes_forced_actions),
@@ -1449,6 +1466,10 @@ def main():
         (
             "pipeline diagnostic modes",
             test_pipeline_scales_select_expected_diagnostic_modes,
+        ),
+        (
+            "pipeline compute resource report",
+            test_pipeline_compute_report_names_backends_and_memory,
         ),
     ]
 

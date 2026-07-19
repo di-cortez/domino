@@ -141,6 +141,15 @@ startup memory, checkpoint-to-checkpoint time, and total elapsed time.
 Archival files in `models/supervised_checkpoints/` are pruned after every save,
 so repeated or large training runs retain at most 10 of them.
 
+CuPy import alone is not treated as proof of a working GPU. At startup,
+`agents/nn.py` also asks the CUDA runtime for a visible device; a missing driver,
+hidden device, or unusable runtime produces a documented NumPy/CPU fallback
+reason. The root README's **Linux GPU setup and verification** section contains
+the driver checks, CUDA 12.x/13.x installation commands, a real calculation
+test, and troubleshooting steps. `run_pipeline.py` prints the selected
+supervised and RL-parent backends plus free/total RAM and VRAM before dataset
+generation starts.
+
 The encoded cache is rebuilt automatically when the source JSONL file changes,
 the encoder input/output dimensions change, or the feature-version tag changes.
 

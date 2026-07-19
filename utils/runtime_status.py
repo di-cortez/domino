@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from utils.resource_limits import gpu_memory_info, process_rss_bytes, system_memory_info
+from utils.resource_limits import (
+    MIB,
+    gpu_memory_info,
+    process_rss_bytes,
+    system_memory_info,
+)
 
 
 def format_duration(seconds):
@@ -89,6 +94,77 @@ def memory_report():
         )
 
     return " | ".join(parts)
+
+
+def pipeline_compute_report(rl_requested_device="auto"):
+    """Describe pipeline backends and currently available RAM/VRAM.
+
+    Supervised training follows ``agents.nn.GPU_ENABLED``. The RL parent can
+    override that choice, while dataset, rollout, and diagnostic workers are
+    deliberately CPU-only. This function reports those distinctions before
+    the first long-running pipeline stage starts.
+    """
+    from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON
+
+    gpu_memory = _gpu_memory_bytes()
+    gpu_name = None
+    cupy_version = None
+    cupy_importable = False
+    try:
+        import cupy
+
+        cupy_importable = True
+        cupy_version = cupy.__version__
+        properties = cupy.cuda.runtime.getDeviceProperties(0)
+        gpu_name = properties.get("name", "CUDA device")
+        if isinstance(gpu_name, bytes):
+            gpu_name = gpu_name.decode(errors="replace")
+    except Exception:
+        pass
+
+    if GPU_ENABLED:
+        supervised = f"GPU ({gpu_name or 'CUDA device'}, CuPy {cupy_version})"
+    else:
+        reason = GPU_UNAVAILABLE_REASON or "CuPy is not installed"
+        supervised = f"CPU (NumPy; GPU unavailable: {reason})"
+
+    if rl_requested_device == "cpu":
+        rl_parent = "CPU (forced)"
+    elif rl_requested_device == "gpu":
+        if not cupy_importable:
+            rl_parent = "GPU requested but CuPy is unavailable"
+        elif gpu_memory is not None and gpu_memory["free"] < 256 * MIB:
+            rl_parent = "GPU requested but the 256 MiB VRAM preflight will fail"
+        else:
+            rl_parent = f"GPU ({gpu_name or 'CUDA device'}, forced)"
+    elif GPU_ENABLED and (
+        gpu_memory is None or gpu_memory["free"] >= 256 * MIB
+    ):
+        rl_parent = f"GPU ({gpu_name or 'CUDA device'}, auto)"
+    else:
+        rl_parent = "CPU (automatic fallback)"
+
+    parts = [
+        f"supervised={supervised}",
+        f"RL parent={rl_parent}",
+        "dataset/RL rollout/diagnostic workers=CPU-only",
+    ]
+    system_memory = system_memory_info()
+    if system_memory is None:
+        parts.append("system RAM unavailable")
+    else:
+        parts.append(
+            f"system RAM {_format_bytes(system_memory.available)} free / "
+            f"{_format_bytes(system_memory.total)} total"
+        )
+    if gpu_memory is None:
+        parts.append("GPU VRAM unavailable")
+    else:
+        parts.append(
+            f"GPU VRAM {_format_bytes(gpu_memory['free'])} free / "
+            f"{_format_bytes(gpu_memory['total'])} total"
+        )
+    return "Pipeline compute resources: " + " | ".join(parts)
 
 
 def print_memory_report(label):

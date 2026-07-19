@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from utils.runtime_status import format_duration
+from utils.runtime_status import format_duration, pipeline_compute_report
 
 try:
     from tqdm.auto import tqdm
@@ -400,6 +400,7 @@ def main():
         f"{config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
+    print(pipeline_compute_report(args.device))
     if args.dataset_workers == "auto":
         print(
             "Dataset workers: automatic retained benchmark "

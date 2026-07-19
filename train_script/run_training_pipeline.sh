@@ -285,6 +285,14 @@ if [[ -z "$DIAG_OUTPUT_DIR" ]]; then
     DIAG_OUTPUT_DIR="diagnostics/results/$RL_WEIGHTS_BASENAME"
 fi
 
+"$PYTHON_BIN" - "$RL_DEVICE" <<'PY'
+import sys
+
+from utils.runtime_status import pipeline_compute_report
+
+print(pipeline_compute_report(sys.argv[1]))
+PY
+
 section() {
     echo
     echo "==================================================================="

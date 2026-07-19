@@ -69,16 +69,121 @@ python -m pip install --upgrade pip
 python -m pip install pygame PyOpenGL PyOpenGL-accelerate numpy matplotlib tqdm
 ```
 
-For GPU acceleration, install a CuPy build that matches the local CUDA runtime.
-For CUDA 12:
+### Linux GPU setup and verification
 
-```bash
-python -m pip install cupy-cuda12x
-```
+The neural networks use NVIDIA CUDA through CuPy. Dataset generation, RL
+rollout workers, and diagnostics intentionally remain CPU-only; supervised
+training and the RL parent process use the GPU when it is available and safe.
 
-Training and diagnostics commands print a startup RAM/GPU memory snapshot.
-`training/training_loop.py` also prints whether it is using CPU or GPU at
-startup.
+1. Verify that Linux sees an NVIDIA GPU and that the driver is loaded:
+
+   ```bash
+   lspci | grep -i nvidia
+   nvidia-smi
+   ```
+
+   If `nvidia-smi` is missing or fails, install the recommended NVIDIA driver
+   using the distribution package manager and reboot. On Ubuntu/Linux Mint:
+
+   ```bash
+   sudo apt update
+   sudo apt install ubuntu-drivers-common
+   sudo ubuntu-drivers install
+   sudo reboot
+   ```
+
+   Do not install Python GPU packages until `nvidia-smi` works. The `CUDA
+   Version` shown by `nvidia-smi` is the newest CUDA runtime supported by the
+   loaded driver; it does not prove that a system CUDA Toolkit or `nvcc` is
+   installed.
+
+2. Activate this repository's environment and verify that `python` and `pip`
+   point into `.venv`:
+
+   ```bash
+   source .venv/bin/activate
+   which python
+   python -m pip --version
+   ```
+
+3. Install exactly one CuPy wheel family. The `[ctk]` extra installs the CUDA
+   runtime libraries inside `.venv`, so a system-wide CUDA Toolkit and `nvcc`
+   are not required. Choose the wheel from the CUDA major version supported by
+   the driver:
+
+   ```bash
+   # Driver supports CUDA 13.x
+   python -m pip install "cupy-cuda13x[ctk]"
+
+   # Driver supports CUDA 12.x
+   python -m pip install "cupy-cuda12x[ctk]"
+   ```
+
+   If a matching system CUDA Toolkit is already installed and `nvcc --version`
+   works, the smaller installation without `[ctk]` can be used instead. Never
+   install `cupy`, `cupy-cuda12x`, and `cupy-cuda13x` together; their modules
+   conflict. The authoritative package table is in the
+   [CuPy installation guide](https://docs.cupy.dev/en/stable/install.html).
+
+4. Test the CUDA runtime, a real GPU calculation, and device memory:
+
+   ```bash
+   python - <<'PY'
+   import cupy as cp
+
+   print("CuPy:", cp.__version__)
+   print("CUDA runtime:", cp.cuda.runtime.runtimeGetVersion())
+   print("CUDA driver:", cp.cuda.runtime.driverGetVersion())
+   print("GPU count:", cp.cuda.runtime.getDeviceCount())
+   print("GPU:", cp.cuda.runtime.getDeviceProperties(0)["name"])
+   values = cp.arange(1_000_000, dtype=cp.float32)
+   print("GPU calculation:", float(cp.sum(values * values).get()))
+   free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
+   print(f"VRAM: {free_bytes / 1024**2:.1f} MiB free / "
+         f"{total_bytes / 1024**2:.1f} MiB total")
+   PY
+   ```
+
+5. Verify the backend selected by this project:
+
+   ```bash
+   python - <<'PY'
+   from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON
+   print("GPU enabled:", GPU_ENABLED)
+   print("Fallback reason:", GPU_UNAVAILABLE_REASON)
+   PY
+
+   python -m training.training_loop
+   ```
+
+   The training command must begin with `CuPy available. Training on GPU.`.
+   Use `watch -n 1 nvidia-smi` in another terminal to observe VRAM and GPU
+   utilization during a real run.
+
+Common failures:
+
+- `ModuleNotFoundError: cupy`: CuPy was installed into a different Python;
+  reactivate `.venv` and use `python -m pip`, not bare `pip` or `sudo pip`.
+- `cudaErrorInsufficientDriver`: update the NVIDIA driver or install a CuPy
+  wheel/runtime compatible with the current driver.
+- missing `libcudart`, NVRTC, cuBLAS, or cuSPARSE libraries: reinstall with the
+  `[ctk]` extra, or correctly set `CUDA_PATH` and `LD_LIBRARY_PATH` for an
+  existing system Toolkit.
+- warnings about multiple CuPy installations: run
+  `python -m pip list | grep -i cupy`, uninstall every conflicting CuPy
+  package, then install exactly one matching wheel.
+- an intentional CPU selection: check `echo "$DOMINO_FORCE_CPU"` and
+  `echo "$CUDA_VISIBLE_DEVICES"`; unset them for normal parent-process GPU use.
+
+See NVIDIA's [Linux CUDA installation guide](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/)
+for driver/Toolkit installation and its
+[driver compatibility matrix](https://docs.nvidia.com/datacenter/tesla/drivers/cuda-toolkit-driver-and-architecture-matrix.html)
+for the meaning of the CUDA version reported by `nvidia-smi`.
+
+Every pipeline run now prints one early `Pipeline compute resources` line with
+the supervised and RL-parent backend, the CPU-only worker policy, free/total
+system RAM, and free/total GPU VRAM. Individual stages retain their more
+detailed memory snapshots.
 
 ## Run the Visual Simulator
 
@@ -296,6 +401,7 @@ Run the core tests:
 python tests/test_core.py
 python tests/test_parallel_dataset.py
 python tests/test_parallel_diagnostics.py
+python tests/test_parallel_rl.py
 ```
 
 Run the UI/controller tests:

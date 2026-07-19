@@ -23,6 +23,13 @@ NumPy or CuPy inputs and converts them to the active backend internally.
 Optional supervised weight decay applies only to `W1`, `W2`, and `W3`; bias
 vectors are never regularized.
 
+`GPU_ENABLED` becomes true only when CuPy imports and its CUDA runtime reports at
+least one visible device. `GPU_UNAVAILABLE_REASON` records why the probe failed,
+allowing pipeline and standalone logs to explain a NumPy/CPU fallback instead
+of claiming that an importable but unusable CuPy installation is active. See
+the root README for the complete Linux driver, CuPy `[ctk]`, verification, and
+troubleshooting procedure.
+
 If the `DOMINO_VRAM_LIMIT_MB` environment variable is set when `nn.py` is
 first imported and CuPy is active, it caps that process's CuPy default
 memory pool (`cupy.get_default_memory_pool().set_limit`) at that many

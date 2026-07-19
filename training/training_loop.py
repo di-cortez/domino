@@ -14,20 +14,27 @@ import time
 import numpy as np
 
 from agents.encoder import DominoEncoder
-from agents.nn import SupervisedNeuralNetwork
+from agents.nn import (
+    GPU_ENABLED,
+    GPU_UNAVAILABLE_REASON,
+    SupervisedNeuralNetwork,
+)
 from utils.resource_limits import ensure_ram_available
 from utils.runtime_status import format_duration, print_memory_report
 
-try:
+if GPU_ENABLED:
     import cupy as cp
 
     USE_GPU = True
     print("CuPy available. Training on GPU.")
-except ImportError:
+else:
     import numpy as cp
 
     USE_GPU = False
-    print("CuPy not found. Training on CPU.")
+    print(
+        "GPU backend unavailable; training on CPU"
+        f" ({GPU_UNAVAILABLE_REASON or 'CuPy is not available'})."
+    )
 
 EPOCHS = 2000
 BATCH_SIZE = 1024

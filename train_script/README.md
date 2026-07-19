@@ -227,6 +227,12 @@ specifically. Verified end-to-end with a tiny run (`--rl-device cpu`,
 `--rl-iterations 3 --rl-games-per-iteration 4`): the run logged `RL self-play
 array backend: numpy (device='cpu')` and completed correctly.
 
+For Linux driver installation, the correct CUDA 12.x/13.x CuPy wheel, the
+recommended `[ctk]` installation, real GPU calculation tests, and common error
+diagnosis, follow **Linux GPU setup and verification** in the root README before
+starting a long batch. The pipeline startup line reports both training backends
+and current free/total RAM and VRAM before any workload begins.
+
 ### Diagnostics stage and per-run output directories
 
 Step 4 wraps `python -m diagnostics.evaluate`, the same five agent-vs-random comparisons

@@ -4,13 +4,19 @@ import os
 
 import numpy as host_np
 
+GPU_UNAVAILABLE_REASON = None
+
 try:
     if os.environ.get("DOMINO_FORCE_CPU") == "1":
         raise ImportError("CPU forced by DOMINO_FORCE_CPU")
     import cupy as np
 
+    device_count = int(np.cuda.runtime.getDeviceCount())
+    if device_count < 1:
+        raise RuntimeError("CuPy did not find a CUDA-capable device")
     GPU_ENABLED = True
-except ImportError:
+except Exception as exc:
+    GPU_UNAVAILABLE_REASON = f"{type(exc).__name__}: {exc}"
     import numpy as np
 
     GPU_ENABLED = False

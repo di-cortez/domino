@@ -155,6 +155,12 @@ controls listed below.
 | `--rl-moving-average-window` | RL | Trailing-iteration window for value-loss/win-rate moving averages in the log | `10` |
 | `--rl-seed` | RL | Fix random/numpy state for reproducible comparisons | unset |
 | `--rl-device` | RL | Array backend: `auto`/`cpu`/`gpu` (see below) | `auto` |
+| `--rl-workers` | RL | CPU-only rollout workers or retained automatic tuning, maximum 20 | `auto` |
+| `--rl-autotune-fraction` | RL | Fraction of complete iterations retained per worker test | `0.01` |
+| `--rl-autotune-min-gain` | RL | Required marginal rollout-throughput improvement | `0.10` |
+| `--rl-memory-reserve-mb` | RL | Host RAM kept free while workers run | `512` |
+| `--rl-estimated-worker-mb` | RL | Preflight memory estimate per worker | `256` |
+| `--rl-max-worker-rss-mb` | RL | Runtime RSS ceiling for one worker | `1024` |
 | `--sl-early-stopping-patience` | SL | Validation checks (every 10 epochs) without improvement before stopping | unset (off) |
 | `--sl-lr-decay-factor` | SL | LR multiplier applied on each validation check without improvement | unset (off) |
 | `--sl-weight-decay` | SL | L2 penalty on the weight matrices | unset (off) |
@@ -189,6 +195,21 @@ reward per remaining real decision in the trajectory (`gamma ** remaining`);
 This was verified end-to-end with a tiny run (`--rl-iterations 2
 --rl-games-per-iteration 2`) exercising the RL stage with `--skip-dataset
 --skip-sl`, both with and without `--rl-value-head`.
+
+### RL rollout workers
+
+`--rl-workers auto` benchmarks 1, 2, 4, 6, ... CPU-only workers over complete
+early iterations. Each candidate retains about 1% of the planned iterations,
+and every game contributes to the normal parent-side gradient update. Testing
+stops below 10% marginal gain, on a resource guard, or at the hard limit of 20.
+Use a fixed value to skip tuning.
+
+Workers read the current policy and bounded opponent pool through shared memory;
+they never update weights or access the GPU. The main process sorts trajectories
+by game id, assembles the batch, updates the network, and writes checkpoints.
+Stable seeds make one-worker and multi-worker runs bit-identical for the same
+configuration. Runtime pressure retains completed games and retries unfinished
+ones with half as many workers.
 
 ### Device selection (`--rl-device`)
 
@@ -313,18 +334,19 @@ on parsing the folder name.
 |---|---|---:|
 | `--rl-iterations` | RL training iterations per sweep point | `2000` |
 | `--sl-weights-path` | Input SL weights used to initialize every RL run | `models/domino_sl_weights.npz` |
-| `--diagnostic-games` | Games in the rl-vs-random diagnostic per sweep point | `500` |
+| `--diagnostic-games` | Games in the rl-vs-random diagnostic per sweep point | `200` |
 | `--seed` | Fix random/NumPy state for both training and diagnostics | `42` |
 | `--model-dir` | Output directory for RL checkpoints | `models/rl_test` |
 | `--resume` | Skip training a checkpoint that already exists on disk; still (re)run its diagnostics | off |
 | `--diag-no-plots` | Skip the per-run diagnostic PNG plots (CSV/JSON are always written) | off (plots on) |
 | `--device` | Array backend for every sweep point: `auto`/`cpu`/`gpu` (see `training/README.md`) | `auto` |
-| `--results-dir` | Output directory for per-run diagnostics subdirectories | `diagnostics/results` |
+| `--rl-workers` | Rollout workers inside each sweep subprocess; kept fixed to avoid nested oversubscription | `1` |
+| `--results-dir` | Output directory for per-run diagnostics subdirectories | `diagnostics/results/rl_test` |
 | `--report-output-dir` | Where the final comparative table is written | `diagnostics/results/rl_sweep_table` |
 | `--skip-report` | Skip the final comparative-table stage | off |
-| `--jobs` | Run up to N sweep points at once as background subprocesses | `1` (sequential) |
-| `--ram-limit-mb` | Per-subprocess physical-memory cap in MiB (see below) | auto when `--jobs` > 1, else unset |
-| `--vram-limit-mb` | Per-subprocess CuPy memory-pool cap in MiB (see below) | auto when `--jobs` > 1 and device isn't `cpu`, else unset |
+| `--jobs` | Run up to N sweep points at once as background subprocesses | `10` |
+| `--ram-limit-mb` | Per-subprocess physical-memory cap in MiB (see below) | auto from RAM / `--jobs` |
+| `--vram-limit-mb` | Per-subprocess CuPy memory-pool cap in MiB | auto from VRAM / `--jobs` when device is not `cpu` |
 
 A fixed `--seed` (default `42`) is used for every sweep point, per the
 historical reports' recommendation to fix randomness when comparing
@@ -347,8 +369,8 @@ Sweep points are fully independent -- each writes to its own unique
 `--rl-weights-path`/diagnostics directory and only *reads* the shared SL
 checkpoint -- so running several at once is safe. `--jobs N` launches up to
 N sweep points at once as background `python -m training.self_play`
-subprocesses; `--jobs 1` (the default) is unchanged from before this existed:
-fully sequential, same terminal output. Measured on a 20-core/32GB machine
+subprocesses. The default is 10 concurrent points; pass `--jobs 1` for fully
+sequential execution and direct terminal output. Measured on a 20-core/32GB machine
 with one shared GPU: `--jobs 4` cut a 58-point tiny sweep from 6m13s to
 3m11s (~1.95x, sub-linear because each batch of 4 waits for its slowest
 member -- see below).
@@ -367,6 +389,11 @@ points, waits for that whole batch, then launches the next. Simpler and
 portable across bash versions (a rolling pool needs `wait -n`), at the cost
 of a batch waiting on its slowest point before the next one starts -- part of
 why the measured speedup above is ~2x rather than ~4x at `--jobs 4`.
+
+Each training subprocess defaults to `--rl-workers 1`: the outer `--jobs`
+pool already supplies concurrency, and automatic inner rollout pools would
+multiply the process count and distort memory limits. When using only one or
+two outer jobs, `--rl-workers auto` can instead tune rollouts inside each run.
 
 **Memory limits**, auto-computed from detected system RAM / GPU memory
 divided by `--jobs`, **always applied by default** (not only when `--jobs >
@@ -496,7 +523,7 @@ can be run against the same `--model-dir`/`--results-dir`.
 
 CLI flags mirror the shell script's: `--rl-iterations`, `--sl-weights-path`,
 `--diagnostic-games`, `--seed`, `--model-dir`, `--results-dir`, `--resume`,
-`--diag-no-plots`, `--device`, `--report-output-dir`, `--skip-report`, plus
+`--diag-no-plots`, `--device`, `--rl-workers`, `--report-output-dir`, `--skip-report`, plus
 `--quiet-training` (suppresses `self_play`'s per-iteration logs and
 `pairwise`'s per-matchup console summary; off by default, matching the shell
 script's always-verbose behavior).

@@ -62,6 +62,7 @@ DEFAULT_MODEL_DIR = ROOT / "models" / "rl_test"
 DEFAULT_RESULTS_DIR = ROOT / "diagnostics" / "results"
 DEFAULT_REPORT_OUTPUT_DIR = DEFAULT_RESULTS_DIR / "rl_sweep_table"
 DEFAULT_DEVICE = "cpu"
+DEFAULT_RL_WORKERS = "auto"
 
 # Baselines and sweep values mirror train_script/run_rl_parameter_sweep.sh
 # exactly -- see that script's header comment for where each range comes
@@ -138,6 +139,7 @@ def run_sweep_point(
     sl_weights_path,
     sl_weights_data,
     device,
+    rl_workers,
     resume,
     diag_plots,
     quiet_training,
@@ -173,6 +175,7 @@ def run_sweep_point(
             rl_weights_path=str(model_path),
             seed=seed,
             device=device,
+            workers=rl_workers,
             use_value_head=critic_enabled,
             quiet=quiet_training,
         )
@@ -201,6 +204,7 @@ def run_sweep_point(
         games_per_iteration=games_per_iteration,
         value_coef=value_coef,
         rl_iterations=rl_iterations,
+        rl_workers=rl_workers,
         seed=seed,
         diagnostic_games=diagnostic_games,
         sl_weights_path=str(sl_weights_path),
@@ -220,6 +224,7 @@ def run_sweep(
     resume=False,
     diag_plots=True,
     device=DEFAULT_DEVICE,
+    rl_workers=DEFAULT_RL_WORKERS,
     report_output_dir=DEFAULT_REPORT_OUTPUT_DIR,
     skip_report=False,
     quiet_training=False,
@@ -262,6 +267,7 @@ def run_sweep(
                     sl_weights_path=sl_weights_path,
                     sl_weights_data=sl_weights_data,
                     device=device,
+                    rl_workers=rl_workers,
                     resume=resume,
                     diag_plots=diag_plots,
                     quiet_training=quiet_training,
@@ -303,6 +309,12 @@ def parse_args(argv=None):
         help="Skip the per-run diagnostic PNG plots (CSV/JSON are always written).",
     )
     parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default=DEFAULT_DEVICE)
+    parser.add_argument(
+        "--rl-workers",
+        type=self_play.parse_rl_worker_count,
+        default=DEFAULT_RL_WORKERS,
+        help="CPU-only rollout workers for each sequential sweep point.",
+    )
     parser.add_argument("--report-output-dir", default=str(DEFAULT_REPORT_OUTPUT_DIR))
     parser.add_argument(
         "--skip-report", action="store_true", help="Skip the final comparative-table stage."
@@ -330,6 +342,7 @@ def main(argv=None):
         resume=args.resume,
         diag_plots=not args.diag_no_plots,
         device=args.device,
+        rl_workers=args.rl_workers,
         report_output_dir=Path(args.report_output_dir),
         skip_report=args.skip_report,
         quiet_training=args.quiet_training,

@@ -40,7 +40,8 @@ diagnostic games in total.
 | `dataset_generator.py` | Coordinates retained worker tuning, bounded SQLite aggregation, and atomic ordered JSONL output. |
 | `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
 | `training_loop.py` | Loads the JSONL dataset, trains `SupervisedNeuralNetwork`, and saves `models/domino_sl_weights.npz`. Forced draw/pass and single-option labels are skipped defensively. |
-| `self_play.py` | Loads the supervised policy or an existing RL checkpoint, then trains `PolicyNetwork` from real learner decisions with reward shaping and option-count multipliers. |
+| `self_play.py` | Loads the supervised policy or an existing RL checkpoint, orchestrates parallel rollouts, and applies parent-only policy updates. |
+| `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed games across memory fallback. |
 
 ## Important Shape Change
 
@@ -143,17 +144,16 @@ so repeated or large training runs retain at most 10 of them.
 The encoded cache is rebuilt automatically when the source JSONL file changes,
 the encoder input/output dimensions change, or the feature-version tag changes.
 
-RL self-play performs a host-memory preflight for the snapshot pool and expected
-batch, then checks the actual workspace before each `hstack`. With
+RL self-play performs a host-memory preflight for the shared snapshot bank and
+expected batch, then checks the actual workspace before each `hstack`. With
 `--device auto`, less than 256 MiB of effective free VRAM causes an announced
 CPU fallback; explicit `--device gpu` fails early instead. Diagnostics later
 run in separate CPU-only processes and never consume training VRAM.
 
-The Python pipeline exposes independent dataset and diagnostic worker controls.
-Dataset generation tunes once for the dataset workload. Diagnostics tune each
-matchup separately so random, heuristic, and neural combinations may select
-different optimal worker counts. Both tuners retain their benchmark games and
-enforce the same hard limit of 20 workers.
+The Python pipeline exposes independent dataset, RL rollout, and diagnostic
+worker controls. Dataset generation tunes once for its full workload. RL tunes
+across complete early iterations, and diagnostics tune each matchup separately.
+All three retain benchmark work and enforce the same hard limit of 20 workers.
 
 ### Optional SL controls
 
@@ -202,6 +202,8 @@ Run:
 
 ```bash
 python -m training.self_play
+python -m training.self_play --rl-workers auto --seed 123
+python -m training.self_play --rl-workers 4 --device cpu
 ```
 
 Default behavior:
@@ -218,6 +220,40 @@ policy and stores trajectory steps. Frozen pool opponents use
 not build training masks or store trajectories. This exposes the learner to
 more of each snapshot's policy distribution without retaining unused opponent
 experience.
+
+### Parallel rollout generation
+
+All games in an iteration use one immutable learner policy, so rollout work is
+independent until batch aggregation. `training/rl_parallel.py` publishes the
+current policy and at most `max_pool_size` opponent snapshots in a fixed-size
+shared-memory ring. Workers attach NumPy views to that bank, never see the GPU,
+and return finalized trajectories through a bounded dynamic queue. The parent
+sorts results by game id and remains solely responsible for the gradient,
+checkpoint writes, logging, and GPU allocations.
+
+Automatic mode tests 1, 2, 4, 6, ... workers, never exceeding 20 or the number
+of games per iteration. Each candidate uses and retains complete iterations
+totaling about 1% of the planned iteration count. Testing stops below 10%
+marginal rollout-throughput gain, on a resource cap, or when too few untrained
+iterations remain. Runtime RAM pressure terminates the current pool, keeps
+completed game ids, halves the worker count, and retries only unfinished games.
+
+Per-game SplitMix64-style seeds are derived from the run seed, iteration, and
+game id. Parent aggregation is ordered, so the same seed produces bit-identical
+checkpoints with one or multiple workers, including after fallback. Useful
+controls are:
+
+| Flag | Meaning | Default |
+|---|---|---:|
+| `--rl-workers` | CPU-only rollout workers or `auto` | `auto` |
+| `--rl-autotune-fraction` | Planned iteration fraction retained per candidate | `0.01` |
+| `--rl-autotune-min-gain` | Required marginal throughput improvement | `0.10` |
+| `--rl-memory-reserve-mb` | Host RAM that must remain free | `512` |
+| `--rl-estimated-worker-mb` | Conservative worker-memory estimate for preflight | `256` |
+| `--rl-max-worker-rss-mb` | Runtime RSS ceiling for one worker | `1024` |
+
+Checkpoint evaluation games also use the selected rollout pool, but remain
+deterministic and alternate the RL player position.
 
 Checkpoint evaluation against `StrategicAgent`, diagnostics, and the UI use
 `mode="evaluation"`, which always selects the highest-probability legal action
@@ -262,11 +298,10 @@ same supervised checkpoint and use separately archived RL outputs.
 
 ### Optional RL controls
 
-The default command reproduces the original fixed training behavior exactly:
-no terminal-reward discount, the original reward constants, gradient clipping
-at norm `5.0`, no advantage normalization, and unseeded randomness. Every
-control below is opt-in and defaults to that behavior, so omitting all of them
-changes nothing:
+The default command preserves the original learning algorithm: no
+terminal-reward discount, the original reward constants, gradient clipping at
+norm `5.0`, and no advantage normalization. Rollout generation is now parallel
+by default, without moving gradient updates out of the parent process:
 
 | Flag | Meaning | Default |
 |---|---|---:|

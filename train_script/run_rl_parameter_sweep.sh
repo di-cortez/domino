@@ -74,9 +74,13 @@ DIAG_PLOTS=1
 # Array backend for every sweep point: "auto" (default) matches GPU_ENABLED
 # exactly (CuPy when installed, else NumPy); "cpu"/"gpu" force one backend.
 DEVICE="auto"
+# Each sweep already runs multiple training subprocesses via --jobs. Keep one
+# rollout worker per subprocess by default to avoid nested oversubscription;
+# users running a small number of sweep jobs can raise this explicitly.
+RL_WORKERS=1
 
-# Concurrency: 1 (default) runs every sweep point sequentially, exactly as
-# before. --jobs N > 1 runs up to N sweep points at once as background
+# Concurrency: --jobs 1 runs every sweep point sequentially. The current
+# default runs 10 points at once as background
 # `python -m training.self_play` subprocesses -- safe because every sweep
 # point writes to its own unique --rl-weights-path/diagnostics directory and
 # only *reads* the shared SL checkpoint. RAM_LIMIT_MB/VRAM_LIMIT_MB, left
@@ -149,13 +153,14 @@ Options:
   --resume                Skip training a checkpoint that already exists on disk; still (re)run its diagnostics
   --diag-no-plots         Skip the per-run diagnostic PNG plots (CSV/JSON are always written)
   --device {auto,cpu,gpu} Array backend for every sweep point; "auto" matches GPU_ENABLED (default: $DEVICE)
+  --rl-workers N|auto     Rollout workers inside each sweep subprocess (default: $RL_WORKERS; use 1 with high --jobs)
   --vc-sample-count N     Number of grid combinations sampled for the value_coef axis (default: $VC_SAMPLE_COUNT)
   --results-dir PATH      Output directory for per-run diagnostics subdirectories (default: $RESULTS_DIR)
   --report-output-dir PATH  Where the final comparative table is written (default: $REPORT_OUTPUT_DIR)
   --skip-report           Skip the final comparative-table stage
 
 Concurrency and memory limits:
-  --jobs N                Run up to N sweep points at once as background subprocesses (default: $JOBS, sequential)
+  --jobs N                Run up to N sweep points at once as background subprocesses (default: $JOBS)
   --ram-limit-mb N        Per-subprocess physical-memory cap in MiB, enforced via a systemd-run --scope cgroup if available (default: auto from detected system RAM / --jobs)
   --vram-limit-mb N       Per-subprocess CuPy memory-pool cap in MiB, hard-enforced by CuPy (default: auto from detected GPU memory / --jobs, when device isn't cpu)
 
@@ -173,6 +178,7 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=1; shift ;;
         --diag-no-plots) DIAG_PLOTS=0; shift ;;
         --device) DEVICE="$2"; shift 2 ;;
+        --rl-workers) RL_WORKERS="$2"; shift 2 ;;
         --vc-sample-count) VC_SAMPLE_COUNT="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --report-output-dir) REPORT_OUTPUT_DIR="$2"; shift 2 ;;
@@ -398,6 +404,7 @@ run_point() {
             --rl-weights-path "$model_path" \
             --seed "$SEED" \
             --device "$DEVICE" \
+            --rl-workers "$RL_WORKERS" \
             "${VALUE_HEAD_FLAG[@]}"
     fi
 

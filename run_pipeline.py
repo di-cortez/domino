@@ -205,6 +205,12 @@ def _run_rl_training(config, args):
     """Run reinforcement-learning self-play with compact iteration progress."""
     self_play = importlib.import_module("training.self_play")
 
+    def rl_status(message):
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
+
     return _run_stage(
         "RL self-play",
         config.rl_iterations,
@@ -233,10 +239,20 @@ def _run_rl_training(config, args):
             moving_average_window=args.moving_average_window,
             seed=args.seed,
             device=args.device,
+            workers=args.rl_workers,
+            safety_config=self_play.ParallelSafetyConfig(
+                memory_reserve_mb=args.rl_memory_reserve_mb,
+                estimated_worker_mb=args.rl_estimated_worker_mb,
+                max_worker_rss_mb=args.rl_max_worker_rss_mb,
+            ),
+            autotune_fraction=args.rl_autotune_fraction,
+            autotune_minimum_gain=args.rl_autotune_min_gain,
+            status_callback=rl_status,
         ),
         lambda summary: (
             f"{summary['iterations']} iterations x "
             f"{summary['games_per_iteration']} games, "
+            f"{summary['selected_workers']} rollout worker(s), "
             f"value head {'on' if summary['use_value_head'] else 'off'}, "
             f"weights {summary['rl_weights_path']}"
         ),
@@ -391,14 +407,25 @@ def main():
         )
     else:
         print(f"Dataset workers: fixed at {args.dataset_workers}.")
+    if args.rl_workers == "auto":
+        print(
+            "RL rollout workers: automatic retained benchmark "
+            "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
+        )
+        print(
+            "Each RL worker test uses complete early iterations, and every "
+            "benchmark game contributes to a policy update."
+        )
+    else:
+        print(f"RL rollout workers: fixed at {args.rl_workers}.")
     if args.diagnostic_workers == "auto":
         print(
             "Diagnostic workers: independent retained benchmark per matchup "
             "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
         )
         print(
-            "Worker testing will start after RL so every benchmark game uses "
-            "the newly trained checkpoint and can remain in the final diagnostics."
+            "Diagnostic worker testing starts after RL so every benchmark game "
+            "uses the newly trained checkpoint and remains in the final report."
         )
     else:
         print(f"Diagnostic workers: fixed at {args.diagnostic_workers}.")
@@ -412,8 +439,8 @@ def main():
         lr_decay_factor=args.lr_decay,
     )
     print(
-        "RL startup note: diagnostic worker autotuning is deferred until the "
-        "diagnostic stage; RL training itself remains serial."
+        "RL startup note: rollout workers are CPU-only; policy aggregation and "
+        "gradient updates remain in the main process."
     )
     rl_summary = _run_rl_training(config, args)
     diagnostics_summary = _run_diagnostics(

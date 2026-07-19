@@ -50,7 +50,8 @@ and visual UI can be changed independently.
 | `training/dataset_generator.py` | Coordinates deterministic dataset generation, retained worker tuning, bounded SQLite aggregation, and atomic JSONL output. |
 | `training/dataset_parallel.py` | Plays independent heuristic-vs-heuristic dataset games in a bounded CPU-only worker pool. |
 | `training/training_loop.py` | Trains supervised weights, skips forced labels, and saves the best validation checkpoint. |
-| `training/self_play.py` | Refines the RL policy with direct REINFORCE and decayed draw/pass reward shaping. |
+| `training/self_play.py` | Refines the RL policy with direct REINFORCE, parallel rollout orchestration, and parent-only gradient updates. |
+| `training/rl_parallel.py` | Generates deterministic RL trajectories in CPU-only workers backed by a bounded shared policy-snapshot bank. |
 | `diagnostics/evaluate.py` | Evaluates all five supported agents against the common random baseline. |
 | `diagnostics/pairwise.py` | Helper for evaluating one agent against another and writing `summary.json`, `games.csv`, and plots. |
 | `diagnostics/hyperparameter_sweep.py` | Trains an RL checkpoint per sweep point (one hyperparameter varied at a time, critic on and off) and appends its diagnostics to a single JSON log. |
@@ -167,14 +168,14 @@ uses the same five matchups: each of `rl`, `neural`, `random_nn`, `heuristic`,
 and `random` against `random`. Diagnostic game counts are specified per
 matchup.
 
-Dataset generation and diagnostics automatically benchmark CPU-only worker
-counts 1, 2, 4, 6, ... up to the hard limit of 20. Dataset attempts each use
-and retain 1% of all requested dataset games. Diagnostics tune every matchup
-independently because agent combinations have different costs; every attempt
-uses and retains 1% of that matchup's games. Testing stops on a memory/error
-guard or below 10% marginal gain. Override either tuner with
-`--dataset-workers N` or `--diagnostic-workers N`; the corresponding
-`--*-memory-reserve-mb` options control their RAM reserves.
+Dataset generation, RL rollouts, and diagnostics automatically benchmark
+CPU-only worker counts 1, 2, 4, 6, ... up to the hard limit of 20. Dataset and
+diagnostic attempts retain 1% game slices. RL attempts retain complete early
+iterations totaling about 1% of the planned iterations per candidate, so every
+tested trajectory still contributes to a gradient update. Testing stops on a
+memory/error guard or below 10% marginal gain. Override the tuners with
+`--dataset-workers N`, `--rl-workers N`, or `--diagnostic-workers N`; the
+corresponding `--*-memory-reserve-mb` options control their RAM reserves.
 
 Generate supervised data:
 
@@ -211,12 +212,22 @@ Refine the RL agent:
 
 ```bash
 python -m training.self_play
+python -m training.self_play --rl-workers auto --seed 123
+python -m training.self_play --rl-workers 4 --device cpu
 ```
 
 Self-play reports startup memory, checkpoint-to-checkpoint time, and total
 elapsed time. Iteration logs omit entropy and show reward mean/min/max,
 good/neutral/bad percentages, local reward mean, draw/pass event counts, wins,
 pool size, and gradient norm.
+
+All games inside an iteration see the same frozen policy. CPU-only workers
+generate trajectories from shared-memory policy snapshots; the main process
+orders results by game id, assembles the batch, performs the only gradient
+update, and remains the only process allowed to use the GPU. Stable per-game
+seeds make fixed worker counts, autotuning, scheduling, and memory fallback
+produce identical seeded trajectories. Checkpoint evaluation is parallelized
+through the same safe pool.
 
 The learner samples actions and stores its trajectory. Frozen self-play pool
 opponents also sample actions but do not store trajectories. Checkpoint

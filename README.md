@@ -54,7 +54,7 @@ and visual UI can be changed independently.
 | `diagnostics/evaluate.py` | Runs the upper-triangle all-pairs diagnostic matrix. |
 | `diagnostics/pairwise.py` | Helper for evaluating one agent against another and writing `summary.json`, `games.csv`, and plots. |
 | `diagnostics/hyperparameter_sweep.py` | Trains an RL checkpoint per sweep point (one hyperparameter varied at a time, critic on and off) and appends its diagnostics to a single JSON log. |
-| `diagnostics/rl_sweep_table.py` | Joins each `train_script/run_rl_parameter_sweep.sh` sweep point's hyperparameters with its rl-vs-random results into one comparative CSV/JSON/PNG table. |
+| `diagnostics/rl_sweep_table.py` | Joins sweep hyperparameters with rl-vs-random results; raw CSV/JSON keep every model, while the compact PNG pivots games-per-iteration into 40/80/160 win-rate columns. |
 | `ui/visual_main.py` | Starts the visual simulator. |
 
 ## Setup

@@ -428,8 +428,7 @@ The very last stage runs `python -m diagnostics.rl_sweep_table`
 (i.e. every point this script has ever produced, not just the current
 invocation -- it accumulates across repeated sweeps the same way
 `diagnostics/hyperparameter_sweep.py`'s JSON log does), joins each run's
-hyperparameters with its rl-vs-random win/draw/loss rates into one row, and
-writes:
+hyperparameters with its rl-vs-random win/draw/loss rates and writes:
 
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.csv`
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.json`
@@ -437,10 +436,21 @@ writes:
   mirroring `diagnostics/evaluate.py`'s all-pairs matrix output
   (`_matrix_rows`/`_save_matrix_csv`/`plot_all_pairs_table`)
 
-Rows are grouped critic-off then critic-on, then by which parameter was
-varied, then sorted by that parameter's value, with the win-rate column
-shaded the same way `plot_all_pairs_table` shades its win-rate matrix (light
-blue >= 60%, light orange <= 40%). It also prints an aligned console table.
+The CSV and JSON retain one row per trained model, including its exact
+games-per-iteration value and checkpoint path. The PNG and console table group
+models that differ only in games per iteration into one row with win-rate
+columns labelled `40`, `80`, and `160`. Critic, learning rate, gamma, and
+value coefficient remain row dimensions. Percentage cells use the same
+win-rate shading as the all-pairs matrix (light blue >= 60%, light orange <=
+40%).
+
+The `40`, `80`, and `160` columns are a side-by-side comparison, not an
+assumed ranking. Larger training batches usually reduce gradient noise, but
+they do not guarantee a strictly higher final win rate because update count,
+exploration, optimization dynamics, and statistical uncertainty still matter.
+Treat differences as meaningful only when their confidence intervals and
+repeated-seed results support the same conclusion.
+
 Run it standalone at any time to rebuild the table from whatever sweep output
 already exists on disk:
 

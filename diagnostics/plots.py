@@ -402,36 +402,52 @@ def plot_aggregate_choice_opportunities(choice_info, path):
     plot_choice_opportunities(summary, path, "all evaluated pairs")
 
 
-SWEEP_TABLE_COLUMNS = (
-    ("run_name", "Run"),
+SWEEP_TABLE_BASE_COLUMNS = (
     ("critic", "Critic"),
-    ("varied_parameter", "Varied"),
     ("learning_rate", "LR"),
     ("gamma", "Gamma"),
-    ("games_per_iteration", "Games/Iter"),
     ("value_coef", "ValueCoef"),
-    ("win_rate_pct", "Win %"),
-    ("draw_rate_pct", "Draw %"),
-    ("games", "Games"),
 )
 
 
-def plot_sweep_comparison_table(rows, path):
-    """Render one row per RL sweep point (hyperparameters + vs-random results).
+def plot_sweep_comparison_table(
+    rows,
+    path,
+    games_per_iteration_values=(40, 80, 160),
+):
+    """Render grouped runs with one win-rate column per games/iteration value.
 
     Mirrors ``plot_all_pairs_table``'s look (same palette, same
-    ``ax.table``-based rendering), shaped for a list of sweep runs instead of
-    a square agent matrix.
+    ``ax.table``-based rendering). Models that differ only in
+    games-per-iteration share one row, reducing the visual table height while
+    preserving their separate percentages.
     """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    field_names = [field for field, _ in SWEEP_TABLE_COLUMNS]
-    headers = [label for _, label in SWEEP_TABLE_COLUMNS]
-    cell_text = [[str(row.get(field, "")) for field in field_names] for row in rows]
-    win_rate_column = field_names.index("win_rate_pct")
+    columns = list(SWEEP_TABLE_BASE_COLUMNS) + [
+        (f"win_rate_pct_gpi_{value}", str(value))
+        for value in games_per_iteration_values
+    ]
+    field_names = [field for field, _ in columns]
+    headers = [label for _, label in columns]
+    win_rate_columns = {
+        field_names.index(f"win_rate_pct_gpi_{value}")
+        for value in games_per_iteration_values
+    }
+
+    def format_cell(row, field):
+        value = row.get(field, "")
+        if field.startswith("win_rate_pct_gpi_"):
+            return "" if value == "" or value is None else f"{float(value):.1f}%"
+        return str(value)
+
+    cell_text = [
+        [format_cell(row, field) for field in field_names]
+        for row in rows
+    ]
 
     # Proportional column widths from the longest cell (header or value) in
     # each column, so long run names don't get clipped by equal-width cells.
@@ -450,12 +466,24 @@ def plot_sweep_comparison_table(rows, path):
     ax.set_facecolor(SURFACE)
     ax.axis("off")
     ax.set_title(
-        "RL hyperparameter sweep vs random (win %)",
+        "RL sweep vs random: win rate (%) by games per iteration",
         color=INK,
         fontsize=14,
         loc="left",
         pad=14,
     )
+    if not rows:
+        ax.text(
+            0.5,
+            0.44,
+            "No sweep runs found.",
+            color=SECONDARY_INK,
+            fontsize=11,
+            ha="center",
+            va="center",
+        )
+        _save_figure(fig, path)
+        return
 
     table = ax.table(
         cellText=cell_text,
@@ -475,9 +503,9 @@ def plot_sweep_comparison_table(rows, path):
             cell.set_facecolor("#efeee8")
             cell.set_text_props(color=INK, weight="bold")
             continue
-        if col == win_rate_column:
+        if col in win_rate_columns:
             try:
-                rate = float(cell_text[row - 1][col])
+                rate = float(cell_text[row - 1][col].rstrip("%"))
             except ValueError:
                 rate = None
             if rate is not None and rate >= 60:

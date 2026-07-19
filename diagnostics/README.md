@@ -150,8 +150,10 @@ Trained checkpoints are written under `--checkpoint-dir` (default
 (a separate, bash-driven sweep — see `train_script/README.md`): that script
 writes one `sweep_run.json` (hyperparameters) + `summary.json` (rl-vs-random
 results) pair per sweep point under `diagnostics/results/<run_name>/`. This
-module discovers every such pair, joins them into one row per run, and writes
-a comparative CSV/JSON/PNG table plus a console summary:
+module discovers every such pair and joins its data. Raw CSV/JSON keep one row
+per trained model. The console and PNG reduce clutter by grouping runs that
+differ only in games per iteration into one row, with win-rate percentage
+columns labelled `40`, `80`, and `160`:
 
 ```bash
 python -m diagnostics.rl_sweep_table

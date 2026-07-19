@@ -84,6 +84,28 @@ Every action uses one of these shapes:
 The same format is consumed by `DominoEngine.step`, `DominoEngine.valid_actions`,
 and `DominoEncoder`.
 
+## Headless Step Fast Path
+
+`DominoEngine.step(action)` remains the fully validating public path: it
+computes legal actions internally and returns the post-action state in the
+stable `(state, game_over, info)` tuple. Controlled automatic loops that have
+just called `valid_actions()` may instead pass that unchanged collection as
+`legal_actions` and set `return_state=False`. This avoids a second legal-action
+scan and a discarded post-action serialization while still checking that the
+chosen action belongs to the supplied collection. The returned tuple still has
+three items, with `None` in its first position.
+
+The supplied collection is trusted internal data for that exact engine,
+current player, and position. It must be computed immediately before `step`,
+must not be modified by an agent, and must never come from a UI, network, or
+client payload. Human actions continue to use engine-side legal-action
+generation.
+
+`python benchmarks/headless_step_benchmark.py` compares the old repeated-work
+turn structure with this fast path using fixed seeds. The report includes
+games/second and exact counts for legal-action scans, state snapshots, and
+serialized history actions, and rejects any result-fingerprint difference.
+
 ## Game Termination
 
 A game ends one of two ways: a player empties their hand (that player wins),

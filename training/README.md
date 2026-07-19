@@ -94,6 +94,13 @@ payloads to a disposable SQLite database, keeping RAM bounded while results
 arrive out of order. Final rows are emitted in game-id order, and the existing
 JSONL is replaced atomically only after every requested game succeeds.
 
+Automatic dataset and RL game loops use the engine's trusted headless step
+path. They reuse the unchanged legal-action collection already shown to the
+agent and skip the post-action state snapshot that the loop would discard.
+The pre-action state used for supervised examples, policy encoding, opponent
+inference, trajectories, and event rewards is unchanged. Public/default engine
+calls still generate their own legal actions and return a full state.
+
 `StrategicAgent` now uses the exact two-player opponent model from
 `middleware/opponent_model.py`. Dataset generation is therefore slower than the
 old heuristic-only version, but each saved state includes the computed

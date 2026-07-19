@@ -357,6 +357,27 @@ seeds make fixed worker counts, autotuning, scheduling, and memory fallback
 produce identical seeded trajectories. Checkpoint evaluation is parallelized
 through the same safe pool.
 
+Headless dataset, RL, and diagnostic turns reuse the legal-action collection
+already computed for the agent and skip the discarded post-action engine
+snapshot. `DominoEngine.step(action)` keeps its original validating, full-state
+defaults; the precomputed collection is used only by controlled internal loops
+for the exact current position. Human actions still ask the engine to compute
+legal actions itself.
+
+Run the reproducible structural and throughput comparison with:
+
+```bash
+python benchmarks/headless_step_benchmark.py
+python benchmarks/headless_step_benchmark.py --games 500 --rollout-games 200 \
+  --json-output /tmp/headless_step_benchmark.json
+```
+
+It compares the legacy-equivalent discarded-state loop with the optimized
+path for random, heuristic, neural, and RL agents against random, plus actual
+RL rollout generation when checkpoints are available. It reports games per
+second, legal-action calls, state snapshots, serialized history actions, and
+requires identical fixed-seed result fingerprints.
+
 The learner samples actions and stores its trajectory. Frozen self-play pool
 opponents also sample actions but do not store trajectories. Checkpoint
 evaluation, diagnostics, and UI play remain deterministic.

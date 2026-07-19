@@ -70,6 +70,14 @@ pool starts and while it runs. Under pressure, unfinished game ids are retried
 with half as many workers while completed records are kept. Output directories
 are replaced atomically only after all files and plots have been produced.
 
+Inside each diagnostic game, the headless engine loop reuses the fresh,
+unchanged legal-action collection already supplied to the acting agent and
+does not serialize a post-action state that would be discarded. The final
+`engine.to_dict()` record, seeded deals, agent choices, validation, terminal
+rules, and diagnostic outputs remain unchanged. This trusted collection is an
+internal optimization and is not accepted from diagnostic CLI or external
+payloads.
+
 The output folder defaults to `diagnostics/results/all_pairs/`.
 Reusing that folder replaces the aggregate report and removes pair folders that
 do not belong to the selected mode, keeping its contents internally consistent.

@@ -205,7 +205,11 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         else:
             action = agents[current_player].choose_move(state, legal_actions)
 
-        engine.step(action)
+        engine.step(
+            action,
+            return_state=False,
+            legal_actions=legal_actions,
+        )
 
     final_state = engine.to_dict()
     winner = final_state["winner"]

@@ -130,13 +130,34 @@ class DominoEngine:
 
         return list(actions)
 
-    def step(self, action):
-        """Apply one legal action and return ``(state, game_over, info)``."""
+    def step(self, action, *, return_state=True, legal_actions=None):
+        """Apply one legal action and return ``(state_or_none, done, info)``.
+
+        The defaults preserve the public behavior: legal actions are computed
+        and validated inside the engine, and the first tuple item is the full
+        post-action state. Headless internal loops may pass ``return_state=False``
+        to skip a post-action snapshot they will discard.
+
+        ``legal_actions`` is a trusted fast path, not a rules override. A
+        supplied collection must be the unchanged result of ``valid_actions``
+        for this engine's current player and current position, computed
+        immediately before this call and never reused afterward. The chosen
+        action is still checked for membership. Untrusted UI, client, or
+        network actions must leave it as ``None`` so the engine computes the
+        legal collection itself.
+
+        The return value always contains three items. In headless mode its
+        first item is ``None`` while all engine mutation, terminal detection,
+        winner selection, validation, and ``info`` semantics remain unchanged.
+        """
         if self.game_over:
             raise RuntimeError("The game is over. Call reset() before playing again.")
 
         hand = self.hands[self.current_player]
-        available_actions = self.valid_actions(self.current_player)
+        if legal_actions is None:
+            available_actions = self.valid_actions(self.current_player)
+        else:
+            available_actions = legal_actions
 
         if action is None and available_actions != [None]:
             raise ValueError(
@@ -211,7 +232,8 @@ class DominoEngine:
         if not self.game_over and advance_player:
             self.current_player = (self.current_player + 1) % self.player_count
 
-        return self._get_state(), self.game_over, {"winner": self.winner}
+        next_state = self._get_state() if return_state else None
+        return next_state, self.game_over, {"winner": self.winner}
 
     def _get_state(self):
         """Return the compact state consumed by agents and encoders."""

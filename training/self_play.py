@@ -344,7 +344,11 @@ def _play_training_game(agents, learner_position, learner_agent, schema):
                 decay_lambda=schema["event_decay"],
             )
 
-        engine.step(action)
+        engine.step(
+            action,
+            return_state=False,
+            legal_actions=legal_actions,
+        )
 
     return engine, event_stats
 

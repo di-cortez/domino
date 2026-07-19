@@ -15,11 +15,9 @@
 #      hyperparameters keep separate diagnostics output instead of
 #      overwriting a shared `all_pairs/` directory.
 #
-# Stage 1 and 2 are intentionally NOT parameterized here: neither
-# `training.dataset_generator` nor `training.training_loop` currently exposes
-# a dataset-size/epoch-count/output-path CLI (see their module docstrings and
-# `training/README.md`), so this script just runs them exactly as
-# `README.md` documents:
+# Stage 1 keeps the dataset-generator defaults. Stage 2 forwards supervised
+# scheduler, backend, batch, seed, and memory controls while retaining the
+# training module's dataset/epoch/output defaults:
 #
 #   python -m training.dataset_generator
 #   python -m training.training_loop
@@ -93,14 +91,20 @@ RL_MEMORY_RESERVE_MB=512
 RL_ESTIMATED_WORKER_MB=256
 RL_MAX_WORKER_RSS_MB=1024
 
-# SL convergence controls (unset by default so a bare run matches
-# README/module defaults exactly). Early stopping and LR-decay-by-plateau are
-# the validated SL convergence-determination mechanisms from the same
-# reports: stop/slow down on the validation curve, not on a fixed epoch
-# budget.
+# SL convergence, device, memory, and retained-batch controls. Plateau decay is
+# enabled by default and has an independent counter from optional early
+# stopping.
 SL_EARLY_STOPPING_PATIENCE=""
-SL_LR_DECAY_FACTOR=""
+SL_LR_DECAY_FACTOR=0.5
+SL_LR_DECAY_PATIENCE=5
+SL_NO_LR_DECAY=0
 SL_WEIGHT_DECAY=""
+SL_DEVICE="auto"
+SL_BATCH_SIZE=""
+SL_BATCH_AUTOTUNE=1
+SL_MEMORY_RESERVE_MB=512
+SL_GPU_MEMORY_RESERVE_MB=512
+SL_SEED=""
 
 # Diagnostics stage: mirrors run_pipeline.py's diagnostics logic
 # (diagnostics/evaluate.py::run_all_pairs). run_pipeline.py maps its "big"
@@ -167,10 +171,18 @@ RL convergence monitoring (see references/explicacoes/relatorios/relatorio_1407)
   --rl-seed N                   Fix random/numpy state, for reproducible comparisons between configurations
   --rl-device {auto,cpu,gpu}    Array backend; "auto" matches GPU_ENABLED (default: $RL_DEVICE)
 
-SL convergence monitoring (unset by default -> bare README invocation):
+SL training controls:
   --sl-early-stopping-patience N  Validation checks (every 10 epochs) without improvement before stopping
-  --sl-lr-decay-factor F          LR multiplier applied on each validation check without improvement
+  --sl-lr-decay-factor F          LR multiplier after a validation plateau (default: $SL_LR_DECAY_FACTOR)
+  --sl-lr-decay-patience N        Failed validation checks before LR decay (default: $SL_LR_DECAY_PATIENCE)
+  --sl-no-lr-decay                Disable the default supervised LR schedule
   --sl-weight-decay F              L2 penalty on the weight matrices
+  --sl-device {auto,cpu,gpu}       Supervised array backend (default: $SL_DEVICE)
+  --sl-batch-size N                Fixed mini-batch size; disables autotuning
+  --sl-no-batch-autotune           Use the device default mini-batch size
+  --sl-memory-reserve-mb N         Host RAM reserve (default: $SL_MEMORY_RESERVE_MB)
+  --sl-gpu-memory-reserve-mb N     GPU VRAM reserve (default: $SL_GPU_MEMORY_RESERVE_MB)
+  --sl-seed N                      Fix supervised initialization and shuffling
 
 Agent-vs-random diagnostics (forwarded to diagnostics.evaluate, mirrors run_pipeline.py):
   --diag-mode NAME              Compatibility label; every value runs the same 5 matchups (default: $DIAG_MODE)
@@ -235,7 +247,15 @@ while [[ $# -gt 0 ]]; do
         --rl-max-worker-rss-mb) RL_MAX_WORKER_RSS_MB="$2"; shift 2 ;;
         --sl-early-stopping-patience) SL_EARLY_STOPPING_PATIENCE="$2"; shift 2 ;;
         --sl-lr-decay-factor) SL_LR_DECAY_FACTOR="$2"; shift 2 ;;
+        --sl-lr-decay-patience) SL_LR_DECAY_PATIENCE="$2"; shift 2 ;;
+        --sl-no-lr-decay) SL_NO_LR_DECAY=1; shift ;;
         --sl-weight-decay) SL_WEIGHT_DECAY="$2"; shift 2 ;;
+        --sl-device) SL_DEVICE="$2"; shift 2 ;;
+        --sl-batch-size) SL_BATCH_SIZE="$2"; shift 2 ;;
+        --sl-no-batch-autotune) SL_BATCH_AUTOTUNE=0; shift ;;
+        --sl-memory-reserve-mb) SL_MEMORY_RESERVE_MB="$2"; shift 2 ;;
+        --sl-gpu-memory-reserve-mb) SL_GPU_MEMORY_RESERVE_MB="$2"; shift 2 ;;
+        --sl-seed) SL_SEED="$2"; shift 2 ;;
         --diag-mode) DIAG_MODE="$2"; shift 2 ;;
         --diag-games) DIAG_GAMES="$2"; shift 2 ;;
         --diag-seed) DIAG_SEED="$2"; shift 2 ;;
@@ -285,12 +305,12 @@ if [[ -z "$DIAG_OUTPUT_DIR" ]]; then
     DIAG_OUTPUT_DIR="diagnostics/results/$RL_WEIGHTS_BASENAME"
 fi
 
-"$PYTHON_BIN" - "$RL_DEVICE" <<'PY'
+"$PYTHON_BIN" - "$RL_DEVICE" "$SL_DEVICE" <<'PY'
 import sys
 
 from utils.runtime_status import pipeline_compute_report
 
-print(pipeline_compute_report(sys.argv[1]))
+print(pipeline_compute_report(sys.argv[1], sys.argv[2]))
 PY
 
 section() {
@@ -310,24 +330,34 @@ fi
 if [[ "$SKIP_SL" -eq 1 ]]; then
     section "Step 2/4: supervised training (skipped)"
 else
-    SL_EXTRA_ARGS=()
+    SL_EXTRA_ARGS=(
+        --lr-decay-patience "$SL_LR_DECAY_PATIENCE"
+        --sl-device "$SL_DEVICE"
+        --sl-memory-reserve-mb "$SL_MEMORY_RESERVE_MB"
+        --sl-gpu-memory-reserve-mb "$SL_GPU_MEMORY_RESERVE_MB"
+    )
     if [[ -n "$SL_EARLY_STOPPING_PATIENCE" ]]; then
         SL_EXTRA_ARGS+=(--early-stopping "$SL_EARLY_STOPPING_PATIENCE")
     fi
-    if [[ -n "$SL_LR_DECAY_FACTOR" ]]; then
+    if [[ "$SL_NO_LR_DECAY" -eq 1 ]]; then
+        SL_EXTRA_ARGS+=(--no-lr-decay)
+    else
         SL_EXTRA_ARGS+=(--lr-decay "$SL_LR_DECAY_FACTOR")
     fi
     if [[ -n "$SL_WEIGHT_DECAY" ]]; then
         SL_EXTRA_ARGS+=(--weight-decay "$SL_WEIGHT_DECAY")
     fi
-
-    if [[ ${#SL_EXTRA_ARGS[@]} -eq 0 ]]; then
-        section "Step 2/4: training supervised policy (README defaults -> models/domino_sl_weights.npz)"
-        "$PYTHON_BIN" -u -m training.training_loop
-    else
-        section "Step 2/4: training supervised policy (convergence controls: ${SL_EXTRA_ARGS[*]} -> models/domino_sl_weights.npz)"
-        "$PYTHON_BIN" -u -m training.training_loop "${SL_EXTRA_ARGS[@]}"
+    if [[ -n "$SL_BATCH_SIZE" ]]; then
+        SL_EXTRA_ARGS+=(--sl-batch-size "$SL_BATCH_SIZE")
+    elif [[ "$SL_BATCH_AUTOTUNE" -eq 0 ]]; then
+        SL_EXTRA_ARGS+=(--sl-no-batch-autotune)
     fi
+    if [[ -n "$SL_SEED" ]]; then
+        SL_EXTRA_ARGS+=(--sl-seed "$SL_SEED")
+    fi
+
+    section "Step 2/4: training supervised policy (${SL_EXTRA_ARGS[*]} -> models/domino_sl_weights.npz)"
+    "$PYTHON_BIN" -u -m training.training_loop "${SL_EXTRA_ARGS[@]}"
 fi
 
 if [[ "$SKIP_RL" -eq 1 ]]; then

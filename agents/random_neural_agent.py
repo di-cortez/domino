@@ -15,7 +15,7 @@ class RandomNeuralAgent(NeuralAgent):
     DEFAULT_SEED = 0
 
     @classmethod
-    def create(cls, seed=DEFAULT_SEED):
+    def create(cls, seed=DEFAULT_SEED, device="auto"):
         """Create an untrained policy without loading or saving a checkpoint."""
-        network = SupervisedNeuralNetwork(random_seed=seed)
+        network = SupervisedNeuralNetwork(random_seed=seed, device=device)
         return cls(network)

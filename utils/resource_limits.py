@@ -168,13 +168,78 @@ def gpu_memory_info() -> MemoryInfo | None:
 
 
 def effective_gpu_available_bytes() -> int | None:
-    """Return free VRAM after applying the optional CuPy pool ceiling."""
+    """Return reusable VRAM after applying the optional CuPy pool ceiling."""
     info = gpu_memory_info()
     pool_limit = _positive_env_mb("DOMINO_VRAM_LIMIT_MB")
     available = None if info is None else info.available
+    pool_used = 0
+    pool_cached = 0
+    if info is not None and not info.simulated:
+        try:
+            import cupy
+
+            pool = cupy.get_default_memory_pool()
+            pool_used = int(pool.used_bytes())
+            pool_cached = max(0, int(pool.total_bytes()) - pool_used)
+            available += pool_cached
+        except Exception:
+            pass
     if pool_limit is not None:
-        available = pool_limit if available is None else min(available, pool_limit)
+        pool_headroom = max(0, pool_limit - pool_used)
+        available = (
+            pool_headroom
+            if available is None
+            else min(available, pool_headroom)
+        )
     return available
+
+
+def host_allocation_status(
+    required_bytes: int,
+    reserve_mb: int,
+) -> tuple[bool, dict]:
+    """Return a cgroup-aware host-allocation decision and its measurements."""
+    info = system_memory_info()
+    if info is None:
+        return True, {
+            "required_bytes": int(required_bytes),
+            "reserve_mb": int(reserve_mb),
+            "available_bytes": None,
+            "safe": True,
+            "source": None,
+        }
+    usable = max(0, info.available - int(reserve_mb * MIB))
+    safe = int(required_bytes) <= usable
+    return safe, {
+        "required_bytes": int(required_bytes),
+        "reserve_mb": int(reserve_mb),
+        "available_bytes": int(info.available),
+        "safe": safe,
+        "source": info.source,
+    }
+
+
+def gpu_allocation_status(
+    required_bytes: int,
+    reserve_mb: int,
+) -> tuple[bool, dict]:
+    """Return an effective-VRAM allocation decision and its measurements."""
+    available = effective_gpu_available_bytes()
+    if available is None:
+        return False, {
+            "required_bytes": int(required_bytes),
+            "reserve_mb": int(reserve_mb),
+            "available_bytes": None,
+            "safe": False,
+        }
+    usable = max(0, available - int(reserve_mb * MIB))
+    safe = int(required_bytes) <= usable
+    return safe, {
+        "required_bytes": int(required_bytes),
+        "reserve_mb": int(reserve_mb),
+        "available_bytes": int(available),
+        "safe": safe,
+    }
 
 
 def ensure_ram_available(required_bytes: int, reserve_mb: int, context: str) -> None:
@@ -218,3 +283,48 @@ def choose_safe_rl_device(
             raise MemorySafetyError(f"Cannot honor device='gpu': {reason}.")
         return "cpu", reason
     return requested_device, None
+
+
+def choose_safe_supervised_device(
+    requested_device: str,
+    minimum_free_vram_mb: int = 512,
+) -> tuple[str, str | None]:
+    """Resolve a supervised CPU/GPU request before any training update."""
+    if requested_device not in {"auto", "cpu", "gpu"}:
+        raise ValueError(f"Unknown device {requested_device!r}")
+    if requested_device == "cpu":
+        return "cpu", None
+
+    if os.environ.get("DOMINO_FORCE_CPU") == "1":
+        reason = "CPU is forced by DOMINO_FORCE_CPU"
+        if requested_device == "gpu":
+            raise MemorySafetyError(f"Cannot honor device='gpu': {reason}.")
+        return "cpu", reason
+
+    try:
+        import cupy
+
+        if int(cupy.cuda.runtime.getDeviceCount()) < 1:
+            raise RuntimeError("no CUDA device is visible")
+    except Exception as exc:
+        reason = f"CuPy/CUDA is unavailable ({type(exc).__name__}: {exc})"
+        if requested_device == "gpu":
+            raise MemorySafetyError(f"Cannot honor device='gpu': {reason}.")
+        return "cpu", reason
+
+    effective_free = effective_gpu_available_bytes()
+    required = int(minimum_free_vram_mb * MIB)
+    if effective_free is None or effective_free < required:
+        available_text = (
+            "unknown"
+            if effective_free is None
+            else f"{effective_free / MIB:.1f} MiB"
+        )
+        reason = (
+            f"only {available_text} effective VRAM is available; the "
+            f"supervised safety minimum is {minimum_free_vram_mb} MiB"
+        )
+        if requested_device == "gpu":
+            raise MemorySafetyError(f"Cannot honor device='gpu': {reason}.")
+        return "cpu", reason
+    return "gpu", None

@@ -171,12 +171,7 @@ def _run_dataset(config, args):
     )
 
 
-def _run_supervised_training(
-    config,
-    weight_decay=0.0,
-    early_stopping_patience=None,
-    lr_decay_factor=None,
-):
+def _run_supervised_training(config, args):
     """Train the supervised policy with compact epoch progress."""
     training_loop = _silent_import("training.training_loop")
 
@@ -186,12 +181,18 @@ def _run_supervised_training(
         "epoch",
         lambda progress: training_loop.train_supervised(
             epochs=config.supervised_epochs,
-            batch_size=training_loop.BATCH_SIZE,
+            batch_size=args.sl_batch_size,
             quiet=True,
             progress_callback=progress,
-            weight_decay=weight_decay,
-            early_stopping_patience=early_stopping_patience,
-            lr_decay_factor=lr_decay_factor,
+            weight_decay=args.weight_decay,
+            early_stopping_patience=args.early_stopping,
+            lr_decay_factor=args.lr_decay,
+            lr_decay_patience=args.lr_decay_patience,
+            device=args.sl_device,
+            autotune_batch_size=not args.sl_no_batch_autotune,
+            memory_reserve_mb=args.sl_memory_reserve_mb,
+            gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
+            seed=args.sl_seed,
         ),
         lambda summary: (
             f"{summary['epochs']}/{summary['requested_epochs']} epochs, "
@@ -400,7 +401,7 @@ def main():
         f"{config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
-    print(pipeline_compute_report(args.device))
+    print(pipeline_compute_report(args.device, args.sl_device))
     if args.dataset_workers == "auto":
         print(
             "Dataset workers: automatic retained benchmark "
@@ -433,12 +434,7 @@ def main():
 
     start_time = time.time()
     dataset_summary = _run_dataset(config, args)
-    supervised_summary = _run_supervised_training(
-        config,
-        weight_decay=args.weight_decay,
-        early_stopping_patience=args.early_stopping,
-        lr_decay_factor=args.lr_decay,
-    )
+    supervised_summary = _run_supervised_training(config, args)
     print(
         "RL startup note: rollout workers are CPU-only; policy aggregation and "
         "gradient updates remain in the main process."

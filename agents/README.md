@@ -8,7 +8,7 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 | `agent.py` | Baseline `RandomAgent` and `GreedyAgent`, plus a small runnable demo. |
 | `encoder.py` | Single source of truth for state-to-vector and tile-play action encoding. |
 | `heuristic_agent.py` | `StrategicAgent`, the exact-probability rule-based teacher used for supervised labels and benchmarks. |
-| `nn.py` | Supervised MLP backend. Uses CuPy automatically when installed, otherwise NumPy. |
+| `nn.py` | Per-network NumPy/CuPy float32 MLP backend with explicit `auto`/`cpu`/`gpu` selection. |
 | `neural_agent.py` | Loads `models/domino_sl_weights.npz` and plays the supervised policy. |
 | `random_neural_agent.py` | Uses the same supervised architecture with fixed random initialization and no checkpoint. |
 | `rl_nn.py` | Masked REINFORCE network with entropy regularization and an optional value head. |
@@ -17,14 +17,16 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 The opponent belief model lives in `middleware/opponent_model.py` because it is
 shared by agents, training, diagnostics, and the UI.
 
-During supervised training, `nn.py` receives NumPy arrays backed by system RAM
-and transfers only the active mini-batch to CuPy. Inference still accepts either
-NumPy or CuPy inputs and converts them to the active backend internally.
+Each supervised network owns an exact `network.device` and `network.xp` instead
+of relying on one module-wide array backend. Inference accepts NumPy or CuPy
+inputs and converts them to that network's backend in `float32`. Training may
+use host RAM, disk-backed arrays, full GPU residency, or a reusable rotating GPU
+window; these storage policies live in `training/supervised_runtime.py`.
 Optional supervised weight decay applies only to `W1`, `W2`, and `W3`; bias
 vectors are never regularized.
 
-`GPU_ENABLED` becomes true only when CuPy imports and its CUDA runtime reports at
-least one visible device. `GPU_UNAVAILABLE_REASON` records why the probe failed,
+`GPU_ENABLED` becomes true only when CuPy imports, CUDA reports a visible
+device, and a synchronized float32 allocation succeeds. `GPU_UNAVAILABLE_REASON` records why the probe failed,
 allowing pipeline and standalone logs to explain a NumPy/CPU fallback instead
 of claiming that an importable but unusable CuPy installation is active. See
 the root README for the complete Linux driver, CuPy `[ctk]`, verification, and
@@ -40,9 +42,8 @@ sized from detected total GPU memory divided by `--jobs`, so several
 concurrent training subprocesses sharing one GPU can't collectively exceed
 its VRAM.
 
-`rl_nn.py::PolicyNetwork` resolves its own array backend independently of
-`nn.py`'s module-wide `GPU_ENABLED` via a `device` parameter (`"auto"`
-matches `GPU_ENABLED`; `"cpu"`/`"gpu"` force one regardless), so an RL run
+`rl_nn.py::PolicyNetwork` uses the same per-network resolver via a `device`
+parameter (`"auto"` follows usable CuPy; `"cpu"`/`"gpu"` are explicit), so an RL run
 can be pinned to CPU while supervised training elsewhere in the same process
 still uses the GPU, or vice versa. `PolicyNetwork.load_from_sl` also accepts
 a pre-loaded `data` mapping of SL weight arrays, to warm-start many networks
@@ -51,6 +52,9 @@ from the same checkpoint without re-reading it from disk each time.
 `RandomNeuralAgent` is an untrained control for diagnostics. Seed `0` is local
 to its network initialization, so every matchup uses the same random policy and
 does not perturb the random sequence used to shuffle and play games.
+`NeuralAgent.load(..., device=...)` and `RandomNeuralAgent.create(...,
+device=...)` preserve that backend choice. CPU-only workers set
+`DOMINO_FORCE_CPU=1`, so they never initialize a CUDA context.
 
 ## State Encoding
 

@@ -50,6 +50,7 @@ and visual UI can be changed independently.
 | `training/dataset_generator.py` | Coordinates deterministic dataset generation, retained worker tuning, bounded SQLite aggregation, and atomic JSONL output. |
 | `training/dataset_parallel.py` | Plays independent heuristic-vs-heuristic dataset games in a bounded CPU-only worker pool. |
 | `training/training_loop.py` | Trains supervised weights, skips forced labels, and saves the best validation checkpoint. |
+| `training/supervised_runtime.py` | Retained CPU/GPU batch tuning, GPU dataset residency/windows, and supervised memory telemetry. |
 | `training/self_play.py` | Refines the RL policy with direct REINFORCE, parallel rollout orchestration, and parent-only gradient updates. |
 | `training/rl_parallel.py` | Generates deterministic RL trajectories in CPU-only workers backed by a bounded shared policy-snapshot bank. |
 | `diagnostics/evaluate.py` | Evaluates all five supported agents against the common random baseline. |
@@ -300,18 +301,24 @@ Train the supervised neural agent:
 python -m training.training_loop
 ```
 
-Supervised training keeps the complete encoded dataset in RAM and transfers
-only mini-batches of 1024 examples to the GPU. It reports startup memory,
-checkpoint-to-checkpoint time, and total elapsed time.
+Supervised training uses safe host RAM when possible and an atomic disk-backed
+`.npy`/`mmap` cache when the encoded dataset is too large. In GPU mode it keeps
+the full dataset resident when safe or reuses a bounded rotating GPU window.
+It benchmarks power-of-two CPU/GPU mini-batches for 10 retained epochs each,
+selects on synchronized median examples/second, and stops at the first gain
+below 10% or memory guard. Every completed benchmark epoch remains trained.
 
 The dataset encoder uses a two-pass preallocated `float32` representation and
 checks cgroup-aware RAM headroom before loading/encoding. RL also validates host
 workspace and effective free VRAM before large batch assembly; automatic device
 selection falls back to CPU when VRAM is below its safety minimum.
 
-Weight decay, early stopping, and learning-rate decay are optional. The default
-keeps the learning rate fixed; see `training/README.md` for the three flags and
-their configurable values. The same flags work with `run_pipeline.py`.
+Supervised weights and intermediates are `float32`; legacy `float64` checkpoints
+are cast safely. Plateau LR decay is enabled by default: validation runs every
+10 epochs and five consecutive failures multiply LR by `0.5`. Early stopping
+and LR scheduling use independent counters. See `training/README.md` for
+device, fixed-batch, reserve, seed, scheduler, and disable flags; the canonical
+pipeline device flag is `--sl-device`.
 
 Refine the RL agent:
 
@@ -352,6 +359,7 @@ Generated files:
 |---|---|
 | `dataset/supervised_dataset.jsonl` | `training.dataset_generator` |
 | `dataset/supervised_dataset_encoded.npz` | `training.training_loop` cache for encoded `X/Y` arrays |
+| `dataset/supervised_dataset_X.npy`, `supervised_dataset_Y.npy`, `supervised_dataset_metadata.json` | Disk-backed fallback cache from `training.training_loop` |
 | `models/domino_sl_weights.npz` | `training.training_loop` |
 | `models/domino_rl_weights.npz` | `training.self_play` |
 

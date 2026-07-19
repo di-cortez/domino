@@ -39,7 +39,8 @@ diagnostic games in total.
 |---|---|
 | `dataset_generator.py` | Coordinates retained worker tuning, bounded SQLite aggregation, and atomic ordered JSONL output. |
 | `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
-| `training_loop.py` | Loads the JSONL dataset, trains `SupervisedNeuralNetwork`, and saves `models/domino_sl_weights.npz`. Forced draw/pass and single-option labels are skipped defensively. |
+| `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz`. |
+| `supervised_runtime.py` | Implements CPU/GPU batch candidates, synchronized retained timing, GPU residency probes/windows, and supervised memory telemetry. |
 | `self_play.py` | Loads the supervised policy or an existing RL checkpoint, orchestrates parallel rollouts, and applies parent-only policy updates. |
 | `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed games across memory fallback. |
 
@@ -122,22 +123,49 @@ The loop:
 - reads `dataset/supervised_dataset.jsonl`;
 - filters out forced draw/pass examples;
 - filters out single-option tile-play examples;
-- scans the JSONL twice and preallocates encoded `float32` arrays once;
-- checks cgroup-aware host RAM before loading or encoding the dataset;
+- scans the JSONL twice and encodes `float32` arrays without retaining decoded records;
+- checks cgroup-aware host RAM before every material allocation;
 - encodes states and tile-play actions with `DominoEncoder`;
-- saves/loads `dataset/supervised_dataset_encoded.npz` to skip repeated JSONL encoding;
+- uses `dataset/supervised_dataset_encoded.npz` when the encoded dataset fits safely in RAM;
+- otherwise atomically builds disk-backed `supervised_dataset_X.npy`,
+  `supervised_dataset_Y.npy`, and `supervised_dataset_metadata.json` files and
+  opens them read-only with `mmap`;
 - splits data into training and validation sets;
-- keeps the encoded dataset and zero-copy split views in NumPy host memory;
-- trains the MLP in mini-batches of 1024 examples;
+- selects CPU/GPU independently with `--sl-device {auto,cpu,gpu}` (`--device`
+  is a standalone alias);
+- retains every batch-autotuning epoch as real training;
+- keeps the complete dataset in GPU memory when safe, or rotates one reusable
+  GPU window through a global per-epoch permutation when it is not;
 - keeps the best validation checkpoint in memory;
 - keeps only the 10 most recent archival checkpoints;
 - saves `models/domino_sl_weights.npz`.
 
-`agents/nn.py` uses CuPy automatically when it is installed. Only the current
-training or validation mini-batch is transferred to the GPU; complete datasets
-are never copied into VRAM. GPU memory usage therefore stays proportional to
-the batch size rather than the number of encoded examples. The command prints
-startup memory, checkpoint-to-checkpoint time, and total elapsed time.
+CPU batch candidates are powers of two from 1,024 through 1,048,576; GPU
+candidates start at 2,048. Each candidate runs 10 complete epochs on the same
+live network. Timing includes recurring data materialization/transfers and the
+forward/backward update, synchronizes CUDA around each GPU epoch, excludes
+validation/checkpoint/log time, and compares median **examples/second**. A
+larger candidate is accepted only at a gain of at least 10%; a rejected
+candidate's epochs still remain in the model. Runs shorter than 10 epochs use
+the first safe device default without starting an incomplete benchmark. Use
+`--sl-batch-size N` for a fixed batch or `--sl-no-batch-autotune` for the
+device default.
+
+GPU mode first probes resident example counts from 2,048 through 1,048,576
+without changing weights. It preserves 512 MiB by default for batches,
+activations, gradients, CUDA workspace, and fragmentation. `auto` falls back
+safely to CPU when that reserve cannot be kept; explicit `gpu` fails before a
+training update. Override host and GPU reserves with
+`--sl-memory-reserve-mb` and `--sl-gpu-memory-reserve-mb`. The detailed command
+reports the selected device, residency mode/capacity, one-time full upload,
+batch results, and memory high/low watermarks. `run_pipeline.py` uses
+`quiet=True`, so its existing progress bar and compact one-line SL summary do
+not gain this detailed chatter.
+
+All supervised inputs, targets, weights, activations, gradients, and new
+checkpoints are `float32`. Legacy `float64` checkpoints remain loadable and are
+cast on input. Archival files in `models/supervised_checkpoints/` are pruned
+after every save, so repeated or large runs retain at most 10 of them.
 Archival files in `models/supervised_checkpoints/` are pruned after every save,
 so repeated or large training runs retain at most 10 of them.
 
@@ -164,26 +192,41 @@ worker controls. Dataset generation tunes once for its full workload. RL tunes
 across complete early iterations, and diagnostics tune each matchup separately.
 All three retain benchmark work and enforce the same hard limit of 20 workers.
 
-### Optional SL controls
+### Supervised scheduler and controls
 
-The default command uses a fixed learning rate, no weight decay, and no early
-stopping. It still tracks validation loss and saves the best validation weights.
+The normal command starts at learning rate `0.005` and enables plateau decay by
+default. Validation remains every 10 epochs. The first result establishes the
+global best; after five consecutive checks without strict improvement, the LR
+is multiplied by `0.5` and only the LR-specific failure counter resets. Another
+five failures are required for another reduction. Optional early stopping has
+its own counter; its patience should normally exceed LR patience so a reduced
+rate has time to help.
 
 Enable any control independently by adding its flag:
 
 ```bash
 python -m training.training_loop --weight-decay
 python -m training.training_loop --early-stopping
-python -m training.training_loop --lr-decay
+python -m training.training_loop --lr-decay 0.7 --lr-decay-patience 8
+python -m training.training_loop --no-lr-decay
+python -m training.training_loop --sl-device cpu --sl-seed 123
 ```
 
 Passing a flag without a value uses these defaults:
 
-| Flag | Enabled behavior | Default value when enabled |
+| Flag | Behavior | Default |
 |---|---|---:|
 | `--weight-decay [COEFFICIENT]` | Adds L2 decay to `W1`, `W2`, and `W3`, but not biases | `0.0001` |
 | `--early-stopping [PATIENCE]` | Stops after this many validation checks without improvement | `5` |
-| `--lr-decay [FACTOR]` | Multiplies the learning rate after each failed validation check | `0.5` |
+| `--lr-decay [FACTOR]` | Multiplies LR after the configured consecutive failed checks | `0.5` (on) |
+| `--lr-decay-patience N` | Consecutive failed validation checks before each reduction | `5` |
+| `--no-lr-decay` | Disables plateau scheduling for controlled comparisons | off |
+| `--sl-device` / standalone `--device` | `auto`, forced `cpu`, or required `gpu` | `auto` |
+| `--sl-batch-size N` | Fixed safe batch; bypasses tuning | unset |
+| `--sl-no-batch-autotune` | Uses 1,024 on CPU or 2,048 on GPU | off |
+| `--sl-memory-reserve-mb N` | Free host RAM retained | `512` |
+| `--sl-gpu-memory-reserve-mb N` | Effective free VRAM retained | `512` |
+| `--sl-seed N` | Reproducible initialization and epoch permutations | unset |
 
 Validation is checked every 10 epochs. The options can be combined and can
 receive explicit values:
@@ -191,8 +234,9 @@ receive explicit values:
 ```bash
 python -m training.training_loop \
   --weight-decay 0.00005 \
-  --early-stopping 8 \
-  --lr-decay 0.7
+  --early-stopping 12 \
+  --lr-decay 0.7 --lr-decay-patience 5 \
+  --sl-device gpu
 ```
 
 Reported training and validation losses remain cross-entropy values, allowing
@@ -202,7 +246,7 @@ loss curves to be compared with runs that do not enable weight decay.
 training:
 
 ```bash
-python run_pipeline.py small --weight-decay --early-stopping --lr-decay
+python run_pipeline.py small --weight-decay --early-stopping 12 --sl-device auto
 ```
 
 ## Self-Play RL

@@ -4,36 +4,18 @@ import os
 
 import numpy as np
 
-from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
-
-try:
-    import cupy as _cupy
-except ImportError:
-    _cupy = None
+from agents.nn import (
+    DEVICES,
+    SupervisedNeuralNetwork,
+    resolve_device,
+)
 
 _POLICY_WEIGHTS = ("W1", "b1", "W2", "b2", "W3", "b3")
 _VALUE_WEIGHTS = ("Wv", "bv")
 
-DEVICES = ("auto", "cpu", "gpu")
-
-
 def _resolve_device(device):
-    """Return (array_module, resolved_device_name) for 'auto'/'cpu'/'gpu'.
-
-    'auto' reproduces the project-wide default: CuPy when GPU_ENABLED (i.e.
-    when CuPy is installed), NumPy otherwise. 'cpu'/'gpu' force one backend
-    regardless of GPU_ENABLED, so a training run can be pinned to CPU (or
-    GPU) explicitly instead of only following whatever's installed.
-    """
-    if device in (None, "auto"):
-        return (_cupy if GPU_ENABLED else np), ("gpu" if GPU_ENABLED else "cpu")
-    if device == "cpu":
-        return np, "cpu"
-    if device == "gpu":
-        if _cupy is None:
-            raise ValueError("device='gpu' requested but CuPy is not installed.")
-        return _cupy, "gpu"
-    raise ValueError(f"Unknown device {device!r}; expected one of {DEVICES}.")
+    """Compatibility wrapper around the shared per-network device resolver."""
+    return resolve_device(device)
 
 
 class PolicyNetwork(SupervisedNeuralNetwork):
@@ -50,14 +32,15 @@ class PolicyNetwork(SupervisedNeuralNetwork):
     """
 
     def __init__(self, *args, use_value_head=False, device="auto", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.xp, self.device = _resolve_device(device)
-        self._cast_weights_to_device()
+        super().__init__(*args, device=device, **kwargs)
         self.use_value_head = use_value_head
         if use_value_head:
             hidden2_size = self.W3.shape[1]
-            self.Wv = self.xp.zeros((1, hidden2_size))
-            self.bv = self.xp.zeros((1, 1))
+            self.Wv = self.xp.zeros(
+                (1, hidden2_size),
+                dtype=self.xp.float32,
+            )
+            self.bv = self.xp.zeros((1, 1), dtype=self.xp.float32)
 
     def _cast_weights_to_device(self):
         """Move the six policy weights (built by the parent class) to ``self.xp``."""
@@ -67,11 +50,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 continue
             if hasattr(value, "get"):
                 value = value.get()
-            setattr(self, name, self.xp.array(value))
+            setattr(self, name, self.xp.asarray(value, dtype=self.xp.float32))
 
     def forward(self, x):
         """Same three-layer forward pass as the parent class, pinned to ``self.xp``."""
-        x = self.xp.asarray(x)
+        x = self.xp.asarray(x, dtype=self.xp.float32)
         z1 = self.xp.dot(self.W1, x) + self.b1
         a1 = self.xp.maximum(0, z1)
         z2 = self.xp.dot(self.W2, a1) + self.b2
@@ -110,10 +93,21 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 device=device,
             )
             for name in _POLICY_WEIGHTS:
-                setattr(network, name, network.xp.array(data[name]))
+                setattr(
+                    network,
+                    name,
+                    network.xp.asarray(data[name], dtype=network.xp.float32),
+                )
             if use_value_head and all(name in data for name in _VALUE_WEIGHTS):
                 for name in _VALUE_WEIGHTS:
-                    setattr(network, name, network.xp.array(data[name]))
+                    setattr(
+                        network,
+                        name,
+                        network.xp.asarray(
+                            data[name],
+                            dtype=network.xp.float32,
+                        ),
+                    )
             return network
         finally:
             if owns_data:
@@ -216,7 +210,10 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         m = z3.shape[1]
 
         action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
-        policy_rewards = xp.asarray(policy_rewards).reshape(1, m)
+        policy_rewards = xp.asarray(
+            policy_rewards,
+            dtype=z3.dtype,
+        ).reshape(1, m)
         legal_masks = (xp.asarray(legal_masks) > 0).astype(z3.dtype)
 
         if action_indices.shape[0] != m:
@@ -271,7 +268,10 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 raise ValueError(
                     "value_returns are required when the value head is enabled."
                 )
-            value_returns = xp.asarray(value_returns).reshape(1, m)
+            value_returns = xp.asarray(
+                value_returns,
+                dtype=z3.dtype,
+            ).reshape(1, m)
             values = xp.dot(self.Wv, a2) + self.bv
             value_error = values - value_returns
             value_loss = float(xp.mean(0.5 * value_error ** 2))

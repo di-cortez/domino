@@ -1,11 +1,15 @@
-"""Train the supervised-learning domino policy from a JSONL dataset.
+"""Train the supervised domino policy with safe CPU/GPU autotuning.
 
-The supervised policy only learns real voluntary tile-play decisions. Forced
-draw, pass, and single-option tile-play records are skipped because those turns
-do not require a neural decision.
+The encoded dataset stays in host RAM when that is safe, falls back to a
+disk-backed ``.npy`` cache when it is not, and may be kept fully or partially
+resident on a selected GPU. Every completed autotuning epoch updates the live
+network and counts toward the requested epoch total.
 """
 
+from __future__ import annotations
+
 import argparse
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -14,35 +18,41 @@ import time
 import numpy as np
 
 from agents.encoder import DominoEncoder
-from agents.nn import (
-    GPU_ENABLED,
-    GPU_UNAVAILABLE_REASON,
-    SupervisedNeuralNetwork,
+from agents.nn import SupervisedNeuralNetwork
+from training.supervised_runtime import (
+    DEFAULT_SUPERVISED_CPU_BATCH_SIZE,
+    DEFAULT_SUPERVISED_GPU_BATCH_SIZE,
+    RetainedBatchAutotuner,
+    SUPERVISED_BATCH_AUTOTUNE_EPOCHS,
+    SUPERVISED_GPU_MEMORY_RESERVE_MB,
+    SupervisedDataPlan,
+    SupervisedResourceTracker,
+    estimate_supervised_workspace_bytes,
+    probe_gpu_residency,
 )
-from utils.resource_limits import ensure_ram_available
-from utils.runtime_status import format_duration, print_memory_report
+from utils.resource_limits import (
+    MIB,
+    MemorySafetyError,
+    choose_safe_supervised_device,
+    effective_gpu_available_bytes,
+    gpu_memory_info,
+    host_allocation_status,
+)
+from utils.runtime_status import format_duration, memory_report
 
-if GPU_ENABLED:
-    import cupy as cp
-
-    USE_GPU = True
-    print("CuPy available. Training on GPU.")
-else:
-    import numpy as cp
-
-    USE_GPU = False
-    print(
-        "GPU backend unavailable; training on CPU"
-        f" ({GPU_UNAVAILABLE_REASON or 'CuPy is not available'})."
-    )
 
 EPOCHS = 2000
-BATCH_SIZE = 1024
+BATCH_SIZE = DEFAULT_SUPERVISED_CPU_BATCH_SIZE
+INITIAL_SUPERVISED_LEARNING_RATE = 0.005
 DEFAULT_WEIGHT_DECAY = 0.0001
 DEFAULT_EARLY_STOPPING_PATIENCE = 5
-DEFAULT_LR_DECAY_FACTOR = 0.5
+DEFAULT_SUPERVISED_LR_DECAY_PATIENCE = 5
+DEFAULT_SUPERVISED_LR_DECAY_FACTOR = 0.5
+# Compatibility name retained for existing imports.
+DEFAULT_LR_DECAY_FACTOR = DEFAULT_SUPERVISED_LR_DECAY_FACTOR
+SUPERVISED_VALIDATION_INTERVAL_EPOCHS = 10
 
-CHECKPOINT_EVERY = 10
+CHECKPOINT_EVERY = SUPERVISED_VALIDATION_INTERVAL_EPOCHS
 CHECKPOINT_DIR = "models/supervised_checkpoints"
 MAX_SUPERVISED_CHECKPOINTS = 10
 ENCODED_CACHE_FILE = "dataset/supervised_dataset_encoded.npz"
@@ -51,9 +61,21 @@ DATASET_DTYPE = np.float32
 DATASET_MEMORY_RESERVE_MB = 512
 
 
-def to_backend_array(matrix):
-    """Convert a NumPy array loaded from disk to the active backend."""
-    return cp.array(matrix)
+def _format_optional_mib(byte_count):
+    """Format an optional byte measurement for detailed resource logs."""
+    if byte_count is None:
+        return "unavailable"
+    return f"{byte_count / MIB:.1f} MiB"
+
+
+@dataclass
+class EncodedDataset:
+    """An encoded dataset and the storage mode that owns its arrays."""
+
+    x: np.ndarray
+    y: np.ndarray
+    storage_mode: str
+    metadata: dict
 
 
 def _prune_supervised_checkpoints(
@@ -63,15 +85,11 @@ def _prune_supervised_checkpoints(
     """Delete older archival checkpoints and return the removed paths."""
     if keep_count < 1:
         raise ValueError("keep_count must be at least one.")
-
-    checkpoint_paths = list(
-        Path(checkpoint_dir).glob("domino_sl_epoch_*.npz")
-    )
+    checkpoint_paths = list(Path(checkpoint_dir).glob("domino_sl_epoch_*.npz"))
     checkpoint_paths.sort(
         key=lambda path: (path.stat().st_mtime_ns, path.name),
         reverse=True,
     )
-
     removed_paths = checkpoint_paths[keep_count:]
     for path in removed_paths:
         path.unlink()
@@ -79,10 +97,8 @@ def _prune_supervised_checkpoints(
 
 
 def _normalize_action(action):
-    """Return a normalized tile-play action or None for draw/pass."""
-    if action is None:
-        return None
-    if action == ["DRAW", None] or action == ("DRAW", None):
+    """Return a normalized tile-play action or ``None`` for draw/pass."""
+    if action is None or action == ["DRAW", None] or action == ("DRAW", None):
         return None
     if isinstance(action[0], list):
         return (tuple(action[0]), action[1])
@@ -93,36 +109,31 @@ def _legal_tile_actions_from_state(state):
     """Reconstruct legal tile-play actions from a serialized state."""
     hand = [tuple(tile) for tile in state["current_player_hand"]]
     ends = state.get("ends", [])
-
     if not ends:
         doubles = [tile for tile in hand if tile[0] == tile[1]]
         if doubles:
-            opening_double = max(doubles, key=lambda tile: tile[0])
-            return [(opening_double, 0)]
+            return [(max(doubles, key=lambda tile: tile[0]), 0)]
         return [(tile, 0) for tile in hand]
 
     left_end, right_end = ends
     actions = []
-
     for tile in hand:
         if left_end in tile:
             actions.append((tile, 0))
         if right_end in tile:
             actions.append((tile, 1))
-
     if left_end == right_end:
         actions = [(tile, 0) for tile, _side in actions]
-
     return list(dict.fromkeys(actions))
 
 
 def _is_real_decision_state(state):
-    """Return True when the player had at least two legal tile-play choices."""
+    """Return whether a player had at least two legal tile-play choices."""
     return len(_legal_tile_actions_from_state(state)) >= 2
 
 
 def _dataset_metadata(file_path, encoder):
-    """Return metadata used to decide whether an encoded cache is reusable."""
+    """Return source and encoder fields used to validate encoded caches."""
     stat = os.stat(file_path)
     return {
         "source_path": os.path.abspath(file_path),
@@ -135,155 +146,357 @@ def _dataset_metadata(file_path, encoder):
 
 
 def _cache_matches(cache_data, expected_metadata):
-    """Return True when ``cache_data`` was built from the current dataset/encoder."""
+    """Return whether an ``np.load`` mapping matches current source metadata."""
     for key, expected_value in expected_metadata.items():
-        if key not in cache_data:
+        if key not in cache_data or cache_data[key].item() != expected_value:
             return False
-
-        cached_value = cache_data[key].item()
-        if cached_value != expected_value:
-            return False
-
     return True
 
 
-def _save_encoded_cache(cache_file, x, y, metadata, quiet=False):
-    """Persist encoded supervised arrays for faster future training runs."""
-    cache_dir = os.path.dirname(cache_file)
-    if cache_dir:
-        os.makedirs(cache_dir, exist_ok=True)
-
-    np.savez_compressed(
-        cache_file,
-        X=x,
-        Y=y,
-        encoded_example_count=x.shape[1],
-        encoded_bytes=x.nbytes + y.nbytes,
-        **metadata,
+def _mmap_cache_paths(cache_file):
+    """Return stable X/Y/metadata paths derived from the compressed cache."""
+    cache_path = Path(cache_file)
+    stem = cache_path.stem
+    if stem.endswith("_encoded"):
+        stem = stem[:-len("_encoded")]
+    parent = cache_path.parent
+    return (
+        parent / f"{stem}_X.npy",
+        parent / f"{stem}_Y.npy",
+        parent / f"{stem}_metadata.json",
     )
-    if not quiet:
-        print(f"Encoded dataset cache saved to {cache_file}.")
 
 
-def load_or_build_dataset(file_path, encoder, cache_file=ENCODED_CACHE_FILE, quiet=False):
-    """Load encoded ``X/Y`` arrays from cache, rebuilding when the cache is stale."""
-    metadata = _dataset_metadata(file_path, encoder)
-
-    if os.path.exists(cache_file):
-        try:
-            with np.load(cache_file, allow_pickle=False) as cache_data:
-                if _cache_matches(cache_data, metadata):
-                    if "encoded_bytes" in cache_data:
-                        ensure_ram_available(
-                            int(cache_data["encoded_bytes"].item()),
-                            DATASET_MEMORY_RESERVE_MB,
-                            "loading the encoded supervised dataset",
-                        )
-                    x = cache_data["X"]
-                    y = cache_data["Y"]
-                    if not quiet:
-                        print(f"Loaded encoded dataset cache from {cache_file}.")
-                        print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
-                    return x, y
-
-            if not quiet:
-                print(f"Encoded dataset cache is stale: {cache_file}. Rebuilding.")
-        except (OSError, KeyError, ValueError) as exc:
-            if not quiet:
-                print(f"Could not read encoded dataset cache {cache_file}: {exc}. Rebuilding.")
-
-    x, y = load_dataset(file_path, encoder, quiet=quiet)
-    _save_encoded_cache(cache_file, x, y, metadata, quiet=quiet)
-    return x, y
-
-
-def load_dataset(file_path, encoder, quiet=False):
-    """Load JSONL examples with a two-pass, preallocated float32 encoder.
-
-    The previous list-of-column-arrays approach retained one Python/NumPy
-    object per example and then duplicated all data during ``hstack``.  A
-    counting pass lets us validate RAM headroom and allocate the two final
-    matrices exactly once.
-    """
-    skipped_draw_pass = 0
-    skipped_single_option = 0
-    example_count = 0
-
-    if not quiet:
-        print(f"Scanning dataset from {file_path}...")
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
+def _scan_dataset(file_path):
+    """Count usable examples without retaining decoded JSON records."""
+    counts = {
+        "example_count": 0,
+        "skipped_draw_pass": 0,
+        "skipped_single_option": 0,
+    }
+    with open(file_path, "r", encoding="utf-8") as stream:
+        for line in stream:
             if not line.strip():
                 continue
-
             record = json.loads(line)
-            state = record["state"]
-            target_action = _normalize_action(record["target_action"])
-
-            if target_action is None:
-                skipped_draw_pass += 1
-                continue
-
-            if not _is_real_decision_state(state):
-                skipped_single_option += 1
-                continue
-
-            example_count += 1
-
-    if not example_count:
+            action = _normalize_action(record["target_action"])
+            if action is None:
+                counts["skipped_draw_pass"] += 1
+            elif not _is_real_decision_state(record["state"]):
+                counts["skipped_single_option"] += 1
+            else:
+                counts["example_count"] += 1
+    if counts["example_count"] < 1:
         raise ValueError(
             "The dataset contains no real tile-play decisions after filtering "
             "draw/pass and single-option tile-play actions."
         )
+    return counts
 
-    required_bytes = example_count * (
-        encoder.VECTOR_SIZE + len(encoder.all_actions)
-    ) * np.dtype(DATASET_DTYPE).itemsize
-    ensure_ram_available(
-        required_bytes,
-        DATASET_MEMORY_RESERVE_MB,
-        "encoding the supervised dataset",
-    )
-    x = np.empty((encoder.VECTOR_SIZE, example_count), dtype=DATASET_DTYPE)
-    y = np.zeros((len(encoder.all_actions), example_count), dtype=DATASET_DTYPE)
 
-    if not quiet:
-        print(
-            f"Encoding {example_count} examples into one "
-            f"{required_bytes / (1024 * 1024):.1f} MiB allocation..."
-        )
+def _fill_encoded_arrays(file_path, encoder, x, y, expected_count):
+    """Fill preallocated RAM or mmap arrays during one streaming JSONL pass."""
     column = 0
-    with open(file_path, "r", encoding="utf-8") as f:
-        for line in f:
+    with open(file_path, "r", encoding="utf-8") as stream:
+        for line in stream:
             if not line.strip():
                 continue
-
             record = json.loads(line)
             state = record["state"]
-            target_action = _normalize_action(record["target_action"])
-            if target_action is None or not _is_real_decision_state(state):
+            action = _normalize_action(record["target_action"])
+            if action is None or not _is_real_decision_state(state):
                 continue
-
-            action_index = encoder._action_index(target_action)
             x[:, column] = encoder.encode_state(state)[:, 0]
-            y[action_index, column] = 1.0
+            y[:, column] = 0.0
+            y[encoder._action_index(action), column] = 1.0
             column += 1
-
-    if column != example_count:
+    if column != expected_count:
         raise RuntimeError(
-            f"dataset changed while it was being encoded: expected "
-            f"{example_count} examples, read {column}"
+            "dataset changed while it was being encoded: expected "
+            f"{expected_count} examples, read {column}"
         )
+
+
+def _encoded_bytes(example_count, encoder):
+    return int(
+        example_count
+        * (encoder.VECTOR_SIZE + len(encoder.all_actions))
+        * np.dtype(DATASET_DTYPE).itemsize
+    )
+
+
+def _host_dataset_working_set_bytes(example_count, encoder):
+    """Estimate dataset, permutation, and minimum CPU training workspace."""
+    train_count = max(1, int(example_count * 0.85))
+    return (
+        _encoded_bytes(example_count, encoder)
+        + train_count * np.dtype(np.int64).itemsize
+        + estimate_supervised_workspace_bytes(
+            min(DEFAULT_SUPERVISED_CPU_BATCH_SIZE, train_count),
+            encoder.VECTOR_SIZE,
+            256,
+            128,
+            len(encoder.all_actions),
+        )
+    )
+
+
+def _save_encoded_cache(cache_file, x, y, metadata, quiet=False):
+    """Persist the RAM-resident compressed cache through an atomic replace."""
+    cache_path = Path(cache_file)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp.npz")
+    try:
+        np.savez_compressed(
+            temporary,
+            X=np.asarray(x, dtype=DATASET_DTYPE),
+            Y=np.asarray(y, dtype=DATASET_DTYPE),
+            encoded_example_count=x.shape[1],
+            encoded_bytes=x.nbytes + y.nbytes,
+            **metadata,
+        )
+        os.replace(temporary, cache_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    if not quiet:
+        print(f"Encoded dataset cache saved to {cache_file}.")
+
+
+def _mmap_metadata_matches(metadata_path, x_path, y_path, expected):
+    """Validate mmap metadata, shapes, dtypes, sizes, and completed files."""
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            return False, None
+        if metadata.get("dtype") != np.dtype(DATASET_DTYPE).name:
+            return False, None
+        if not x_path.is_file() or not y_path.is_file():
+            return False, None
+        if metadata.get("x_file_size") != x_path.stat().st_size:
+            return False, None
+        if metadata.get("y_file_size") != y_path.stat().st_size:
+            return False, None
+        x = np.load(x_path, mmap_mode="r", allow_pickle=False)
+        y = np.load(y_path, mmap_mode="r", allow_pickle=False)
+        if list(x.shape) != metadata.get("x_shape"):
+            return False, None
+        if list(y.shape) != metadata.get("y_shape"):
+            return False, None
+        if x.dtype != DATASET_DTYPE or y.dtype != DATASET_DTYPE:
+            return False, None
+        if x.shape[1] != y.shape[1] or x.shape[1] != metadata.get("example_count"):
+            return False, None
+        return True, (x, y, metadata)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return False, None
+
+
+def _build_mmap_cache(file_path, encoder, cache_file, source_metadata, counts):
+    """Build complete disk-backed arrays and publish metadata last."""
+    x_path, y_path, metadata_path = _mmap_cache_paths(cache_file)
+    x_path.parent.mkdir(parents=True, exist_ok=True)
+    example_count = counts["example_count"]
+    token = f"{os.getpid()}-{time.time_ns()}"
+    temporary_x = x_path.with_name(f".{x_path.name}.{token}.tmp.npy")
+    temporary_y = y_path.with_name(f".{y_path.name}.{token}.tmp.npy")
+    temporary_metadata = metadata_path.with_name(
+        f".{metadata_path.name}.{token}.tmp"
+    )
+    try:
+        x = np.lib.format.open_memmap(
+            temporary_x,
+            mode="w+",
+            dtype=DATASET_DTYPE,
+            shape=(encoder.VECTOR_SIZE, example_count),
+        )
+        y = np.lib.format.open_memmap(
+            temporary_y,
+            mode="w+",
+            dtype=DATASET_DTYPE,
+            shape=(len(encoder.all_actions), example_count),
+        )
+        _fill_encoded_arrays(file_path, encoder, x, y, example_count)
+        x.flush()
+        y.flush()
+        del x, y
+        os.replace(temporary_x, x_path)
+        os.replace(temporary_y, y_path)
+        metadata = {
+            **source_metadata,
+            "example_count": example_count,
+            "dtype": np.dtype(DATASET_DTYPE).name,
+            "x_shape": [encoder.VECTOR_SIZE, example_count],
+            "y_shape": [len(encoder.all_actions), example_count],
+            "x_file_size": x_path.stat().st_size,
+            "y_file_size": y_path.stat().st_size,
+        }
+        with open(temporary_metadata, "w", encoding="utf-8") as stream:
+            json.dump(metadata, stream, indent=2, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_metadata, metadata_path)
+        return (
+            np.load(x_path, mmap_mode="r", allow_pickle=False),
+            np.load(y_path, mmap_mode="r", allow_pickle=False),
+            metadata,
+        )
+    finally:
+        for path in (temporary_x, temporary_y, temporary_metadata):
+            if path.exists():
+                path.unlink()
+
+
+def load_dataset(
+    file_path,
+    encoder,
+    quiet=False,
+    memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
+):
+    """Encode a JSONL dataset directly into preallocated float32 RAM arrays."""
+    if not quiet:
+        print(f"Scanning dataset from {file_path}...")
+    counts = _scan_dataset(file_path)
+    required = _host_dataset_working_set_bytes(counts["example_count"], encoder)
+    safe, status = host_allocation_status(required, memory_reserve_mb)
+    if not safe:
+        raise MemorySafetyError(
+            "RAM-resident supervised encoding is unsafe: "
+            f"needs about {required / MIB:.1f} MiB plus the "
+            f"{memory_reserve_mb} MiB reserve, while "
+            f"{status['available_bytes'] / MIB:.1f} MiB is available."
+        )
+    count = counts["example_count"]
+    x = np.empty((encoder.VECTOR_SIZE, count), dtype=DATASET_DTYPE)
+    y = np.empty((len(encoder.all_actions), count), dtype=DATASET_DTYPE)
+    _fill_encoded_arrays(file_path, encoder, x, y, count)
     if not quiet:
         print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
-        print(f"Skipped forced draw/pass examples: {skipped_draw_pass}")
-        print(f"Skipped single-option tile-play examples: {skipped_single_option}")
+        print(f"Skipped forced draw/pass examples: {counts['skipped_draw_pass']}")
+        print(
+            "Skipped single-option tile-play examples: "
+            f"{counts['skipped_single_option']}"
+        )
     return x, y
+
+
+def load_or_build_dataset(
+    file_path,
+    encoder,
+    cache_file=ENCODED_CACHE_FILE,
+    quiet=False,
+    *,
+    memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
+    return_info=False,
+):
+    """Return a validated RAM or mmap encoded cache without unsafe allocation."""
+    source_metadata = _dataset_metadata(file_path, encoder)
+    counts = _scan_dataset(file_path)
+    example_count = counts["example_count"]
+    required = _host_dataset_working_set_bytes(example_count, encoder)
+    safe_in_ram, _status = host_allocation_status(required, memory_reserve_mb)
+
+    if safe_in_ram and os.path.exists(cache_file):
+        try:
+            with np.load(cache_file, allow_pickle=False) as cache_data:
+                if (
+                    _cache_matches(cache_data, source_metadata)
+                    and int(cache_data["encoded_example_count"].item())
+                    == example_count
+                ):
+                    x = np.asarray(cache_data["X"], dtype=DATASET_DTYPE)
+                    y = np.asarray(cache_data["Y"], dtype=DATASET_DTYPE)
+                    result = EncodedDataset(x, y, "ram", source_metadata)
+                    if not quiet:
+                        print(f"Loaded encoded dataset cache from {cache_file}.")
+                    return result if return_info else (x, y)
+        except (OSError, KeyError, ValueError):
+            pass
+
+    x_path, y_path, metadata_path = _mmap_cache_paths(cache_file)
+    valid_mmap, mmap_payload = _mmap_metadata_matches(
+        metadata_path,
+        x_path,
+        y_path,
+        source_metadata,
+    )
+    if not safe_in_ram:
+        if valid_mmap:
+            x, y, metadata = mmap_payload
+        else:
+            x, y, metadata = _build_mmap_cache(
+                file_path,
+                encoder,
+                cache_file,
+                source_metadata,
+                counts,
+            )
+        result = EncodedDataset(x, y, "mmap", metadata)
+        if not quiet:
+            print(
+                "Encoded dataset uses disk-backed mmap storage: "
+                f"{x_path} and {y_path}."
+            )
+        return result if return_info else (x, y)
+
+    x, y = load_dataset(
+        file_path,
+        encoder,
+        quiet=quiet,
+        memory_reserve_mb=memory_reserve_mb,
+    )
+    _save_encoded_cache(cache_file, x, y, source_metadata, quiet=quiet)
+    result = EncodedDataset(x, y, "ram", source_metadata)
+    return result if return_info else (x, y)
+
+
+def _network_weight_payload(network, weights=None):
+    """Return six compatible host float32 arrays for checkpoint writing."""
+    source = weights or {name: getattr(network, name) for name in network.weight_names}
+    return {
+        name: network.to_host(source[name]).astype(np.float32, copy=False)
+        for name in network.weight_names
+    }
+
+
+def _load_existing_weights(network, weights_file):
+    """Validate and load a legacy or current supervised checkpoint."""
+    with np.load(weights_file, allow_pickle=False) as weights:
+        for name in network.weight_names:
+            expected_shape = getattr(network, name).shape
+            if weights[name].shape != expected_shape:
+                raise ValueError(
+                    f"Cannot resume from {weights_file}: {name} has shape "
+                    f"{weights[name].shape}, but expected {expected_shape}. "
+                    "Delete or move the old checkpoint and retrain from scratch."
+                )
+        network.load_policy_weights(weights)
+
+
+def _create_network(*, device, weight_decay, seed):
+    return SupervisedNeuralNetwork(
+        input_size=DominoEncoder.VECTOR_SIZE,
+        hidden1_size=256,
+        hidden2_size=128,
+        output_size=DominoEncoder.ACTION_SIZE,
+        learning_rate=INITIAL_SUPERVISED_LEARNING_RATE,
+        weight_decay=weight_decay,
+        random_seed=seed,
+        device=device,
+    )
+
+
+def _is_gpu_startup_failure(exc):
+    """Return whether an exception came from CuPy/CUDA initialization."""
+    module_name = type(exc).__module__
+    return module_name.startswith("cupy") or module_name.startswith(
+        "cupy_backends"
+    )
 
 
 def train_supervised(
     epochs=EPOCHS,
-    batch_size=BATCH_SIZE,
+    batch_size=None,
     dataset_file="dataset/supervised_dataset.jsonl",
     weights_file="models/domino_sl_weights.npz",
     cache_file=ENCODED_CACHE_FILE,
@@ -291,202 +504,378 @@ def train_supervised(
     progress_callback=None,
     weight_decay=0.0,
     early_stopping_patience=None,
-    lr_decay_factor=None,
+    lr_decay_factor=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
+    lr_decay_patience=DEFAULT_SUPERVISED_LR_DECAY_PATIENCE,
+    device="auto",
+    autotune_batch_size=True,
+    memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
+    gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
+    seed=None,
 ):
-    """Train the supervised policy and return a compact run summary.
-
-    Regularization, early stopping, and learning-rate decay are opt-in. The
-    default call keeps a fixed learning rate and runs every requested epoch.
-    """
-    start_time = time.time()
-
+    """Train the policy and return scheduler, storage, tuning, and memory data."""
+    if epochs < 1:
+        raise ValueError("epochs must be positive")
+    started = time.time()
+    if seed is not None:
+        np.random.seed(seed)
     if not quiet:
-        print_memory_report("Supervised training startup memory")
+        print(f"Supervised training startup memory: {memory_report()}")
 
     encoder = DominoEncoder()
-    x_full, y_full = load_or_build_dataset(dataset_file, encoder, cache_file, quiet=quiet)
-
-    total_examples = x_full.shape[1]
-    train_count = int(total_examples * 0.85)
-    # Dataset games and actions are already generated in randomized order.
-    # Contiguous views avoid duplicating all four split matrices at peak RAM;
-    # the network still shuffles the training columns independently each epoch.
-    x_train = x_full[:, :train_count]
-    y_train = y_full[:, :train_count]
-    x_val = x_full[:, train_count:]
-    y_val = y_full[:, train_count:]
-    if not quiet:
-        print(f"Split complete: {x_train.shape[1]} train | {x_val.shape[1]} validation")
-
-    network = SupervisedNeuralNetwork(
-        input_size=DominoEncoder.VECTOR_SIZE,
-        hidden1_size=256,
-        hidden2_size=128,
-        output_size=len(encoder.all_actions),
-        learning_rate=0.005,
-        weight_decay=weight_decay,
+    dataset = load_or_build_dataset(
+        dataset_file,
+        encoder,
+        cache_file,
+        quiet=quiet,
+        memory_reserve_mb=memory_reserve_mb,
+        return_info=True,
     )
-
-    if os.path.exists(weights_file):
-        if not quiet:
-            print(f"Existing supervised model found at {weights_file}. Resuming training.")
-
-        with np.load(weights_file, allow_pickle=False) as weights:
-            expected_shapes = {
-                "W1": network.W1.shape,
-                "b1": network.b1.shape,
-                "W2": network.W2.shape,
-                "b2": network.b2.shape,
-                "W3": network.W3.shape,
-                "b3": network.b3.shape,
-            }
-
-            for name, expected_shape in expected_shapes.items():
-                if weights[name].shape != expected_shape:
-                    raise ValueError(
-                        f"Cannot resume from {weights_file}: {name} has shape "
-                        f"{weights[name].shape}, but expected {expected_shape}. "
-                        "Delete or move the old checkpoint and retrain from scratch."
-                    )
-
-            network.W1 = to_backend_array(weights["W1"])
-            network.b1 = to_backend_array(weights["b1"])
-            network.W2 = to_backend_array(weights["W2"])
-            network.b2 = to_backend_array(weights["b2"])
-            network.W3 = to_backend_array(weights["W3"])
-            network.b3 = to_backend_array(weights["b3"])
+    total_examples = dataset.x.shape[1]
+    train_count = int(total_examples * 0.85)
+    if total_examples == 1:
+        train_count = 1
     else:
-        if not quiet:
-            print("No existing supervised model found. Training from scratch.")
-        
-    best_state = {"validation_loss": float("inf"), "weights": None}
-    last_checkpoint_time = {"value": start_time}
+        train_count = max(1, min(train_count, total_examples - 1))
+    validation_count = total_examples - train_count
 
+    requested_device = device
+    selected_device, fallback_reason = choose_safe_supervised_device(
+        requested_device,
+        gpu_memory_reserve_mb,
+    )
+    try:
+        network = _create_network(
+            device=selected_device,
+            weight_decay=weight_decay,
+            seed=seed,
+        )
+    except Exception as exc:
+        if selected_device != "gpu" or not _is_gpu_startup_failure(exc):
+            raise
+        reason = f"GPU network initialization failed ({type(exc).__name__}: {exc})"
+        if requested_device == "gpu":
+            raise MemorySafetyError(
+                f"Cannot honor device='gpu': {reason}."
+            ) from exc
+        selected_device = "cpu"
+        fallback_reason = reason
+        network = _create_network(
+            device="cpu",
+            weight_decay=weight_decay,
+            seed=seed,
+        )
+    residency_probe = None
+    resident_capacity = None
 
-    def to_numpy(matrix):
-        return cp.asnumpy(matrix) if USE_GPU else matrix
+    if selected_device == "gpu":
+        if seed is not None:
+            network.xp.random.seed(seed)
+        residency_probe = probe_gpu_residency(
+            dataset.x,
+            dataset.y,
+            reserve_mb=gpu_memory_reserve_mb,
+        )
+        if residency_probe.capacity_examples < 1:
+            reason = (
+                "the first GPU dataset-residency candidate could not preserve "
+                "the configured VRAM reserve"
+            )
+            network.release_disposable_cache()
+            if requested_device == "gpu":
+                raise MemorySafetyError(f"Cannot honor device='gpu': {reason}.")
+            fallback_reason = reason
+            selected_device = "cpu"
+            network = _create_network(
+                device="cpu",
+                weight_decay=weight_decay,
+                seed=seed,
+            )
+        else:
+            resident_capacity = residency_probe.capacity_examples
 
-
-    def save_checkpoint(current_network, epoch, validation_loss):
-        """Save both an archival checkpoint and the active model used by UI/self-play."""
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-        os.makedirs(os.path.dirname(weights_file), exist_ok=True)
-
-        checkpoint_file = os.path.join(
-            CHECKPOINT_DIR,
-            f"domino_sl_epoch_{epoch:04d}_val_{validation_loss:.4f}.npz",
+    try:
+        data_plan = SupervisedDataPlan(
+            dataset.x,
+            dataset.y,
+            train_count=train_count,
+            host_storage_mode=dataset.storage_mode,
+            device=selected_device,
+            resident_capacity=resident_capacity,
+        )
+    except MemorySafetyError:
+        if requested_device != "auto" or selected_device != "gpu":
+            raise
+        fallback_reason = "the final GPU residency allocation was unsafe"
+        network.release_disposable_cache()
+        selected_device = "cpu"
+        network = _create_network(
+            device="cpu",
+            weight_decay=weight_decay,
+            seed=seed,
+        )
+        data_plan = SupervisedDataPlan(
+            dataset.x,
+            dataset.y,
+            train_count=train_count,
+            host_storage_mode=dataset.storage_mode,
+            device="cpu",
         )
 
-        weights_payload = {
-            "W1": to_numpy(current_network.W1),
-            "b1": to_numpy(current_network.b1),
-            "W2": to_numpy(current_network.W2),
-            "b2": to_numpy(current_network.b2),
-            "W3": to_numpy(current_network.W3),
-            "b3": to_numpy(current_network.b3),
-        }
+    if not quiet:
+        print(f"Supervised device: {selected_device}")
+        if fallback_reason:
+            print(f"Automatic supervised CPU fallback: {fallback_reason}.")
+        if selected_device == "gpu":
+            gpu_info = gpu_memory_info()
+            effective_free = effective_gpu_available_bytes()
+            if gpu_info is not None:
+                effective_text = (
+                    "unknown"
+                    if effective_free is None
+                    else f"{effective_free / MIB:.1f} MiB"
+                )
+                print(
+                    "GPU VRAM before supervised residency: "
+                    f"{gpu_info.available / MIB:.1f} MiB free / "
+                    f"{gpu_info.total / MIB:.1f} MiB total; "
+                    f"{effective_text} effective free."
+                )
+            print(
+                "GPU dataset residency: "
+                f"{data_plan.resident_window_examples:,} examples; "
+                f"mode={data_plan.storage_mode}; "
+                f"reserve={gpu_memory_reserve_mb} MiB."
+            )
+            if data_plan.full_upload_seconds is not None:
+                print(
+                    "One-time full-dataset GPU upload: "
+                    f"{data_plan.full_upload_seconds:.3f}s."
+                )
+        print(
+            f"Split complete: {train_count} train | "
+            f"{validation_count} validation"
+        )
 
-        np.savez(checkpoint_file, **weights_payload)
-        np.savez(weights_file, **weights_payload)
-        removed_checkpoints = _prune_supervised_checkpoints(CHECKPOINT_DIR)
+    if os.path.exists(weights_file):
+        _load_existing_weights(network, weights_file)
+        if not quiet:
+            print(f"Existing supervised model found at {weights_file}. Resuming training.")
+    elif not quiet:
+        print("No existing supervised model found. Training from scratch.")
 
+    fixed_batch = None
+    if batch_size is not None:
+        fixed_batch = int(batch_size)
+    elif not autotune_batch_size:
+        fixed_batch = (
+            DEFAULT_SUPERVISED_GPU_BATCH_SIZE
+            if selected_device == "gpu"
+            else DEFAULT_SUPERVISED_CPU_BATCH_SIZE
+        )
+
+    status_callback = None if quiet else print
+    autotuner = RetainedBatchAutotuner(
+        device=selected_device,
+        training_examples=train_count,
+        total_epochs=epochs,
+        preflight=lambda candidate: data_plan.batch_memory_preflight(
+            network,
+            candidate,
+            gpu_memory_reserve_mb
+            if selected_device == "gpu"
+            else memory_reserve_mb,
+        ),
+        enabled=autotune_batch_size and batch_size is None,
+        fixed_batch_size=fixed_batch,
+        epochs_per_candidate=SUPERVISED_BATCH_AUTOTUNE_EPOCHS,
+        status_callback=status_callback,
+    )
+
+    tracker = SupervisedResourceTracker(selected_device)
+    best_state = {"validation_loss": float("inf"), "weights": None}
+    last_checkpoint_time = {"value": started}
+
+    def save_checkpoint(current_network, epoch, validation_loss):
+        checkpoint_dir = Path(CHECKPOINT_DIR)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        weights_path = Path(weights_file)
+        weights_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_file = checkpoint_dir / (
+            f"domino_sl_epoch_{epoch:04d}_val_{validation_loss:.4f}.npz"
+        )
+        payload = _network_weight_payload(current_network)
+        np.savez(checkpoint_file, **payload)
+        np.savez(weights_path, **payload)
+        removed = _prune_supervised_checkpoints(checkpoint_dir)
         now = time.time()
         checkpoint_elapsed = now - last_checkpoint_time["value"]
         last_checkpoint_time["value"] = now
-
         if not quiet:
             print(
                 f"  -> Checkpoint saved to {checkpoint_file} "
-                f"(time since previous checkpoint: {format_duration(checkpoint_elapsed)})."
+                f"(time since previous checkpoint: "
+                f"{format_duration(checkpoint_elapsed)})."
             )
-            if removed_checkpoints:
+            if removed:
                 print(
-                    "  -> Removed "
-                    f"{len(removed_checkpoints)} older supervised checkpoint(s); "
-                    f"keeping the latest {MAX_SUPERVISED_CHECKPOINTS}."
+                    f"  -> Removed {len(removed)} older supervised "
+                    f"checkpoint(s); keeping the latest "
+                    f"{MAX_SUPERVISED_CHECKPOINTS}."
                 )
             print(f"  -> Active supervised model updated at {weights_file}.")
-        
+
     def save_if_best(epoch, validation_loss, current_network):
         if epoch % CHECKPOINT_EVERY == 0:
             save_checkpoint(current_network, epoch, validation_loss)
-
         if validation_loss < best_state["validation_loss"]:
             best_state["validation_loss"] = validation_loss
             best_state["weights"] = {
-                "W1": current_network.W1.copy(),
-                "b1": current_network.b1.copy(),
-                "W2": current_network.W2.copy(),
-                "b2": current_network.b2.copy(),
-                "W3": current_network.W3.copy(),
-                "b3": current_network.b3.copy(),
+                name: getattr(current_network, name).copy()
+                for name in current_network.weight_names
             }
             if not quiet:
-                print(f"  -> New best validation loss {validation_loss:.4f} at epoch {epoch}.")
+                print(
+                    f"  -> New best validation loss "
+                    f"{validation_loss:.4f} at epoch {epoch}."
+                )
 
+    x_train = dataset.x[:, :train_count]
+    y_train = dataset.y[:, :train_count]
+    x_val = dataset.x[:, train_count:] if validation_count else None
+    y_val = dataset.y[:, train_count:] if validation_count else None
     if not quiet:
         print("\nStarting supervised training...")
-    loss_history = network.train(
-        x_train,
-        y_train,
-        x_val=x_val,
-        y_val=y_val,
-        epochs=epochs,
-        batch_size=batch_size,
-        on_validation=save_if_best,
-        progress_callback=progress_callback,
-        quiet=quiet,
-        early_stopping_patience=early_stopping_patience,
-        lr_decay_factor=lr_decay_factor,
-    )
 
-    os.makedirs(os.path.dirname(weights_file), exist_ok=True)
-    weights_to_save = best_state["weights"] or {
-        "W1": network.W1,
-        "b1": network.b1,
-        "W2": network.W2,
-        "b2": network.b2,
-        "W3": network.W3,
-        "b3": network.b3,
-    }
+    epoch_metrics = []
 
-    np.savez(
-        weights_file,
-        W1=to_numpy(weights_to_save["W1"]),
-        b1=to_numpy(weights_to_save["b1"]),
-        W2=to_numpy(weights_to_save["W2"]),
-        b2=to_numpy(weights_to_save["b2"]),
-        W3=to_numpy(weights_to_save["W3"]),
-        b3=to_numpy(weights_to_save["b3"]),
-    )
-    if not quiet:
-        print(
-            f"Model saved to {weights_file} "
-            f"(best validation loss: {best_state['validation_loss']:.4f})."
+    def record_epoch_metrics(metrics):
+        epoch_metrics.append(metrics.copy())
+        tracker.observe()
+
+    try:
+        loss_history = network.train(
+            x_train,
+            y_train,
+            x_val=x_val,
+            y_val=y_val,
+            epochs=epochs,
+            batch_size=autotuner.current_batch_size,
+            on_validation=save_if_best,
+            progress_callback=progress_callback,
+            quiet=quiet,
+            early_stopping_patience=early_stopping_patience,
+            lr_decay_factor=lr_decay_factor,
+            lr_decay_patience=lr_decay_patience,
+            validation_interval=SUPERVISED_VALIDATION_INTERVAL_EPOCHS,
+            epoch_runner=data_plan.train_epoch,
+            validation_runner=data_plan.validation_loss,
+            batch_controller=autotuner,
+            epoch_metrics_callback=record_epoch_metrics,
         )
-    elapsed_time = time.time() - start_time
+        weights_path = Path(weights_file)
+        weights_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            weights_path,
+            **_network_weight_payload(network, best_state["weights"]),
+        )
+    finally:
+        tracker.observe()
+        data_plan.close()
+
+    elapsed = time.time() - started
+    tuning_summary = autotuner.to_dict()
+    training_summary = network.last_training_summary
+    resource_summary = tracker.to_dict()
+    if data_plan.peak_gpu_pool_used_bytes:
+        resource_summary["peak_gpu_pool_used_bytes"] = max(
+            resource_summary.get("peak_gpu_pool_used_bytes") or 0,
+            data_plan.peak_gpu_pool_used_bytes,
+        )
+    if data_plan.minimum_effective_free_vram_bytes is not None:
+        prior = resource_summary.get("minimum_effective_free_vram_bytes")
+        resource_summary["minimum_effective_free_vram_bytes"] = (
+            data_plan.minimum_effective_free_vram_bytes
+            if prior is None
+            else min(prior, data_plan.minimum_effective_free_vram_bytes)
+        )
+
     if not quiet:
-        print(f"Total elapsed time: {format_duration(elapsed_time)}.")
+        best_text = (
+            "unavailable"
+            if best_state["validation_loss"] == float("inf")
+            else f"{best_state['validation_loss']:.4f}"
+        )
+        print(f"Model saved to {weights_file} (best validation loss: {best_text}).")
+        if data_plan.storage_mode == "gpu_windowed":
+            rotations = [
+                metrics["window_rotations"] for metrics in epoch_metrics
+            ]
+            print(
+                "GPU window rotations: "
+                f"{sum(rotations)} total across {len(rotations)} epochs "
+                f"({min(rotations)}-{max(rotations)} per epoch)."
+            )
+        print(
+            "Supervised resource bounds: "
+            f"peak host RSS="
+            f"{_format_optional_mib(resource_summary['peak_host_rss_bytes'])}; "
+            f"minimum available host RAM="
+            f"{_format_optional_mib(resource_summary['minimum_available_host_ram_bytes'])}; "
+            f"peak CuPy pool="
+            f"{_format_optional_mib(resource_summary['peak_gpu_pool_used_bytes'])}; "
+            f"minimum effective free VRAM="
+            f"{_format_optional_mib(resource_summary['minimum_effective_free_vram_bytes'])}."
+        )
+        print(f"Total elapsed time: {format_duration(elapsed)}.")
 
     return {
         "epochs": len(loss_history),
         "requested_epochs": epochs,
-        "batch_size": batch_size,
+        "batch_size": tuning_summary["selected_batch_size"],
+        "selected_batch_size": tuning_summary["selected_batch_size"],
         "total_examples": total_examples,
-        "train_examples": x_train.shape[1],
-        "validation_examples": x_val.shape[1],
+        "train_examples": train_count,
+        "validation_examples": validation_count,
         "best_validation_loss": best_state["validation_loss"],
         "weight_decay": weight_decay,
         "early_stopping_patience": early_stopping_patience,
+        "requested_device": requested_device,
+        "selected_device": selected_device,
+        "device_fallback_reason": fallback_reason,
+        "host_storage_mode": dataset.storage_mode,
+        "storage_mode": data_plan.storage_mode,
+        "resident_window_examples": data_plan.resident_window_examples,
+        "full_dataset_on_gpu": data_plan.full_dataset_on_gpu,
+        "full_dataset_upload_seconds": data_plan.full_upload_seconds,
+        "batch_autotune_attempts": tuning_summary["attempts"],
+        "autotune_epochs_retained": tuning_summary["autotune_epochs_retained"],
+        "initial_learning_rate": training_summary["initial_learning_rate"],
+        "final_learning_rate": training_summary["final_learning_rate"],
         "lr_decay_factor": lr_decay_factor,
-        "final_learning_rate": network.lr,
+        "lr_decay_patience": lr_decay_patience,
+        "lr_decay_count": training_summary["lr_decay_count"],
+        **resource_summary,
+        "resource_usage": resource_summary,
+        "gpu_residency_probe": (
+            None
+            if residency_probe is None
+            else {
+                "capacity_examples": residency_probe.capacity_examples,
+                "full_dataset": residency_probe.full_dataset,
+                "attempts": residency_probe.attempts,
+                "minimum_effective_free_vram_bytes": (
+                    residency_probe.minimum_effective_free_vram_bytes
+                ),
+                "peak_pool_used_bytes": residency_probe.peak_pool_used_bytes,
+            }
+        ),
+        "epoch_metrics": epoch_metrics,
         "weights_file": weights_file,
-        "duration_s": elapsed_time,
+        "duration_s": elapsed,
     }
 
 
 def _nonnegative_float(value):
-    """Parse a non-negative command-line floating-point value."""
     parsed = float(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
@@ -494,24 +883,29 @@ def _nonnegative_float(value):
 
 
 def _positive_int(value):
-    """Parse a positive command-line integer value."""
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be greater than zero")
     return parsed
 
 
+def _nonnegative_int(value):
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
 def _decay_factor(value):
-    """Parse a multiplicative decay factor strictly between zero and one."""
     parsed = float(value)
     if not 0.0 < parsed < 1.0:
         raise argparse.ArgumentTypeError("value must be greater than 0 and less than 1")
     return parsed
 
 
-def add_optional_training_arguments(parser):
-    """Add opt-in SL regularization and scheduling flags to ``parser``."""
-    group = parser.add_argument_group("optional supervised-training controls")
+def add_optional_training_arguments(parser, *, include_device_alias=False):
+    """Add supervised regularization, device, memory, and tuning controls."""
+    group = parser.add_argument_group("supervised-training controls")
     group.add_argument(
         "--weight-decay",
         nargs="?",
@@ -519,10 +913,7 @@ def add_optional_training_arguments(parser):
         const=DEFAULT_WEIGHT_DECAY,
         default=0.0,
         metavar="COEFFICIENT",
-        help=(
-            "Enable L2 weight decay. When passed without a value, use "
-            f"{DEFAULT_WEIGHT_DECAY}."
-        ),
+        help=f"Enable L2 weight decay (shortcut value: {DEFAULT_WEIGHT_DECAY}).",
     )
     group.add_argument(
         "--early-stopping",
@@ -531,42 +922,98 @@ def add_optional_training_arguments(parser):
         const=DEFAULT_EARLY_STOPPING_PATIENCE,
         default=None,
         metavar="PATIENCE",
-        help=(
-            "Stop after this many validation checks without improvement. "
-            f"When passed without a value, use {DEFAULT_EARLY_STOPPING_PATIENCE}."
-        ),
+        help="Stop after this many validation checks without improvement.",
     )
-    group.add_argument(
+    decay = group.add_mutually_exclusive_group()
+    decay.add_argument(
         "--lr-decay",
         nargs="?",
         type=_decay_factor,
-        const=DEFAULT_LR_DECAY_FACTOR,
-        default=None,
+        const=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
+        default=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
         metavar="FACTOR",
-        help=(
-            "Multiply the learning rate by this factor after each failed "
-            "validation check. When omitted, keep the learning rate fixed."
-        ),
+        help="Plateau LR multiplier; enabled by default.",
+    )
+    decay.add_argument(
+        "--no-lr-decay",
+        action="store_const",
+        const=None,
+        dest="lr_decay",
+        help="Disable supervised plateau LR decay.",
+    )
+    group.add_argument(
+        "--lr-decay-patience",
+        type=_positive_int,
+        default=DEFAULT_SUPERVISED_LR_DECAY_PATIENCE,
+        help="Failed validation checks required before each LR reduction.",
+    )
+    group.add_argument(
+        "--sl-device",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Supervised array backend.",
+    )
+    if include_device_alias:
+        group.add_argument(
+            "--device",
+            choices=("auto", "cpu", "gpu"),
+            dest="sl_device",
+            help="Standalone alias for --sl-device.",
+        )
+    group.add_argument(
+        "--sl-batch-size",
+        type=_positive_int,
+        default=None,
+        help="Use a fixed supervised mini-batch and disable autotuning.",
+    )
+    group.add_argument(
+        "--sl-no-batch-autotune",
+        action="store_true",
+        help="Use the device default batch without retained autotuning.",
+    )
+    group.add_argument(
+        "--sl-memory-reserve-mb",
+        type=_nonnegative_int,
+        default=DATASET_MEMORY_RESERVE_MB,
+        help="Host RAM reserve for supervised data and CPU training.",
+    )
+    group.add_argument(
+        "--sl-gpu-memory-reserve-mb",
+        type=_nonnegative_int,
+        default=SUPERVISED_GPU_MEMORY_RESERVE_MB,
+        help="VRAM reserve for supervised GPU training.",
+    )
+    group.add_argument(
+        "--sl-seed",
+        type=int,
+        default=None,
+        help="Fix supervised initialization and shuffle randomness.",
     )
     return parser
 
 
 def parse_args(argv=None):
-    """Return optional supervised-training controls from the command line."""
     parser = argparse.ArgumentParser(
         description="Train the supervised-learning domino policy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    add_optional_training_arguments(parser)
+    add_optional_training_arguments(parser, include_device_alias=True)
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
     train_supervised(
+        batch_size=args.sl_batch_size,
         weight_decay=args.weight_decay,
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,
+        lr_decay_patience=args.lr_decay_patience,
+        device=args.sl_device,
+        autotune_batch_size=not args.sl_no_batch_autotune,
+        memory_reserve_mb=args.sl_memory_reserve_mb,
+        gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
+        seed=args.sl_seed,
     )
 
 

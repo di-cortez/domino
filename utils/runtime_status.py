@@ -96,13 +96,14 @@ def memory_report():
     return " | ".join(parts)
 
 
-def pipeline_compute_report(rl_requested_device="auto"):
+def pipeline_compute_report(
+    rl_requested_device="auto",
+    supervised_requested_device="auto",
+):
     """Describe pipeline backends and currently available RAM/VRAM.
 
-    Supervised training follows ``agents.nn.GPU_ENABLED``. The RL parent can
-    override that choice, while dataset, rollout, and diagnostic workers are
-    deliberately CPU-only. This function reports those distinctions before
-    the first long-running pipeline stage starts.
+    Supervised and RL parent training can choose independent devices, while
+    dataset, rollout, and diagnostic workers remain deliberately CPU-only.
     """
     from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON
 
@@ -122,11 +123,28 @@ def pipeline_compute_report(rl_requested_device="auto"):
     except Exception:
         pass
 
-    if GPU_ENABLED:
-        supervised = f"GPU ({gpu_name or 'CUDA device'}, CuPy {cupy_version})"
+    if supervised_requested_device == "cpu":
+        supervised = "CPU (forced)"
+    elif supervised_requested_device == "gpu" and GPU_ENABLED:
+        supervised = (
+            f"GPU ({gpu_name or 'CUDA device'}, CuPy {cupy_version}, forced; "
+            "512 MiB safety preflight pending)"
+        )
+    elif supervised_requested_device == "gpu":
+        reason = GPU_UNAVAILABLE_REASON or "CuPy is not installed"
+        supervised = f"GPU requested but unavailable: {reason}"
+    elif GPU_ENABLED and (
+        gpu_memory is None or gpu_memory["free"] >= 512 * MIB
+    ):
+        supervised = (
+            f"GPU ({gpu_name or 'CUDA device'}, CuPy {cupy_version}, auto; "
+            "memory preflight pending)"
+        )
     else:
         reason = GPU_UNAVAILABLE_REASON or "CuPy is not installed"
-        supervised = f"CPU (NumPy; GPU unavailable: {reason})"
+        if GPU_ENABLED:
+            reason = "less than the 512 MiB supervised VRAM reserve is free"
+        supervised = f"CPU (automatic fallback: {reason})"
 
     if rl_requested_device == "cpu":
         rl_parent = "CPU (forced)"

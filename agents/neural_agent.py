@@ -6,13 +6,8 @@ import numpy as np
 
 from agents.agent import Agent
 from agents.encoder import DominoEncoder
-from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
+from agents.nn import SupervisedNeuralNetwork
 from middleware.opponent_model import ExactOpponentModel
-
-if GPU_ENABLED:
-    import cupy as xp
-else:
-    xp = np
 
 
 class NeuralAgent(Agent):
@@ -29,7 +24,12 @@ class NeuralAgent(Agent):
         self.opponent_model = ExactOpponentModel()
 
     @classmethod
-    def load(cls, weights_path="models/domino_sl_weights.npz", epsilon=0.0):
+    def load(
+        cls,
+        weights_path="models/domino_sl_weights.npz",
+        epsilon=0.0,
+        device="auto",
+    ):
         """Build an agent from a NumPy ``.npz`` checkpoint."""
         with np.load(weights_path, allow_pickle=False) as data:
             hidden1_size, input_size = data["W1"].shape
@@ -53,9 +53,9 @@ class NeuralAgent(Agent):
                 hidden1_size=hidden1_size,
                 hidden2_size=hidden2_size,
                 output_size=output_size,
+                device=device,
             )
-            for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
-                setattr(network, name, xp.array(data[name]))
+            network.load_policy_weights(data)
 
         return cls(network, epsilon=epsilon)
 
@@ -74,11 +74,7 @@ class NeuralAgent(Agent):
             return random.choice(policy_actions)
 
         state["opponent_suit_probabilities"] = self.opponent_model.update(state)
-        x = self.encoder.encode_state(state)
-        if GPU_ENABLED:
-            x = xp.array(x)
-
-        probabilities = self.network.forward(x)
+        probabilities = self.network.forward(self.encoder.encode_state(state))
         if hasattr(probabilities, "get"):
             probabilities = probabilities.get()
 

@@ -337,6 +337,7 @@ def test_supervised_training_transfers_only_host_minibatches_to_backend():
         output_size=2,
         learning_rate=0.01,
         random_seed=7,
+        device="cpu",
     )
     x_train = host_np.ones((4, 5), dtype=float)
     y_train = host_np.zeros((2, 5), dtype=float)
@@ -363,7 +364,7 @@ def test_supervised_training_transfers_only_host_minibatches_to_backend():
     assert transferred_shapes
     assert max(shape[1] for shape in transferred_shapes) == 2
     assert network.cache["X"].shape == (4, 1)
-    assert isinstance(network.cache["X"], xp.ndarray)
+    assert isinstance(network.cache["X"], host_np.ndarray)
 
 
 def test_supervised_weight_decay_regularizes_weights_but_not_biases():
@@ -375,6 +376,7 @@ def test_supervised_weight_decay_regularizes_weights_but_not_biases():
         "output_size": 2,
         "learning_rate": 0.01,
         "random_seed": 11,
+        "device": "cpu",
     }
     plain = SupervisedNeuralNetwork(**common_args)
     regularized = SupervisedNeuralNetwork(**common_args, weight_decay=0.2)
@@ -405,8 +407,8 @@ def test_supervised_weight_decay_regularizes_weights_but_not_biases():
         )
 
 
-def test_supervised_early_stopping_and_lr_decay_are_opt_in():
-    """Stop and decay only after repeated non-improving validation checks."""
+def test_supervised_early_stopping_and_lr_decay_use_independent_counters():
+    """Early stopping may occur before the independent LR counter reaches five."""
     network = SupervisedNeuralNetwork(
         input_size=4,
         hidden1_size=5,
@@ -414,6 +416,7 @@ def test_supervised_early_stopping_and_lr_decay_are_opt_in():
         output_size=2,
         learning_rate=0.01,
         random_seed=13,
+        device="cpu",
     )
     x = host_np.ones((4, 5), dtype=float)
     y = host_np.zeros((2, 5), dtype=float)
@@ -433,15 +436,17 @@ def test_supervised_early_stopping_and_lr_decay_are_opt_in():
     )
 
     assert len(history) == 21
-    assert abs(network.lr - 0.0025) < 1e-12
+    assert abs(network.lr - 0.01) < 1e-12
 
 
 def test_supervised_regularization_cli_defaults_and_shortcuts():
-    """Keep every optional SL control disabled unless its flag is present."""
+    """Enable plateau decay by default while keeping other controls optional."""
     defaults = parse_supervised_args([])
     assert defaults.weight_decay == 0.0
     assert defaults.early_stopping is None
-    assert defaults.lr_decay is None
+    assert defaults.lr_decay == DEFAULT_LR_DECAY_FACTOR
+    assert defaults.lr_decay_patience == 5
+    assert defaults.sl_device == "auto"
 
     enabled = parse_supervised_args([
         "--weight-decay",
@@ -463,6 +468,10 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     assert custom.weight_decay == 0.0005
     assert custom.early_stopping == 8
     assert custom.lr_decay == 0.8
+
+    disabled = parse_supervised_args(["--no-lr-decay", "--device", "cpu"])
+    assert disabled.lr_decay is None
+    assert disabled.sl_device == "cpu"
 
     pipeline = parse_pipeline_args([
         "small",
@@ -1336,7 +1345,10 @@ def test_pipeline_compute_report_names_backends_and_memory():
 
     assert report.startswith("Pipeline compute resources: ")
     if GPU_ENABLED:
-        assert "supervised=GPU" in report
+        assert (
+            "supervised=GPU" in report
+            or "supervised=CPU (automatic fallback" in report
+        )
         assert GPU_UNAVAILABLE_REASON is None
     else:
         assert "supervised=CPU" in report
@@ -1377,7 +1389,7 @@ def main():
         ),
         (
             "supervised early stopping and LR decay",
-            test_supervised_early_stopping_and_lr_decay_are_opt_in,
+            test_supervised_early_stopping_and_lr_decay_use_independent_counters,
         ),
         (
             "supervised optional CLI controls",

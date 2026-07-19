@@ -6,8 +6,9 @@ Personal batch-training driver for the full pipeline described in
 1. generate supervised examples from heuristic-vs-heuristic games, using the
    `training.dataset_generator` module defaults, including retained automatic
    dataset-worker tuning;
-2. train the supervised neural policy, using the `training.training_loop`
-   module defaults (no CLI flags exist for this stage either);
+2. train the supervised neural policy with its default retained batch tuner and
+   plateau scheduler; the wrapper exposes device, memory, batch, seed, decay,
+   early-stopping, and weight-decay controls;
 3. refine that policy with a **BIG-scale** self-play reinforcement-learning
    run — 5x the default iteration count (1,000 x 5 = 5,000 iterations),
    matching the `big` scale in `run_pipeline.py`'s `SCALE_FACTORS`. This
@@ -31,8 +32,8 @@ Stage 1 (dataset generation) is left unparameterized by this wrapper, so it
 uses the standalone command's 30,000-game default and automatic worker tuner.
 The Python module itself accepts `--games`, `--output`, `--workers`, `--seed`,
 and memory-safety options when called directly. Stage 2 (supervised training)
-runs bare by default too, but accepts three opt-in convergence flags (below)
-that map straight to `training.training_loop`'s own optional flags. Use
+forwards the controls below to `training.training_loop`; LR decay is enabled by
+default with factor `0.5` and patience `5`. Use
 `--skip-dataset`/`--skip-sl`/`--skip-rl`/`--skip-diagnostics` to reuse existing
 artifacts across batch runs that only sweep RL hyperparameters.
 
@@ -46,9 +47,9 @@ average, not the raw log line.** Those reports' validated conclusions:
 
 - **SL**: stop on the validation curve, not a fixed epoch budget (early
   stopping), and decay the learning rate on a validation plateau instead of
-  holding it fixed — both already exist as `training.training_loop` flags and
-  are now forwarded by this script (`--sl-early-stopping-patience`,
-  `--sl-lr-decay-factor`, `--sl-weight-decay`).
+  holding it fixed. LR decay and early stopping have independent counters. The
+  script forwards `--sl-early-stopping-patience`, `--sl-lr-decay-factor`,
+  `--sl-lr-decay-patience`, `--sl-no-lr-decay`, and `--sl-weight-decay`.
 - **RL**: log the return standard deviation next to the mean (a shrinking
   value loss is ambiguous without it — it can mean either learning or just a
   low-variance batch), and use a trailing moving average of value loss and
@@ -128,8 +129,8 @@ train_script/run_training_pipeline.sh --skip-dataset --skip-sl \
 Every RL flag forwards directly to `python -m training.self_play`, which also
 accepts these same flags (see `training/self_play.py:add_optional_rl_arguments`).
 This wrapper does not expose dataset-generation controls; that stage uses the
-documented module defaults. Supervised training exposes only the three SL
-controls listed below.
+documented module defaults. Supervised controls map directly to the standalone
+training module.
 
 | Flag | Stage | Meaning | Default |
 |---|---|---|---|
@@ -162,8 +163,16 @@ controls listed below.
 | `--rl-estimated-worker-mb` | RL | Preflight memory estimate per worker | `256` |
 | `--rl-max-worker-rss-mb` | RL | Runtime RSS ceiling for one worker | `1024` |
 | `--sl-early-stopping-patience` | SL | Validation checks (every 10 epochs) without improvement before stopping | unset (off) |
-| `--sl-lr-decay-factor` | SL | LR multiplier applied on each validation check without improvement | unset (off) |
+| `--sl-lr-decay-factor` | SL | LR multiplier after a validation plateau | `0.5` |
+| `--sl-lr-decay-patience` | SL | Consecutive failed validation checks before each LR reduction | `5` |
+| `--sl-no-lr-decay` | SL | Disable the default plateau scheduler | off |
 | `--sl-weight-decay` | SL | L2 penalty on the weight matrices | unset (off) |
+| `--sl-device` | SL | `auto`, forced `cpu`, or required `gpu` | `auto` |
+| `--sl-batch-size` | SL | Fixed mini-batch size; bypasses tuning | unset |
+| `--sl-no-batch-autotune` | SL | Use the device default batch (CPU 1,024; GPU 2,048) | off |
+| `--sl-memory-reserve-mb` | SL | Host RAM kept free | `512` |
+| `--sl-gpu-memory-reserve-mb` | SL | Effective VRAM kept free | `512` |
+| `--sl-seed` | SL | Fix initialization and epoch permutations | unset |
 | `--diag-mode` | Diagnostics | Compatibility label; every value runs the same 5 agent-vs-random matchups | `complete` (BIG scale) |
 | `--diag-games` | Diagnostics | Games per evaluated matchup | `50000` (BIG scale: `10000 x 5`) |
 | `--diag-seed` | Diagnostics | Fix the RNG seed for the diagnostics games | unset |
@@ -233,6 +242,24 @@ diagnosis, follow **Linux GPU setup and verification** in the root README before
 starting a long batch. The pipeline startup line reports both training backends
 and current free/total RAM and VRAM before any workload begins.
 
+### Supervised retained batch tuning and storage
+
+`--sl-device auto` independently selects the supervised backend. It uses GPU
+only after the 512 MiB VRAM preflight and a no-update dataset-residency probe;
+automatic mode falls back to CPU, while explicit `gpu` fails before training.
+The tuner tests CPU batches from 1,024 or GPU batches from 2,048, doubling up to
+1,048,576 or the training-set size. Ten complete epochs per candidate update
+the live network and count toward progress. Selection uses synchronized median
+examples/second and requires at least 10% improvement.
+
+When safe, encoded arrays stay in host RAM; otherwise the training module uses
+an atomic disk-backed mmap cache. GPU runs upload the complete dataset once if
+it fits safely, or rotate global-permutation windows through reusable buffers.
+Use `--sl-batch-size N` for a fixed batch, or `--sl-no-batch-autotune` for the
+device default. Detailed standalone logs show all decisions; compact
+`run_pipeline.py` output keeps only its normal progress bar and one-line SL
+summary.
+
 ### Diagnostics stage and per-run output directories
 
 Step 4 wraps `python -m diagnostics.evaluate`, the same five agent-vs-random comparisons
@@ -268,7 +295,8 @@ just-trained checkpoint and wrote its comparison report to
 
 ```bash
 train_script/run_training_pipeline.sh --skip-dataset \
-    --sl-early-stopping-patience 5 --sl-lr-decay-factor 0.5 --sl-weight-decay 0.0001 \
+    --sl-early-stopping-patience 12 --sl-lr-decay-factor 0.5 \
+    --sl-lr-decay-patience 5 --sl-weight-decay 0.0001 \
     --rl-value-head --rl-normalize-advantages --rl-clip-grad-norm 2.0 \
     --rl-moving-average-window 10 --rl-seed 42 \
     --rl-weights-file models/domino_rl_weights_monitored.npz

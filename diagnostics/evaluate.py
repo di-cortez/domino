@@ -1,11 +1,11 @@
 """
-Run a selected diagnostics matrix for the supported domino agents.
+Evaluate every supported domino agent against the random baseline.
 
 This is the high-level diagnostics entry point. It intentionally delegates each
 single matchup to ``diagnostics.pairwise`` so the two-agent evaluator remains the
 only place that knows how to play games, summarize them, and write per-matchup
-artifacts. The optional mode controls whether the run uses a focused two-pair
-check, the historical four-agent matrix, or the complete five-agent matrix.
+artifacts. The optional historical mode name is retained for CLI compatibility;
+every mode now evaluates the same five agents against ``random``.
 """
 
 import argparse
@@ -17,6 +17,8 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -42,6 +44,7 @@ from diagnostics.parallel_runner import (
 from diagnostics.plots import (
     plot_aggregate_choice_opportunities,
     plot_all_pairs_table,
+    worst_case_margin_of_error,
 )
 from utils.runtime_status import format_duration, print_memory_report
 from diagnostics.worker_autotune import (
@@ -54,10 +57,15 @@ from diagnostics.worker_autotune import (
 DEFAULT_OUTPUT_DIR = ROOT / "diagnostics" / "results" / "all_pairs"
 DEFAULT_DIAGNOSTIC_MODE = "default"
 DIAGNOSTIC_MODES = ("default", "fast", "complete")
-DEFAULT_MATRIX_AGENTS = ("rl", "neural", "heuristic", "random")
-FAST_MATRIX_AGENTS = ("rl", "heuristic", "random")
-FAST_MATCHUPS = (("rl", "random"), ("heuristic", "random"))
+RANDOM_BASELINE_OPPONENT = "random"
+RANDOM_BASELINE_MATCHUPS = tuple(
+    (agent, RANDOM_BASELINE_OPPONENT)
+    for agent in CANONICAL_AGENTS
+)
 DEFAULT_DIAGNOSTIC_WORKERS = "auto"
+POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
+VALUE_WEIGHT_NAMES = ("Wv", "bv")
+RANDOM_NN_ARCHITECTURE = (168, 256, 128, 56)
 
 
 def _weights_for(agent_name, rl_weights=None, neural_weights=None):
@@ -111,23 +119,87 @@ def _save_matrix_csv(rows, path):
 
 
 def _selected_pairs(agents):
-    """Return only A-vs-B pairs from the upper triangle, keeping A-vs-A controls."""
-    return [
-        (agent, opponent)
-        for agent_index, agent in enumerate(agents)
-        for opponent in agents[agent_index:]
-    ]
+    """Return one random-baseline matchup for every selected agent."""
+    return tuple((agent, RANDOM_BASELINE_OPPONENT) for agent in agents)
 
 
 def diagnostic_plan(mode=DEFAULT_DIAGNOSTIC_MODE):
-    """Return the displayed agents and evaluated pairs for a diagnostics mode."""
-    if mode == "fast":
-        return FAST_MATRIX_AGENTS, FAST_MATCHUPS
-    if mode == "default":
-        return DEFAULT_MATRIX_AGENTS, tuple(_selected_pairs(DEFAULT_MATRIX_AGENTS))
-    if mode == "complete":
-        return CANONICAL_AGENTS, tuple(_selected_pairs(CANONICAL_AGENTS))
-    raise ValueError(f"Unknown diagnostics mode {mode!r}. Options: {DIAGNOSTIC_MODES}")
+    """Return the fixed five-agent random-baseline plan for any valid mode."""
+    if mode not in DIAGNOSTIC_MODES:
+        raise ValueError(
+            f"Unknown diagnostics mode {mode!r}. Options: {DIAGNOSTIC_MODES}"
+        )
+    return CANONICAL_AGENTS, RANDOM_BASELINE_MATCHUPS
+
+
+def _checkpoint_network_metadata(agent, weights_path):
+    """Describe one checkpoint architecture without constructing its agent."""
+    path = Path(weights_path)
+    with np.load(path, allow_pickle=False) as weights:
+        architecture = [
+            int(weights["W1"].shape[1]),
+            int(weights["W1"].shape[0]),
+            int(weights["W2"].shape[0]),
+            int(weights["W3"].shape[0]),
+        ]
+        available_names = set(weights.files)
+        policy_parameters = sum(
+            int(weights[name].size)
+            for name in POLICY_WEIGHT_NAMES
+        )
+        value_head = all(name in available_names for name in VALUE_WEIGHT_NAMES)
+        value_parameters = (
+            sum(int(weights[name].size) for name in VALUE_WEIGHT_NAMES)
+            if value_head
+            else 0
+        )
+    return {
+        "agent": agent,
+        "architecture": architecture,
+        "policy_parameters": policy_parameters,
+        "value_head": value_head,
+        "value_parameters": value_parameters,
+        "total_parameters": policy_parameters + value_parameters,
+        "checkpoint": str(path),
+        "checkpoint_name": path.name,
+        "checkpoint_bytes": path.stat().st_size,
+    }
+
+
+def _network_metadata(agents, matchup_specs):
+    """Collect compact architecture metadata for neural agents in the report."""
+    checkpoint_paths = {
+        matchup.agent: matchup.weights
+        for matchup in matchup_specs
+        if matchup.weights is not None
+    }
+    metadata = {}
+    for agent in ("rl", "neural"):
+        if agent in agents and agent in checkpoint_paths:
+            metadata[agent] = _checkpoint_network_metadata(
+                agent,
+                checkpoint_paths[agent],
+            )
+
+    if "random_nn" in agents:
+        architecture = list(RANDOM_NN_ARCHITECTURE)
+        policy_parameters = (
+            architecture[1] * architecture[0] + architecture[1]
+            + architecture[2] * architecture[1] + architecture[2]
+            + architecture[3] * architecture[2] + architecture[3]
+        )
+        metadata["random_nn"] = {
+            "agent": "random_nn",
+            "architecture": architecture,
+            "policy_parameters": policy_parameters,
+            "value_head": False,
+            "value_parameters": 0,
+            "total_parameters": policy_parameters,
+            "checkpoint": None,
+            "checkpoint_name": None,
+            "initialization": "untrained fixed seed 0",
+        }
+    return metadata
 
 
 def _remove_stale_pair_outputs(pairs_dir, pairs):
@@ -193,8 +265,9 @@ def run_all_pairs(
 ):
     """Evaluate one diagnostics mode and write its aggregate artifacts.
 
-    Passing ``agents`` retains support for custom upper-triangle matrices. When
-    omitted, ``diagnostic_mode`` selects one of the standard plans.
+    Passing ``agents`` retains support for a custom subset, but every selected
+    agent is still evaluated only against the random baseline. When omitted,
+    all five canonical agents are evaluated for every historical mode name.
     """
     if game_count < 1:
         raise ValueError("game_count must be positive")
@@ -219,7 +292,7 @@ def run_all_pairs(
     final_output_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if not quiet:
-        print_memory_report("All-pairs diagnostics startup memory")
+        print_memory_report("Agent-vs-random diagnostics startup memory")
 
     summaries = []
     total_pairs = len(pairs)
@@ -245,6 +318,7 @@ def run_all_pairs(
             opponent_weights=resolve_weights_path(opponent, resolved_opponent_weights),
         ))
     matchup_specs = tuple(matchup_specs)
+    network_metadata = _network_metadata(agents, matchup_specs)
 
     output_dir = Path(tempfile.mkdtemp(
         prefix=f".{final_output_dir.name}.tmp-",
@@ -362,10 +436,13 @@ def run_all_pairs(
     report = {
         "choice_opportunities": choice_opportunities,
         "diagnostic_mode": report_mode,
+        "comparison_opponent": RANDOM_BASELINE_OPPONENT,
+        "report_layout": "single_row",
         "agents": list(agents),
         "game_count_per_matchup": game_count,
         "evaluated_matchups": total_pairs,
-        "unevaluated_matrix_matchups": len(agents) * len(agents) - total_pairs,
+        # Retained as a zero-valued compatibility field for older report readers.
+        "unevaluated_matrix_matchups": 0,
         "seed": seed,
         "effective_seed": effective_seed,
         "requested_workers": workers,
@@ -380,13 +457,30 @@ def run_all_pairs(
             "matchups": autotune_by_matchup,
         },
         "duration_s": time.time() - start_time,
+        "win_rate_margin_of_error_95": {
+            "method": "normal approximation, worst case p=0.5",
+            "proportion": worst_case_margin_of_error(game_count),
+            "percentage_points": 100 * worst_case_margin_of_error(game_count),
+        },
+        "network_metadata": network_metadata,
         "summaries": summaries,
     }
     try:
         _save_matrix_csv(rows, output_dir / "all_pairs_matrix.csv")
         with open(output_dir / "all_pairs_summary.json", "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
-        plot_all_pairs_table(summaries, agents, output_dir / "all_pairs_table.png")
+        plot_all_pairs_table(
+            summaries,
+            agents,
+            output_dir / "all_pairs_table.png",
+            report_metadata=report,
+        )
+        plot_all_pairs_table(
+            summaries,
+            agents,
+            output_dir / "all_pairs_table.pdf",
+            report_metadata=report,
+        )
         plot_aggregate_choice_opportunities(
             choice_opportunities,
             output_dir / "choice_opportunities.png",
@@ -414,9 +508,9 @@ def _worker_count(value):
 
 
 def main():
-    """Parse the diagnostics CLI and run the selected matchup matrix."""
+    """Parse the CLI and run the fixed agent-vs-random comparisons."""
     parser = argparse.ArgumentParser(
-        description="Evaluate a selected matrix of supported domino agents.",
+        description="Evaluate every supported domino agent against random.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -425,8 +519,8 @@ def main():
         choices=DIAGNOSTIC_MODES,
         default=DEFAULT_DIAGNOSTIC_MODE,
         help=(
-            "Diagnostic scope: default uses the historical 10 matchups, fast "
-            "uses 2 focused matchups, and complete uses all 15 matchups."
+            "Compatibility label only; every mode evaluates all five agents "
+            "against random."
         ),
     )
     parser.add_argument(
@@ -443,7 +537,10 @@ def main():
     parser.add_argument(
         "--no-pair-plots",
         action="store_true",
-        help="Skip the per-matchup PNG plots. The aggregate table image is still generated.",
+        help=(
+            "Skip per-matchup PNG plots. The aggregate PNG and PDF are still "
+            "generated."
+        ),
     )
     parser.add_argument(
         "-j",
@@ -477,18 +574,19 @@ def main():
         autotune_minimum_gain=args.autotune_min_gain,
     )
 
-    print("\n===== All-pairs diagnostics complete =====")
+    print("\n===== Agent-vs-random diagnostics complete =====")
     print(f"Mode: {report['diagnostic_mode']}")
     print(f"Agents: {', '.join(report['agents'])}")
     print(f"Games per matchup: {report['game_count_per_matchup']}")
     print(f"Evaluated matchups: {report['evaluated_matchups']}")
-    print(f"Unevaluated matrix matchups: {report['unevaluated_matrix_matchups']}")
+    print(f"Comparison opponent: {report['comparison_opponent']}")
     print(f"Elapsed time: {format_duration(report['duration_s'])}")
     print("Diagnostic workers selected per matchup:")
     for matchup, worker_count in report["selected_workers_by_matchup"].items():
         print(f"  {matchup}: {worker_count}")
     print(f"Results saved in {Path(args.output)}/")
     print("  all_pairs_table.png")
+    print("  all_pairs_table.pdf")
     print("  choice_opportunities.png")
     print("  all_pairs_matrix.csv")
     print("  all_pairs_summary.json")

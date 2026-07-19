@@ -252,7 +252,7 @@ def _diagnostic_workload(config):
 
 
 def _run_diagnostics(config, args, rl_weights, neural_weights):
-    """Run the all-pairs diagnostics matrix with one aggregate progress bar."""
+    """Run the five agent-vs-random diagnostics with one progress bar."""
     evaluate, matchup_count, total_games = _diagnostic_workload(config)
 
     def diagnostic_status(message):
@@ -293,7 +293,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
             "Run dataset generation, supervised training, RL self-play, and "
-            "all-pairs diagnostics with compact progress output."
+            "agent-vs-random diagnostics with compact progress output."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

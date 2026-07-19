@@ -2,9 +2,9 @@
 Evaluate one domino agent against another and write compact diagnostics.
 
 This module is the pairwise diagnostics helper. The high-level entry point
-``diagnostics.evaluate`` calls this module repeatedly to build a complete
-all-pairs matrix, but this file can still be executed directly when only one
-matchup is needed:
+``diagnostics.evaluate`` calls this module repeatedly to compare every agent
+with the common random baseline, but this file can still be executed directly
+when only one matchup is needed:
 
     python -m diagnostics.pairwise --agent heuristic --opponent random
 

@@ -22,16 +22,17 @@ and `huge` uses twenty times the default counts. The scaled counts apply to
 dataset games, supervised epochs, RL iterations, and diagnostic games per
 matchup. RL games per iteration stay at 40 so the scale remains linear.
 The default dataset workload is 10,000 heuristic-vs-heuristic games.
-Diagnostics counts are per matchup, and their mode depends on pipeline scale:
+Diagnostics counts are per matchup. Mode labels remain compatible with older
+commands, but all scales evaluate the same five agents against `random`:
 
 | Pipeline scale | Diagnostic mode | Matchups |
 |---|---|---:|
-| `small` | `fast` | 2 |
-| `default` | `default` | 10 |
-| `big` | `complete` | 15 |
-| `huge` | `complete` | 15 |
+| `small` | `fast` | 5 |
+| `default` | `default` | 5 |
+| `big` | `complete` | 5 |
+| `huge` | `complete` | 5 |
 
-For example, `small` runs 2,000 games in each of 2 matchups, for 4,000
+For example, `small` runs 2,000 games in each of 5 matchups, for 10,000
 diagnostic games in total.
 
 | File | Purpose |

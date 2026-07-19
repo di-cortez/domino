@@ -1,8 +1,9 @@
 # Diagnostics
 
-Diagnostics compare agents over many two-player domino games and write compact
-metrics, CSV data, and plots. Three modes control the number of matchups without
-changing the number of games played inside each selected matchup.
+Diagnostics compare every supported agent with the same random baseline over
+many two-player domino games and write compact metrics, CSV data, and plots.
+Historical mode names remain accepted, but they no longer change the matchup
+set.
 
 ## Supported Agents
 
@@ -24,9 +25,9 @@ The mode is an optional positional argument:
 
 | Command | Matchups |
 |---|---:|
-| `python -m diagnostics.evaluate` | 10: the historical upper triangle for `rl`, `neural`, `heuristic`, and `random`. |
-| `python -m diagnostics.evaluate fast` | 2: `rl` vs `random` and `heuristic` vs `random`. |
-| `python -m diagnostics.evaluate complete` | 15: the full upper triangle including `random_nn`. |
+| `python -m diagnostics.evaluate` | 5: every supported agent vs `random`. |
+| `python -m diagnostics.evaluate fast` | 5: every supported agent vs `random`. |
+| `python -m diagnostics.evaluate complete` | 5: every supported agent vs `random`. |
 
 Every mode uses 10,000 games per matchup by default. Change that count with
 `-n`:
@@ -75,11 +76,24 @@ do not belong to the selected mode, keeping its contents internally consistent.
 
 | File or folder | Contents |
 |---|---|
-| `all_pairs_table.png` | Triangular image table with one win-rate number per evaluated matchup. |
+| `all_pairs_table.png` | Metadata-rich one-row comparison of all five agents against random. |
+| `all_pairs_table.pdf` | Vector PDF version of the same aggregate comparison. |
 | `choice_opportunities.png` | Aggregate histogram of draw/pass/choice opportunities across all evaluated matchups. |
 | `all_pairs_matrix.csv` | One row per evaluated matchup. |
 | `all_pairs_summary.json` | Full aggregate report with `selected_workers_by_matchup`, per-matchup retained autotuning reports, accumulated choice-opportunity stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
+
+The aggregate PNG/PDF header records mode, games per matchup, total games,
+elapsed evaluation time, seed, selected workers, checkpoint names, neural
+architectures, parameter counts, and whether the RL checkpoint contains a
+value head. It also reports the 95% worst-case percentage margin of error as
+`sqrt(0.9604 / n)`, rounded to two significant digits, where `n` is the games
+per matchup.
+
+Win-rate cells use red-to-blue intensity bands at five-percentage-point
+intervals: `<30%`, `30–35%`, ..., `65–70%`, and `≥70%`. This makes both weak
+and strong deviations from 50% visible without changing the underlying
+numeric percentages.
 
 ## Pairwise Helper
 

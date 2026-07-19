@@ -7,8 +7,8 @@
 #      iteration count used by run_pipeline.py's "big" scale), with RL
 #      hyperparameters overridable from the command line so the same script
 #      can drive repeated batch runs that only vary the RL stage;
-#   4. run the all-pairs diagnostics matrix (heuristic/neural/rl vs random and
-#      in self-play), mirroring `run_pipeline.py`'s diagnostics stage at the
+#   4. compare all five supported agents with the random baseline, mirroring
+#      `run_pipeline.py`'s diagnostics stage at the
 #      same BIG scale, writing results to a subdirectory of
 #      `diagnostics/results/` named after the RL weights file this run
 #      produced (or reused), so repeated batch runs that vary RL
@@ -27,7 +27,7 @@
 # Stage 3 wraps `python -m training.self_play`, which does accept CLI flags
 # (iterations, games-per-iteration, learning rate, reward schema, gamma,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
-# passing the RL/SL weights this run used so the matrix evaluates the correct
+# passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
 # default paths. This script only chains the four stages and forwards flags
 # through; see `training/self_play.py add_optional_rl_arguments` and
@@ -118,7 +118,7 @@ usage() {
 Run the domino training pipeline: dataset generation -> supervised training
 (both with README/module defaults) -> a BIG-scale self-play RL run ($BASE_RL_ITERATIONS
 x ${BIG_SCALE_FACTOR} = $RL_ITERATIONS iterations by default, matching run_pipeline.py's
-"big" scale) -> the all-pairs diagnostics matrix at the same BIG scale
+"big" scale) -> five agent-vs-random diagnostics at the same BIG scale
 ($BASE_DIAGNOSTIC_GAMES x ${BIG_SCALE_FACTOR} = $DIAG_GAMES games per matchup by default,
 mode "$DIAG_MODE"), written to diagnostics/results/<rl-weights-basename>/.
 
@@ -160,18 +160,18 @@ SL convergence monitoring (unset by default -> bare README invocation):
   --sl-lr-decay-factor F          LR multiplier applied on each validation check without improvement
   --sl-weight-decay F              L2 penalty on the weight matrices
 
-All-pairs diagnostics (forwarded to diagnostics.evaluate, mirrors run_pipeline.py):
-  --diag-mode NAME              "default" (10 matchups), "fast" (2), or "complete" (15 matchups) (default: $DIAG_MODE)
+Agent-vs-random diagnostics (forwarded to diagnostics.evaluate, mirrors run_pipeline.py):
+  --diag-mode NAME              Compatibility label; every value runs the same 5 matchups (default: $DIAG_MODE)
   --diag-games N                Games per evaluated matchup (default: $DIAG_GAMES)
   --diag-seed N                 Fix the RNG seed for the diagnostics games (default: unset)
-  --diag-no-pair-plots          Skip the per-matchup PNG plots (the aggregate table image is still generated)
+  --diag-no-pair-plots          Skip per-matchup PNG plots (the aggregate PNG and PDF are still generated)
   --diag-output-dir PATH        Override the diagnostics output directory (default: diagnostics/results/<rl-weights-basename>/)
 
 Stage control:
   --skip-dataset                Skip dataset generation (reuse an existing dataset file)
   --skip-sl                     Skip supervised training (reuse an existing SL weights file)
   --skip-rl                     Skip self-play reinforcement learning
-  --skip-diagnostics            Skip the all-pairs diagnostics stage
+  --skip-diagnostics            Skip the agent-vs-random diagnostics stage
 
   -h, --help                   Show this help message and exit
 
@@ -345,9 +345,9 @@ else
 fi
 
 if [[ "$SKIP_DIAGNOSTICS" -eq 1 ]]; then
-    section "Step 4/4: all-pairs diagnostics (skipped)"
+    section "Step 4/4: agent-vs-random diagnostics (skipped)"
 else
-    section "Step 4/4: all-pairs diagnostics ($DIAG_MODE mode, $DIAG_GAMES games/matchup -> $DIAG_OUTPUT_DIR/)"
+    section "Step 4/4: agent-vs-random diagnostics ($DIAG_MODE mode, $DIAG_GAMES games/matchup -> $DIAG_OUTPUT_DIR/)"
     DIAG_EXTRA_ARGS=()
     if [[ -n "$DIAG_SEED" ]]; then
         DIAG_EXTRA_ARGS+=(--seed "$DIAG_SEED")

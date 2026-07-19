@@ -51,7 +51,7 @@ and visual UI can be changed independently.
 | `training/dataset_parallel.py` | Plays independent heuristic-vs-heuristic dataset games in a bounded CPU-only worker pool. |
 | `training/training_loop.py` | Trains supervised weights, skips forced labels, and saves the best validation checkpoint. |
 | `training/self_play.py` | Refines the RL policy with direct REINFORCE and decayed draw/pass reward shaping. |
-| `diagnostics/evaluate.py` | Runs the upper-triangle all-pairs diagnostic matrix. |
+| `diagnostics/evaluate.py` | Evaluates all five supported agents against the common random baseline. |
 | `diagnostics/pairwise.py` | Helper for evaluating one agent against another and writing `summary.json`, `games.csv`, and plots. |
 | `diagnostics/hyperparameter_sweep.py` | Trains an RL checkpoint per sweep point (one hyperparameter varied at a time, critic on and off) and appends its diagnostics to a single JSON log. |
 | `diagnostics/rl_sweep_table.py` | Joins sweep hyperparameters with rl-vs-random results; raw CSV/JSON keep every model, while the compact PNG pivots games-per-iteration into 40/80/160 win-rate columns. |
@@ -161,10 +161,11 @@ With no argument, the runner uses the normal defaults: 10,000 dataset games,
 1,000 supervised epochs, 1,000 RL iterations, and 10,000 diagnostic games per
 matchup. `small` uses one fifth of those counts, `big` uses five times those
 counts, and `huge` uses twenty times those counts. RL keeps 40 games per
-iteration so the scale changes total RL iterations linearly. Pipeline diagnostic
-modes are selected automatically: `small` uses `fast` (2 matchups), the default
-pipeline uses `default` (10), and `big`/`huge` use `complete` (15). Diagnostic
-game counts are always specified per matchup.
+iteration so the scale changes total RL iterations linearly. Historical mode
+labels remain (`fast`, `default`, and `complete`), but every pipeline scale now
+uses the same five matchups: each of `rl`, `neural`, `random_nn`, `heuristic`,
+and `random` against `random`. Diagnostic game counts are specified per
+matchup.
 
 Dataset generation and diagnostics automatically benchmark CPU-only worker
 counts 1, 2, 4, 6, ... up to the hard limit of 20. Dataset attempts each use
@@ -240,8 +241,7 @@ Generated files:
 
 ## Diagnostics
 
-Run diagnostics with 10,000 games per selected matchup. With no mode argument,
-the historical four-agent upper triangle runs 10 matchups:
+Run all five agents against `random`, with 10,000 games per matchup by default:
 
 ```bash
 python -m diagnostics.evaluate
@@ -254,8 +254,7 @@ python -m diagnostics.evaluate fast --workers auto --seed 123
 Supported names are `rl`, `neural`, `random_nn`, `heuristic`, and `random`.
 `random_nn` uses the supervised network architecture with reproducible random
 initial weights and no checkpoint. The old `greedy` baseline is no longer part
-of diagnostics. The `random_nn` agent enters the automatic matrix only in
-`complete` mode, but remains available to the pairwise helper in every mode.
+of diagnostics. `random_nn` is included in every automatic diagnostic mode.
 
 The full diagnostic writes to `diagnostics/results/all_pairs/` unless `--output`
 is provided. Pair evaluation uses a progress bar. The aggregate report records
@@ -263,6 +262,7 @@ is provided. Pair evaluation uses a progress bar. The aggregate report records
 `duration_s`; pair summaries also include `duration_s`:
 
 - `all_pairs_table.png`
+- `all_pairs_table.pdf`
 - `choice_opportunities.png`
 - `all_pairs_matrix.csv`
 - `all_pairs_summary.json`

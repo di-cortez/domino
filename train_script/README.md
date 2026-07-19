@@ -13,8 +13,8 @@ Personal batch-training driver for the full pipeline described in
    matching the `big` scale in `run_pipeline.py`'s `SCALE_FACTORS`. This
    stage is fully parameterized from the command line so the script can drive
    repeated batch runs that only vary RL hyperparameters;
-4. run the **all-pairs diagnostics matrix** (`diagnostics.evaluate`) —
-   heuristic/neural/rl vs random and in self-play — evaluating the exact
+4. run the **five agent-vs-random diagnostics** (`diagnostics.evaluate`) —
+   evaluating the exact
    RL/SL checkpoints this run used, at the same BIG scale as the RL stage
    (`run_pipeline.py` maps its `big` scale to `diagnostic_mode="complete"`
    and scales `BASE_DIAGNOSTIC_GAMES=10000` by the scale factor; this script
@@ -158,15 +158,15 @@ controls listed below.
 | `--sl-early-stopping-patience` | SL | Validation checks (every 10 epochs) without improvement before stopping | unset (off) |
 | `--sl-lr-decay-factor` | SL | LR multiplier applied on each validation check without improvement | unset (off) |
 | `--sl-weight-decay` | SL | L2 penalty on the weight matrices | unset (off) |
-| `--diag-mode` | Diagnostics | `default` (10 matchups), `fast` (2), or `complete` (15 matchups) | `complete` (BIG scale) |
+| `--diag-mode` | Diagnostics | Compatibility label; every value runs the same 5 agent-vs-random matchups | `complete` (BIG scale) |
 | `--diag-games` | Diagnostics | Games per evaluated matchup | `50000` (BIG scale: `10000 x 5`) |
 | `--diag-seed` | Diagnostics | Fix the RNG seed for the diagnostics games | unset |
-| `--diag-no-pair-plots` | Diagnostics | Skip the per-matchup PNG plots (the aggregate table image is still generated) | off (plots on) |
+| `--diag-no-pair-plots` | Diagnostics | Skip per-matchup PNG plots (the aggregate PNG and PDF are still generated) | off (plots on) |
 | `--diag-output-dir` | Diagnostics | Override the output directory | `diagnostics/results/<rl-weights-basename>/` |
 | `--skip-dataset` | control | Skip dataset generation (reuse an existing dataset file) | off |
 | `--skip-sl` | control | Skip supervised training (reuse an existing SL weights file) | off |
 | `--skip-rl` | control | Skip self-play reinforcement learning | off |
-| `--skip-diagnostics` | control | Skip the all-pairs diagnostics stage | off |
+| `--skip-diagnostics` | control | Skip the agent-vs-random diagnostics stage | off |
 
 ### The critic (value-head) toggle
 
@@ -208,7 +208,7 @@ array backend: numpy (device='cpu')` and completed correctly.
 
 ### Diagnostics stage and per-run output directories
 
-Step 4 wraps `python -m diagnostics.evaluate`, the same all-pairs matrix
+Step 4 wraps `python -m diagnostics.evaluate`, the same five agent-vs-random comparisons
 `run_pipeline.py` runs after RL training (`diagnostics/evaluate.py::run_all_pairs`),
 passing `--rl-weights`/`--neural-weights` explicitly so it evaluates the exact
 checkpoints this invocation trained or reused, rather than falling back to
@@ -226,15 +226,15 @@ Every invocation gets its own output directory —
 `--rl-weights-file`) — instead of the single shared `all_pairs/` directory
 `run_pipeline.py` always writes to. A batch of runs that only vary
 `--rl-weights-file` per configuration therefore keeps every configuration's
-matrix, CSV, and plots side by side instead of the next run overwriting the
-last one. Override the computed path directly with `--diag-output-dir` if
-needed.
+comparison table, CSV, and plots side by side instead of the next run
+overwriting the last one. Override the computed path directly with
+`--diag-output-dir` if needed.
 
 This was verified end-to-end with a tiny run (`--diag-mode fast --diag-games 3
 --diag-no-pair-plots --diag-seed 7`, `--rl-weights-file
 models/smoke_test_rl_weights.npz`) chained after a tiny RL stage with
 `--skip-dataset --skip-sl`: the diagnostics stage correctly evaluated the
-just-trained checkpoint and wrote its matrix to
+just-trained checkpoint and wrote its comparison report to
 `diagnostics/results/smoke_test_rl_weights/`.
 
 ### Monitored batch run example
@@ -433,16 +433,14 @@ hyperparameters with its rl-vs-random win/draw/loss rates and writes:
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.csv`
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.json`
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.png` -- an image table,
-  mirroring `diagnostics/evaluate.py`'s all-pairs matrix output
-  (`_matrix_rows`/`_save_matrix_csv`/`plot_all_pairs_table`)
+  using the same visual style as the aggregate diagnostics report
 
 The CSV and JSON retain one row per trained model, including its exact
 games-per-iteration value and checkpoint path. The PNG and console table group
 models that differ only in games per iteration into one row with win-rate
 columns labelled `40`, `80`, and `160`. Critic, learning rate, gamma, and
-value coefficient remain row dimensions. Percentage cells use the same
-win-rate shading as the all-pairs matrix (light blue >= 60%, light orange <=
-40%).
+value coefficient remain row dimensions. Percentage cells use red/blue
+win-rate shading around the neutral 50% region.
 
 The `40`, `80`, and `160` columns are a side-by-side comparison, not an
 assumed ranking. Larger training batches usually reduce gradient noise, but

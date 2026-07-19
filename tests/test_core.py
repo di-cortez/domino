@@ -1314,13 +1314,13 @@ def test_diagnostic_modes_select_expected_matchups():
     fast_agents, fast_matchups = diagnostic_plan("fast")
     complete_agents, complete_matchups = diagnostic_plan("complete")
 
-    assert default_agents == ("rl", "neural", "heuristic", "random")
-    assert len(default_matchups) == 10
-    assert "random_nn" not in default_agents
-    assert fast_agents == ("rl", "heuristic", "random")
-    assert fast_matchups == (("rl", "random"), ("heuristic", "random"))
+    expected_matchups = tuple((agent, "random") for agent in CANONICAL_AGENTS)
+    assert default_agents == CANONICAL_AGENTS
+    assert fast_agents == CANONICAL_AGENTS
     assert complete_agents == CANONICAL_AGENTS
-    assert len(complete_matchups) == 15
+    assert default_matchups == expected_matchups
+    assert fast_matchups == expected_matchups
+    assert complete_matchups == expected_matchups
 
 
 def test_pipeline_scales_select_expected_diagnostic_modes():

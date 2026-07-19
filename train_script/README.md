@@ -256,9 +256,10 @@ When safe, encoded arrays stay in host RAM; otherwise the training module uses
 an atomic disk-backed mmap cache. GPU runs upload the complete dataset once if
 it fits safely, or rotate global-permutation windows through reusable buffers.
 Use `--sl-batch-size N` for a fixed batch, or `--sl-no-batch-autotune` for the
-device default. Detailed standalone logs show all decisions; compact
-`run_pipeline.py` output keeps only its normal progress bar and one-line SL
-summary.
+device default. Detailed standalone logs show all decisions. `run_pipeline.py`
+keeps per-epoch/checkpoint details suppressed, but prints the concise retained
+batch tests (median time, total time, throughput, gain, decision, and selected
+size) around its normal progress bar and one-line SL summary.
 
 ### Diagnostics stage and per-run output directories
 

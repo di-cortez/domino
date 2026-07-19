@@ -175,6 +175,12 @@ def _run_supervised_training(config, args):
     """Train the supervised policy with compact epoch progress."""
     training_loop = _silent_import("training.training_loop")
 
+    def supervised_status(message):
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
+
     return _run_stage(
         "Supervised training",
         config.supervised_epochs,
@@ -184,6 +190,7 @@ def _run_supervised_training(config, args):
             batch_size=args.sl_batch_size,
             quiet=True,
             progress_callback=progress,
+            status_callback=supervised_status,
             weight_decay=args.weight_decay,
             early_stopping_patience=args.early_stopping,
             lr_decay_factor=args.lr_decay,
@@ -402,6 +409,24 @@ def main():
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
     print(pipeline_compute_report(args.device, args.sl_device))
+    if args.sl_batch_size is not None:
+        print(f"Supervised batch size: fixed at {args.sl_batch_size:,}.")
+    elif args.sl_no_batch_autotune:
+        print(
+            "Supervised batch autotuning: disabled; using the selected "
+            "device default (CPU 1,024 or GPU 2,048)."
+        )
+    else:
+        print(
+            "Supervised batches: automatic retained benchmark "
+            "(10 complete epochs per candidate; starts at CPU 1,024 or GPU "
+            "2,048, then doubles up to 1,048,576; stops below 10% marginal "
+            "gain)."
+        )
+        print(
+            "Every supervised batch test updates the live model and counts "
+            "toward the requested epoch total."
+        )
     if args.dataset_workers == "auto":
         print(
             "Dataset workers: automatic retained benchmark "

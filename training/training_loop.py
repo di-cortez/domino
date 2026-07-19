@@ -502,6 +502,7 @@ def train_supervised(
     cache_file=ENCODED_CACHE_FILE,
     quiet=False,
     progress_callback=None,
+    status_callback=None,
     weight_decay=0.0,
     early_stopping_patience=None,
     lr_decay_factor=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
@@ -673,7 +674,9 @@ def train_supervised(
             else DEFAULT_SUPERVISED_CPU_BATCH_SIZE
         )
 
-    status_callback = None if quiet else print
+    emit_status = status_callback
+    if emit_status is None:
+        emit_status = (lambda _message: None) if quiet else print
     autotuner = RetainedBatchAutotuner(
         device=selected_device,
         training_examples=train_count,
@@ -688,7 +691,7 @@ def train_supervised(
         enabled=autotune_batch_size and batch_size is None,
         fixed_batch_size=fixed_batch,
         epochs_per_candidate=SUPERVISED_BATCH_AUTOTUNE_EPOCHS,
-        status_callback=status_callback,
+        status_callback=emit_status,
     )
 
     tracker = SupervisedResourceTracker(selected_device)

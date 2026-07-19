@@ -307,6 +307,9 @@ the full dataset resident when safe or reuses a bounded rotating GPU window.
 It benchmarks power-of-two CPU/GPU mini-batches for 10 retained epochs each,
 selects on synchronized median examples/second, and stops at the first gain
 below 10% or memory guard. Every completed benchmark epoch remains trained.
+The pipeline prints each batch candidate's median epoch time, total benchmark
+time, throughput, marginal gain, and the final selected size alongside its
+compact supervised progress bar.
 
 The dataset encoder uses a two-pass preallocated `float32` representation and
 checks cgroup-aware RAM headroom before loading/encoding. RL also validates host

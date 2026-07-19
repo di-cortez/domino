@@ -186,8 +186,9 @@ class RetainedBatchAutotuner:
 
         if not self.finished:
             self.emit(
-                "Testing retained supervised batch sizes: "
-                f"{self.epochs_per_candidate} epochs per candidate."
+                "Testing the optimal supervised batch size on "
+                f"{self.device.upper()}... each test trains and retains "
+                f"{self.epochs_per_candidate} complete epoch(s)."
             )
         self._preflight_or_stop(self.current_batch_size, baseline=True)
 
@@ -234,11 +235,12 @@ class RetainedBatchAutotuner:
             )
         self.finished = True
         self.emit(
-            f"Batch {batch_size}: rejected before training by memory preflight; "
-            f"{reason}."
+            f"Supervised batch test with {batch_size:,} stopped before "
+            f"training by memory preflight: {reason}."
         )
         self.emit(
-            f"Selected supervised batch size: {self.selected_batch_size}."
+            "Optimal supervised batch size: "
+            f"{self.selected_batch_size:,}."
         )
         return False
 
@@ -286,24 +288,36 @@ class RetainedBatchAutotuner:
 
         if gain is None:
             self.emit(
-                f"Batch {self.current_batch_size}: "
-                f"{self.epochs_per_candidate} retained epochs, "
-                f"{examples_per_second:,.0f} examples/s (baseline)."
+                "Supervised batch test with "
+                f"{self.current_batch_size:,} passed; median epoch "
+                f"{median_duration:.3f}s; test total "
+                f"{sum(self._durations):.1f}s; "
+                f"{examples_per_second:,.0f} examples/s (baseline); "
+                f"{self.epochs_per_candidate} epochs retained."
             )
         else:
             decision = "accepted" if accepted else "rejected"
             self.emit(
-                f"Batch {self.current_batch_size}: "
-                f"{self.epochs_per_candidate} retained epochs, "
-                f"{examples_per_second:,.0f} examples/s, {gain:+.1%}; "
-                f"{decision}."
+                "Supervised batch test with "
+                f"{self.current_batch_size:,} passed; median epoch "
+                f"{median_duration:.3f}s; test total "
+                f"{sum(self._durations):.1f}s; "
+                f"{examples_per_second:,.0f} examples/s; "
+                f"{gain:+.1%} improvement over the last accepted batch; "
+                f"{decision}; {self.epochs_per_candidate} epochs retained."
             )
 
         if not accepted:
             self.finished = True
             self.current_batch_size = self.selected_batch_size
             self.emit(
-                f"Selected supervised batch size: {self.selected_batch_size}."
+                f"Marginal gain is below {self.minimum_gain:.0%}; the current "
+                "test remains in supervised training but its batch size will "
+                "not be selected."
+            )
+            self.emit(
+                "Optimal supervised batch size: "
+                f"{self.selected_batch_size:,}."
             )
             return
 
@@ -318,7 +332,8 @@ class RetainedBatchAutotuner:
         ):
             self.finished = True
             self.emit(
-                f"Selected supervised batch size: {self.selected_batch_size}."
+                "Optimal supervised batch size: "
+                f"{self.selected_batch_size:,}."
             )
             return
 
@@ -369,9 +384,10 @@ class RetainedBatchAutotuner:
         if not can_retry:
             return False
         self.emit(
-            f"Batch {self.current_batch_size}: runtime memory failure before "
+            f"Supervised batch {self.current_batch_size:,}: runtime memory "
+            "failure before "
             f"completing epoch {epoch_index + 1}; retrying with accepted "
-            f"batch {self.selected_batch_size}."
+            f"batch {self.selected_batch_size:,}."
         )
         self.current_batch_size = self.selected_batch_size
         accepted_attempt = next(

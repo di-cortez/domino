@@ -159,8 +159,10 @@ training update. Override host and GPU reserves with
 `--sl-memory-reserve-mb` and `--sl-gpu-memory-reserve-mb`. The detailed command
 reports the selected device, residency mode/capacity, one-time full upload,
 batch results, and memory high/low watermarks. `run_pipeline.py` uses
-`quiet=True`, so its existing progress bar and compact one-line SL summary do
-not gain this detailed chatter.
+`quiet=True`, so it continues suppressing per-epoch, checkpoint, scheduler, and
+memory-detail chatter. It does display concise retained-batch benchmark lines
+through `tqdm.write`: candidate size, median epoch time, total test time,
+examples/second, marginal gain, retention decision, and final selected batch.
 
 All supervised inputs, targets, weights, activations, gradients, and new
 checkpoints are `float32`. Legacy `float64` checkpoints remain loadable and are

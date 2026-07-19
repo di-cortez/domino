@@ -283,13 +283,16 @@ historical sweep table in
 games-per-iteration in `{40, 80, 160}`. `value_coef` uses 10 evenly spaced
 values from 0.1 to 1.0 (baseline 0.5 included).
 
-Naming (models and diagnostics share one name per run):
+Naming (models and diagnostics share one name per run). Each model gets a
+dedicated directory holding the weights plus a `<name>.json` with the run's
+hyperparameter combination (same format as the diagnostics `sweep_run.json`):
 
 ```text
-models/rl_test/domino_rl[_critic]_default.npz                       (learning_rate/gamma/games_per_iteration all at baseline)
-models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>.npz  (every other grid point)
-models/rl_test/domino_rl[_critic]_value_coef_<VC>.npz               (value_coef axis)
-diagnostics/results/domino_rl[_critic]_<same tag>/
+models/rl_test/<name>/<name>.npz + <name>.json, where <name> is
+  domino_rl[_critic]_default                       (learning_rate/gamma/games_per_iteration all at baseline)
+  domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>  (every other grid point)
+  domino_rl_critic_<grid tag>_vc<VC>               (value_coef axis)
+diagnostics/results/rl_test/<name>/
 ```
 
 `_critic` appears when the value head is on; the grid combination matching

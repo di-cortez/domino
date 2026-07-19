@@ -18,10 +18,13 @@
 # value_coef equal to the baseline is skipped because the critic-on grid run
 # of that combination already covers it.
 #
-# Loop structure: one pass over the full cross-product grid; per base
-# combination, run it critic-off, then critic-on at baseline value_coef,
-# then (if the combination was sampled for the value_coef axis) once more
-# per remaining value_coef value, before moving to the next combination.
+# Loop structure: one pass over the full cross-product grid with
+# games_per_iteration as the OUTERMOST axis, so every combination of the
+# cheapest (first-listed) games-per-iteration value is queued before the
+# next value starts. Per base combination, run it critic-off, then
+# critic-on at baseline value_coef, then (if the combination was sampled
+# for the value_coef axis) once more per remaining value_coef value,
+# before moving to the next combination.
 #
 # Baselines and the learning-rate/gamma sweep values mirror
 # diagnostics/hyperparameter_sweep.py: BASELINE_LEARNING_RATE, BASELINE_GAMMA,
@@ -39,11 +42,15 @@
 # value exactly is tagged "default" rather than spelling out all three
 # values.
 #
-# Naming (models and diagnostics share one name per run):
-#   models/rl_test/domino_rl[_critic]_default.npz                       (lr/gamma/gpi all at baseline)
-#   models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>.npz  (every other grid point)
-#   models/rl_test/domino_rl_critic_<grid tag>_vc<VC>.npz               (value_coef axis, critic-on only)
-#   diagnostics/results/domino_rl[_critic]_<same tag>/
+# Naming (models and diagnostics share one name per run). Every model gets
+# its own directory holding the weights plus a <name>.json recording the
+# run's full hyperparameter combination (same format as the diagnostics
+# sweep_run.json):
+#   models/rl_test/<name>/<name>.npz + <name>.json, where <name> is
+#     domino_rl[_critic]_default                       (lr/gamma/gpi all at baseline)
+#     domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>  (every other grid point)
+#     domino_rl_critic_<grid tag>_vc<VC>               (value_coef axis, critic-on only)
+#   diagnostics/results/rl_test/<name>/
 #
 # Reports total elapsed wall-clock time at the very end.
 #
@@ -84,7 +91,7 @@ DEVICE="auto"
 # memory divided by --jobs -- always, not only when --jobs > 1, as a general
 # OOM backstop (see the "Concurrency and memory limits" block below for the
 # exact formula and enforcement mechanism).
-JOBS=10
+JOBS=12
 RAM_LIMIT_MB=""
 VRAM_LIMIT_MB=""
 RUN_LOG_DIR=""  # computed from RESULTS_DIR after argument parsing, below
@@ -93,7 +100,7 @@ RUN_LOG_DIR=""  # computed from RESULTS_DIR after argument parsing, below
 # summary.json under diagnostics/results/ (diagnostics.rl_sweep_table) and
 # writes a combined CSV/JSON/PNG table.
 RESULTS_DIR="diagnostics/results/rl_test"
-REPORT_OUTPUT_DIR="diagnostics/results/rl_sweep_table"
+REPORT_OUTPUT_DIR="diagnostics/results/lr0005/rl_sweep_table"
 SKIP_REPORT=0
 
 # Baselines: diagnostics/hyperparameter_sweep.py BASELINE_* constants.
@@ -106,8 +113,11 @@ BASELINE_VALUE_COEF=0.5
 # DEFAULT_GAMMA_VALUES from diagnostics/hyperparameter_sweep.py.
 # games-per-iteration is not a tuple there (see header comment above) -- its
 # range comes from the historical report instead.
-LR_VALUES=(0.0005 0.001 0.005)
-GAMMA_VALUES=(1.0 0.97 0.95 0.92)
+# LR_VALUES=(0.0005 0.001 0.005)
+# GAMMA_VALUES=(1.0 0.97 0.95 0.92)
+# GAMES_PER_ITERATION_VALUES=(40 80 160)
+LR_VALUES=(0.005)
+GAMMA_VALUES=(1.0 0.97 0.95 0.92 0.75 0.5)
 GAMES_PER_ITERATION_VALUES=(40 80 160)
 
 # value_coef axis (critic-on only; value_coef has no effect with the critic
@@ -115,7 +125,7 @@ GAMES_PER_ITERATION_VALUES=(40 80 160)
 # grid -- the same sampled combinations for every value_coef value. The
 # baseline (0.5) is included in the list but skipped during the axis sweep:
 # the critic-on grid run already covers it.
-VALUE_COEF_VALUES=(0.25 0.5 0.75)
+VALUE_COEF_VALUES=(0.5)
 VC_SAMPLE_COUNT=10
 
 usage() {
@@ -337,12 +347,17 @@ format_duration() {
     fi
 }
 
-# write_run_metadata NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH DIAG_DIR
+# write_run_metadata NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH OUT_FILE
+#
+# One JSON schema, two destinations: the model directory's <name>.json
+# (written right after training) and the diagnostics directory's
+# sweep_run.json (written after the diagnostic, consumed by
+# diagnostics.rl_sweep_table).
 write_run_metadata() {
-    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" gpi="$6" vc="$7" model_path="$8" diag_dir="$9"
+    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" gpi="$6" vc="$7" model_path="$8" out_file="$9"
     local critic_bool="false"
     if [[ "$critic" -eq 1 ]]; then critic_bool="true"; fi
-    cat > "$diag_dir/sweep_run.json" <<EOF
+    cat > "$out_file" <<EOF
 {
   "run_name": "$name",
   "varied_parameter": "$tag",
@@ -369,7 +384,10 @@ run_point() {
     fi
     name="${name}_${tag}"
 
-    local model_path="$MODEL_DIR/${name}.npz"
+    # Dedicated per-model directory: weights plus a <name>.json with the
+    # run's hyperparameter combination, mirroring the diagnostics layout.
+    local model_dir="$MODEL_DIR/${name}"
+    local model_path="$model_dir/${name}.npz"
     local diag_dir="$RESULTS_DIR/${name}"
     local critic_label="off"
     if [[ "$critic" -eq 1 ]]; then
@@ -401,6 +419,11 @@ run_point() {
             "${VALUE_HEAD_FLAG[@]}"
     fi
 
+    # Hyperparameter record inside the model's own directory, written even on
+    # a --resume skip so pre-existing checkpoints gain it retroactively.
+    mkdir -p "$model_dir"
+    write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$model_dir/${name}.json"
+
     section "[$name] diagnostics: rl vs random ($DIAGNOSTIC_GAMES games) -> $diag_dir/"
     mkdir -p "$diag_dir"
     DIAG_EXTRA_ARGS=()
@@ -415,7 +438,7 @@ run_point() {
         --output "$diag_dir" \
         "${DIAG_EXTRA_ARGS[@]}"
 
-    write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$diag_dir"
+    write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$diag_dir/sweep_run.json"
 }
 
 # ------------------------------------------------------------------
@@ -493,16 +516,21 @@ fi
 # Sweep
 # ------------------------------------------------------------------
 
-# One pass over the full cross-product grid. Per base combination: run it
-# critic-off, then critic-on at the baseline value_coef -- the exact same
-# base combinations for both policies -- then, if the combination was
-# sampled for the value_coef axis, once more per remaining value_coef value
-# (critic on only: value_coef has no effect with the critic off). The
-# baseline value_coef is skipped there because the critic-on grid run just
-# above already covers it.
-for LR in "${LR_VALUES[@]}"; do
-    for GAMMA in "${GAMMA_VALUES[@]}"; do
-        for GPI in "${GAMES_PER_ITERATION_VALUES[@]}"; do
+# One pass over the full cross-product grid, with games_per_iteration as
+# the OUTERMOST loop: every lr x gamma combination for the first (cheapest)
+# games-per-iteration value is queued before the next value starts, so the
+# low-GPI runs get priority. With --jobs > 1 the batch pool only waits when
+# a batch is full, so once all combinations for one GPI value are queued,
+# any idle job slots are filled from the next GPI value automatically.
+# Per base combination: run it critic-off, then critic-on at the baseline
+# value_coef -- the exact same base combinations for both policies -- then,
+# if the combination was sampled for the value_coef axis, once more per
+# remaining value_coef value (critic on only: value_coef has no effect with
+# the critic off). The baseline value_coef is skipped there because the
+# critic-on grid run just above already covers it.
+for GPI in "${GAMES_PER_ITERATION_VALUES[@]}"; do
+    for LR in "${LR_VALUES[@]}"; do
+        for GAMMA in "${GAMMA_VALUES[@]}"; do
             if [[ "$LR" == "$BASELINE_LEARNING_RATE" && "$GAMMA" == "$BASELINE_GAMMA" && "$GPI" == "$BASELINE_GAMES_PER_ITERATION" ]]; then
                 TAG="default"
             else

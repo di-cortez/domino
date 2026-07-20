@@ -245,6 +245,12 @@ converts once to integer `mu(H)` hand weights at the first non-terminal turn end
 where `comb(|U|, h) <= 500`. Drawn slots retain only evidence observed after
 their creation. The exact path has no particle fallback, and the heuristic uses
 the joint hand posterior rather than combining suit marginals independently.
+Slot assignment counting groups tiles with identical eligible-slot sets and
+uses exact falling factorials, backed by a bounded 8,192-entry process-local
+cache. Persistent built-in consumers incrementally annotate appended public
+history and disable intermediate traces when they need only the final vector;
+direct model construction retains detailed traces by default. The exact model
+remains CPU-based and keeps arbitrary-precision integer weights throughout.
 
 Old checkpoints trained with the previous 86-input/58-output encoder are not
 compatible. Regenerate the dataset, retrain supervised learning, and then retrain

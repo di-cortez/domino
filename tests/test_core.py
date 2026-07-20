@@ -117,6 +117,13 @@ class FixedStrategicOpponentModel:
         )
 
 
+class StrategicOpponentModelThatMustNotRun:
+    """Fail if a forced heuristic action performs exact-model work."""
+
+    def update(self, state):
+        raise AssertionError("The exact opponent model must not run for forced actions.")
+
+
 def _to_numpy(value):
     return value.get() if hasattr(value, "get") else value
 
@@ -819,6 +826,19 @@ def test_strategic_agent_uses_response_then_mobility_then_pip_sum_filters():
     assert agent.choose_move(state, legal_actions) == ((0, 3), 0)
 
 
+def test_strategic_agent_skips_exact_model_for_forced_actions():
+    agent = StrategicAgent()
+    agent.opponent_model = StrategicOpponentModelThatMustNotRun()
+    forced_cases = [
+        ([((6, 6), 0)], ((6, 6), 0)),
+        ([("DRAW", None)], ("DRAW", None)),
+        ([None], None),
+    ]
+
+    for legal_actions, expected_action in forced_cases:
+        assert agent.choose_move({}, legal_actions) == expected_action
+
+
 def test_rl_agent_skips_network_for_forced_actions():
     forced_cases = [
         ([("DRAW", None)], ("DRAW", None)),
@@ -1425,6 +1445,10 @@ def main():
         (
             "strategic probability filters",
             test_strategic_agent_uses_response_then_mobility_then_pip_sum_filters,
+        ),
+        (
+            "strategic forced actions skip exact model",
+            test_strategic_agent_skips_exact_model_for_forced_actions,
         ),
         ("RL forced actions skip network", test_rl_agent_skips_network_for_forced_actions),
         ("RL trajectory legal mask", test_rl_agent_saves_legal_mask_for_real_decision),

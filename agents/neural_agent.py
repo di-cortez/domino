@@ -21,7 +21,7 @@ class NeuralAgent(Agent):
         self.network = network
         self.epsilon = epsilon
         self.encoder = DominoEncoder()
-        self.opponent_model = ExactOpponentModel()
+        self.opponent_model = ExactOpponentModel(record_traces=False)
 
     @classmethod
     def load(

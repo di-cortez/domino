@@ -44,8 +44,8 @@ class HudRenderer:
         self._hint_font = None
         self._probability_cache = {}
         self._opponent_models = {
-            0: ExactOpponentModel(),
-            1: ExactOpponentModel(),
+            0: ExactOpponentModel(record_traces=False),
+            1: ExactOpponentModel(record_traces=False),
         }
 
     def _init_fonts(self):

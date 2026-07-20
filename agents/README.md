@@ -87,7 +87,10 @@ once to integer `mu(H)` hand weights when `comb(|U|, h) <= 500`. It never uses a
 particle fallback. `StrategicAgent` filters moves by the exact joint probability
 that the opponent can answer the resulting ends, then by near-best normalized
 mobility, then by highest pip sum, with deterministic legal-action order as the
-final tie-breaker.
+final tie-breaker. `StrategicAgent`, `NeuralAgent`, `RandomNeuralAgent`, and
+`RLAgent` use persistent exact models with intermediate trace recording disabled
+because they consume only the current seven-vector. Direct opponent-model callers
+still receive traces by default.
 
 ## Action Encoding
 
@@ -98,8 +101,9 @@ The neural output space now has 56 actions:
 
 Draw, pass, and single-option tile plays are forced by the current rules
 engine. `NeuralAgent`, `RandomNeuralAgent`, and `RLAgent` return them directly
-without calling the network. They are not learned RL decisions, and `RLAgent`
-does not save a trajectory step for them.
+without calling the network. `StrategicAgent` also returns a single tile-play
+option before running exact inference. These are not learned RL decisions, and
+`RLAgent` does not save a trajectory step for them.
 
 `RLAgent` has three explicit policy modes:
 

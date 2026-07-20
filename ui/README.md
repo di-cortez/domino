@@ -32,8 +32,10 @@ The HUD also shows two compact opponent-suit probability rows near the bottom
 of the screen. `P0 opp` is P0's estimate that P1 has each suit; `P1 opp` is the
 reverse. Each value is shown from `0.00` to `1.00` using the same middleware
 opponent model used by the heuristic and neural encoder. The HUD keeps one
-persistent exact model per observer and caches completed snapshots, avoiding a
-full public-history replay on every rendered frame.
+persistent exact model per observer and caches completed final vectors. Its
+models disable intermediate traces because the HUD does not consume them, and
+they incrementally annotate appended history instead of replaying the full
+public history on every rendered frame.
 
 The window title follows the two agent types currently selected in the menu.
 

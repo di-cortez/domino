@@ -351,7 +351,8 @@ python -m training.self_play --rl-workers 4 --device cpu
 ```
 
 The long student sweep runs one configuration at a time and leaves game-level
-parallelism to the automatic rollout worker pool:
+parallelism to the automatic rollout worker pool. Each configuration uses one
+compact RL progress bar instead of per-iteration/checkpoint logs:
 
 ```bash
 train_script/run_rl_parameter_sweep.sh
@@ -362,6 +363,10 @@ train_script/run_rl_parameter_sweep.sh --resume
 Its checkpoints use `_iterNNNNNN.npz` names and a checksummed `.resume.npz`
 state for the exact opponent pool. Resume rejects changed seeds or
 computation-affecting hyperparameters; repeat any custom options unchanged.
+It also reuses a completed per-point diagnostic only after validating its
+configuration, seed, model identity, game count, CSV, summary, and plots. This
+completed-point check happens before resumable opponent-pool validation, so an
+automatic CPU/GPU choice changing later cannot restart finished work.
 See `train_script/README.md` for the 92-point plan and file locations.
 
 Self-play reports startup memory, checkpoint-to-checkpoint time, and total

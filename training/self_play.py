@@ -1450,46 +1450,123 @@ def parse_args(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     add_optional_rl_arguments(parser)
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help=(
+            "Show retained worker tuning, one iteration progress bar, and one "
+            "final summary instead of per-iteration/checkpoint logs."
+        ),
+    )
     return parser.parse_args(argv)
 
 
-def main(argv=None):
-    args = parse_args(argv)
-    train(
-        iterations=args.iterations,
-        games_per_iteration=args.games_per_iteration,
-        training_opponent=args.training_opponent,
-        learning_rate=args.learning_rate,
-        entropy_coef=args.entropy_coef,
-        log_interval=args.log_interval,
-        checkpoint_interval=args.checkpoint_interval,
-        pool_interval=args.pool_interval,
-        max_pool_size=args.max_pool_size,
-        evaluation_games=args.evaluation_games,
-        sl_weights_path=args.sl_weights_path,
-        rl_weights_path=args.rl_weights_path,
-        use_value_head=args.value_head,
-        value_coef=args.value_coef,
-        gamma=args.gamma,
-        reward_schema=args.reward_schema,
-        clip_grad_norm=args.clip_grad_norm,
-        normalize_advantages=args.normalize_advantages,
-        moving_average_window=args.moving_average_window,
-        seed=args.seed,
-        device=args.device,
-        workers=args.rl_workers,
-        safety_config=ParallelSafetyConfig(
+def _training_kwargs_from_args(args):
+    """Translate CLI arguments into the public ``train`` keyword interface."""
+    return {
+        "iterations": args.iterations,
+        "games_per_iteration": args.games_per_iteration,
+        "training_opponent": args.training_opponent,
+        "learning_rate": args.learning_rate,
+        "entropy_coef": args.entropy_coef,
+        "log_interval": args.log_interval,
+        "checkpoint_interval": args.checkpoint_interval,
+        "pool_interval": args.pool_interval,
+        "max_pool_size": args.max_pool_size,
+        "evaluation_games": args.evaluation_games,
+        "sl_weights_path": args.sl_weights_path,
+        "rl_weights_path": args.rl_weights_path,
+        "use_value_head": args.value_head,
+        "value_coef": args.value_coef,
+        "gamma": args.gamma,
+        "reward_schema": args.reward_schema,
+        "clip_grad_norm": args.clip_grad_norm,
+        "normalize_advantages": args.normalize_advantages,
+        "moving_average_window": args.moving_average_window,
+        "seed": args.seed,
+        "device": args.device,
+        "workers": args.rl_workers,
+        "safety_config": ParallelSafetyConfig(
             memory_reserve_mb=args.rl_memory_reserve_mb,
             estimated_worker_mb=args.rl_estimated_worker_mb,
             max_worker_rss_mb=args.rl_max_worker_rss_mb,
         ),
-        autotune_fraction=args.rl_autotune_fraction,
-        autotune_minimum_gain=args.rl_autotune_min_gain,
-        start_iteration=args.start_iteration,
-        resume_weights_path=args.resume_weights_path,
-        resume_state_file=args.resume_state_file,
-        numbered_checkpoints=args.numbered_checkpoints,
+        "autotune_fraction": args.rl_autotune_fraction,
+        "autotune_minimum_gain": args.rl_autotune_min_gain,
+        "start_iteration": args.start_iteration,
+        "resume_weights_path": args.resume_weights_path,
+        "resume_state_file": args.resume_state_file,
+        "numbered_checkpoints": args.numbered_checkpoints,
+    }
+
+
+def _run_compact_cli(args, training_kwargs):
+    """Run the standalone CLI with the pipeline's compact presentation."""
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        tqdm = None
+
+    print("\nRL self-play")
+    started = time.time()
+
+    if tqdm is None:
+        progress_interval = max(1, args.iterations // 10)
+        last_reported = args.start_iteration
+
+        def progress(done, total):
+            nonlocal last_reported
+            if done == total or done - last_reported >= progress_interval:
+                print(f"RL self-play progress: {done}/{total} iterations", flush=True)
+                last_reported = done
+
+        def status(message):
+            print(message, flush=True)
+
+        summary = train(
+            **training_kwargs,
+            quiet=True,
+            progress_callback=progress,
+            status_callback=status,
+        )
+    else:
+        with tqdm(
+            total=args.iterations,
+            initial=args.start_iteration,
+            desc="RL self-play",
+            unit="iter",
+            leave=True,
+        ) as progress_bar:
+
+            def progress(done, _total):
+                if done > progress_bar.n:
+                    progress_bar.update(done - progress_bar.n)
+
+            summary = train(
+                **training_kwargs,
+                quiet=True,
+                progress_callback=progress,
+                status_callback=tqdm.write,
+            )
+
+    elapsed = time.time() - started
+    print(
+        f"RL self-play complete in {format_duration(elapsed)} | "
+        f"{summary['iterations']} iterations x "
+        f"{summary['games_per_iteration']} games, "
+        f"{summary['selected_workers']} rollout worker(s), "
+        f"value head {'on' if summary['use_value_head'] else 'off'}, "
+        f"weights {summary['rl_weights_path']}"
     )
+    return summary
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    training_kwargs = _training_kwargs_from_args(args)
+    if args.compact:
+        return _run_compact_cli(args, training_kwargs)
+    return train(**training_kwargs)
 
 
 if __name__ == "__main__":

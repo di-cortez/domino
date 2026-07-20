@@ -366,7 +366,7 @@ on parsing the folder name.
 | `--diagnostic-games` | Games in the rl-vs-random diagnostic per sweep point | `10000` |
 | `--seed` | Fix random/NumPy state for both training and diagnostics | `42` |
 | `--model-dir` | Output directory for RL checkpoints | `models/rl_test` |
-| `--resume` | Continue an incomplete point from its newest valid numbered checkpoint; rerun diagnostics for complete points | off |
+| `--resume` | Continue incomplete training and reuse complete, compatible diagnostics | off |
 | `--diag-no-plots` | Skip the per-run diagnostic PNG plots (CSV/JSON are always written) | off (plots on) |
 | `--device` | Array backend for every sweep point: `auto`/`cpu`/`gpu` (see `training/README.md`) | `auto` |
 | `--rl-workers` | CPU-only rollout workers inside the current point | `auto` |
@@ -389,6 +389,8 @@ only for command compatibility and rejects every value except `1`. Parallelism
 is exclusively inside `training.self_play`, where `--rl-workers auto` performs
 the retained worker benchmark and applies the existing 20-worker and memory
 limits. This avoids multiplying outer sweep processes by inner rollout pools.
+Each RL point uses the compact presentation: retained worker-tuning messages,
+one progress bar, and one final summary instead of iteration/checkpoint lines.
 
 Every RL save made by this driver is iteration-numbered, for example
 `domino_rl_default_iter000050.npz`. A paired
@@ -411,8 +413,15 @@ the newest complete pair at or below the requested iteration total, verifies
 its hash, seed, and computation-affecting hyperparameters, restores its policy
 and opponent pool, and begins at the following absolute iteration. A lone or
 corrupt file from an interrupted write is ignored. A point already at the
-requested total skips training but reruns its diagnostic so the final report
-can still be rebuilt. Legacy unsuffixed files cannot prove their completed
+requested total skips training. A matching final model plus diagnostic is
+checked before resumable opponent-pool state, because no computation remains
+and a later automatic CPU/GPU selection change cannot alter completed output.
+Its diagnostic is reused when the
+configuration, numbered model path, seed, requested-game summary, complete games
+CSV, and requested plots all match. New outputs record the model SHA-256;
+existing outputs without that field are accepted only when their artifacts
+are not older than the model checkpoint. Incomplete, stale, or incompatible
+diagnostics are rerun automatically. Legacy unsuffixed model files cannot prove their completed
 iteration or restore their opponent pool, so safe resume intentionally does
 not treat them as complete.
 

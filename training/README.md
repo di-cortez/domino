@@ -264,6 +264,7 @@ Run:
 
 ```bash
 python -m training.self_play
+python -m training.self_play --compact
 python -m training.self_play --rl-workers auto --seed 123
 python -m training.self_play --rl-workers 4 --device cpu
 ```
@@ -352,6 +353,10 @@ The command prints startup memory, checkpoint-to-checkpoint time, and total
 elapsed time. Iteration logs omit entropy and report the direct reward signal
 sent to the policy gradient: reward mean/min/max, good/neutral/bad percentages,
 wins, pool size, and gradient norm.
+
+Pass `--compact` to suppress iteration and checkpoint lines while retaining
+worker-autotuning messages, one absolute iteration progress bar, and one final
+summary. The parameter-sweep shell enables this presentation automatically.
 
 The learner trajectory stores only real decisions. Draw, pass, and single-option
 tile plays are forced actions, so `RLAgent` returns them directly without

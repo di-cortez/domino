@@ -12,7 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diagnostics.rl_sweep_table import build_display_rows, build_report
+from diagnostics.rl_sweep_table import (
+    SWEEP_DIAGNOSTIC_PLOT_FILES,
+    build_display_rows,
+    build_report,
+    file_sha256,
+    validate_reusable_sweep_diagnostic,
+)
 
 
 def _raw_row(gpi, win_rate_pct, *, value_coef=0.5):
@@ -31,7 +37,107 @@ def _raw_row(gpi, win_rate_pct, *, value_coef=0.5):
     }
 
 
+def _write_complete_diagnostic(root, *, games=3, include_hash=False):
+    """Create one minimal but internally consistent sweep diagnostic."""
+    model_path = root / "model_iter000003.npz"
+    run_dir = root / "diagnostic"
+    run_dir.mkdir()
+    model_path.write_bytes(b"numbered model checkpoint")
+    expected = {
+        "run_name": "model",
+        "varied_parameter": "default",
+        "critic_enabled": False,
+        "learning_rate": 0.001,
+        "gamma": 1.0,
+        "games_per_iteration": 40,
+        "value_coef": 0.5,
+        "rl_iterations": 3,
+        "seed": 42,
+        "diagnostic_games": games,
+        "sl_weights_path": "models/domino_sl_weights.npz",
+        "model_path": str(model_path),
+    }
+    metadata = dict(expected)
+    if include_hash:
+        metadata["model_sha256"] = file_sha256(model_path)
+    (run_dir / "sweep_run.json").write_text(
+        json.dumps(metadata), encoding="utf-8"
+    )
+    (run_dir / "summary.json").write_text(json.dumps({
+        "agent": "rl",
+        "opponent": "random",
+        "game_count": games,
+        "seed": 42,
+        "requested_seed": 42,
+        "effective_seed": 42,
+        "counts": {"win": games - 1, "draw": 0, "loss": 1},
+        "rates": {
+            "win": (games - 1) / games,
+            "draw": 0.0,
+            "loss": 1 / games,
+        },
+        "win_ci95": [0.1, 0.9],
+        "mean_turns": 25.0,
+    }), encoding="utf-8")
+    with open(run_dir / "games.csv", "w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["game", "result"])
+        for game_id in range(games):
+            writer.writerow([game_id, "win" if game_id < games - 1 else "loss"])
+    for filename in SWEEP_DIAGNOSTIC_PLOT_FILES:
+        (run_dir / filename).write_bytes(b"plot")
+    return run_dir, model_path, expected
+
+
 class RLSweepTableTests(unittest.TestCase):
+    def test_complete_legacy_diagnostic_is_reusable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir, model_path, expected = _write_complete_diagnostic(
+                Path(temp_dir)
+            )
+
+            valid, reason = validate_reusable_sweep_diagnostic(
+                run_dir, expected, model_path
+            )
+
+            self.assertTrue(valid, reason)
+
+    def test_model_hash_rejects_a_replaced_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir, model_path, expected = _write_complete_diagnostic(
+                Path(temp_dir), include_hash=True
+            )
+            model_path.write_bytes(b"different checkpoint")
+
+            valid, reason = validate_reusable_sweep_diagnostic(
+                run_dir, expected, model_path
+            )
+
+            self.assertFalse(valid)
+            self.assertIn("checksum", reason)
+
+    def test_changed_game_count_and_truncated_csv_are_not_reusable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir, model_path, expected = _write_complete_diagnostic(
+                Path(temp_dir), include_hash=True
+            )
+            expected["diagnostic_games"] = 4
+            valid, reason = validate_reusable_sweep_diagnostic(
+                run_dir, expected, model_path
+            )
+            self.assertFalse(valid)
+            self.assertIn("metadata mismatch", reason)
+
+            expected["diagnostic_games"] = 3
+            (run_dir / "games.csv").write_text(
+                "game,result\n0,win\n", encoding="utf-8"
+            )
+            valid, reason = validate_reusable_sweep_diagnostic(
+                run_dir, expected, model_path
+            )
+            self.assertFalse(valid)
+            self.assertIn("CSV has 1 rows", reason)
+
     def test_empty_report_still_writes_all_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

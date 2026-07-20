@@ -24,6 +24,7 @@ from training.self_play import (
     REWARD_SCHEMAS,
     load_resume_state,
     numbered_checkpoint_path,
+    parse_args as parse_self_play_args,
     resume_state_path,
     train,
 )
@@ -105,6 +106,7 @@ class ParallelRLTests(unittest.TestCase):
         ])
         self.assertEqual(args.rl_workers, 3)
         self.assertEqual(args.rl_memory_reserve_mb, 256)
+        self.assertTrue(parse_self_play_args(["--compact"]).compact)
 
     def test_rollouts_are_identical_with_one_and_multiple_workers(self):
         one_worker, one_info = self._collect(1)

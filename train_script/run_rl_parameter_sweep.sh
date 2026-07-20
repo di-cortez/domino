@@ -142,7 +142,7 @@ Options:
   --diagnostic-games N    Games in the rl-vs-random diagnostic per sweep point (default: $DIAGNOSTIC_GAMES)
   --seed N                Fix random/numpy state for both training and diagnostics (default: $SEED)
   --model-dir PATH        Output directory for RL checkpoints (default: $MODEL_DIR)
-  --resume                Continue each incomplete point from its newest valid numbered checkpoint; still (re)run diagnostics for complete points
+  --resume                Continue incomplete training and reuse complete, compatible diagnostics
   --diag-no-plots         Skip the per-run diagnostic PNG plots (CSV/JSON are always written)
   --device {auto,cpu,gpu} Array backend for every sweep point; "auto" matches GPU_ENABLED (default: $DEVICE)
   --rl-workers N|auto     CPU-only rollout workers inside the current sweep point (default: $RL_WORKERS)
@@ -334,27 +334,31 @@ from training.self_play import (
 )
 from utils.resource_limits import choose_safe_rl_device
 
-weights_path, state_path, gpi, learning_rate, gamma, value_coef, critic, seed, requested_device = sys.argv[1:]
-metadata, _pool = load_resume_state(weights_path, state_path)
-parameters = inspect.signature(train).parameters
-default = lambda name: parameters[name].default
-expected = _resume_configuration(
-    games_per_iteration=int(gpi),
-    training_opponent=default("training_opponent"),
-    learning_rate=float(learning_rate),
-    entropy_coef=default("entropy_coef"),
-    pool_interval=default("pool_interval"),
-    max_pool_size=default("max_pool_size"),
-    use_value_head=bool(int(critic)),
-    value_coef=float(value_coef),
-    gamma=float(gamma),
-    reward_schema=default("reward_schema"),
-    clip_grad_norm=default("clip_grad_norm"),
-    normalize_advantages=default("normalize_advantages"),
-    effective_seed=int(seed),
-    device=choose_safe_rl_device(requested_device)[0],
-)
-_validate_resume_configuration(metadata, expected)
+try:
+    weights_path, state_path, gpi, learning_rate, gamma, value_coef, critic, seed, requested_device = sys.argv[1:]
+    metadata, _pool = load_resume_state(weights_path, state_path)
+    parameters = inspect.signature(train).parameters
+    default = lambda name: parameters[name].default
+    expected = _resume_configuration(
+        games_per_iteration=int(gpi),
+        training_opponent=default("training_opponent"),
+        learning_rate=float(learning_rate),
+        entropy_coef=default("entropy_coef"),
+        pool_interval=default("pool_interval"),
+        max_pool_size=default("max_pool_size"),
+        use_value_head=bool(int(critic)),
+        value_coef=float(value_coef),
+        gamma=float(gamma),
+        reward_schema=default("reward_schema"),
+        clip_grad_norm=default("clip_grad_norm"),
+        normalize_advantages=default("normalize_advantages"),
+        effective_seed=int(seed),
+        device=choose_safe_rl_device(requested_device)[0],
+    )
+    _validate_resume_configuration(metadata, expected)
+except Exception as exc:
+    print(f"Resume pair validation failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
 PY
 }
 
@@ -402,7 +406,16 @@ find_latest_resume_checkpoint() {
 write_run_metadata() {
     local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" gpi="$6" vc="$7" model_path="$8" diag_dir="$9"
     local critic_bool="false"
+    local model_sha256
     if [[ "$critic" -eq 1 ]]; then critic_bool="true"; fi
+    model_sha256=$("$PYTHON_BIN" - "$model_path" <<'PY'
+import sys
+
+from diagnostics.rl_sweep_table import file_sha256
+
+print(file_sha256(sys.argv[1]))
+PY
+)
     cat > "$diag_dir/sweep_run.json" <<EOF
 {
   "run_name": "$name",
@@ -416,9 +429,62 @@ write_run_metadata() {
   "seed": $SEED,
   "diagnostic_games": $DIAGNOSTIC_GAMES,
   "sl_weights_path": "$SL_WEIGHTS_PATH",
-  "model_path": "$model_path"
+  "model_path": "$model_path",
+  "model_sha256": "$model_sha256"
 }
 EOF
+}
+
+# reusable_diagnostics NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH DIAG_DIR
+# Returns success only when every requested diagnostic artifact is complete
+# and belongs to this exact sweep configuration and numbered model checkpoint.
+reusable_diagnostics() {
+    "$PYTHON_BIN" - \
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" \
+        "$RL_ITERATIONS" "$SEED" "$DIAGNOSTIC_GAMES" "$SL_WEIGHTS_PATH" \
+        "$DIAG_PLOTS" <<'PY'
+import sys
+
+from diagnostics.rl_sweep_table import validate_reusable_sweep_diagnostic
+
+(
+    name,
+    tag,
+    critic,
+    learning_rate,
+    gamma,
+    games_per_iteration,
+    value_coef,
+    model_path,
+    diagnostic_dir,
+    rl_iterations,
+    seed,
+    diagnostic_games,
+    sl_weights_path,
+    diagnostic_plots,
+) = sys.argv[1:]
+expected = {
+    "run_name": name,
+    "varied_parameter": tag,
+    "critic_enabled": bool(int(critic)),
+    "learning_rate": float(learning_rate),
+    "gamma": float(gamma),
+    "games_per_iteration": int(games_per_iteration),
+    "value_coef": float(value_coef),
+    "rl_iterations": int(rl_iterations),
+    "seed": int(seed),
+    "diagnostic_games": int(diagnostic_games),
+    "sl_weights_path": sl_weights_path,
+    "model_path": model_path,
+}
+valid, _reason = validate_reusable_sweep_diagnostic(
+    diagnostic_dir,
+    expected,
+    model_path,
+    require_plots=bool(int(diagnostic_plots)),
+)
+raise SystemExit(0 if valid else 1)
+PY
 }
 
 # run_point TAG CRITIC LR GAMMA GPI VC
@@ -432,10 +498,25 @@ run_point() {
 
     local model_base_path="$MODEL_DIR/${name}.npz"
     local model_path
+    local final_model_path
     local diag_dir="$RESULTS_DIR/${name}"
     local critic_label="off"
     if [[ "$critic" -eq 1 ]]; then
         critic_label="on"
+    fi
+
+    # A compatible final diagnostic proves that this exact numbered final
+    # model completed the point. Check it before loading resumable pool state:
+    # no further computation remains, so a CPU/GPU selection change cannot
+    # invalidate or alter the already completed model and diagnostic.
+    printf -v final_model_path '%s_iter%06d.npz' \
+        "${model_base_path%.npz}" "$RL_ITERATIONS"
+    if [[ "$RESUME" -eq 1 ]] && reusable_diagnostics \
+        "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" \
+        "$final_model_path" "$diag_dir"; then
+        section "[$name] training already complete at iteration $RL_ITERATIONS (--resume: $final_model_path)"
+        section "[$name] diagnostics already complete ($DIAGNOSTIC_GAMES games; --resume: $diag_dir/summary.json)"
+        return
     fi
 
     LAST_RESUME_ITERATION=0
@@ -480,26 +561,33 @@ run_point() {
             --seed "$SEED" \
             --device "$DEVICE" \
             --rl-workers "$RL_WORKERS" \
+            --compact \
             "${RESUME_ARGS[@]}" \
             "${VALUE_HEAD_FLAG[@]}"
-        printf -v model_path '%s_iter%06d.npz' "${model_base_path%.npz}" "$RL_ITERATIONS"
+        model_path="$final_model_path"
     fi
 
-    section "[$name] diagnostics: rl vs random ($DIAGNOSTIC_GAMES games) -> $diag_dir/"
-    mkdir -p "$diag_dir"
-    DIAG_EXTRA_ARGS=()
-    if [[ "$DIAG_PLOTS" -eq 0 ]]; then
-        DIAG_EXTRA_ARGS+=(--no-plots)
-    fi
-    "$PYTHON_BIN" -u -m diagnostics.pairwise \
-        --agent rl --opponent random \
-        --weights "$model_path" \
-        --games "$DIAGNOSTIC_GAMES" \
-        --seed "$SEED" \
-        --output "$diag_dir" \
-        "${DIAG_EXTRA_ARGS[@]}"
+    if [[ "$RESUME" -eq 1 ]] && reusable_diagnostics \
+        "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" \
+        "$model_path" "$diag_dir"; then
+        section "[$name] diagnostics already complete ($DIAGNOSTIC_GAMES games; --resume: $diag_dir/summary.json)"
+    else
+        section "[$name] diagnostics: rl vs random ($DIAGNOSTIC_GAMES games) -> $diag_dir/"
+        mkdir -p "$diag_dir"
+        DIAG_EXTRA_ARGS=()
+        if [[ "$DIAG_PLOTS" -eq 0 ]]; then
+            DIAG_EXTRA_ARGS+=(--no-plots)
+        fi
+        "$PYTHON_BIN" -u -m diagnostics.pairwise \
+            --agent rl --opponent random \
+            --weights "$model_path" \
+            --games "$DIAGNOSTIC_GAMES" \
+            --seed "$SEED" \
+            --output "$diag_dir" \
+            "${DIAG_EXTRA_ARGS[@]}"
 
-    write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$diag_dir"
+        write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$diag_dir"
+    fi
 }
 
 # ------------------------------------------------------------------

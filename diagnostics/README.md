@@ -185,4 +185,9 @@ python -m diagnostics.rl_sweep_table --results-dir diagnostics/results --output-
 Output defaults to `diagnostics/results/rl_sweep_table/` and includes
 `rl_sweep_table.csv`, `rl_sweep_table.json`, `rl_sweep_table.png`, and
 `rl_sweep_table.pdf`. `train_script/run_rl_parameter_sweep.sh` invokes this
-automatically as its final stage (`--skip-report` to opt out).
+automatically as its final stage (`--skip-report` to opt out). On a shell
+`--resume`, the same module validates the saved matchup, seed, requested game
+count, result totals and rates, complete games CSV, requested plots, sweep
+metadata, and numbered model identity before an existing diagnostic is reused.
+New metadata includes the model SHA-256 checksum; older output uses conservative
+artifact timestamps for backward-compatible validation.

@@ -23,7 +23,9 @@ Usage:
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -36,6 +38,13 @@ from diagnostics.plots import plot_sweep_comparison_table
 DEFAULT_RESULTS_DIR = ROOT / "diagnostics" / "results"
 DEFAULT_OUTPUT_DIR = DEFAULT_RESULTS_DIR / "rl_sweep_table"
 DEFAULT_GAMES_PER_ITERATION_COLUMNS = (40, 80, 160)
+SWEEP_DIAGNOSTIC_PLOT_FILES = (
+    "cumulative_rates.png",
+    "result_distribution.png",
+    "wins_by_position.png",
+    "game_lengths.png",
+    "choice_opportunities.png",
+)
 
 CSV_FIELDS = [
     "run_name", "critic", "varied_parameter", "learning_rate", "gamma",
@@ -43,6 +52,135 @@ CSV_FIELDS = [
     "win_rate", "draw_rate", "loss_rate", "win_ci95_low", "win_ci95_high",
     "mean_turns", "duration_s", "model_path",
 ]
+
+
+def file_sha256(path):
+    """Return the hexadecimal SHA-256 digest of one file."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_reusable_sweep_diagnostic(
+    run_dir,
+    expected_metadata,
+    model_path,
+    require_plots=True,
+):
+    """Validate that a completed sweep diagnostic can be safely reused.
+
+    The JSON configuration, model identity, requested seed, matchup, counts,
+    CSV row count, and requested artifacts must all match the current sweep
+    point. New metadata records a model SHA-256 digest. Older diagnostics are
+    accepted for backward compatibility only when every artifact is at least
+    as new as the exact numbered model checkpoint.
+
+    Returns ``(is_valid, reason)`` so callers can log or test failures without
+    treating stale output as a fatal error.
+    """
+    run_dir = Path(run_dir)
+    model_path = Path(model_path)
+    metadata_path = run_dir / "sweep_run.json"
+    summary_path = run_dir / "summary.json"
+    games_path = run_dir / "games.csv"
+    artifact_paths = [metadata_path, summary_path, games_path]
+    if require_plots:
+        artifact_paths.extend(run_dir / name for name in SWEEP_DIAGNOSTIC_PLOT_FILES)
+
+    if not model_path.is_file():
+        return False, f"model checkpoint is missing: {model_path}"
+    missing = [str(path) for path in artifact_paths if not path.is_file()]
+    if missing:
+        return False, f"diagnostic artifact is missing: {missing[0]}"
+
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        with open(summary_path, "r", encoding="utf-8") as stream:
+            summary = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, f"diagnostic JSON is unreadable: {exc}"
+
+    for key, expected in expected_metadata.items():
+        actual = metadata.get(key)
+        if isinstance(expected, bool):
+            matches = isinstance(actual, bool) and actual is expected
+        elif isinstance(expected, float):
+            try:
+                matches = math.isclose(
+                    float(actual), expected, rel_tol=0.0, abs_tol=1e-15
+                )
+            except (TypeError, ValueError):
+                matches = False
+        else:
+            matches = actual == expected
+        if not matches:
+            return False, (
+                f"sweep metadata mismatch for {key}: "
+                f"expected {expected!r}, found {actual!r}"
+            )
+
+    expected_games = int(expected_metadata["diagnostic_games"])
+    expected_seed = int(expected_metadata["seed"])
+    if summary.get("agent") != "rl" or summary.get("opponent") != "random":
+        return False, "diagnostic matchup is not rl vs random"
+    if summary.get("game_count") != expected_games:
+        return False, "diagnostic game count does not match the current request"
+    for seed_key in ("seed", "requested_seed", "effective_seed"):
+        if summary.get(seed_key) != expected_seed:
+            return False, f"diagnostic {seed_key} does not match the current request"
+
+    counts = summary.get("counts")
+    rates = summary.get("rates")
+    if not isinstance(counts, dict) or not isinstance(rates, dict):
+        return False, "diagnostic counts or rates are missing"
+    try:
+        count_total = sum(int(counts[key]) for key in ("win", "draw", "loss"))
+        for key in ("win", "draw", "loss"):
+            rate = float(rates[key])
+            if not math.isfinite(rate) or not math.isclose(
+                rate,
+                int(counts[key]) / expected_games,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                return False, f"diagnostic {key} rate is inconsistent with its count"
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return False, "diagnostic counts or rates are invalid"
+    if count_total != expected_games:
+        return False, "diagnostic result counts do not add up to the game count"
+    win_ci95 = summary.get("win_ci95")
+    if not isinstance(win_ci95, list) or len(win_ci95) != 2:
+        return False, "diagnostic confidence interval is missing"
+    if "mean_turns" not in summary:
+        return False, "diagnostic mean-turn count is missing"
+
+    try:
+        with open(games_path, "r", encoding="utf-8", newline="") as stream:
+            csv_row_count = sum(1 for _row in csv.reader(stream)) - 1
+    except (OSError, UnicodeError, csv.Error) as exc:
+        return False, f"diagnostic games CSV is unreadable: {exc}"
+    if csv_row_count != expected_games:
+        return False, (
+            f"diagnostic games CSV has {csv_row_count} rows; "
+            f"expected {expected_games}"
+        )
+
+    stored_hash = metadata.get("model_sha256")
+    if stored_hash:
+        try:
+            if stored_hash != file_sha256(model_path):
+                return False, "diagnostic model checksum does not match the checkpoint"
+        except OSError as exc:
+            return False, f"model checkpoint cannot be hashed: {exc}"
+    else:
+        model_mtime = model_path.stat().st_mtime_ns
+        if any(path.stat().st_mtime_ns < model_mtime for path in artifact_paths):
+            return False, "legacy diagnostic artifacts predate the model checkpoint"
+
+    return True, "diagnostic is complete and compatible"
 
 
 def discover_sweep_runs(results_dir):

@@ -351,7 +351,7 @@ and stores no trajectory. Their results therefore avoid action-sampling noise.
 The command prints startup memory, checkpoint-to-checkpoint time, and total
 elapsed time. Iteration logs omit entropy and report the direct reward signal
 sent to the policy gradient: reward mean/min/max, good/neutral/bad percentages,
-local reward mean, raw event counts, wins, pool size, and gradient norm.
+wins, pool size, and gradient norm.
 
 The learner trajectory stores only real decisions. Draw, pass, and single-option
 tile plays are forced actions, so `RLAgent` returns them directly without

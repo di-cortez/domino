@@ -21,6 +21,7 @@ class RLSweepShellTests(unittest.TestCase):
         self.assertIn("outer sweep parallelism is disabled", result.stdout)
         self.assertIn("current sweep point (default: auto)", result.stdout)
         self.assertIn("newest valid numbered checkpoint", result.stdout)
+        self.assertIn("diagnostic per sweep point (default: 10000)", result.stdout)
 
     def test_outer_parallel_jobs_are_rejected_before_training(self):
         result = subprocess.run(

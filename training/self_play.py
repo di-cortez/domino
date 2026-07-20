@@ -715,14 +715,6 @@ def _merge_parallel_summary(summary, run_info, *, phase, iteration):
     summary[f"{phase}_batches"] += 1
 
 
-def _add_worker_event_stats(total, values):
-    """Accumulate serialized worker event counters into ``EventStats``."""
-    total.opponent_draws += int(values["opponent_draws"])
-    total.opponent_passes += int(values["opponent_passes"])
-    total.learner_draws += int(values["learner_draws"])
-    total.learner_passes += int(values["learner_passes"])
-
-
 def train(
     iterations=1000,
     games_per_iteration=40,
@@ -1063,11 +1055,9 @@ def train(
                 )
 
             batch = []
-            event_totals = EventStats()
             wins = 0
             for result in rollout_results:
                 batch.extend(result["samples"])
-                _add_worker_event_stats(event_totals, result["event_stats"])
                 if result["winner"] == result["learner_position"]:
                     wins += 1
 
@@ -1169,8 +1159,7 @@ def train(
                         f" | advantage mean: {float(xp.mean(policy_signal)):+.3f}"
                     )
                 print(
-                    f"Iteration {iteration} | decisions: {len(batch)} | "
-                    "reward mean/std/min/max: "
+                    f"Iteration {iteration} | reward mean/std/min/max: "
                     f"{reward_summary['reward_mean']:+.2f}/"
                     f"{reward_summary['reward_std']:.2f}/"
                     f"{reward_summary['reward_min']:+.2f}/"
@@ -1179,10 +1168,6 @@ def train(
                     f"{reward_summary['good_pct']:.0f}%/"
                     f"{reward_summary['neutral_pct']:.0f}%/"
                     f"{reward_summary['bad_pct']:.0f}% | "
-                    f"local mean: {reward_summary['local_mean']:+.3f} | "
-                    "opp D/P: "
-                    f"{event_totals.opponent_draws}/{event_totals.opponent_passes}, "
-                    f"self D/P: {event_totals.learner_draws}/{event_totals.learner_passes} | "
                     f"wins {win_label}: {wins}/{games_per_iteration}"
                     f" (avg/{len(win_rate_window)}: {win_rate_moving_avg:.1%})"
                     f"{pool_suffix} | grad: {_gradient_log_text(metrics)}"

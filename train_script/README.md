@@ -363,7 +363,7 @@ on parsing the folder name.
 |---|---|---:|
 | `--rl-iterations` | RL training iterations per sweep point | `2000` |
 | `--sl-weights-path` | Input SL weights used to initialize every RL run | `models/domino_sl_weights.npz` |
-| `--diagnostic-games` | Games in the rl-vs-random diagnostic per sweep point | `200` |
+| `--diagnostic-games` | Games in the rl-vs-random diagnostic per sweep point | `10000` |
 | `--seed` | Fix random/NumPy state for both training and diagnostics | `42` |
 | `--model-dir` | Output directory for RL checkpoints | `models/rl_test` |
 | `--resume` | Continue an incomplete point from its newest valid numbered checkpoint; rerun diagnostics for complete points | off |

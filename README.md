@@ -366,8 +366,7 @@ See `train_script/README.md` for the 92-point plan and file locations.
 
 Self-play reports startup memory, checkpoint-to-checkpoint time, and total
 elapsed time. Iteration logs omit entropy and show reward mean/min/max,
-good/neutral/bad percentages, local reward mean, draw/pass event counts, wins,
-pool size, and gradient norm.
+good/neutral/bad percentages, wins, pool size, and gradient norm.
 
 All games inside an iteration see the same frozen policy. CPU-only workers
 generate trajectories from shared-memory policy snapshots; the main process

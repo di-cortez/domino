@@ -53,7 +53,7 @@ DEFAULT_REWARD_SCHEMAS = tuple(self_play.REWARD_SCHEMAS)
 
 DEFAULT_RL_ITERATIONS = 150
 DEFAULT_RL_GAMES_PER_ITERATION = 40
-DEFAULT_DIAGNOSTIC_GAMES = 500
+DEFAULT_DIAGNOSTIC_GAMES = 10000
 
 
 def _match_rates(agent_name, opponent_name, game_count, weights=None, opponent_weights=None, seed=None):

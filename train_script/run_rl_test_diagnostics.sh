@@ -263,11 +263,15 @@ launch_point() {
 # Discover checkpoints and reconstruct their hyperparameters
 # ------------------------------------------------------------------
 
+# The sweep script now writes each checkpoint into its own directory
+# ($MODEL_DIR/<name>/<name>.npz, next to a <name>.json hyperparameter
+# record); older sweeps wrote flat $MODEL_DIR/<name>.npz files. Scan both
+# layouts so either generation of checkpoints gets its diagnostics.
 shopt -s nullglob
-MODEL_PATHS=("$MODEL_DIR"/*.npz)
+MODEL_PATHS=("$MODEL_DIR"/*/*.npz "$MODEL_DIR"/*.npz)
 shopt -u nullglob
 if [[ "${#MODEL_PATHS[@]}" -eq 0 ]]; then
-    echo "No *.npz checkpoints found in $MODEL_DIR" >&2
+    echo "No *.npz checkpoints found in $MODEL_DIR (or its per-model subdirectories)" >&2
     exit 1
 fi
 

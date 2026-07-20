@@ -10,9 +10,9 @@ that script: ``sweep_run.json`` (the exact RL hyperparameters used) and
 ``summary.json`` (the rl-vs-random win/draw/loss rates from
 ``diagnostics.pairwise``). This module discovers every such directory, joins
 the two JSON files into one row per run, and writes a comparative table --
-CSV, an aggregate JSON, a console summary, and a PNG image table. The raw
+CSV, an aggregate JSON, a console summary, and PNG/PDF visual tables. The raw
 CSV/JSON retain one row per trained model. For the less cluttered console and
-PNG presentation, runs that differ only by games-per-iteration are pivoted
+PNG/PDF presentation, runs that differ only by games-per-iteration are pivoted
 into one row with win-rate columns labelled 40, 80, and 160. Rows are sorted
 directly on numeric hyperparameters rather than by parsing tag strings.
 
@@ -241,9 +241,10 @@ def _print_console_table(rows, games_per_iteration_values):
 def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR, quiet=False):
     """Discover every RL sweep point under ``results_dir`` and write the comparative table.
 
-    Writes ``rl_sweep_table.csv``, ``rl_sweep_table.json``, and
-    ``rl_sweep_table.png`` to ``output_dir``. CSV/JSON and the returned list
-    retain one row per model; console/PNG use the compact pivoted view.
+    Writes ``rl_sweep_table.csv``, ``rl_sweep_table.json``,
+    ``rl_sweep_table.png``, and ``rl_sweep_table.pdf`` to ``output_dir``.
+    CSV/JSON and the returned list retain one row per model; console/PNG/PDF
+    use the compact pivoted view.
     """
     results_dir = Path(results_dir)
     output_dir = Path(output_dir)
@@ -261,6 +262,11 @@ def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR,
         output_dir / "rl_sweep_table.png",
         games_per_iteration_values=gpi_columns,
     )
+    plot_sweep_comparison_table(
+        display_rows,
+        output_dir / "rl_sweep_table.pdf",
+        games_per_iteration_values=gpi_columns,
+    )
 
     if not quiet:
         print(
@@ -270,7 +276,7 @@ def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR,
         _print_console_table(display_rows, gpi_columns)
         print(
             f"\nSaved: {output_dir}/rl_sweep_table.csv, "
-            "rl_sweep_table.json, rl_sweep_table.png"
+            "rl_sweep_table.json, rl_sweep_table.png, rl_sweep_table.pdf"
         )
 
     return rows

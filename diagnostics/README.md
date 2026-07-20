@@ -173,7 +173,7 @@ Trained checkpoints are written under `--checkpoint-dir` (default
 writes one `sweep_run.json` (hyperparameters) + `summary.json` (rl-vs-random
 results) pair per sweep point under `diagnostics/results/<run_name>/`. This
 module discovers every such pair and joins its data. Raw CSV/JSON keep one row
-per trained model. The console and PNG reduce clutter by grouping runs that
+per trained model. The console, PNG, and PDF reduce clutter by grouping runs that
 differ only in games per iteration into one row, with win-rate percentage
 columns labelled `40`, `80`, and `160`:
 
@@ -182,5 +182,7 @@ python -m diagnostics.rl_sweep_table
 python -m diagnostics.rl_sweep_table --results-dir diagnostics/results --output-dir /tmp/report
 ```
 
-Output defaults to `diagnostics/results/rl_sweep_table/`. `train_script/run_rl_parameter_sweep.sh`
-invokes this automatically as its final stage (`--skip-report` to opt out).
+Output defaults to `diagnostics/results/rl_sweep_table/` and includes
+`rl_sweep_table.csv`, `rl_sweep_table.json`, `rl_sweep_table.png`, and
+`rl_sweep_table.pdf`. `train_script/run_rl_parameter_sweep.sh` invokes this
+automatically as its final stage (`--skip-report` to opt out).

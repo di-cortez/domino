@@ -57,7 +57,7 @@ and visual UI can be changed independently.
 | `diagnostics/evaluate.py` | Evaluates all five supported agents against the common random baseline. |
 | `diagnostics/pairwise.py` | Helper for evaluating one agent against another and writing `summary.json`, `games.csv`, and plots. |
 | `diagnostics/hyperparameter_sweep.py` | Trains an RL checkpoint per sweep point (one hyperparameter varied at a time, critic on and off) and appends its diagnostics to a single JSON log. |
-| `diagnostics/rl_sweep_table.py` | Joins sweep hyperparameters with rl-vs-random results; raw CSV/JSON keep every model, while the compact PNG pivots games-per-iteration into 40/80/160 win-rate columns. |
+| `diagnostics/rl_sweep_table.py` | Joins sweep hyperparameters with rl-vs-random results; raw CSV/JSON keep every model, while compact PNG/PDF tables pivot games-per-iteration into 40/80/160 win-rate columns. |
 | `ui/visual_main.py` | Starts the visual simulator. |
 
 ## Setup
@@ -350,6 +350,20 @@ python -m training.self_play --rl-workers auto --seed 123
 python -m training.self_play --rl-workers 4 --device cpu
 ```
 
+The long student sweep runs one configuration at a time and leaves game-level
+parallelism to the automatic rollout worker pool:
+
+```bash
+train_script/run_rl_parameter_sweep.sh
+# Press Ctrl+C once to interrupt safely.
+train_script/run_rl_parameter_sweep.sh --resume
+```
+
+Its checkpoints use `_iterNNNNNN.npz` names and a checksummed `.resume.npz`
+state for the exact opponent pool. Resume rejects changed seeds or
+computation-affecting hyperparameters; repeat any custom options unchanged.
+See `train_script/README.md` for the 92-point plan and file locations.
+
 Self-play reports startup memory, checkpoint-to-checkpoint time, and total
 elapsed time. Iteration logs omit entropy and show reward mean/min/max,
 good/neutral/bad percentages, local reward mean, draw/pass event counts, wins,
@@ -405,6 +419,7 @@ Generated files:
 | `dataset/supervised_dataset_X.npy`, `supervised_dataset_Y.npy`, `supervised_dataset_metadata.json` | Disk-backed fallback cache from `training.training_loop` |
 | `models/domino_sl_weights.npz` | `training.training_loop` |
 | `models/domino_rl_weights.npz` | `training.self_play` |
+| `models/rl_test/*_iterNNNNNN.npz` and the newest paired `*.resume.npz` | `train_script/run_rl_parameter_sweep.sh` interruption-safe checkpoints |
 
 ## Diagnostics
 

@@ -16,6 +16,10 @@ uses the GPU.
 import argparse
 from collections import deque
 from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
 import random
 import secrets
 import time
@@ -61,6 +65,8 @@ DEFAULT_DEVICE = "auto"
 SL_WEIGHTS = "models/domino_sl_weights.npz"
 RL_WEIGHTS = "models/domino_rl_weights.npz"
 TRAINING_OPPONENT = "self_play"
+RESUME_STATE_VERSION = 1
+RESUME_POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 
 TERMINAL_WIN_REWARD = 0.50
 TERMINAL_TIE_REWARD = 0.00
@@ -429,24 +435,25 @@ def _load_initial_network(
     disk once and reuse it, instead of every run re-reading
     ``sl_weights_path``. Unused when resuming from an existing RL checkpoint.
     """
-    try:
-        network = PolicyNetwork.load(
-            rl_weights_path,
-            learning_rate=learning_rate,
-            use_value_head=use_value_head,
-            device=device,
-        )
-        if not _checkpoint_matches_encoder(network):
-            raise ValueError(
-                f"RL checkpoint {rl_weights_path} has shape "
-                f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
-                "but the current encoder expects input=168, output=56."
+    if rl_weights_path is not None:
+        try:
+            network = PolicyNetwork.load(
+                rl_weights_path,
+                learning_rate=learning_rate,
+                use_value_head=use_value_head,
+                device=device,
             )
-        if not quiet:
-            print(f"Resuming RL training from {rl_weights_path}")
-        return network
-    except FileNotFoundError:
-        pass
+            if not _checkpoint_matches_encoder(network):
+                raise ValueError(
+                    f"RL checkpoint {rl_weights_path} has shape "
+                    f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
+                    "but the current encoder expects input=168, output=56."
+                )
+            if not quiet:
+                print(f"Resuming RL training from {rl_weights_path}")
+            return network
+        except FileNotFoundError:
+            pass
 
     network = PolicyNetwork.load_from_sl(
         sl_weights_path,
@@ -465,6 +472,193 @@ def _load_initial_network(
     if not quiet:
         print(f"Initializing RL policy from supervised weights: {sl_weights_path}")
     return network
+
+
+def numbered_checkpoint_path(base_path, iteration):
+    """Return an iteration-suffixed checkpoint path derived from ``base_path``."""
+    path = Path(base_path)
+    suffix = path.suffix or ".npz"
+    stem = path.name[:-len(path.suffix)] if path.suffix else path.name
+    return path.with_name(f"{stem}_iter{int(iteration):06d}{suffix}")
+
+
+def resume_state_path(weights_path):
+    """Return the auxiliary resume-state path paired with a weights checkpoint."""
+    path = Path(weights_path)
+    suffix = path.suffix or ".npz"
+    stem = path.name[:-len(path.suffix)] if path.suffix else path.name
+    return path.with_name(f"{stem}.resume{suffix}")
+
+
+def _file_sha256(path):
+    """Return a streaming SHA-256 digest without duplicating checkpoint memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as checkpoint_file:
+        for block in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _atomic_network_save(network, path):
+    """Publish a complete network file with one same-directory atomic rename."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.stem}.tmp-{os.getpid()}-{secrets.token_hex(4)}.npz"
+    )
+    try:
+        network.save(str(temporary))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_resume_state_save(path, metadata, pool_snapshots):
+    """Atomically save metadata and the exact self-play opponent pool."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arrays = {
+        "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True)),
+        "pool_count": np.asarray(len(pool_snapshots), dtype=np.int64),
+    }
+    for snapshot_index, snapshot in enumerate(pool_snapshots):
+        for name in RESUME_POLICY_WEIGHT_NAMES:
+            arrays[f"pool_{snapshot_index:03d}_{name}"] = np.asarray(snapshot[name])
+    temporary = path.with_name(
+        f".{path.stem}.tmp-{os.getpid()}-{secrets.token_hex(4)}.npz"
+    )
+    try:
+        np.savez_compressed(temporary, **arrays)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_resume_state(weights_path, state_path):
+    """Validate and load one complete weights/state checkpoint pair."""
+    weights_path = Path(weights_path)
+    state_path = Path(state_path)
+    with np.load(state_path, allow_pickle=False) as state:
+        metadata = json.loads(str(state["metadata_json"].item()))
+        if metadata.get("version") != RESUME_STATE_VERSION:
+            raise ValueError(
+                f"Unsupported RL resume-state version in {state_path}: "
+                f"{metadata.get('version')!r}."
+            )
+        actual_hash = _file_sha256(weights_path)
+        if metadata.get("weights_sha256") != actual_hash:
+            raise ValueError(
+                f"RL checkpoint pair is inconsistent: {weights_path} does not "
+                f"match {state_path}."
+            )
+        pool_count = int(state["pool_count"])
+        snapshots = []
+        for snapshot_index in range(pool_count):
+            weights = {}
+            for name in RESUME_POLICY_WEIGHT_NAMES:
+                key = f"pool_{snapshot_index:03d}_{name}"
+                if key not in state:
+                    raise ValueError(f"RL resume state {state_path} is missing {key}.")
+                weights[name] = np.asarray(state[key]).copy()
+            snapshots.append(weights)
+    return metadata, tuple(snapshots)
+
+
+def _resume_configuration(
+    *,
+    games_per_iteration,
+    training_opponent,
+    learning_rate,
+    entropy_coef,
+    pool_interval,
+    max_pool_size,
+    use_value_head,
+    value_coef,
+    gamma,
+    reward_schema,
+    clip_grad_norm,
+    normalize_advantages,
+    effective_seed,
+    device,
+):
+    """Return every setting that can affect post-checkpoint RL computation."""
+    return {
+        "games_per_iteration": int(games_per_iteration),
+        "training_opponent": training_opponent,
+        "learning_rate": float(learning_rate),
+        "entropy_coef": float(entropy_coef),
+        "pool_interval": int(pool_interval),
+        "max_pool_size": int(max_pool_size),
+        "use_value_head": bool(use_value_head),
+        "value_coef": float(value_coef),
+        "gamma": float(gamma),
+        "reward_schema": reward_schema,
+        "clip_grad_norm": (
+            None if clip_grad_norm is None else float(clip_grad_norm)
+        ),
+        "normalize_advantages": bool(normalize_advantages),
+        "effective_seed": int(effective_seed),
+        "device": device,
+    }
+
+
+def _validate_resume_configuration(metadata, expected):
+    """Reject a resume that would silently continue a different experiment."""
+    saved = metadata.get("configuration")
+    if saved != expected:
+        differences = []
+        saved = saved or {}
+        for key in sorted(set(saved) | set(expected)):
+            if saved.get(key) != expected.get(key):
+                differences.append(
+                    f"{key}: checkpoint={saved.get(key)!r}, requested={expected.get(key)!r}"
+                )
+        raise ValueError(
+            "RL resume configuration does not match the checkpoint: "
+            + "; ".join(differences)
+        )
+
+
+def _save_numbered_resume_checkpoint(
+    network,
+    runner,
+    base_path,
+    iteration,
+    configuration,
+    runtime_workers,
+):
+    """Save one atomic resumable checkpoint and retain only its latest state."""
+    weights_path = numbered_checkpoint_path(base_path, iteration)
+    state_path = resume_state_path(weights_path)
+
+    # Invalidate an older same-iteration pair before replacing its weights.
+    # A sudden interruption then leaves either the previous iteration pair or
+    # the newly completed pair, never new weights with stale resume metadata.
+    state_path.unlink(missing_ok=True)
+    _atomic_network_save(network, weights_path)
+    metadata = {
+        "version": RESUME_STATE_VERSION,
+        "completed_iteration": int(iteration),
+        "weights_file": weights_path.name,
+        "weights_sha256": _file_sha256(weights_path),
+        "runtime_workers": int(runtime_workers),
+        "configuration": configuration,
+    }
+    _atomic_resume_state_save(
+        state_path,
+        metadata,
+        runner.export_pool_snapshots(),
+    )
+
+    # Pool snapshots are much larger than policy-only checkpoints. The newest
+    # state is sufficient for continuation; older numbered weight files remain
+    # available for analysis while their superseded resume states are removed.
+    base = Path(base_path)
+    base_stem = base.name[:-len(base.suffix)] if base.suffix else base.name
+    for older_state in base.parent.glob(f"{base_stem}_iter*.resume.npz"):
+        if older_state != state_path:
+            older_state.unlink(missing_ok=True)
+    return weights_path, state_path
 
 
 def _new_parallel_summary(requested_workers):
@@ -560,6 +754,10 @@ def train(
     autotune_minimum_gain=DEFAULT_RL_MINIMUM_GAIN,
     worker_candidates=DEFAULT_RL_WORKER_CANDIDATES,
     status_callback=None,
+    start_iteration=0,
+    resume_weights_path=None,
+    resume_state_file=None,
+    numbered_checkpoints=False,
 ):
     """Train with direct REINFORCE or an optional learned value baseline.
 
@@ -606,6 +804,11 @@ def train(
     every benchmark game in training, and stops below the configured marginal
     throughput gain. Per-game seeds and ordered parent aggregation make a
     seeded run independent of worker scheduling and worker count.
+
+    ``numbered_checkpoints=True`` writes ``_iterNNNNNN`` weight files plus an
+    atomic auxiliary state containing the exact opponent pool. Pass that pair
+    back through ``resume_weights_path``/``resume_state_file`` with its absolute
+    ``start_iteration`` to continue safely without replaying earlier updates.
     """
     if iterations < 1:
         raise ValueError("iterations must be positive")
@@ -619,6 +822,18 @@ def train(
         raise ValueError("pool_interval must be positive")
     if max_pool_size < 0:
         raise ValueError("max_pool_size must be non-negative")
+    if start_iteration < 0 or start_iteration >= iterations:
+        raise ValueError("start_iteration must be between 0 and iterations - 1")
+    has_resume_weights = resume_weights_path is not None
+    has_resume_state = resume_state_file is not None
+    if has_resume_weights != has_resume_state:
+        raise ValueError(
+            "resume_weights_path and resume_state_file must be provided together"
+        )
+    if start_iteration > 0 and not has_resume_weights:
+        raise ValueError("A positive start_iteration requires a complete resume pair")
+    if start_iteration == 0 and has_resume_weights:
+        raise ValueError("A resume pair requires a positive start_iteration")
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
     if reward_schema not in REWARD_SCHEMAS:
@@ -634,12 +849,51 @@ def train(
             )
     safety_config = safety_config or ParallelSafetyConfig()
     schema = REWARD_SCHEMAS[reward_schema]
-    effective_seed = int(seed) if seed is not None else secrets.randbits(63)
+    resume_metadata = None
+    resume_pool_snapshots = ()
+    if has_resume_weights:
+        resume_metadata, resume_pool_snapshots = load_resume_state(
+            resume_weights_path,
+            resume_state_file,
+        )
+        completed_iteration = int(resume_metadata["completed_iteration"])
+        if completed_iteration != int(start_iteration):
+            raise ValueError(
+                f"Resume state completed iteration {completed_iteration}, but "
+                f"start_iteration is {start_iteration}."
+            )
+        saved_seed = int(resume_metadata["configuration"]["effective_seed"])
+        if seed is not None and int(seed) != saved_seed:
+            raise ValueError(
+                f"Resume state uses seed {saved_seed}, but seed {int(seed)} was requested."
+            )
+        effective_seed = saved_seed
+    else:
+        effective_seed = int(seed) if seed is not None else secrets.randbits(63)
+
     random.seed(effective_seed)
     np.random.seed(effective_seed & 0xFFFFFFFF)
 
     requested_device = device
     device, device_fallback_reason = choose_safe_rl_device(device)
+    resume_configuration = _resume_configuration(
+        games_per_iteration=games_per_iteration,
+        training_opponent=training_opponent,
+        learning_rate=learning_rate,
+        entropy_coef=entropy_coef,
+        pool_interval=pool_interval,
+        max_pool_size=max_pool_size,
+        use_value_head=use_value_head,
+        value_coef=value_coef,
+        gamma=gamma,
+        reward_schema=reward_schema,
+        clip_grad_norm=clip_grad_norm,
+        normalize_advantages=normalize_advantages,
+        effective_seed=effective_seed,
+        device=device,
+    )
+    if resume_metadata is not None:
+        _validate_resume_configuration(resume_metadata, resume_configuration)
     # Conservative upper bound for one full 52-decision trajectory per game
     # and several matrix/gradient copies during parent-side batch assembly.
     estimated_batch_bytes = games_per_iteration * 52 * 4096
@@ -649,10 +903,15 @@ def train(
             f"{device_fallback_reason}.",
             flush=True,
         )
+    initial_rl_weights_path = (
+        resume_weights_path
+        if resume_metadata is not None
+        else (None if numbered_checkpoints else rl_weights_path)
+    )
     network = _load_initial_network(
         learning_rate,
         sl_weights_path,
-        rl_weights_path,
+        initial_rl_weights_path,
         quiet=quiet,
         use_value_head=use_value_head,
         device=device,
@@ -695,8 +954,15 @@ def train(
         max_pool_size=shared_pool_size,
         safety=safety_config,
     )
+    if resume_metadata is not None:
+        runner.restore_pool_snapshots(resume_pool_snapshots)
+        emit_status(
+            f"Resuming RL after iteration {start_iteration} from "
+            f"{resume_weights_path}; restored {len(resume_pool_snapshots)} "
+            "opponent-pool snapshot(s)."
+        )
     parallel_summary = _new_parallel_summary(workers)
-    if workers == "auto":
+    if workers == "auto" and resume_metadata is None:
         autotuner = RetainedRLWorkerAutotuner(
             total_iterations=iterations,
             games_per_iteration=games_per_iteration,
@@ -709,18 +975,28 @@ def train(
         selected_workers = 1
     else:
         autotuner = None
+        fixed_workers = (
+            int(resume_metadata["runtime_workers"])
+            if workers == "auto"
+            else workers
+        )
         selected_workers, was_capped, cap_reason = cap_parallel_workers(
-            workers,
+            fixed_workers,
             safety_config,
         )
+        if workers == "auto":
+            emit_status(
+                f"Resumed RL will reuse {selected_workers} rollout worker(s) "
+                "from the last complete checkpoint."
+            )
         if was_capped:
             emit_status(
-                f"Fixed RL workers reduced from {workers} to {selected_workers} "
+                f"Fixed RL workers reduced from {fixed_workers} to {selected_workers} "
                 f"by resource preflight: {cap_reason}."
             )
             parallel_summary["safety_capped"] = True
             parallel_summary["fallback_history"].append({
-                "from_workers": workers,
+                "from_workers": fixed_workers,
                 "to_workers": selected_workers,
                 "completed_games": 0,
                 "reason": cap_reason,
@@ -735,8 +1011,14 @@ def train(
     start_time = time.time()
     last_checkpoint_time = start_time
     configured_worker_target = None
+    last_saved_iteration = int(start_iteration)
+    final_weights_path = (
+        Path(resume_weights_path)
+        if resume_weights_path is not None
+        else Path(rl_weights_path)
+    )
     try:
-        for iteration in range(1, iterations + 1):
+        for iteration in range(start_iteration + 1, iterations + 1):
             if autotuner is not None and not autotuner.finished:
                 candidate = autotuner.current_workers
                 capped, was_capped, cap_reason = cap_parallel_workers(
@@ -908,7 +1190,22 @@ def train(
                 )
 
             if iteration % checkpoint_interval == 0:
-                network.save(rl_weights_path)
+                if numbered_checkpoints:
+                    checkpoint_weights_path, _checkpoint_state_path = (
+                        _save_numbered_resume_checkpoint(
+                            network,
+                            runner,
+                            rl_weights_path,
+                            iteration,
+                            resume_configuration,
+                            runner.worker_count,
+                        )
+                    )
+                    final_weights_path = checkpoint_weights_path
+                    last_saved_iteration = iteration
+                else:
+                    network.save(rl_weights_path)
+                    checkpoint_weights_path = Path(rl_weights_path)
                 runner.sync_current(network)
                 evaluation_seed = game_seed(
                     effective_seed,
@@ -948,7 +1245,7 @@ def train(
                 last_checkpoint_time = now
                 if not quiet:
                     print(
-                        f"  [checkpoint] saved {rl_weights_path} | "
+                        f"  [checkpoint] saved {checkpoint_weights_path} | "
                         f"time since previous checkpoint: "
                         f"{format_duration(checkpoint_elapsed)} | "
                         f"deterministic RL vs heuristic: {win_rate:.1%} wins, "
@@ -957,6 +1254,17 @@ def train(
 
             if progress_callback is not None:
                 progress_callback(iteration, iterations)
+
+        if numbered_checkpoints and last_saved_iteration != iterations:
+            final_weights_path, _final_state_path = _save_numbered_resume_checkpoint(
+                network,
+                runner,
+                rl_weights_path,
+                iterations,
+                resume_configuration,
+                runner.worker_count,
+            )
+            last_saved_iteration = iterations
     finally:
         final_runtime_workers = runner.worker_count
         runner.close()
@@ -978,14 +1286,17 @@ def train(
             "attempts": [],
         }
     parallel_summary["final_workers"] = final_runtime_workers
-    network.save(rl_weights_path)
+    if not numbered_checkpoints:
+        network.save(rl_weights_path)
+        final_weights_path = Path(rl_weights_path)
     elapsed_time = time.time() - start_time
     if not quiet:
         print(f"\nTraining complete. Total elapsed time: {format_duration(elapsed_time)}.")
-        print(f"Final weights: {rl_weights_path}")
+        print(f"Final weights: {final_weights_path}")
 
     return {
         "iterations": iterations,
+        "start_iteration": start_iteration,
         "games_per_iteration": games_per_iteration,
         "training_opponent": training_opponent,
         "learning_rate": learning_rate,
@@ -1006,7 +1317,8 @@ def train(
         "selected_workers": selected_workers,
         "autotune": autotune_summary,
         "parallel": parallel_summary,
-        "rl_weights_path": rl_weights_path,
+        "rl_weights_path": str(final_weights_path),
+        "numbered_checkpoints": bool(numbered_checkpoints),
         "duration_s": elapsed_time,
     }
 
@@ -1033,6 +1345,30 @@ def add_optional_rl_arguments(parser):
     group.add_argument("--evaluation-games", type=int, default=200)
     group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
     group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
+    group.add_argument(
+        "--numbered-checkpoints",
+        action="store_true",
+        help=(
+            "Write iteration-suffixed weights and an atomic opponent-pool state "
+            "for safe interruption recovery."
+        ),
+    )
+    group.add_argument(
+        "--start-iteration",
+        type=int,
+        default=0,
+        help="Absolute completed iteration when continuing a numbered checkpoint.",
+    )
+    group.add_argument(
+        "--resume-weights-path",
+        default=None,
+        help="Iteration-suffixed weights file from a complete resume pair.",
+    )
+    group.add_argument(
+        "--resume-state-file",
+        default=None,
+        help="Auxiliary .resume.npz file paired with --resume-weights-path.",
+    )
     group.add_argument(
         "--value-head",
         action="store_true",
@@ -1164,6 +1500,10 @@ def main(argv=None):
         ),
         autotune_fraction=args.rl_autotune_fraction,
         autotune_minimum_gain=args.rl_autotune_min_gain,
+        start_iteration=args.start_iteration,
+        resume_weights_path=args.resume_weights_path,
+        resume_state_file=args.resume_state_file,
+        numbered_checkpoints=args.numbered_checkpoints,
     )
 
 

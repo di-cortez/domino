@@ -317,6 +317,33 @@ controls are:
 Checkpoint evaluation games also use the selected rollout pool, but remain
 deterministic and alternate the RL player position.
 
+### Numbered checkpoints and exact resume
+
+Normal pipeline and direct-module calls keep the existing single-file
+checkpoint behavior. The long shell sweep opts into interruption-safe files
+with `--numbered-checkpoints`. Each save adds the absolute completed iteration
+to the name, such as `model_iter000050.npz`, and atomically publishes a paired
+`model_iter000050.resume.npz`. The state file contains a SHA-256 checksum,
+every computation-affecting RL setting, the effective seed, worker count, and
+the exact historical opponent-policy pool. The newest pool state replaces the
+previous one to bound disk use; numbered policy-only files remain available.
+
+To continue manually, pass the matching pair and its completed iteration while
+keeping the original training configuration and total target:
+
+```bash
+python -m training.self_play --iterations 2000 --numbered-checkpoints \
+  --rl-weights-path models/example.npz --start-iteration 500 \
+  --resume-weights-path models/example_iter000500.npz \
+  --resume-state-file models/example_iter000500.resume.npz --seed 42
+```
+
+Resume validates the checksum and configuration before loading anything,
+restores the opponent pool, continues game ids at the next absolute iteration,
+and reuses the saved rollout-worker count when the requested mode is `auto`.
+This is a true continuation. Loading an ordinary `.npz` through the legacy
+path restores only weights and cannot reconstruct the former in-memory pool.
+
 Checkpoint evaluation against `StrategicAgent`, diagnostics, and the UI use
 `mode="evaluation"`, which always selects the highest-probability legal action
 and stores no trajectory. Their results therefore avoid action-sampling noise.
@@ -481,5 +508,6 @@ L = -mean(policy_reward * log pi(action | state)) - entropy_coef * entropy
 Gradient clipping remains active in `PolicyNetwork` to limit large updates from
 rare high-choice decisions.
 
-The snapshot pool lives only in memory. Resuming from an RL checkpoint restores
-the policy weights, but not the previous in-memory opponent pool.
+The snapshot pool normally lives only in memory. The opt-in numbered resume
+state described above is the exception: it serializes and restores that pool
+for exact interruption recovery.

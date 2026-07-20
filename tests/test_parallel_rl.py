@@ -20,7 +20,13 @@ from diagnostics.parallel_runner import (
     ParallelSafetyConfig,
 )
 from training.rl_parallel import RLRolloutRunner, worker_count
-from training.self_play import REWARD_SCHEMAS, train
+from training.self_play import (
+    REWARD_SCHEMAS,
+    load_resume_state,
+    numbered_checkpoint_path,
+    resume_state_path,
+    train,
+)
 from run_pipeline import parse_args as parse_pipeline_args
 from utils.resource_limits import MemorySafetyError
 
@@ -136,6 +142,111 @@ class ParallelRLTests(unittest.TestCase):
                         np.testing.assert_array_equal(one[name], two[name])
             self.assertEqual(summaries[0]["effective_seed"], 987)
             self.assertEqual(summaries[1]["effective_seed"], 987)
+
+    def test_numbered_checkpoint_resume_matches_uninterrupted_training(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            full_base = root / "full.npz"
+            resumed_base = root / "resumed.npz"
+            common = {
+                "games_per_iteration": 4,
+                "checkpoint_interval": 2,
+                "evaluation_games": 2,
+                "pool_interval": 1,
+                "max_pool_size": 3,
+                "seed": 987,
+                "device": "cpu",
+                "workers": 1,
+                "safety_config": self.safety,
+                "quiet": True,
+                "numbered_checkpoints": True,
+            }
+
+            full = train(
+                iterations=4,
+                rl_weights_path=str(full_base),
+                **common,
+            )
+            train(
+                iterations=2,
+                rl_weights_path=str(resumed_base),
+                **common,
+            )
+            partial_weights = numbered_checkpoint_path(resumed_base, 2)
+            partial_state = resume_state_path(partial_weights)
+            metadata, pool = load_resume_state(partial_weights, partial_state)
+            self.assertEqual(metadata["completed_iteration"], 2)
+            self.assertEqual(len(pool), 3)
+            with self.assertRaisesRegex(ValueError, "inconsistent"):
+                load_resume_state(full["rl_weights_path"], partial_state)
+
+            with self.assertRaisesRegex(ValueError, "gamma"):
+                train(
+                    iterations=4,
+                    rl_weights_path=str(resumed_base),
+                    start_iteration=2,
+                    resume_weights_path=str(partial_weights),
+                    resume_state_file=str(partial_state),
+                    gamma=0.97,
+                    **common,
+                )
+
+            resumed = train(
+                iterations=4,
+                rl_weights_path=str(resumed_base),
+                start_iteration=2,
+                resume_weights_path=str(partial_weights),
+                resume_state_file=str(partial_state),
+                **common,
+            )
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
+                    self.assertEqual(left.files, right.files)
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
+
+            final_weights = numbered_checkpoint_path(resumed_base, 4)
+            self.assertEqual(resumed["rl_weights_path"], str(final_weights))
+            self.assertFalse(partial_state.exists())
+            self.assertTrue(resume_state_path(final_weights).exists())
+
+    def test_numbered_resume_restores_value_head_training(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common = {
+                "games_per_iteration": 4,
+                "checkpoint_interval": 1,
+                "evaluation_games": 2,
+                "pool_interval": 1,
+                "max_pool_size": 2,
+                "use_value_head": True,
+                "seed": 654,
+                "device": "cpu",
+                "workers": 1,
+                "safety_config": self.safety,
+                "quiet": True,
+                "numbered_checkpoints": True,
+            }
+            full_base = root / "full_critic.npz"
+            resumed_base = root / "resumed_critic.npz"
+            full = train(iterations=3, rl_weights_path=str(full_base), **common)
+            train(iterations=1, rl_weights_path=str(resumed_base), **common)
+            partial_weights = numbered_checkpoint_path(resumed_base, 1)
+            resumed = train(
+                iterations=3,
+                rl_weights_path=str(resumed_base),
+                start_iteration=1,
+                resume_weights_path=str(partial_weights),
+                resume_state_file=str(resume_state_path(partial_weights)),
+                **common,
+            )
+
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
+                    self.assertIn("Wv", left.files)
+                    self.assertIn("bv", left.files)
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
 
     def test_autotuning_retains_complete_training_iterations(self):
         messages = []

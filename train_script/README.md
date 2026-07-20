@@ -319,25 +319,19 @@ diagnostic against the random agent, independent of the full pipeline above
 train_script/run_rl_parameter_sweep.sh
 ```
 
-Trains one dedicated self-play checkpoint per sweep point: a **full grid
-search** (cross product) over the three main hyperparameters --
-`learning_rate` x `gamma` x `games_per_iteration`, 3 values each, 3x3x3 = 27
-combinations -- plus a **separate** `value_coef` axis (10 values,
-one-at-a-time, `learning_rate`/`gamma`/`games_per_iteration` held at
-baseline; `value_coef` isn't crossed into the grid). Each point is diagnosed
-against `random` (`python -m diagnostics.pairwise --agent rl --opponent
-random`). Runs the whole sweep with the critic off, then again with it on,
-with **every point identical between the two** so the two policies are
-compared on the exact same sweep points: 72 training+diagnostics runs by
-default (27 grid + 9 value_coef, per critic setting). Prints total elapsed
-wall-clock time at the end.
+Trains one dedicated self-play model per sweep point. The full cross-product
+grid is 3 learning rates x 4 gamma values x 3 games-per-iteration values = 36
+base configurations. Every base configuration runs with the critic off and on
+(72 runs). A seeded sample of 10 base configurations also runs the two
+non-baseline value coefficients with the critic on (20 more runs), for **92
+training+diagnostic runs** by default. Every point is diagnosed against
+`random`, and the final comparative report groups the 40/80/160 game-batch
+variants into columns.
 
 `value_coef` only affects training inside
 `PolicyNetwork.backward_policy_gradient`'s `use_value_head` branch, so it has
-no effect on direct REINFORCE (critic off) -- those runs are trained and
-swept anyway, for structural symmetry with the critic-on group, and are
-expected to reproduce the grid's `default` checkpoint exactly (same seed,
-same everything else that actually affects training).
+no effect on direct REINFORCE (critic off). The separate value-coefficient
+axis therefore runs only with the critic on.
 
 Baselines and the learning-rate/gamma grid values come from
 `diagnostics/hyperparameter_sweep.py` (`BASELINE_LEARNING_RATE`,
@@ -346,16 +340,16 @@ Baselines and the learning-rate/gamma grid values come from
 games-per-iteration, not a sweep tuple, so its range comes from the
 historical sweep table in
 `references/explicacoes/relatorios/teste_1/plano_correcao.tex` instead:
-games-per-iteration in `{40, 80, 160}`. `value_coef` uses 10 evenly spaced
-values from 0.1 to 1.0 (baseline 0.5 included).
+games-per-iteration in `{40, 80, 160}`. `value_coef` uses `{0.25, 0.5, 0.75}`;
+the `0.5` baseline is already covered by the critic-on grid.
 
 Naming (models and diagnostics share one name per run):
 
 ```text
-models/rl_test/domino_rl[_critic]_default.npz                       (learning_rate/gamma/games_per_iteration all at baseline)
-models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>.npz  (every other grid point)
-models/rl_test/domino_rl[_critic]_value_coef_<VC>.npz               (value_coef axis)
-diagnostics/results/domino_rl[_critic]_<same tag>/
+models/rl_test/domino_rl[_critic]_default_iter002000.npz
+models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>_iter002000.npz
+models/rl_test/domino_rl_critic_<grid-tag>_vc<VC>_iter002000.npz
+diagnostics/results/rl_test/domino_rl[_critic]_<same-tag>/
 ```
 
 `_critic` appears when the value head is on; the grid combination matching
@@ -372,75 +366,61 @@ on parsing the folder name.
 | `--diagnostic-games` | Games in the rl-vs-random diagnostic per sweep point | `200` |
 | `--seed` | Fix random/NumPy state for both training and diagnostics | `42` |
 | `--model-dir` | Output directory for RL checkpoints | `models/rl_test` |
-| `--resume` | Skip training a checkpoint that already exists on disk; still (re)run its diagnostics | off |
+| `--resume` | Continue an incomplete point from its newest valid numbered checkpoint; rerun diagnostics for complete points | off |
 | `--diag-no-plots` | Skip the per-run diagnostic PNG plots (CSV/JSON are always written) | off (plots on) |
 | `--device` | Array backend for every sweep point: `auto`/`cpu`/`gpu` (see `training/README.md`) | `auto` |
-| `--rl-workers` | Rollout workers inside each sweep subprocess; kept fixed to avoid nested oversubscription | `1` |
+| `--rl-workers` | CPU-only rollout workers inside the current point | `auto` |
+| `--vc-sample-count` | Seeded base configurations used by the non-baseline value-coefficient axis | `10` |
 | `--results-dir` | Output directory for per-run diagnostics subdirectories | `diagnostics/results/rl_test` |
 | `--report-output-dir` | Where the final comparative table is written | `diagnostics/results/rl_sweep_table` |
 | `--skip-report` | Skip the final comparative-table stage | off |
-| `--jobs` | Run up to N sweep points at once as background subprocesses | `10` |
-| `--ram-limit-mb` | Per-subprocess physical-memory cap in MiB (see below) | auto from RAM / `--jobs` |
-| `--vram-limit-mb` | Per-subprocess CuPy memory-pool cap in MiB | auto from VRAM / `--jobs` when device is not `cpu` |
+| `--jobs` | Compatibility flag; only `1` is accepted | `1` |
+| `--ram-limit-mb` | Physical-memory cap for the current training subprocess | 80% of detected RAM |
+| `--vram-limit-mb` | CuPy memory-pool cap for the current training subprocess | 80% of detected VRAM when device is not `cpu` |
 
 A fixed `--seed` (default `42`) is used for every sweep point, per the
 historical reports' recommendation to fix randomness when comparing
-hyperparameter configurations. `--resume` matters because a full sweep is
-expensive (72 runs by default): rerunning after an interruption skips
-checkpoints that already exist instead of retraining them.
+hyperparameter configurations.
 
-The naming scheme, `--resume` behavior, and `sweep_run.json` contents were
-verified end-to-end with a tiny run (`--rl-iterations 2 --diagnostic-games 3
---diag-no-plots`) before the sweep became a full grid search with a
-separately-swept `value_coef` axis; the grid/value_coef run-count math and
-tag generation were checked by simulating the loop logic standalone (no
-training invoked), and `diagnostics/rl_sweep_table.py`'s updated sort
-(directly on the numeric hyperparameters rather than parsing the tag string)
-was checked against synthetic grid/value_coef records.
+### Sequential execution, interruption, and safe resume
 
-### Concurrency (`--jobs`) and memory limits
+The shell driver runs exactly one sweep point at a time. `--jobs` is retained
+only for command compatibility and rejects every value except `1`. Parallelism
+is exclusively inside `training.self_play`, where `--rl-workers auto` performs
+the retained worker benchmark and applies the existing 20-worker and memory
+limits. This avoids multiplying outer sweep processes by inner rollout pools.
 
-Sweep points are fully independent -- each writes to its own unique
-`--rl-weights-path`/diagnostics directory and only *reads* the shared SL
-checkpoint -- so running several at once is safe. `--jobs N` launches up to
-N sweep points at once as background `python -m training.self_play`
-subprocesses. The default is 10 concurrent points; pass `--jobs 1` for fully
-sequential execution and direct terminal output. Measured on a 20-core/32GB machine
-with one shared GPU: `--jobs 4` cut a 58-point tiny sweep from 6m13s to
-3m11s (~1.95x, sub-linear because each batch of 4 waits for its slowest
-member -- see below).
+Every RL save made by this driver is iteration-numbered, for example
+`domino_rl_default_iter000050.npz`. A paired
+`domino_rl_default_iter000050.resume.npz` stores the configuration, checksum,
+completed iteration, selected worker count, and exact historical opponent
+pool. Both files are published atomically. Only the newest pool-state file is
+retained because it can be much larger; all numbered policy checkpoints remain.
 
-Concurrent output doesn't interleave: each background job's full output goes
-to `diagnostics/results/_sweep_logs/<run-name>.log` instead of the terminal,
-with only concise `started`/`finished`/`FAILED` lines printed live. Unlike
-`--jobs 1` (where `set -e` aborts the whole script on the first failure,
-unchanged), a failed point under `--jobs > 1` doesn't stop the rest of the
-sweep -- other points keep running, failures are collected and printed as a
-summary at the end, and the script exits nonzero if any occurred, so
-automation can detect it while still getting every other point's results.
+Press `Ctrl+C` once to stop the foreground point. Resume with the exact same
+options plus `--resume`:
 
-The job pool is batch-based, not a rolling pool: it launches up to `--jobs`
-points, waits for that whole batch, then launches the next. Simpler and
-portable across bash versions (a rolling pool needs `wait -n`), at the cost
-of a batch waiting on its slowest point before the next one starts -- part of
-why the measured speedup above is ~2x rather than ~4x at `--jobs 4`.
+```bash
+train_script/run_rl_parameter_sweep.sh
+# Press Ctrl+C once.
+train_script/run_rl_parameter_sweep.sh --resume
+```
 
-Each training subprocess defaults to `--rl-workers 1`: the outer `--jobs`
-pool already supplies concurrency, and automatic inner rollout pools would
-multiply the process count and distort memory limits. When using only one or
-two outer jobs, `--rl-workers auto` can instead tune rollouts inside each run.
+If custom options were used, repeat them unchanged. Resume scans each point for
+the newest complete pair at or below the requested iteration total, verifies
+its hash, seed, and computation-affecting hyperparameters, restores its policy
+and opponent pool, and begins at the following absolute iteration. A lone or
+corrupt file from an interrupted write is ignored. A point already at the
+requested total skips training but reruns its diagnostic so the final report
+can still be rebuilt. Legacy unsuffixed files cannot prove their completed
+iteration or restore their opponent pool, so safe resume intentionally does
+not treat them as complete.
 
-**Memory limits**, auto-computed from detected system RAM / GPU memory
-divided by `--jobs`, **always applied by default** (not only when `--jobs >
-1`) as a general OOM backstop, unless set explicitly with
-`--ram-limit-mb`/`--vram-limit-mb`. 80% of the detected total is used, so
-headroom stays free for the rest of the system. Verified on this machine: 20
-CPU cores, 31779MiB (~31GiB) system RAM, one NVIDIA RTX 3050 with 6144MiB
-(6GiB) VRAM, 2047MiB (2GiB) swap -- giving, at the default `--jobs 1`, a
-~25.4GiB RAM / ~4.8GiB VRAM ceiling for that single process. That's
-deliberately generous relative to real observed usage (a few hundred MiB per
-process) -- it's a backstop against a bug badly leaking memory, not a routine
-constraint, and re-verified not to interfere with a normal run (see below).
+### Memory limits
+
+Memory limits are computed for the one active training subprocess and applied
+by default unless overridden. The automatic value is 80% of detected system
+RAM and, when GPU use is possible, 80% of detected VRAM.
 
 - `--ram-limit-mb`: a cap on each subprocess's actual physical memory, via
   `systemd-run --user --scope -p MemoryMax=... -p MemorySwapMax=0` (a cgroup
@@ -469,18 +449,9 @@ constraint, and re-verified not to interfere with a normal run (see below).
   `cupy.cuda.memory.OutOfMemoryError` with `limit set to: 1,048,576 bytes`
   in the message. No-op when unset (every existing caller).
 
-Verified end-to-end: the job pool's concurrency and failure-isolation logic
-was checked in isolation first (fake sleep-based jobs, confirmed N=3
-concurrent jobs finish in ~1/3 the sequential time and that one deliberately
-failing job doesn't stop the others). The RAM limit's `RLIMIT_AS` rejection
-was reproduced and diagnosed from an actual failed real run before switching
-to the cgroup approach, which was then verified to (a) not break a real
-`training.self_play` invocation under a generous limit and (b) actually
-enforce a tight one (`MemoryMax=50M` + `MemorySwapMax=0` correctly SIGKILLed
-a process touching 1.6GB). The full `--jobs 4` sweep (58 points) then ran
-end-to-end with zero failures and correct `sweep_run.json`/`summary.json`
-output, timed against an equivalent `--jobs 1` run for the speedup figure
-above.
+The RAM cgroup and CuPy pool implementation details remain unchanged from the
+main training driver; see the flag descriptions above and the top-level
+resource-safety documentation.
 
 ### Comparative table (`diagnostics.rl_sweep_table`)
 
@@ -496,9 +467,11 @@ hyperparameters with its rl-vs-random win/draw/loss rates and writes:
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.json`
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.png` -- an image table,
   using the same visual style as the aggregate diagnostics report
+- `diagnostics/results/rl_sweep_table/rl_sweep_table.pdf` -- the same compact
+  table as a vector PDF
 
 The CSV and JSON retain one row per trained model, including its exact
-games-per-iteration value and checkpoint path. The PNG and console table group
+games-per-iteration value and checkpoint path. The PNG, PDF, and console table group
 models that differ only in games per iteration into one row with win-rate
 columns labelled `40`, `80`, and `160`. Critic, learning rate, gamma, and
 value coefficient remain row dimensions. Percentage cells use red/blue

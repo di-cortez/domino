@@ -49,6 +49,7 @@ class RLSweepTableTests(unittest.TestCase):
             self.assertTrue((output_dir / "rl_sweep_table.csv").exists())
             self.assertTrue((output_dir / "rl_sweep_table.json").exists())
             self.assertTrue((output_dir / "rl_sweep_table.png").exists())
+            self.assertTrue((output_dir / "rl_sweep_table.pdf").exists())
 
     def test_three_gpi_models_become_one_display_row(self):
         raw_rows = [
@@ -120,6 +121,7 @@ class RLSweepTableTests(unittest.TestCase):
                 )
 
             self.assertEqual(len(returned_rows), 3)
+            self.assertEqual(plot_table.call_count, 2)
             persisted_json = json.loads(
                 (output_dir / "rl_sweep_table.json").read_text(encoding="utf-8")
             )
@@ -133,6 +135,11 @@ class RLSweepTableTests(unittest.TestCase):
 
             display_rows = plot_table.call_args.args[0]
             self.assertEqual(len(display_rows), 1)
+            output_paths = [call.args[1].name for call in plot_table.call_args_list]
+            self.assertEqual(
+                output_paths,
+                ["rl_sweep_table.png", "rl_sweep_table.pdf"],
+            )
             self.assertEqual(
                 plot_table.call_args.kwargs["games_per_iteration_values"],
                 (40, 80, 160),

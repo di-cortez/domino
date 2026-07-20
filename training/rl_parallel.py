@@ -154,6 +154,43 @@ class SharedPolicyBank:
         self.pool_slots.append(slot)
         self._next_pool_slot = (slot + 1) % self.max_pool_size
 
+    def export_pool_snapshots(self):
+        """Copy opponent snapshots in their logical oldest-to-newest order."""
+        snapshots = []
+        for slot in self.pool_slots:
+            flat = np.ndarray(
+                (self.element_count,),
+                dtype=self.dtype,
+                buffer=self._segments[slot + 1].buf,
+            )
+            weights = {}
+            offset = 0
+            for name, shape in zip(POLICY_WEIGHT_NAMES, self.shapes):
+                size = math.prod(shape)
+                weights[name] = flat[offset:offset + size].reshape(shape).copy()
+                offset += size
+            snapshots.append(weights)
+        return tuple(snapshots)
+
+    def restore_pool_snapshots(self, snapshots):
+        """Replace the ring with serialized snapshots from a resume state."""
+        snapshots = tuple(snapshots)
+        if len(snapshots) > self.max_pool_size:
+            raise ValueError(
+                f"Resume state contains {len(snapshots)} opponent snapshots, "
+                f"but max_pool_size is {self.max_pool_size}."
+            )
+        self.pool_slots = []
+        self._next_pool_slot = 0
+        for weights in snapshots:
+            missing = [name for name in POLICY_WEIGHT_NAMES if name not in weights]
+            if missing:
+                raise ValueError(
+                    "Resume opponent snapshot is missing policy weights: "
+                    + ", ".join(missing)
+                )
+            self.append_pool_snapshot(_CPUInferencePolicy(weights))
+
     def close(self):
         """Release every shared segment, even after a failed training run."""
         if self._closed:
@@ -375,6 +412,15 @@ class RLRolloutRunner:
     def append_pool_snapshot(self, network):
         """Publish a new frozen opponent after the iteration update."""
         self.bank.append_pool_snapshot(network)
+
+    def export_pool_snapshots(self):
+        """Return copies suitable for an atomic parent-side resume file."""
+        return self.bank.export_pool_snapshots()
+
+    def restore_pool_snapshots(self, snapshots):
+        """Restore the exact opponent pool before starting resumed rollouts."""
+        self._shutdown_executor()
+        self.bank.restore_pool_snapshots(snapshots)
 
     def _shutdown_executor(self, terminate=False):
         if self.executor is None:

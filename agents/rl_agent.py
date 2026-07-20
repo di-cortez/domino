@@ -54,7 +54,7 @@ class RLAgent(Agent):
         self.network = network
         self.mode = mode
         self.encoder = DominoEncoder()
-        self.opponent_model = ExactOpponentModel()
+        self.opponent_model = ExactOpponentModel(record_traces=False)
         self.trajectory = []
 
     @classmethod

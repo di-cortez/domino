@@ -6,12 +6,22 @@ trajectory. Local draw/pass events are distributed to all earlier real
 decisions with temporal decay, then combined with a uniform terminal reward and
 an option-count multiplier. Direct reward updates are the default; a value head
 can optionally convert those rewards into reward-minus-value advantages.
+
+Independent games within each iteration run in deterministic CPU-only workers.
+Workers read frozen policies from shared memory and return trajectories; only
+the parent process assembles batches, updates weights, writes checkpoints, or
+uses the GPU.
 """
 
 import argparse
 from collections import deque
 from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
 import random
+import secrets
 import time
 
 import numpy as np
@@ -22,6 +32,28 @@ from agents.rl_agent import RLAgent
 from agents.rl_nn import DEVICES, PolicyNetwork
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
+from diagnostics.parallel_runner import (
+    MAX_PARALLEL_WORKERS,
+    ParallelSafetyConfig,
+    cap_parallel_workers,
+    game_seed,
+)
+from training.rl_parallel import (
+    DEFAULT_RL_AUTOTUNE_FRACTION,
+    DEFAULT_RL_MINIMUM_GAIN,
+    DEFAULT_RL_WORKER_CANDIDATES,
+    DEFAULT_RL_WORKERS,
+    RLRolloutRunner,
+    RetainedRLWorkerAutotuner,
+    worker_count as parse_rl_worker_count,
+)
+from utils.resource_limits import (
+    MIB,
+    MemorySafetyError,
+    choose_safe_rl_device,
+    effective_gpu_available_bytes,
+    ensure_ram_available,
+)
 from utils.runtime_status import format_duration, print_memory_report
 
 # The array backend for a given run is resolved once, inside train(), from
@@ -33,6 +65,8 @@ DEFAULT_DEVICE = "auto"
 SL_WEIGHTS = "models/domino_sl_weights.npz"
 RL_WEIGHTS = "models/domino_rl_weights.npz"
 TRAINING_OPPONENT = "self_play"
+RESUME_STATE_VERSION = 1
+RESUME_POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 
 TERMINAL_WIN_REWARD = 0.50
 TERMINAL_TIE_REWARD = 0.00
@@ -316,7 +350,11 @@ def _play_training_game(agents, learner_position, learner_agent, schema):
                 decay_lambda=schema["event_decay"],
             )
 
-        engine.step(action)
+        engine.step(
+            action,
+            return_state=False,
+            legal_actions=legal_actions,
+        )
 
     return engine, event_stats
 
@@ -397,24 +435,25 @@ def _load_initial_network(
     disk once and reuse it, instead of every run re-reading
     ``sl_weights_path``. Unused when resuming from an existing RL checkpoint.
     """
-    try:
-        network = PolicyNetwork.load(
-            rl_weights_path,
-            learning_rate=learning_rate,
-            use_value_head=use_value_head,
-            device=device,
-        )
-        if not _checkpoint_matches_encoder(network):
-            raise ValueError(
-                f"RL checkpoint {rl_weights_path} has shape "
-                f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
-                "but the current encoder expects input=168, output=56."
+    if rl_weights_path is not None:
+        try:
+            network = PolicyNetwork.load(
+                rl_weights_path,
+                learning_rate=learning_rate,
+                use_value_head=use_value_head,
+                device=device,
             )
-        if not quiet:
-            print(f"Resuming RL training from {rl_weights_path}")
-        return network
-    except FileNotFoundError:
-        pass
+            if not _checkpoint_matches_encoder(network):
+                raise ValueError(
+                    f"RL checkpoint {rl_weights_path} has shape "
+                    f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
+                    "but the current encoder expects input=168, output=56."
+                )
+            if not quiet:
+                print(f"Resuming RL training from {rl_weights_path}")
+            return network
+        except FileNotFoundError:
+            pass
 
     network = PolicyNetwork.load_from_sl(
         sl_weights_path,
@@ -433,6 +472,247 @@ def _load_initial_network(
     if not quiet:
         print(f"Initializing RL policy from supervised weights: {sl_weights_path}")
     return network
+
+
+def numbered_checkpoint_path(base_path, iteration):
+    """Return an iteration-suffixed checkpoint path derived from ``base_path``."""
+    path = Path(base_path)
+    suffix = path.suffix or ".npz"
+    stem = path.name[:-len(path.suffix)] if path.suffix else path.name
+    return path.with_name(f"{stem}_iter{int(iteration):06d}{suffix}")
+
+
+def resume_state_path(weights_path):
+    """Return the auxiliary resume-state path paired with a weights checkpoint."""
+    path = Path(weights_path)
+    suffix = path.suffix or ".npz"
+    stem = path.name[:-len(path.suffix)] if path.suffix else path.name
+    return path.with_name(f"{stem}.resume{suffix}")
+
+
+def _file_sha256(path):
+    """Return a streaming SHA-256 digest without duplicating checkpoint memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as checkpoint_file:
+        for block in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _atomic_network_save(network, path):
+    """Publish a complete network file with one same-directory atomic rename."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(
+        f".{path.stem}.tmp-{os.getpid()}-{secrets.token_hex(4)}.npz"
+    )
+    try:
+        network.save(str(temporary))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_resume_state_save(path, metadata, pool_snapshots):
+    """Atomically save metadata and the exact self-play opponent pool."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arrays = {
+        "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True)),
+        "pool_count": np.asarray(len(pool_snapshots), dtype=np.int64),
+    }
+    for snapshot_index, snapshot in enumerate(pool_snapshots):
+        for name in RESUME_POLICY_WEIGHT_NAMES:
+            arrays[f"pool_{snapshot_index:03d}_{name}"] = np.asarray(snapshot[name])
+    temporary = path.with_name(
+        f".{path.stem}.tmp-{os.getpid()}-{secrets.token_hex(4)}.npz"
+    )
+    try:
+        np.savez_compressed(temporary, **arrays)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_resume_state(weights_path, state_path):
+    """Validate and load one complete weights/state checkpoint pair."""
+    weights_path = Path(weights_path)
+    state_path = Path(state_path)
+    with np.load(state_path, allow_pickle=False) as state:
+        metadata = json.loads(str(state["metadata_json"].item()))
+        if metadata.get("version") != RESUME_STATE_VERSION:
+            raise ValueError(
+                f"Unsupported RL resume-state version in {state_path}: "
+                f"{metadata.get('version')!r}."
+            )
+        actual_hash = _file_sha256(weights_path)
+        if metadata.get("weights_sha256") != actual_hash:
+            raise ValueError(
+                f"RL checkpoint pair is inconsistent: {weights_path} does not "
+                f"match {state_path}."
+            )
+        pool_count = int(state["pool_count"])
+        snapshots = []
+        for snapshot_index in range(pool_count):
+            weights = {}
+            for name in RESUME_POLICY_WEIGHT_NAMES:
+                key = f"pool_{snapshot_index:03d}_{name}"
+                if key not in state:
+                    raise ValueError(f"RL resume state {state_path} is missing {key}.")
+                weights[name] = np.asarray(state[key]).copy()
+            snapshots.append(weights)
+    return metadata, tuple(snapshots)
+
+
+def _resume_configuration(
+    *,
+    games_per_iteration,
+    training_opponent,
+    learning_rate,
+    entropy_coef,
+    pool_interval,
+    max_pool_size,
+    use_value_head,
+    value_coef,
+    gamma,
+    reward_schema,
+    clip_grad_norm,
+    normalize_advantages,
+    effective_seed,
+    device,
+):
+    """Return every setting that can affect post-checkpoint RL computation."""
+    return {
+        "games_per_iteration": int(games_per_iteration),
+        "training_opponent": training_opponent,
+        "learning_rate": float(learning_rate),
+        "entropy_coef": float(entropy_coef),
+        "pool_interval": int(pool_interval),
+        "max_pool_size": int(max_pool_size),
+        "use_value_head": bool(use_value_head),
+        "value_coef": float(value_coef),
+        "gamma": float(gamma),
+        "reward_schema": reward_schema,
+        "clip_grad_norm": (
+            None if clip_grad_norm is None else float(clip_grad_norm)
+        ),
+        "normalize_advantages": bool(normalize_advantages),
+        "effective_seed": int(effective_seed),
+        "device": device,
+    }
+
+
+def _validate_resume_configuration(metadata, expected):
+    """Reject a resume that would silently continue a different experiment."""
+    saved = metadata.get("configuration")
+    if saved != expected:
+        differences = []
+        saved = saved or {}
+        for key in sorted(set(saved) | set(expected)):
+            if saved.get(key) != expected.get(key):
+                differences.append(
+                    f"{key}: checkpoint={saved.get(key)!r}, requested={expected.get(key)!r}"
+                )
+        raise ValueError(
+            "RL resume configuration does not match the checkpoint: "
+            + "; ".join(differences)
+        )
+
+
+def _save_numbered_resume_checkpoint(
+    network,
+    runner,
+    base_path,
+    iteration,
+    configuration,
+    runtime_workers,
+):
+    """Save one atomic resumable checkpoint and retain only its latest state."""
+    weights_path = numbered_checkpoint_path(base_path, iteration)
+    state_path = resume_state_path(weights_path)
+
+    # Invalidate an older same-iteration pair before replacing its weights.
+    # A sudden interruption then leaves either the previous iteration pair or
+    # the newly completed pair, never new weights with stale resume metadata.
+    state_path.unlink(missing_ok=True)
+    _atomic_network_save(network, weights_path)
+    metadata = {
+        "version": RESUME_STATE_VERSION,
+        "completed_iteration": int(iteration),
+        "weights_file": weights_path.name,
+        "weights_sha256": _file_sha256(weights_path),
+        "runtime_workers": int(runtime_workers),
+        "configuration": configuration,
+    }
+    _atomic_resume_state_save(
+        state_path,
+        metadata,
+        runner.export_pool_snapshots(),
+    )
+
+    # Pool snapshots are much larger than policy-only checkpoints. The newest
+    # state is sufficient for continuation; older numbered weight files remain
+    # available for analysis while their superseded resume states are removed.
+    base = Path(base_path)
+    base_stem = base.name[:-len(base.suffix)] if base.suffix else base.name
+    for older_state in base.parent.glob(f"{base_stem}_iter*.resume.npz"):
+        if older_state != state_path:
+            older_state.unlink(missing_ok=True)
+    return weights_path, state_path
+
+
+def _new_parallel_summary(requested_workers):
+    """Return mutable aggregate metadata for all RL worker-pool phases."""
+    return {
+        "requested_workers": requested_workers,
+        "initial_workers": None,
+        "final_workers": None,
+        "peak_worker_rss_mb": 0.0,
+        "peak_total_children_rss_mb": 0.0,
+        "min_available_memory_mb": None,
+        "fallback_count": 0,
+        "fallback_history": [],
+        "attempted_worker_counts": [],
+        "safety_capped": False,
+        "memory_monitoring_available": True,
+        "workers_cpu_only": True,
+        "rollout_batches": 0,
+        "evaluation_batches": 0,
+    }
+
+
+def _merge_parallel_summary(summary, run_info, *, phase, iteration):
+    """Accumulate one rollout/evaluation pool run into the public summary."""
+    if summary["initial_workers"] is None:
+        summary["initial_workers"] = run_info.initial_workers
+    summary["final_workers"] = run_info.final_workers
+    summary["peak_worker_rss_mb"] = max(
+        summary["peak_worker_rss_mb"],
+        run_info.peak_worker_rss_mb,
+    )
+    summary["peak_total_children_rss_mb"] = max(
+        summary["peak_total_children_rss_mb"],
+        run_info.peak_total_children_rss_mb,
+    )
+    available = run_info.min_available_memory_mb
+    if available is not None:
+        current = summary["min_available_memory_mb"]
+        summary["min_available_memory_mb"] = (
+            available if current is None else min(current, available)
+        )
+    summary["fallback_count"] += run_info.fallback_count
+    for item in run_info.fallback_history:
+        tagged = dict(item)
+        tagged["rl_phase"] = phase
+        tagged["iteration"] = int(iteration)
+        summary["fallback_history"].append(tagged)
+    summary["attempted_worker_counts"].extend(run_info.attempted_worker_counts)
+    summary["safety_capped"] = summary["safety_capped"] or run_info.safety_capped
+    summary["memory_monitoring_available"] = (
+        summary["memory_monitoring_available"]
+        and run_info.memory_monitoring_available
+    )
+    summary[f"{phase}_batches"] += 1
 
 
 def train(
@@ -460,6 +740,16 @@ def train(
     seed=None,
     device=DEFAULT_DEVICE,
     sl_weights_data=None,
+    workers=DEFAULT_RL_WORKERS,
+    safety_config=None,
+    autotune_fraction=DEFAULT_RL_AUTOTUNE_FRACTION,
+    autotune_minimum_gain=DEFAULT_RL_MINIMUM_GAIN,
+    worker_candidates=DEFAULT_RL_WORKER_CANDIDATES,
+    status_callback=None,
+    start_iteration=0,
+    resume_weights_path=None,
+    resume_state_file=None,
+    numbered_checkpoints=False,
 ):
     """Train with direct REINFORCE or an optional learned value baseline.
 
@@ -500,7 +790,42 @@ def train(
     sweep) can read ``sl_weights_path`` from disk once and pass the result to
     every call, instead of re-reading it each time. Ignored when resuming
     from an existing ``rl_weights_path`` checkpoint.
+
+    Rollout workers are CPU-only and never update the policy. ``workers="auto"``
+    benchmarks complete early iterations with 1, 2, 4, 6, ... workers, keeps
+    every benchmark game in training, and stops below the configured marginal
+    throughput gain. Per-game seeds and ordered parent aggregation make a
+    seeded run independent of worker scheduling and worker count.
+
+    ``numbered_checkpoints=True`` writes ``_iterNNNNNN`` weight files plus an
+    atomic auxiliary state containing the exact opponent pool. Pass that pair
+    back through ``resume_weights_path``/``resume_state_file`` with its absolute
+    ``start_iteration`` to continue safely without replaying earlier updates.
     """
+    if iterations < 1:
+        raise ValueError("iterations must be positive")
+    if games_per_iteration < 1:
+        raise ValueError("games_per_iteration must be positive")
+    if checkpoint_interval < 1:
+        raise ValueError("checkpoint_interval must be positive")
+    if evaluation_games < 1:
+        raise ValueError("evaluation_games must be positive")
+    if pool_interval < 1:
+        raise ValueError("pool_interval must be positive")
+    if max_pool_size < 0:
+        raise ValueError("max_pool_size must be non-negative")
+    if start_iteration < 0 or start_iteration >= iterations:
+        raise ValueError("start_iteration must be between 0 and iterations - 1")
+    has_resume_weights = resume_weights_path is not None
+    has_resume_state = resume_state_file is not None
+    if has_resume_weights != has_resume_state:
+        raise ValueError(
+            "resume_weights_path and resume_state_file must be provided together"
+        )
+    if start_iteration > 0 and not has_resume_weights:
+        raise ValueError("A positive start_iteration requires a complete resume pair")
+    if start_iteration == 0 and has_resume_weights:
+        raise ValueError("A resume pair requires a positive start_iteration")
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
     if reward_schema not in REWARD_SCHEMAS:
@@ -508,164 +833,455 @@ def train(
             f"Unknown reward_schema {reward_schema!r}; expected one of "
             f"{sorted(REWARD_SCHEMAS)}."
         )
+    if workers != "auto":
+        workers = int(workers)
+        if not 1 <= workers <= MAX_PARALLEL_WORKERS:
+            raise ValueError(
+                f"workers must be 'auto' or between 1 and {MAX_PARALLEL_WORKERS}"
+            )
+    safety_config = safety_config or ParallelSafetyConfig()
     schema = REWARD_SCHEMAS[reward_schema]
-    if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
+    resume_metadata = None
+    resume_pool_snapshots = ()
+    if has_resume_weights:
+        resume_metadata, resume_pool_snapshots = load_resume_state(
+            resume_weights_path,
+            resume_state_file,
+        )
+        completed_iteration = int(resume_metadata["completed_iteration"])
+        if completed_iteration != int(start_iteration):
+            raise ValueError(
+                f"Resume state completed iteration {completed_iteration}, but "
+                f"start_iteration is {start_iteration}."
+            )
+        saved_seed = int(resume_metadata["configuration"]["effective_seed"])
+        if seed is not None and int(seed) != saved_seed:
+            raise ValueError(
+                f"Resume state uses seed {saved_seed}, but seed {int(seed)} was requested."
+            )
+        effective_seed = saved_seed
+    else:
+        effective_seed = int(seed) if seed is not None else secrets.randbits(63)
 
-    if not quiet:
-        print_memory_report("RL self-play startup memory")
+    random.seed(effective_seed)
+    np.random.seed(effective_seed & 0xFFFFFFFF)
+
+    requested_device = device
+    device, device_fallback_reason = choose_safe_rl_device(device)
+    resume_configuration = _resume_configuration(
+        games_per_iteration=games_per_iteration,
+        training_opponent=training_opponent,
+        learning_rate=learning_rate,
+        entropy_coef=entropy_coef,
+        pool_interval=pool_interval,
+        max_pool_size=max_pool_size,
+        use_value_head=use_value_head,
+        value_coef=value_coef,
+        gamma=gamma,
+        reward_schema=reward_schema,
+        clip_grad_norm=clip_grad_norm,
+        normalize_advantages=normalize_advantages,
+        effective_seed=effective_seed,
+        device=device,
+    )
+    if resume_metadata is not None:
+        _validate_resume_configuration(resume_metadata, resume_configuration)
+    # Conservative upper bound for one full 52-decision trajectory per game
+    # and several matrix/gradient copies during parent-side batch assembly.
+    estimated_batch_bytes = games_per_iteration * 52 * 4096
+    if device_fallback_reason:
+        print(
+            "RL memory safety: automatic GPU selection fell back to CPU because "
+            f"{device_fallback_reason}.",
+            flush=True,
+        )
+    initial_rl_weights_path = (
+        resume_weights_path
+        if resume_metadata is not None
+        else (None if numbered_checkpoints else rl_weights_path)
+    )
     network = _load_initial_network(
         learning_rate,
         sl_weights_path,
-        rl_weights_path,
+        initial_rl_weights_path,
         quiet=quiet,
         use_value_head=use_value_head,
         device=device,
         sl_weights_data=sl_weights_data,
     )
     xp = network.xp
+    policy_bytes = 0
+    for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
+        value = getattr(network, name)
+        policy_bytes += int(value.nbytes)
+    shared_pool_size = max_pool_size if training_opponent == "self_play" else 0
+    estimated_shared_bytes = (1 + shared_pool_size) * policy_bytes
+    estimated_peak_bytes = estimated_shared_bytes + estimated_batch_bytes
+    ensure_ram_available(
+        estimated_peak_bytes,
+        safety_config.memory_reserve_mb,
+        "RL self-play and shared-policy preflight",
+    )
     if not quiet:
+        print_memory_report("RL self-play startup memory")
+        print(
+            "RL resource preflight: "
+            f"requested device={requested_device!r}, selected device={device!r}, "
+            f"estimated peak host allocation {estimated_peak_bytes / MIB:.1f} MiB."
+        )
         print(f"RL self-play array backend: {xp.__name__} (device={network.device!r})")
 
-    pool = None
-    if training_opponent == "self_play":
-        pool = deque(maxlen=max_pool_size)
-        pool.append(network.clone())
+    if status_callback is not None:
+        emit_status = status_callback
+    elif quiet:
+        emit_status = lambda _message: None
+    else:
+        emit_status = lambda message: print(message, flush=True)
+
+    runner = RLRolloutRunner(
+        network,
+        training_opponent=training_opponent,
+        schema=schema,
+        gamma=gamma,
+        max_pool_size=shared_pool_size,
+        safety=safety_config,
+    )
+    if resume_metadata is not None:
+        runner.restore_pool_snapshots(resume_pool_snapshots)
+        emit_status(
+            f"Resuming RL after iteration {start_iteration} from "
+            f"{resume_weights_path}; restored {len(resume_pool_snapshots)} "
+            "opponent-pool snapshot(s)."
+        )
+    parallel_summary = _new_parallel_summary(workers)
+    if workers == "auto" and resume_metadata is None:
+        autotuner = RetainedRLWorkerAutotuner(
+            total_iterations=iterations,
+            games_per_iteration=games_per_iteration,
+            safety=safety_config,
+            benchmark_fraction=autotune_fraction,
+            minimum_gain=autotune_minimum_gain,
+            candidates=worker_candidates,
+            status_callback=emit_status,
+        )
+        selected_workers = 1
+    else:
+        autotuner = None
+        fixed_workers = (
+            int(resume_metadata["runtime_workers"])
+            if workers == "auto"
+            else workers
+        )
+        selected_workers, was_capped, cap_reason = cap_parallel_workers(
+            fixed_workers,
+            safety_config,
+        )
+        if workers == "auto":
+            emit_status(
+                f"Resumed RL will reuse {selected_workers} rollout worker(s) "
+                "from the last complete checkpoint."
+            )
+        if was_capped:
+            emit_status(
+                f"Fixed RL workers reduced from {fixed_workers} to {selected_workers} "
+                f"by resource preflight: {cap_reason}."
+            )
+            parallel_summary["safety_capped"] = True
+            parallel_summary["fallback_history"].append({
+                "from_workers": fixed_workers,
+                "to_workers": selected_workers,
+                "completed_games": 0,
+                "reason": cap_reason,
+                "phase": "preflight",
+                "rl_phase": "rollout",
+                "iteration": 0,
+            })
 
     value_loss_window = deque(maxlen=moving_average_window)
     win_rate_window = deque(maxlen=moving_average_window)
 
     start_time = time.time()
     last_checkpoint_time = start_time
-    for iteration in range(1, iterations + 1):
-        batch = []
-        event_totals = EventStats()
-        wins = 0
+    configured_worker_target = None
+    last_saved_iteration = int(start_iteration)
+    final_weights_path = (
+        Path(resume_weights_path)
+        if resume_weights_path is not None
+        else Path(rl_weights_path)
+    )
+    try:
+        for iteration in range(start_iteration + 1, iterations + 1):
+            if autotuner is not None and not autotuner.finished:
+                candidate = autotuner.current_workers
+                capped, was_capped, cap_reason = cap_parallel_workers(
+                    candidate,
+                    safety_config,
+                )
+                if was_capped:
+                    autotuner.reject_current_before_allocation(cap_reason)
+                    candidate = autotuner.optimal_workers
+                selected_workers = candidate
+            elif autotuner is not None:
+                selected_workers = autotuner.optimal_workers
 
-        for _ in range(games_per_iteration):
-            if training_opponent == "self_play":
-                samples, event_stats, winner, learner_position = _collect_self_play_steps(
-                    network,
-                    pool,
-                    schema,
-                    gamma,
+            if selected_workers != configured_worker_target:
+                runner.set_workers(selected_workers)
+                configured_worker_target = selected_workers
+            runner.sync_current(network)
+            rollout_started = time.perf_counter()
+            rollout_results, rollout_info = runner.collect_training_iteration(
+                iteration - 1,
+                games_per_iteration,
+                effective_seed,
+            )
+            rollout_elapsed = time.perf_counter() - rollout_started
+            _merge_parallel_summary(
+                parallel_summary,
+                rollout_info,
+                phase="rollout",
+                iteration=iteration,
+            )
+            if rollout_info.fallback_count:
+                emit_status(
+                    f"RL iteration {iteration} retained completed games and "
+                    f"reduced workers to {rollout_info.final_workers}: "
+                    f"{rollout_info.fallback_history[-1]['reason']}."
+                )
+            if autotuner is not None and not autotuner.finished:
+                autotuner.record_iteration(
+                    rollout_elapsed,
+                    rollout_info,
+                    iteration,
+                )
+
+            batch = []
+            wins = 0
+            for result in rollout_results:
+                batch.extend(result["samples"])
+                if result["winner"] == result["learner_position"]:
+                    wins += 1
+
+            win_rate_window.append(wins / games_per_iteration)
+
+            if not batch:
+                if progress_callback is not None:
+                    progress_callback(iteration, iterations)
+                continue
+
+            exact_sample_bytes = 0
+            for sample in batch:
+                exact_sample_bytes += int(getattr(sample.x, "nbytes", 0))
+                exact_sample_bytes += int(getattr(sample.legal_mask, "nbytes", 0))
+            matrix_workspace_bytes = max(1, exact_sample_bytes * 4)
+            if network.device == "cpu":
+                ensure_ram_available(
+                    matrix_workspace_bytes,
+                    safety_config.memory_reserve_mb,
+                    f"RL iteration {iteration} batch assembly",
                 )
             else:
-                samples, event_stats, winner, learner_position = _collect_steps_vs_heuristic(
-                    network, schema, gamma
-                )
-            batch.extend(samples)
-            event_totals.add(event_stats)
-            if winner == learner_position:
-                wins += 1
+                effective_gpu_bytes = effective_gpu_available_bytes()
+                if (
+                    effective_gpu_bytes is not None
+                    and effective_gpu_bytes < matrix_workspace_bytes
+                ):
+                    raise MemorySafetyError(
+                        f"RL iteration {iteration} needs about "
+                        f"{matrix_workspace_bytes / MIB:.1f} MiB of GPU workspace, "
+                        f"but only {effective_gpu_bytes / MIB:.1f} MiB is effectively free. "
+                        "Restart with --device cpu or a smaller games-per-iteration."
+                    )
 
-        win_rate_window.append(wins / games_per_iteration)
+            x_batch = xp.hstack([sample.x for sample in batch])
+            action_indices = [sample.action_index for sample in batch]
+            legal_masks = xp.hstack([
+                xp.asarray(sample.legal_mask)
+                for sample in batch
+            ])
+            policy_rewards = xp.array(
+                [sample.policy_reward for sample in batch],
+                dtype=float,
+            ).reshape(1, -1)
 
-        if not batch:
-            if progress_callback is not None:
-                progress_callback(iteration, iterations)
-            continue
-
-        x_batch = xp.hstack([sample.x for sample in batch])
-        action_indices = [sample.action_index for sample in batch]
-        legal_masks = xp.hstack([
-            xp.asarray(sample.legal_mask)
-            for sample in batch
-        ])
-        policy_rewards = xp.array(
-            [sample.policy_reward for sample in batch],
-            dtype=float,
-        ).reshape(1, -1)
-
-        value_returns = None
-        policy_signal = policy_rewards
-        if use_value_head:
-            values = network.predict_values(x_batch)
-            policy_signal = policy_rewards - values
-            value_returns = policy_rewards
-        else:
-            network.forward(x_batch)
-
-        if normalize_advantages:
-            signal_std = float(xp.std(policy_signal))
-            if signal_std > REWARD_ZERO_EPSILON:
-                policy_signal = (policy_signal - float(xp.mean(policy_signal))) / signal_std
-
-        metrics = network.backward_policy_gradient(
-            action_indices,
-            policy_signal,
-            legal_masks=legal_masks,
-            entropy_coef=entropy_coef,
-            value_returns=value_returns,
-            value_coef=value_coef,
-            clip_grad_norm=clip_grad_norm,
-        )
-
-        if use_value_head:
-            value_loss_window.append(metrics["value_loss"])
-
-        if training_opponent == "self_play" and iteration % pool_interval == 0:
-            pool.append(network.clone())
-
-        if iteration % log_interval == 0 and not quiet:
-            reward_summary = _reward_signal_summary(batch, xp)
-            win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
-            pool_suffix = f" | pool: {len(pool)}" if training_opponent == "self_play" else ""
-            win_rate_moving_avg = sum(win_rate_window) / len(win_rate_window)
-            value_suffix = ""
+            value_returns = None
+            policy_signal = policy_rewards
             if use_value_head:
-                value_loss_moving_avg = sum(value_loss_window) / len(value_loss_window)
-                value_suffix = (
-                    f" | value loss: {metrics['value_loss']:.3f}"
-                    f" (avg/{len(value_loss_window)}: {value_loss_moving_avg:.3f})"
-                    f" | advantage mean: {float(xp.mean(policy_signal)):+.3f}"
-                )
-            print(
-                f"Iteration {iteration} | decisions: {len(batch)} | "
-                "reward mean/std/min/max: "
-                f"{reward_summary['reward_mean']:+.2f}/"
-                f"{reward_summary['reward_std']:.2f}/"
-                f"{reward_summary['reward_min']:+.2f}/"
-                f"{reward_summary['reward_max']:+.2f} | "
-                "good/neutral/bad: "
-                f"{reward_summary['good_pct']:.0f}%/"
-                f"{reward_summary['neutral_pct']:.0f}%/"
-                f"{reward_summary['bad_pct']:.0f}% | "
-                f"local mean: {reward_summary['local_mean']:+.3f} | "
-                "opp D/P: "
-                f"{event_totals.opponent_draws}/{event_totals.opponent_passes}, "
-                f"self D/P: {event_totals.learner_draws}/{event_totals.learner_passes} | "
-                f"wins {win_label}: {wins}/{games_per_iteration}"
-                f" (avg/{len(win_rate_window)}: {win_rate_moving_avg:.1%}){pool_suffix} | "
-                f"grad: {_gradient_log_text(metrics)}{value_suffix}"
+                values = network.predict_values(x_batch)
+                policy_signal = policy_rewards - values
+                value_returns = policy_rewards
+            else:
+                network.forward(x_batch)
+
+            if normalize_advantages:
+                signal_std = float(xp.std(policy_signal))
+                if signal_std > REWARD_ZERO_EPSILON:
+                    policy_signal = (
+                        policy_signal - float(xp.mean(policy_signal))
+                    ) / signal_std
+
+            metrics = network.backward_policy_gradient(
+                action_indices,
+                policy_signal,
+                legal_masks=legal_masks,
+                entropy_coef=entropy_coef,
+                value_returns=value_returns,
+                value_coef=value_coef,
+                clip_grad_norm=clip_grad_norm,
             )
 
-        if iteration % checkpoint_interval == 0:
-            network.save(rl_weights_path)
-            win_rate, draw_rate = evaluate_against_heuristic(network, game_count=evaluation_games)
-            now = time.time()
-            checkpoint_elapsed = now - last_checkpoint_time
-            last_checkpoint_time = now
-            if not quiet:
+            if use_value_head:
+                value_loss_window.append(metrics["value_loss"])
+
+            if training_opponent == "self_play" and iteration % pool_interval == 0:
+                runner.append_pool_snapshot(network)
+
+            if iteration % log_interval == 0 and not quiet:
+                reward_summary = _reward_signal_summary(batch, xp)
+                win_label = (
+                    "vs pool"
+                    if training_opponent == "self_play"
+                    else "vs heuristic"
+                )
+                pool_suffix = (
+                    f" | pool: {len(runner.bank.pool_slots)}"
+                    if training_opponent == "self_play"
+                    else ""
+                )
+                win_rate_moving_avg = sum(win_rate_window) / len(win_rate_window)
+                value_suffix = ""
+                if use_value_head:
+                    value_loss_moving_avg = (
+                        sum(value_loss_window) / len(value_loss_window)
+                    )
+                    value_suffix = (
+                        f" | value loss: {metrics['value_loss']:.3f}"
+                        f" (avg/{len(value_loss_window)}: {value_loss_moving_avg:.3f})"
+                        f" | advantage mean: {float(xp.mean(policy_signal)):+.3f}"
+                    )
                 print(
-                    f"  [checkpoint] saved {rl_weights_path} | "
-                    f"time since previous checkpoint: {format_duration(checkpoint_elapsed)} | "
-                    f"deterministic RL vs heuristic: {win_rate:.1%} wins, "
-                    f"{draw_rate:.1%} draws ({evaluation_games} games)"
+                    f"Iteration {iteration} | reward mean/std/min/max: "
+                    f"{reward_summary['reward_mean']:+.2f}/"
+                    f"{reward_summary['reward_std']:.2f}/"
+                    f"{reward_summary['reward_min']:+.2f}/"
+                    f"{reward_summary['reward_max']:+.2f} | "
+                    "good/neutral/bad: "
+                    f"{reward_summary['good_pct']:.0f}%/"
+                    f"{reward_summary['neutral_pct']:.0f}%/"
+                    f"{reward_summary['bad_pct']:.0f}% | "
+                    f"wins {win_label}: {wins}/{games_per_iteration}"
+                    f" (avg/{len(win_rate_window)}: {win_rate_moving_avg:.1%})"
+                    f"{pool_suffix} | grad: {_gradient_log_text(metrics)}"
+                    f"{value_suffix}"
                 )
 
-        if progress_callback is not None:
-            progress_callback(iteration, iterations)
+            if iteration % checkpoint_interval == 0:
+                if numbered_checkpoints:
+                    checkpoint_weights_path, _checkpoint_state_path = (
+                        _save_numbered_resume_checkpoint(
+                            network,
+                            runner,
+                            rl_weights_path,
+                            iteration,
+                            resume_configuration,
+                            runner.worker_count,
+                        )
+                    )
+                    final_weights_path = checkpoint_weights_path
+                    last_saved_iteration = iteration
+                else:
+                    network.save(rl_weights_path)
+                    checkpoint_weights_path = Path(rl_weights_path)
+                runner.sync_current(network)
+                evaluation_seed = game_seed(
+                    effective_seed,
+                    iterations * games_per_iteration + iteration,
+                )
+                evaluation_results, evaluation_info = (
+                    runner.evaluate_current_against_heuristic(
+                        evaluation_games,
+                        evaluation_seed,
+                    )
+                )
+                _merge_parallel_summary(
+                    parallel_summary,
+                    evaluation_info,
+                    phase="evaluation",
+                    iteration=iteration,
+                )
+                if evaluation_info.fallback_count:
+                    emit_status(
+                        f"RL checkpoint evaluation at iteration {iteration} "
+                        f"retained completed games and reduced workers to "
+                        f"{evaluation_info.final_workers}: "
+                        f"{evaluation_info.fallback_history[-1]['reason']}."
+                    )
+                evaluation_wins = sum(
+                    result["winner"] == result["learner_position"]
+                    for result in evaluation_results
+                )
+                evaluation_draws = sum(
+                    result["winner"] == -1
+                    for result in evaluation_results
+                )
+                win_rate = evaluation_wins / evaluation_games
+                draw_rate = evaluation_draws / evaluation_games
+                now = time.time()
+                checkpoint_elapsed = now - last_checkpoint_time
+                last_checkpoint_time = now
+                if not quiet:
+                    print(
+                        f"  [checkpoint] saved {checkpoint_weights_path} | "
+                        f"time since previous checkpoint: "
+                        f"{format_duration(checkpoint_elapsed)} | "
+                        f"deterministic RL vs heuristic: {win_rate:.1%} wins, "
+                        f"{draw_rate:.1%} draws ({evaluation_games} games)"
+                    )
 
-    network.save(rl_weights_path)
+            if progress_callback is not None:
+                progress_callback(iteration, iterations)
+
+        if numbered_checkpoints and last_saved_iteration != iterations:
+            final_weights_path, _final_state_path = _save_numbered_resume_checkpoint(
+                network,
+                runner,
+                rl_weights_path,
+                iterations,
+                resume_configuration,
+                runner.worker_count,
+            )
+            last_saved_iteration = iterations
+    finally:
+        final_runtime_workers = runner.worker_count
+        runner.close()
+
+    if autotuner is not None:
+        selected_workers = autotuner.optimal_workers
+        autotune_summary = autotuner.to_dict()
+    else:
+        selected_workers = final_runtime_workers
+        autotune_summary = {
+            "optimal_workers": selected_workers,
+            "candidate_workers": [workers],
+            "benchmark_fraction": 0.0,
+            "minimum_gain": autotune_minimum_gain,
+            "iterations_per_test": 0,
+            "games_per_test": 0,
+            "reused_iteration_count": 0,
+            "reused_game_count": 0,
+            "attempts": [],
+        }
+    parallel_summary["final_workers"] = final_runtime_workers
+    if not numbered_checkpoints:
+        network.save(rl_weights_path)
+        final_weights_path = Path(rl_weights_path)
     elapsed_time = time.time() - start_time
     if not quiet:
         print(f"\nTraining complete. Total elapsed time: {format_duration(elapsed_time)}.")
-        print(f"Final weights: {rl_weights_path}")
+        print(f"Final weights: {final_weights_path}")
 
     return {
         "iterations": iterations,
+        "start_iteration": start_iteration,
         "games_per_iteration": games_per_iteration,
         "training_opponent": training_opponent,
         "learning_rate": learning_rate,
@@ -678,18 +1294,22 @@ def train(
         "normalize_advantages": normalize_advantages,
         "moving_average_window": moving_average_window,
         "seed": seed,
+        "effective_seed": effective_seed,
         "device": network.device,
-        "rl_weights_path": rl_weights_path,
+        "requested_device": requested_device,
+        "device_fallback_reason": device_fallback_reason,
+        "requested_workers": workers,
+        "selected_workers": selected_workers,
+        "autotune": autotune_summary,
+        "parallel": parallel_summary,
+        "rl_weights_path": str(final_weights_path),
+        "numbered_checkpoints": bool(numbered_checkpoints),
         "duration_s": elapsed_time,
     }
 
 
 def add_optional_rl_arguments(parser):
-    """Add opt-in self-play hyperparameter flags to ``parser``.
-
-    Every flag defaults to the matching keyword default on ``train()``, so
-    omitting all of them reproduces the previous fixed behavior exactly.
-    """
+    """Add self-play hyperparameter and rollout-resource flags to ``parser``."""
     group = parser.add_argument_group("optional reinforcement-learning controls")
     group.add_argument("--iterations", type=int, default=1000, help="Training iterations.")
     group.add_argument(
@@ -710,6 +1330,30 @@ def add_optional_rl_arguments(parser):
     group.add_argument("--evaluation-games", type=int, default=200)
     group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
     group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
+    group.add_argument(
+        "--numbered-checkpoints",
+        action="store_true",
+        help=(
+            "Write iteration-suffixed weights and an atomic opponent-pool state "
+            "for safe interruption recovery."
+        ),
+    )
+    group.add_argument(
+        "--start-iteration",
+        type=int,
+        default=0,
+        help="Absolute completed iteration when continuing a numbered checkpoint.",
+    )
+    group.add_argument(
+        "--resume-weights-path",
+        default=None,
+        help="Iteration-suffixed weights file from a complete resume pair.",
+    )
+    group.add_argument(
+        "--resume-state-file",
+        default=None,
+        help="Auxiliary .resume.npz file paired with --resume-weights-path.",
+    )
     group.add_argument(
         "--value-head",
         action="store_true",
@@ -772,6 +1416,30 @@ def add_optional_rl_arguments(parser):
         "else NumPy) -- unchanged from prior behavior. 'cpu'/'gpu' force one "
         "backend regardless of what's installed/enabled globally.",
     )
+    group.add_argument(
+        "--rl-workers",
+        type=parse_rl_worker_count,
+        default=DEFAULT_RL_WORKERS,
+        help=(
+            f"CPU-only rollout workers or 'auto' for retained online tuning "
+            f"(maximum {MAX_PARALLEL_WORKERS})."
+        ),
+    )
+    group.add_argument(
+        "--rl-autotune-fraction",
+        type=float,
+        default=DEFAULT_RL_AUTOTUNE_FRACTION,
+        help="Fraction of planned iterations retained by each worker-count test.",
+    )
+    group.add_argument(
+        "--rl-autotune-min-gain",
+        type=float,
+        default=DEFAULT_RL_MINIMUM_GAIN,
+        help="Minimum marginal rollout-throughput gain for a larger pool.",
+    )
+    group.add_argument("--rl-memory-reserve-mb", type=int, default=512)
+    group.add_argument("--rl-estimated-worker-mb", type=int, default=256)
+    group.add_argument("--rl-max-worker-rss-mb", type=int, default=1024)
     return parser
 
 
@@ -782,34 +1450,123 @@ def parse_args(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     add_optional_rl_arguments(parser)
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help=(
+            "Show retained worker tuning, one iteration progress bar, and one "
+            "final summary instead of per-iteration/checkpoint logs."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _training_kwargs_from_args(args):
+    """Translate CLI arguments into the public ``train`` keyword interface."""
+    return {
+        "iterations": args.iterations,
+        "games_per_iteration": args.games_per_iteration,
+        "training_opponent": args.training_opponent,
+        "learning_rate": args.learning_rate,
+        "entropy_coef": args.entropy_coef,
+        "log_interval": args.log_interval,
+        "checkpoint_interval": args.checkpoint_interval,
+        "pool_interval": args.pool_interval,
+        "max_pool_size": args.max_pool_size,
+        "evaluation_games": args.evaluation_games,
+        "sl_weights_path": args.sl_weights_path,
+        "rl_weights_path": args.rl_weights_path,
+        "use_value_head": args.value_head,
+        "value_coef": args.value_coef,
+        "gamma": args.gamma,
+        "reward_schema": args.reward_schema,
+        "clip_grad_norm": args.clip_grad_norm,
+        "normalize_advantages": args.normalize_advantages,
+        "moving_average_window": args.moving_average_window,
+        "seed": args.seed,
+        "device": args.device,
+        "workers": args.rl_workers,
+        "safety_config": ParallelSafetyConfig(
+            memory_reserve_mb=args.rl_memory_reserve_mb,
+            estimated_worker_mb=args.rl_estimated_worker_mb,
+            max_worker_rss_mb=args.rl_max_worker_rss_mb,
+        ),
+        "autotune_fraction": args.rl_autotune_fraction,
+        "autotune_minimum_gain": args.rl_autotune_min_gain,
+        "start_iteration": args.start_iteration,
+        "resume_weights_path": args.resume_weights_path,
+        "resume_state_file": args.resume_state_file,
+        "numbered_checkpoints": args.numbered_checkpoints,
+    }
+
+
+def _run_compact_cli(args, training_kwargs):
+    """Run the standalone CLI with the pipeline's compact presentation."""
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        tqdm = None
+
+    print("\nRL self-play")
+    started = time.time()
+
+    if tqdm is None:
+        progress_interval = max(1, args.iterations // 10)
+        last_reported = args.start_iteration
+
+        def progress(done, total):
+            nonlocal last_reported
+            if done == total or done - last_reported >= progress_interval:
+                print(f"RL self-play progress: {done}/{total} iterations", flush=True)
+                last_reported = done
+
+        def status(message):
+            print(message, flush=True)
+
+        summary = train(
+            **training_kwargs,
+            quiet=True,
+            progress_callback=progress,
+            status_callback=status,
+        )
+    else:
+        with tqdm(
+            total=args.iterations,
+            initial=args.start_iteration,
+            desc="RL self-play",
+            unit="iter",
+            leave=True,
+        ) as progress_bar:
+
+            def progress(done, _total):
+                if done > progress_bar.n:
+                    progress_bar.update(done - progress_bar.n)
+
+            summary = train(
+                **training_kwargs,
+                quiet=True,
+                progress_callback=progress,
+                status_callback=tqdm.write,
+            )
+
+    elapsed = time.time() - started
+    print(
+        f"RL self-play complete in {format_duration(elapsed)} | "
+        f"{summary['iterations']} iterations x "
+        f"{summary['games_per_iteration']} games, "
+        f"{summary['selected_workers']} rollout worker(s), "
+        f"value head {'on' if summary['use_value_head'] else 'off'}, "
+        f"weights {summary['rl_weights_path']}"
+    )
+    return summary
 
 
 def main(argv=None):
     args = parse_args(argv)
-    train(
-        iterations=args.iterations,
-        games_per_iteration=args.games_per_iteration,
-        training_opponent=args.training_opponent,
-        learning_rate=args.learning_rate,
-        entropy_coef=args.entropy_coef,
-        log_interval=args.log_interval,
-        checkpoint_interval=args.checkpoint_interval,
-        pool_interval=args.pool_interval,
-        max_pool_size=args.max_pool_size,
-        evaluation_games=args.evaluation_games,
-        sl_weights_path=args.sl_weights_path,
-        rl_weights_path=args.rl_weights_path,
-        use_value_head=args.value_head,
-        value_coef=args.value_coef,
-        gamma=args.gamma,
-        reward_schema=args.reward_schema,
-        clip_grad_norm=args.clip_grad_norm,
-        normalize_advantages=args.normalize_advantages,
-        moving_average_window=args.moving_average_window,
-        seed=args.seed,
-        device=args.device,
-    )
+    training_kwargs = _training_kwargs_from_args(args)
+    if args.compact:
+        return _run_compact_cli(args, training_kwargs)
+    return train(**training_kwargs)
 
 
 if __name__ == "__main__":

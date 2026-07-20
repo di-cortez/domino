@@ -30,7 +30,11 @@ class GameManager:
             "target_action": chosen_action,
         })
 
-        _, game_over, info = self.engine.step(chosen_action)
+        _, game_over, info = self.engine.step(
+            chosen_action,
+            return_state=False,
+            legal_actions=legal_actions,
+        )
         info["action"] = chosen_action
         info["acting_player"] = current_player
         return game_over, info

@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 from agents.encoder import DominoEncoder
 from agents.heuristic_agent import StrategicAgent
 from agents.neural_agent import NeuralAgent
-from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
+from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON, SupervisedNeuralNetwork
 from agents.random_neural_agent import RandomNeuralAgent
 from agents.rl_agent import RLAgent, TrajectoryStep
 from agents.rl_nn import PolicyNetwork
@@ -71,6 +71,7 @@ from training.training_loop import (
     parse_args as parse_supervised_args,
 )
 from run_pipeline import _build_config, parse_args as parse_pipeline_args
+from utils.runtime_status import pipeline_compute_report
 
 from math import comb, factorial
 
@@ -114,6 +115,13 @@ class FixedStrategicOpponentModel:
             (1.0 - self.probabilities[left])
             * (1.0 - self.probabilities[right])
         )
+
+
+class StrategicOpponentModelThatMustNotRun:
+    """Fail if a forced heuristic action performs exact-model work."""
+
+    def update(self, state):
+        raise AssertionError("The exact opponent model must not run for forced actions.")
 
 
 def _to_numpy(value):
@@ -336,6 +344,7 @@ def test_supervised_training_transfers_only_host_minibatches_to_backend():
         output_size=2,
         learning_rate=0.01,
         random_seed=7,
+        device="cpu",
     )
     x_train = host_np.ones((4, 5), dtype=float)
     y_train = host_np.zeros((2, 5), dtype=float)
@@ -362,7 +371,7 @@ def test_supervised_training_transfers_only_host_minibatches_to_backend():
     assert transferred_shapes
     assert max(shape[1] for shape in transferred_shapes) == 2
     assert network.cache["X"].shape == (4, 1)
-    assert isinstance(network.cache["X"], xp.ndarray)
+    assert isinstance(network.cache["X"], host_np.ndarray)
 
 
 def test_supervised_weight_decay_regularizes_weights_but_not_biases():
@@ -374,6 +383,7 @@ def test_supervised_weight_decay_regularizes_weights_but_not_biases():
         "output_size": 2,
         "learning_rate": 0.01,
         "random_seed": 11,
+        "device": "cpu",
     }
     plain = SupervisedNeuralNetwork(**common_args)
     regularized = SupervisedNeuralNetwork(**common_args, weight_decay=0.2)
@@ -404,8 +414,8 @@ def test_supervised_weight_decay_regularizes_weights_but_not_biases():
         )
 
 
-def test_supervised_early_stopping_and_lr_decay_are_opt_in():
-    """Stop and decay only after repeated non-improving validation checks."""
+def test_supervised_early_stopping_and_lr_decay_use_independent_counters():
+    """Early stopping may occur before the independent LR counter reaches five."""
     network = SupervisedNeuralNetwork(
         input_size=4,
         hidden1_size=5,
@@ -413,6 +423,7 @@ def test_supervised_early_stopping_and_lr_decay_are_opt_in():
         output_size=2,
         learning_rate=0.01,
         random_seed=13,
+        device="cpu",
     )
     x = host_np.ones((4, 5), dtype=float)
     y = host_np.zeros((2, 5), dtype=float)
@@ -432,15 +443,17 @@ def test_supervised_early_stopping_and_lr_decay_are_opt_in():
     )
 
     assert len(history) == 21
-    assert abs(network.lr - 0.0025) < 1e-12
+    assert abs(network.lr - 0.01) < 1e-12
 
 
 def test_supervised_regularization_cli_defaults_and_shortcuts():
-    """Keep every optional SL control disabled unless its flag is present."""
+    """Enable plateau decay by default while keeping other controls optional."""
     defaults = parse_supervised_args([])
     assert defaults.weight_decay == 0.0
     assert defaults.early_stopping is None
-    assert defaults.lr_decay is None
+    assert defaults.lr_decay == DEFAULT_LR_DECAY_FACTOR
+    assert defaults.lr_decay_patience == 5
+    assert defaults.sl_device == "auto"
 
     enabled = parse_supervised_args([
         "--weight-decay",
@@ -462,6 +475,10 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     assert custom.weight_decay == 0.0005
     assert custom.early_stopping == 8
     assert custom.lr_decay == 0.8
+
+    disabled = parse_supervised_args(["--no-lr-decay", "--device", "cpu"])
+    assert disabled.lr_decay is None
+    assert disabled.sl_device == "cpu"
 
     pipeline = parse_pipeline_args([
         "small",
@@ -807,6 +824,19 @@ def test_strategic_agent_uses_response_then_mobility_then_pip_sum_filters():
     ]
 
     assert agent.choose_move(state, legal_actions) == ((0, 3), 0)
+
+
+def test_strategic_agent_skips_exact_model_for_forced_actions():
+    agent = StrategicAgent()
+    agent.opponent_model = StrategicOpponentModelThatMustNotRun()
+    forced_cases = [
+        ([((6, 6), 0)], ((6, 6), 0)),
+        ([("DRAW", None)], ("DRAW", None)),
+        ([None], None),
+    ]
+
+    for legal_actions, expected_action in forced_cases:
+        assert agent.choose_move({}, legal_actions) == expected_action
 
 
 def test_rl_agent_skips_network_for_forced_actions():
@@ -1314,13 +1344,13 @@ def test_diagnostic_modes_select_expected_matchups():
     fast_agents, fast_matchups = diagnostic_plan("fast")
     complete_agents, complete_matchups = diagnostic_plan("complete")
 
-    assert default_agents == ("rl", "neural", "heuristic", "random")
-    assert len(default_matchups) == 10
-    assert "random_nn" not in default_agents
-    assert fast_agents == ("rl", "heuristic", "random")
-    assert fast_matchups == (("rl", "random"), ("heuristic", "random"))
+    expected_matchups = tuple((agent, "random") for agent in CANONICAL_AGENTS)
+    assert default_agents == CANONICAL_AGENTS
+    assert fast_agents == CANONICAL_AGENTS
     assert complete_agents == CANONICAL_AGENTS
-    assert len(complete_matchups) == 15
+    assert default_matchups == expected_matchups
+    assert fast_matchups == expected_matchups
+    assert complete_matchups == expected_matchups
 
 
 def test_pipeline_scales_select_expected_diagnostic_modes():
@@ -1328,6 +1358,25 @@ def test_pipeline_scales_select_expected_diagnostic_modes():
     assert _build_config("default").diagnostic_mode == "default"
     assert _build_config("big").diagnostic_mode == "complete"
     assert _build_config("huge").diagnostic_mode == "complete"
+
+
+def test_pipeline_compute_report_names_backends_and_memory():
+    report = pipeline_compute_report("auto")
+
+    assert report.startswith("Pipeline compute resources: ")
+    if GPU_ENABLED:
+        assert (
+            "supervised=GPU" in report
+            or "supervised=CPU (automatic fallback" in report
+        )
+        assert GPU_UNAVAILABLE_REASON is None
+    else:
+        assert "supervised=CPU" in report
+        assert GPU_UNAVAILABLE_REASON
+    assert "RL parent=" in report
+    assert "dataset/RL rollout/diagnostic workers=CPU-only" in report
+    assert "system RAM" in report
+    assert "GPU VRAM" in report
 
 
 def main():
@@ -1360,7 +1409,7 @@ def main():
         ),
         (
             "supervised early stopping and LR decay",
-            test_supervised_early_stopping_and_lr_decay_are_opt_in,
+            test_supervised_early_stopping_and_lr_decay_use_independent_counters,
         ),
         (
             "supervised optional CLI controls",
@@ -1396,6 +1445,10 @@ def main():
         (
             "strategic probability filters",
             test_strategic_agent_uses_response_then_mobility_then_pip_sum_filters,
+        ),
+        (
+            "strategic forced actions skip exact model",
+            test_strategic_agent_skips_exact_model_for_forced_actions,
         ),
         ("RL forced actions skip network", test_rl_agent_skips_network_for_forced_actions),
         ("RL trajectory legal mask", test_rl_agent_saves_legal_mask_for_real_decision),
@@ -1449,6 +1502,10 @@ def main():
         (
             "pipeline diagnostic modes",
             test_pipeline_scales_select_expected_diagnostic_modes,
+        ),
+        (
+            "pipeline compute resource report",
+            test_pipeline_compute_report_names_backends_and_memory,
         ),
     ]
 

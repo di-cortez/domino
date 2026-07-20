@@ -308,57 +308,182 @@ def generate_plots(games, summary, folder):
     plot_choice_opportunities(summary, folder / "choice_opportunities.png", subtitle)
 
 
-def plot_all_pairs_table(summaries, agents, path):
-    """Render a triangular all-pairs win-rate matrix as a clean PNG table."""
+WIN_RATE_COLOR_BANDS = (
+    (None, 30, "<30%", "#8f1d1d"),
+    (30, 35, "30–35%", "#b73b3b"),
+    (35, 40, "35–40%", "#d96868"),
+    (40, 45, "40–45%", "#ee9b9b"),
+    (45, 50, "45–50%", "#f8d6d6"),
+    (50, 55, "50–55%", "#f7fbff"),
+    (55, 60, "55–60%", "#d8eaf7"),
+    (60, 65, "60–65%", "#a9cfea"),
+    (65, 70, "65–70%", "#6da7d5"),
+    (70, None, "≥70%", "#2468a2"),
+)
+
+
+def worst_case_margin_of_error(sample_size):
+    """Return the 95% worst-case proportion margin ``sqrt(0.9604 / n)``."""
+    if sample_size < 1:
+        raise ValueError("sample_size must be positive")
+    return math.sqrt(0.9604 / int(sample_size))
+
+
+def win_rate_color_band(win_rate_pct):
+    """Return the label, fill, and readable text color for a win percentage."""
+    rate = float(win_rate_pct)
+    if not 0 <= rate <= 100:
+        raise ValueError("win_rate_pct must be between 0 and 100")
+    for lower, upper, label, fill in WIN_RATE_COLOR_BANDS:
+        if (lower is None or rate >= lower) and (upper is None or rate < upper):
+            text_color = "#ffffff" if rate < 35 or rate >= 70 else INK
+            return label, fill, text_color
+    raise RuntimeError(f"no color band configured for win rate {rate}")
+
+
+def _format_diagnostic_duration(seconds):
+    """Format elapsed seconds compactly for the aggregate report header."""
+    total_seconds = max(0, int(round(float(seconds))))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _network_header_text(label, metadata):
+    """Format one network architecture/checkpoint description."""
+    architecture = "→".join(str(value) for value in metadata["architecture"])
+    parameters = f"{int(metadata['total_parameters']):,} params"
+    if metadata.get("checkpoint_name"):
+        source = metadata["checkpoint_name"]
+    else:
+        source = metadata.get("initialization", "no checkpoint")
+    value_head = "value head on" if metadata.get("value_head") else "value head off"
+    return f"{label}: {architecture}; {parameters}; {value_head}; {source}"
+
+
+def diagnostic_table_header_lines(summaries, agents, report_metadata=None):
+    """Build descriptive lines shown above the one-row diagnostic result."""
+    metadata = report_metadata or {}
+    game_count = int(
+        metadata.get(
+            "game_count_per_matchup",
+            summaries[0]["game_count"] if summaries else 0,
+        )
+    )
+    matchup_count = int(metadata.get("evaluated_matchups", len(summaries)))
+    total_games = game_count * matchup_count
+    mode = metadata.get("diagnostic_mode", "ad hoc")
+    margin = (
+        100 * worst_case_margin_of_error(game_count)
+        if game_count
+        else None
+    )
+    margin_text = f"±{margin:.2g} percentage points" if margin is not None else "unknown"
+    lines = [
+        (
+            f"Scope: {matchup_count} agents vs random | {game_count:,} games per "
+            f"matchup | {total_games:,} games total | mode: {mode}"
+        ),
+        (
+            "95% worst-case margin of error for each win rate: "
+            f"{margin_text} (normal approximation, p=50%)"
+        ),
+    ]
+
+    if "duration_s" in metadata:
+        duration = _format_diagnostic_duration(metadata["duration_s"])
+        seed = metadata.get("seed")
+        seed_text = metadata.get("effective_seed") if seed is None else seed
+        workers = metadata.get("selected_workers_by_matchup", {})
+        worker_text = ", ".join(
+            f"{key.removesuffix('_vs_random')}={value}"
+            for key, value in workers.items()
+        )
+        line = f"Evaluation elapsed: {duration} | seed: {seed_text}"
+        if worker_text:
+            line += f" | workers: {worker_text}"
+        lines.append(line)
+
+    networks = metadata.get("network_metadata", {})
+    if "rl" in networks:
+        lines.append(_network_header_text("RL", networks["rl"]))
+    if "neural" in networks:
+        lines.append(_network_header_text("Neural", networks["neural"]))
+    if "random_nn" in networks:
+        lines.append(_network_header_text("Random NN", networks["random_nn"]))
+    return lines
+
+
+def plot_all_pairs_table(summaries, agents, path, report_metadata=None):
+    """Render one row of agent win rates against random as PNG or PDF."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
 
-    summary_by_pair = {(summary["agent"], summary["opponent"]): summary for summary in summaries}
+    summary_by_agent = {
+        summary["agent"]: summary
+        for summary in summaries
+        if summary.get("opponent") == "random"
+    }
     cell_text = []
     cell_rates = []
     for agent in agents:
-        row = []
-        rate_row = []
-        for opponent in agents:
-            summary = summary_by_pair.get((agent, opponent))
-            if summary is None:
-                row.append("")
-                rate_row.append(None)
-                continue
-            win_rate = 100 * summary["rates"]["win"]
-            row.append(f"{win_rate:.1f}")
-            rate_row.append(win_rate)
-        cell_text.append(row)
-        cell_rates.append(rate_row)
+        summary = summary_by_agent.get(agent)
+        if summary is None:
+            cell_text.append("")
+            cell_rates.append(None)
+            continue
+        win_rate = 100 * summary["rates"]["win"]
+        cell_text.append(f"{win_rate:.1f}%")
+        cell_rates.append(win_rate)
 
-    width = max(9.0, 2.15 * (len(agents) + 1))
-    height = max(3.2, 0.58 * (len(agents) + 2))
-    fig, ax = plt.subplots(figsize=(width, height), facecolor=SURFACE, dpi=160)
+    width = max(12.0, 2.15 * (len(agents) + 1))
+    fig, ax = plt.subplots(figsize=(width, 6.6), facecolor=SURFACE, dpi=160)
     ax.set_facecolor(SURFACE)
     ax.axis("off")
     ax.set_title(
-        "All-pairs win-rate matrix (%)",
+        "Agent win rates against the random baseline",
         color=INK,
-        fontsize=14,
+        fontsize=15,
         loc="left",
         pad=18,
     )
 
+    header_lines = diagnostic_table_header_lines(
+        summaries,
+        agents,
+        report_metadata=report_metadata,
+    )
+    for index, line in enumerate(header_lines):
+        ax.text(
+            0.0,
+            0.94 - 0.065 * index,
+            line,
+            transform=ax.transAxes,
+            color=INK if index < 2 else SECONDARY_INK,
+            fontsize=9.2,
+            va="top",
+        )
+
     display_names = [agent.replace("_", " ") for agent in agents]
     table = ax.table(
-        cellText=cell_text,
-        rowLabels=display_names,
+        cellText=[cell_text],
+        rowLabels=["Win rate"],
         colLabels=display_names,
-        bbox=[0, 0.24, 1, 0.58],
+        bbox=[0, 0.32, 1, 0.20],
         cellLoc="center",
         rowLoc="center",
         loc="center",
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1.0, 1.55)
+    table.set_fontsize(11)
+    table.scale(1.0, 1.6)
 
     for (row, col), cell in table.get_celld().items():
         cell.set_edgecolor(AXIS)
@@ -366,27 +491,41 @@ def plot_all_pairs_table(summaries, agents, path):
         if row == 0 or col == -1:
             cell.set_facecolor("#efeee8")
             cell.set_text_props(color=INK, weight="bold")
-        elif not cell.get_text().get_text():
+            continue
+        rate = cell_rates[col]
+        if rate is None:
             cell.set_facecolor("#f4f3ee")
             cell.set_text_props(color="#c9c6bd")
-        else:
-            rate = cell_rates[row - 1][col]
-            if rate >= 60:
-                cell.set_facecolor("#e6f1fb")
-            elif rate <= 40:
-                cell.set_facecolor("#f9ead9")
-            else:
-                cell.set_facecolor(SURFACE)
-            cell.set_text_props(color=INK, weight="bold")
+            continue
+        _label, fill, text_color = win_rate_color_band(rate)
+        cell.set_facecolor(fill)
+        cell.set_text_props(color=text_color, weight="bold")
 
     ax.text(
         0.0,
-        0.06,
-        "Rows are evaluated agents; columns are opponents. Blank cells are skipped reverse matchups.",
+        0.245,
+        (
+            "Each evaluated agent alternates between player 0 and player 1. "
+            "Percentages are wins by the column agent against random."
+        ),
         transform=ax.transAxes,
         color=SECONDARY_INK,
         fontsize=9,
         va="top",
+    )
+    legend_handles = [
+        Patch(facecolor=fill, edgecolor=AXIS, label=label)
+        for _lower, _upper, label, fill in WIN_RATE_COLOR_BANDS
+    ]
+    ax.legend(
+        handles=legend_handles,
+        title="Win-rate color bands",
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.01),
+        ncol=5,
+        frameon=False,
+        fontsize=8,
+        title_fontsize=9,
     )
     _save_figure(fig, path)
 
@@ -402,36 +541,52 @@ def plot_aggregate_choice_opportunities(choice_info, path):
     plot_choice_opportunities(summary, path, "all evaluated pairs")
 
 
-SWEEP_TABLE_COLUMNS = (
-    ("run_name", "Run"),
+SWEEP_TABLE_BASE_COLUMNS = (
     ("critic", "Critic"),
-    ("varied_parameter", "Varied"),
     ("learning_rate", "LR"),
     ("gamma", "Gamma"),
-    ("games_per_iteration", "Games/Iter"),
     ("value_coef", "ValueCoef"),
-    ("win_rate_pct", "Win %"),
-    ("draw_rate_pct", "Draw %"),
-    ("games", "Games"),
 )
 
 
-def plot_sweep_comparison_table(rows, path):
-    """Render one row per RL sweep point (hyperparameters + vs-random results).
+def plot_sweep_comparison_table(
+    rows,
+    path,
+    games_per_iteration_values=(40, 80, 160),
+):
+    """Render grouped runs with one win-rate column per games/iteration value.
 
     Mirrors ``plot_all_pairs_table``'s look (same palette, same
-    ``ax.table``-based rendering), shaped for a list of sweep runs instead of
-    a square agent matrix.
+    ``ax.table``-based rendering). Models that differ only in
+    games-per-iteration share one row, reducing the visual table height while
+    preserving their separate percentages.
     """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    field_names = [field for field, _ in SWEEP_TABLE_COLUMNS]
-    headers = [label for _, label in SWEEP_TABLE_COLUMNS]
-    cell_text = [[str(row.get(field, "")) for field in field_names] for row in rows]
-    win_rate_column = field_names.index("win_rate_pct")
+    columns = list(SWEEP_TABLE_BASE_COLUMNS) + [
+        (f"win_rate_pct_gpi_{value}", str(value))
+        for value in games_per_iteration_values
+    ]
+    field_names = [field for field, _ in columns]
+    headers = [label for _, label in columns]
+    win_rate_columns = {
+        field_names.index(f"win_rate_pct_gpi_{value}")
+        for value in games_per_iteration_values
+    }
+
+    def format_cell(row, field):
+        value = row.get(field, "")
+        if field.startswith("win_rate_pct_gpi_"):
+            return "" if value == "" or value is None else f"{float(value):.1f}%"
+        return str(value)
+
+    cell_text = [
+        [format_cell(row, field) for field in field_names]
+        for row in rows
+    ]
 
     # Proportional column widths from the longest cell (header or value) in
     # each column, so long run names don't get clipped by equal-width cells.
@@ -450,12 +605,24 @@ def plot_sweep_comparison_table(rows, path):
     ax.set_facecolor(SURFACE)
     ax.axis("off")
     ax.set_title(
-        "RL hyperparameter sweep vs random (win %)",
+        "RL sweep vs random: win rate (%) by games per iteration",
         color=INK,
         fontsize=14,
         loc="left",
         pad=14,
     )
+    if not rows:
+        ax.text(
+            0.5,
+            0.44,
+            "No sweep runs found.",
+            color=SECONDARY_INK,
+            fontsize=11,
+            ha="center",
+            va="center",
+        )
+        _save_figure(fig, path)
+        return
 
     table = ax.table(
         cellText=cell_text,
@@ -475,9 +642,9 @@ def plot_sweep_comparison_table(rows, path):
             cell.set_facecolor("#efeee8")
             cell.set_text_props(color=INK, weight="bold")
             continue
-        if col == win_rate_column:
+        if col in win_rate_columns:
             try:
-                rate = float(cell_text[row - 1][col])
+                rate = float(cell_text[row - 1][col].rstrip("%"))
             except ValueError:
                 rate = None
             if rate is not None and rate >= 60:

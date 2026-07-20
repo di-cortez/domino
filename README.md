@@ -1,5 +1,18 @@
 # Domino - Neural vs Heuristic
 
+## Repository Maintenance Policy
+
+**Keep everything in this repository in English.** This requirement applies to
+source code, filenames, directory names, variables, functions, classes, command
+line options, log messages, comments, docstrings, tests, generated report
+labels, and documentation.
+
+All code must remain clearly documented with useful comments and docstrings,
+especially around non-obvious algorithms, resource safeguards, concurrency,
+and public interfaces. Update every affected README whenever behavior,
+commands, configuration, outputs, or architecture change. A code change is not
+complete until its documentation is current.
+
 Interactive two-player domino simulator with a 3D OpenGL board, a rule-based
 heuristic agent, a supervised neural agent, and an RL agent refined by self-play.
 An untrained neural baseline is also available for measuring whether learned
@@ -34,13 +47,17 @@ and visual UI can be changed independently.
 | `agents/rl_agent.py` | `RLAgent`, which plays a `PolicyNetwork` in training or evaluation mode. |
 | `agents/nn.py` | NumPy/CuPy MLP for supervised learning. CuPy is selected automatically when available. |
 | `agents/rl_nn.py` | Policy-only network with masked REINFORCE gradients for self-play RL. |
-| `training/dataset_generator.py` | Generates JSONL `(state, target_action)` examples from heuristic-vs-heuristic games. |
+| `training/dataset_generator.py` | Coordinates deterministic dataset generation, retained worker tuning, bounded SQLite aggregation, and atomic JSONL output. |
+| `training/dataset_parallel.py` | Plays independent heuristic-vs-heuristic dataset games in a bounded CPU-only worker pool. |
 | `training/training_loop.py` | Trains supervised weights, skips forced labels, and saves the best validation checkpoint. |
-| `training/self_play.py` | Refines the RL policy with direct REINFORCE and decayed draw/pass reward shaping. |
-| `diagnostics/evaluate.py` | Runs the upper-triangle all-pairs diagnostic matrix. |
+| `training/supervised_runtime.py` | Retained CPU/GPU batch tuning, GPU dataset residency/windows, and supervised memory telemetry. |
+| `training/self_play.py` | Refines the RL policy with direct REINFORCE, parallel rollout orchestration, and parent-only gradient updates. |
+| `training/rl_parallel.py` | Generates deterministic RL trajectories in CPU-only workers backed by a bounded shared policy-snapshot bank. |
+| `utils/exact_update_timing.py` | Aggregates per-stage CPU time spent in `ExactOpponentModel.update()` across the pipeline parent and worker processes. |
+| `diagnostics/evaluate.py` | Evaluates all five supported agents against the common random baseline. |
 | `diagnostics/pairwise.py` | Helper for evaluating one agent against another and writing `summary.json`, `games.csv`, and plots. |
 | `diagnostics/hyperparameter_sweep.py` | Trains an RL checkpoint per sweep point (one hyperparameter varied at a time, critic on and off) and appends its diagnostics to a single JSON log. |
-| `diagnostics/rl_sweep_table.py` | Joins each `train_script/run_rl_parameter_sweep.sh` sweep point's hyperparameters with its rl-vs-random results into one comparative CSV/JSON/PNG table. |
+| `diagnostics/rl_sweep_table.py` | Joins sweep hyperparameters with rl-vs-random results; raw CSV/JSON keep every model, while compact PNG/PDF tables pivot games-per-iteration into 40/80/160 win-rate columns. |
 | `ui/visual_main.py` | Starts the visual simulator. |
 
 ## Setup
@@ -54,16 +71,121 @@ python -m pip install --upgrade pip
 python -m pip install pygame PyOpenGL PyOpenGL-accelerate numpy matplotlib tqdm
 ```
 
-For GPU acceleration, install a CuPy build that matches the local CUDA runtime.
-For CUDA 12:
+### Linux GPU setup and verification
 
-```bash
-python -m pip install cupy-cuda12x
-```
+The neural networks use NVIDIA CUDA through CuPy. Dataset generation, RL
+rollout workers, and diagnostics intentionally remain CPU-only; supervised
+training and the RL parent process use the GPU when it is available and safe.
 
-Training and diagnostics commands print a startup RAM/GPU memory snapshot.
-`training/training_loop.py` also prints whether it is using CPU or GPU at
-startup.
+1. Verify that Linux sees an NVIDIA GPU and that the driver is loaded:
+
+   ```bash
+   lspci | grep -i nvidia
+   nvidia-smi
+   ```
+
+   If `nvidia-smi` is missing or fails, install the recommended NVIDIA driver
+   using the distribution package manager and reboot. On Ubuntu/Linux Mint:
+
+   ```bash
+   sudo apt update
+   sudo apt install ubuntu-drivers-common
+   sudo ubuntu-drivers install
+   sudo reboot
+   ```
+
+   Do not install Python GPU packages until `nvidia-smi` works. The `CUDA
+   Version` shown by `nvidia-smi` is the newest CUDA runtime supported by the
+   loaded driver; it does not prove that a system CUDA Toolkit or `nvcc` is
+   installed.
+
+2. Activate this repository's environment and verify that `python` and `pip`
+   point into `.venv`:
+
+   ```bash
+   source .venv/bin/activate
+   which python
+   python -m pip --version
+   ```
+
+3. Install exactly one CuPy wheel family. The `[ctk]` extra installs the CUDA
+   runtime libraries inside `.venv`, so a system-wide CUDA Toolkit and `nvcc`
+   are not required. Choose the wheel from the CUDA major version supported by
+   the driver:
+
+   ```bash
+   # Driver supports CUDA 13.x
+   python -m pip install "cupy-cuda13x[ctk]"
+
+   # Driver supports CUDA 12.x
+   python -m pip install "cupy-cuda12x[ctk]"
+   ```
+
+   If a matching system CUDA Toolkit is already installed and `nvcc --version`
+   works, the smaller installation without `[ctk]` can be used instead. Never
+   install `cupy`, `cupy-cuda12x`, and `cupy-cuda13x` together; their modules
+   conflict. The authoritative package table is in the
+   [CuPy installation guide](https://docs.cupy.dev/en/stable/install.html).
+
+4. Test the CUDA runtime, a real GPU calculation, and device memory:
+
+   ```bash
+   python - <<'PY'
+   import cupy as cp
+
+   print("CuPy:", cp.__version__)
+   print("CUDA runtime:", cp.cuda.runtime.runtimeGetVersion())
+   print("CUDA driver:", cp.cuda.runtime.driverGetVersion())
+   print("GPU count:", cp.cuda.runtime.getDeviceCount())
+   print("GPU:", cp.cuda.runtime.getDeviceProperties(0)["name"])
+   values = cp.arange(1_000_000, dtype=cp.float32)
+   print("GPU calculation:", float(cp.sum(values * values).get()))
+   free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
+   print(f"VRAM: {free_bytes / 1024**2:.1f} MiB free / "
+         f"{total_bytes / 1024**2:.1f} MiB total")
+   PY
+   ```
+
+5. Verify the backend selected by this project:
+
+   ```bash
+   python - <<'PY'
+   from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON
+   print("GPU enabled:", GPU_ENABLED)
+   print("Fallback reason:", GPU_UNAVAILABLE_REASON)
+   PY
+
+   python -m training.training_loop
+   ```
+
+   The training command must begin with `CuPy available. Training on GPU.`.
+   Use `watch -n 1 nvidia-smi` in another terminal to observe VRAM and GPU
+   utilization during a real run.
+
+Common failures:
+
+- `ModuleNotFoundError: cupy`: CuPy was installed into a different Python;
+  reactivate `.venv` and use `python -m pip`, not bare `pip` or `sudo pip`.
+- `cudaErrorInsufficientDriver`: update the NVIDIA driver or install a CuPy
+  wheel/runtime compatible with the current driver.
+- missing `libcudart`, NVRTC, cuBLAS, or cuSPARSE libraries: reinstall with the
+  `[ctk]` extra, or correctly set `CUDA_PATH` and `LD_LIBRARY_PATH` for an
+  existing system Toolkit.
+- warnings about multiple CuPy installations: run
+  `python -m pip list | grep -i cupy`, uninstall every conflicting CuPy
+  package, then install exactly one matching wheel.
+- an intentional CPU selection: check `echo "$DOMINO_FORCE_CPU"` and
+  `echo "$CUDA_VISIBLE_DEVICES"`; unset them for normal parent-process GPU use.
+
+See NVIDIA's [Linux CUDA installation guide](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/)
+for driver/Toolkit installation and its
+[driver compatibility matrix](https://docs.nvidia.com/datacenter/tesla/drivers/cuda-toolkit-driver-and-architecture-matrix.html)
+for the meaning of the CUDA version reported by `nvidia-smi`.
+
+Every pipeline run now prints one early `Pipeline compute resources` line with
+the supervised and RL-parent backend, the CPU-only worker policy, free/total
+system RAM, and free/total GPU VRAM. Individual stages retain their more
+detailed memory snapshots.
 
 ## Run the Visual Simulator
 
@@ -123,6 +245,12 @@ converts once to integer `mu(H)` hand weights at the first non-terminal turn end
 where `comb(|U|, h) <= 500`. Drawn slots retain only evidence observed after
 their creation. The exact path has no particle fallback, and the heuristic uses
 the joint hand posterior rather than combining suit marginals independently.
+Slot assignment counting groups tiles with identical eligible-slot sets and
+uses exact falling factorials, backed by a bounded 8,192-entry process-local
+cache. Persistent built-in consumers incrementally annotate appended public
+history and disable intermediate traces when they need only the final vector;
+direct model construction retains detailed traces by default. The exact model
+remains CPU-based and keeps arbitrary-precision integer weights throughout.
 
 Old checkpoints trained with the previous 86-input/58-output encoder are not
 compatible. Regenerate the dataset, retrain supervised learning, and then retrain
@@ -147,18 +275,44 @@ With no argument, the runner uses the normal defaults: 10,000 dataset games,
 1,000 supervised epochs, 1,000 RL iterations, and 10,000 diagnostic games per
 matchup. `small` uses one fifth of those counts, `big` uses five times those
 counts, and `huge` uses twenty times those counts. RL keeps 40 games per
-iteration so the scale changes total RL iterations linearly. Pipeline diagnostic
-modes are selected automatically: `small` uses `fast` (2 matchups), the default
-pipeline uses `default` (10), and `big`/`huge` use `complete` (15). Diagnostic
-game counts are always specified per matchup.
+iteration so the scale changes total RL iterations linearly. Historical mode
+labels remain (`fast`, `default`, and `complete`), but every pipeline scale now
+uses the same five matchups: each of `rl`, `neural`, `random_nn`, `heuristic`,
+and `random` against `random`. Diagnostic game counts are specified per
+matchup.
+
+Each full pipeline run appends a timing record to
+`../exact_opponent_model_timing.json`, next to the repository. The report keeps
+separate entries for dataset generation, supervised training, RL self-play,
+and diagnostics. For every stage it records elapsed wall time and splits
+aggregate process CPU time into `ExactOpponentModel.update()` and everything
+else, including call counts and percentages. Aggregate CPU is the parent CPU
+plus all reaped worker CPU, so parallel worker times are intentionally summed.
+The report also includes the aggregate wall duration of exact-update calls as
+informational data; do not subtract it from stage wall time because concurrent
+worker calls overlap. The timing hook is inactive when modules are run outside
+`run_pipeline.py`, and it does not add console log lines.
+
+Dataset generation, RL rollouts, and diagnostics automatically benchmark
+CPU-only worker counts 1, 2, 4, 6, ... up to the hard limit of 20. Dataset and
+diagnostic attempts retain 1% game slices. RL attempts retain complete early
+iterations totaling about 1% of the planned iterations per candidate, so every
+tested trajectory still contributes to a gradient update. Testing stops on a
+memory/error guard or below 10% marginal gain. Override the tuners with
+`--dataset-workers N`, `--rl-workers N`, or `--diagnostic-workers N`; the
+corresponding `--*-memory-reserve-mb` options control their RAM reserves.
 
 Generate supervised data:
 
 ```bash
 python -m training.dataset_generator
+python -m training.dataset_generator --workers auto --seed 123
 ```
 
-Dataset generation shows a progress bar and prints total elapsed time.
+Dataset generation uses a bounded dynamic queue and writes completed games to a
+temporary SQLite database in the parent process. It emits the final JSONL in
+stable game-id order, atomically replaces the old dataset only after success,
+shows a progress bar, and prints total elapsed time.
 
 Train the supervised neural agent:
 
@@ -166,24 +320,87 @@ Train the supervised neural agent:
 python -m training.training_loop
 ```
 
-Supervised training keeps the complete encoded dataset in RAM and transfers
-only mini-batches of 1024 examples to the GPU. It reports startup memory,
-checkpoint-to-checkpoint time, and total elapsed time.
+Supervised training uses safe host RAM when possible and an atomic disk-backed
+`.npy`/`mmap` cache when the encoded dataset is too large. In GPU mode it keeps
+the full dataset resident when safe or reuses a bounded rotating GPU window.
+It benchmarks power-of-two CPU/GPU mini-batches for 10 retained epochs each,
+selects on synchronized median examples/second, and stops at the first gain
+below 10% or memory guard. Every completed benchmark epoch remains trained.
+The pipeline prints each batch candidate's median epoch time, total benchmark
+time, throughput, marginal gain, and the final selected size alongside its
+compact supervised progress bar.
 
-Weight decay, early stopping, and learning-rate decay are optional. The default
-keeps the learning rate fixed; see `training/README.md` for the three flags and
-their configurable values. The same flags work with `run_pipeline.py`.
+The dataset encoder uses a two-pass preallocated `float32` representation and
+checks cgroup-aware RAM headroom before loading/encoding. RL also validates host
+workspace and effective free VRAM before large batch assembly; automatic device
+selection falls back to CPU when VRAM is below its safety minimum.
+
+Supervised weights and intermediates are `float32`; legacy `float64` checkpoints
+are cast safely. Plateau LR decay is enabled by default: validation runs every
+10 epochs and five consecutive failures multiply LR by `0.5`. Early stopping
+and LR scheduling use independent counters. See `training/README.md` for
+device, fixed-batch, reserve, seed, scheduler, and disable flags; the canonical
+pipeline device flag is `--sl-device`.
 
 Refine the RL agent:
 
 ```bash
 python -m training.self_play
+python -m training.self_play --rl-workers auto --seed 123
+python -m training.self_play --rl-workers 4 --device cpu
 ```
+
+The long student sweep runs one configuration at a time and leaves game-level
+parallelism to the automatic rollout worker pool. Each configuration uses one
+compact RL progress bar instead of per-iteration/checkpoint logs:
+
+```bash
+train_script/run_rl_parameter_sweep.sh
+# Press Ctrl+C once to interrupt safely.
+train_script/run_rl_parameter_sweep.sh --resume
+```
+
+Its checkpoints use `_iterNNNNNN.npz` names and a checksummed `.resume.npz`
+state for the exact opponent pool. Resume rejects changed seeds or
+computation-affecting hyperparameters; repeat any custom options unchanged.
+It also reuses a completed per-point diagnostic only after validating its
+configuration, seed, model identity, game count, CSV, summary, and plots. This
+completed-point check happens before resumable opponent-pool validation, so an
+automatic CPU/GPU choice changing later cannot restart finished work.
+See `train_script/README.md` for the 92-point plan and file locations.
 
 Self-play reports startup memory, checkpoint-to-checkpoint time, and total
 elapsed time. Iteration logs omit entropy and show reward mean/min/max,
-good/neutral/bad percentages, local reward mean, draw/pass event counts, wins,
-pool size, and gradient norm.
+good/neutral/bad percentages, wins, pool size, and gradient norm.
+
+All games inside an iteration see the same frozen policy. CPU-only workers
+generate trajectories from shared-memory policy snapshots; the main process
+orders results by game id, assembles the batch, performs the only gradient
+update, and remains the only process allowed to use the GPU. Stable per-game
+seeds make fixed worker counts, autotuning, scheduling, and memory fallback
+produce identical seeded trajectories. Checkpoint evaluation is parallelized
+through the same safe pool.
+
+Headless dataset, RL, and diagnostic turns reuse the legal-action collection
+already computed for the agent and skip the discarded post-action engine
+snapshot. `DominoEngine.step(action)` keeps its original validating, full-state
+defaults; the precomputed collection is used only by controlled internal loops
+for the exact current position. Human actions still ask the engine to compute
+legal actions itself.
+
+Run the reproducible structural and throughput comparison with:
+
+```bash
+python benchmarks/headless_step_benchmark.py
+python benchmarks/headless_step_benchmark.py --games 500 --rollout-games 200 \
+  --json-output /tmp/headless_step_benchmark.json
+```
+
+It compares the legacy-equivalent discarded-state loop with the optimized
+path for random, heuristic, neural, and RL agents against random, plus actual
+RL rollout generation when checkpoints are available. It reports games per
+second, legal-action calls, state snapshots, serialized history actions, and
+requires identical fixed-seed result fingerprints.
 
 The learner samples actions and stores its trajectory. Frozen self-play pool
 opponents also sample actions but do not store trajectories. Checkpoint
@@ -203,32 +420,35 @@ Generated files:
 |---|---|
 | `dataset/supervised_dataset.jsonl` | `training.dataset_generator` |
 | `dataset/supervised_dataset_encoded.npz` | `training.training_loop` cache for encoded `X/Y` arrays |
+| `dataset/supervised_dataset_X.npy`, `supervised_dataset_Y.npy`, `supervised_dataset_metadata.json` | Disk-backed fallback cache from `training.training_loop` |
 | `models/domino_sl_weights.npz` | `training.training_loop` |
 | `models/domino_rl_weights.npz` | `training.self_play` |
+| `models/rl_test/*_iterNNNNNN.npz` and the newest paired `*.resume.npz` | `train_script/run_rl_parameter_sweep.sh` interruption-safe checkpoints |
 
 ## Diagnostics
 
-Run diagnostics with 10,000 games per selected matchup. With no mode argument,
-the historical four-agent upper triangle runs 10 matchups:
+Run all five agents against `random`, with 10,000 games per matchup by default:
 
 ```bash
 python -m diagnostics.evaluate
 python -m diagnostics.evaluate fast
 python -m diagnostics.evaluate complete
 python -m diagnostics.evaluate complete -n 5000
+python -m diagnostics.evaluate fast --workers auto --seed 123
 ```
 
 Supported names are `rl`, `neural`, `random_nn`, `heuristic`, and `random`.
 `random_nn` uses the supervised network architecture with reproducible random
 initial weights and no checkpoint. The old `greedy` baseline is no longer part
-of diagnostics. The `random_nn` agent enters the automatic matrix only in
-`complete` mode, but remains available to the pairwise helper in every mode.
+of diagnostics. `random_nn` is included in every automatic diagnostic mode.
 
 The full diagnostic writes to `diagnostics/results/all_pairs/` unless `--output`
-is provided. Pair evaluation uses a progress bar, and both pair summaries and
-the aggregate summary include `duration_s`:
+is provided. Pair evaluation uses a progress bar. The aggregate report records
+`selected_workers_by_matchup`, retained tuning details for every matchup, and
+`duration_s`; pair summaries also include `duration_s`:
 
 - `all_pairs_table.png`
+- `all_pairs_table.pdf`
 - `choice_opportunities.png`
 - `all_pairs_matrix.csv`
 - `all_pairs_summary.json`
@@ -249,6 +469,9 @@ Run the core tests:
 
 ```bash
 python tests/test_core.py
+python tests/test_parallel_dataset.py
+python tests/test_parallel_diagnostics.py
+python tests/test_parallel_rl.py
 ```
 
 Run the UI/controller tests:

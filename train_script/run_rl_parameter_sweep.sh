@@ -2,7 +2,7 @@
 #
 # RL-only hyperparameter sweep: train a dedicated self-play RL checkpoint for
 # every point in a full grid search over the three main hyperparameters
-# (learning_rate x gamma x games_per_iteration, 3x3x3 = 27 combinations),
+# (learning_rate x gamma x games_per_iteration, 3x4x3 = 36 combinations),
 # then diagnose it against the random agent. The full grid runs for both
 # policies -- critic off (direct REINFORCE) and critic on (actor-critic) at
 # the baseline value_coef -- with every base combination identical between
@@ -18,13 +18,10 @@
 # value_coef equal to the baseline is skipped because the critic-on grid run
 # of that combination already covers it.
 #
-# Loop structure: one pass over the full cross-product grid with
-# games_per_iteration as the OUTERMOST axis, so every combination of the
-# cheapest (first-listed) games-per-iteration value is queued before the
-# next value starts. Per base combination, run it critic-off, then
-# critic-on at baseline value_coef, then (if the combination was sampled
-# for the value_coef axis) once more per remaining value_coef value,
-# before moving to the next combination.
+# Loop structure: one pass over the full cross-product grid; per base
+# combination, run it critic-off, then critic-on at baseline value_coef,
+# then (if the combination was sampled for the value_coef axis) once more
+# per remaining value_coef value, before moving to the next combination.
 #
 # Baselines and the learning-rate/gamma sweep values mirror
 # diagnostics/hyperparameter_sweep.py: BASELINE_LEARNING_RATE, BASELINE_GAMMA,
@@ -42,15 +39,11 @@
 # value exactly is tagged "default" rather than spelling out all three
 # values.
 #
-# Naming (models and diagnostics share one name per run). Every model gets
-# its own directory holding the weights plus a <name>.json recording the
-# run's full hyperparameter combination (same format as the diagnostics
-# sweep_run.json):
-#   models/rl_test/<name>/<name>.npz + <name>.json, where <name> is
-#     domino_rl[_critic]_default                       (lr/gamma/gpi all at baseline)
-#     domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>  (every other grid point)
-#     domino_rl_critic_<grid tag>_vc<VC>               (value_coef axis, critic-on only)
-#   diagnostics/results/rl_test/<name>/
+# Naming (models and diagnostics share one name per run):
+#   models/rl_test/domino_rl[_critic]_default_iter002000.npz
+#   models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>_iter002000.npz
+#   models/rl_test/domino_rl_critic_<grid tag>_vc<VC>_iter002000.npz
+#   diagnostics/results/domino_rl[_critic]_<same tag>/
 #
 # Reports total elapsed wall-clock time at the very end.
 #
@@ -73,7 +66,7 @@ SWEEP_START_EPOCH=$(date +%s)
 
 RL_ITERATIONS=2000
 SL_WEIGHTS_PATH="models/domino_sl_weights.npz"
-DIAGNOSTIC_GAMES=200
+DIAGNOSTIC_GAMES=10000
 SEED=42
 MODEL_DIR="models/rl_test"
 RESUME=0
@@ -81,26 +74,22 @@ DIAG_PLOTS=1
 # Array backend for every sweep point: "auto" (default) matches GPU_ENABLED
 # exactly (CuPy when installed, else NumPy); "cpu"/"gpu" force one backend.
 DEVICE="auto"
+# Sweep points run sequentially. Parallelism belongs inside self_play's
+# CPU-only rollout pool, where game ids, memory fallback, and retained worker
+# autotuning are already controlled centrally.
+RL_WORKERS=auto
 
-# Concurrency: 1 (default) runs every sweep point sequentially, exactly as
-# before. --jobs N > 1 runs up to N sweep points at once as background
-# `python -m training.self_play` subprocesses -- safe because every sweep
-# point writes to its own unique --rl-weights-path/diagnostics directory and
-# only *reads* the shared SL checkpoint. RAM_LIMIT_MB/VRAM_LIMIT_MB, left
-# empty here, are auto-computed from this machine's detected system RAM / GPU
-# memory divided by --jobs -- always, not only when --jobs > 1, as a general
-# OOM backstop (see the "Concurrency and memory limits" block below for the
-# exact formula and enforcement mechanism).
-JOBS=12
+# The outer sweep is deliberately fixed to one job. The legacy --jobs flag is
+# accepted only as --jobs 1 so old sequential commands remain valid.
+JOBS=1
 RAM_LIMIT_MB=""
 VRAM_LIMIT_MB=""
-RUN_LOG_DIR=""  # computed from RESULTS_DIR after argument parsing, below
 
 # Final comparative-table stage: parses every sweep point's sweep_run.json +
 # summary.json under diagnostics/results/ (diagnostics.rl_sweep_table) and
 # writes a combined CSV/JSON/PNG table.
 RESULTS_DIR="diagnostics/results/rl_test"
-REPORT_OUTPUT_DIR="diagnostics/results/lr0005/rl_sweep_table"
+REPORT_OUTPUT_DIR="diagnostics/results/rl_sweep_table"
 SKIP_REPORT=0
 
 # Baselines: diagnostics/hyperparameter_sweep.py BASELINE_* constants.
@@ -109,15 +98,12 @@ BASELINE_GAMMA=1.0
 BASELINE_GAMES_PER_ITERATION=40  # DEFAULT_RL_GAMES_PER_ITERATION
 BASELINE_VALUE_COEF=0.5
 
-# Grid-search values (3x3x3 = 27 combinations): DEFAULT_LR_VALUES /
+# Grid-search values (3x4x3 = 36 combinations): DEFAULT_LR_VALUES /
 # DEFAULT_GAMMA_VALUES from diagnostics/hyperparameter_sweep.py.
 # games-per-iteration is not a tuple there (see header comment above) -- its
 # range comes from the historical report instead.
-# LR_VALUES=(0.0005 0.001 0.005)
-# GAMMA_VALUES=(1.0 0.97 0.95 0.92)
-# GAMES_PER_ITERATION_VALUES=(40 80 160)
-LR_VALUES=(0.005)
-GAMMA_VALUES=(1.0 0.97 0.95 0.92 0.75 0.5)
+LR_VALUES=(0.0005 0.001 0.005)
+GAMMA_VALUES=(1.0 0.97 0.95 0.92)
 GAMES_PER_ITERATION_VALUES=(40 80 160)
 
 # value_coef axis (critic-on only; value_coef has no effect with the critic
@@ -125,14 +111,14 @@ GAMES_PER_ITERATION_VALUES=(40 80 160)
 # grid -- the same sampled combinations for every value_coef value. The
 # baseline (0.5) is included in the list but skipped during the axis sweep:
 # the critic-on grid run already covers it.
-VALUE_COEF_VALUES=(0.5)
+VALUE_COEF_VALUES=(0.25 0.5 0.75)
 VC_SAMPLE_COUNT=10
 
 usage() {
     cat <<EOF
 Train a dedicated RL self-play checkpoint ($RL_ITERATIONS iterations) per
 sweep point. The full learning_rate x gamma x games_per_iteration grid
-(3x3x3 = 27 combinations) runs for both policies -- critic off and critic on
+(3x4x3 = 36 combinations) runs for both policies -- critic off and critic on
 at the baseline value_coef -- with every base combination identical between
 the two. The value_coef axis runs with the critic ON only (it has no effect
 otherwise): $VC_SAMPLE_COUNT base combinations are sampled at random (seeded)
@@ -142,7 +128,7 @@ elapsed wall-clock time at the end.
 
 Usage: $(basename "$0") [options]
 
-Grid search axes (cross product, 27 combinations, both critic settings):
+Grid search axes (cross product, 36 combinations, both critic settings):
   learning_rate        ${LR_VALUES[*]} (baseline: $BASELINE_LEARNING_RATE)
   gamma                 ${GAMMA_VALUES[*]} (baseline: $BASELINE_GAMMA)
   games_per_iteration   ${GAMES_PER_ITERATION_VALUES[*]} (baseline: $BASELINE_GAMES_PER_ITERATION)
@@ -156,18 +142,19 @@ Options:
   --diagnostic-games N    Games in the rl-vs-random diagnostic per sweep point (default: $DIAGNOSTIC_GAMES)
   --seed N                Fix random/numpy state for both training and diagnostics (default: $SEED)
   --model-dir PATH        Output directory for RL checkpoints (default: $MODEL_DIR)
-  --resume                Skip training a checkpoint that already exists on disk; still (re)run its diagnostics
+  --resume                Continue incomplete training and reuse complete, compatible diagnostics
   --diag-no-plots         Skip the per-run diagnostic PNG plots (CSV/JSON are always written)
   --device {auto,cpu,gpu} Array backend for every sweep point; "auto" matches GPU_ENABLED (default: $DEVICE)
+  --rl-workers N|auto     CPU-only rollout workers inside the current sweep point (default: $RL_WORKERS)
   --vc-sample-count N     Number of grid combinations sampled for the value_coef axis (default: $VC_SAMPLE_COUNT)
   --results-dir PATH      Output directory for per-run diagnostics subdirectories (default: $RESULTS_DIR)
   --report-output-dir PATH  Where the final comparative table is written (default: $REPORT_OUTPUT_DIR)
   --skip-report           Skip the final comparative-table stage
 
-Concurrency and memory limits:
-  --jobs N                Run up to N sweep points at once as background subprocesses (default: $JOBS, sequential)
-  --ram-limit-mb N        Per-subprocess physical-memory cap in MiB, enforced via a systemd-run --scope cgroup if available (default: auto from detected system RAM / --jobs)
-  --vram-limit-mb N       Per-subprocess CuPy memory-pool cap in MiB, hard-enforced by CuPy (default: auto from detected GPU memory / --jobs, when device isn't cpu)
+Sequential execution and memory limits:
+  --jobs 1                Compatibility flag; outer sweep parallelism is disabled
+  --ram-limit-mb N        Active subprocess physical-memory cap in MiB, enforced via a systemd-run --scope cgroup if available (default: 80% of detected system RAM)
+  --vram-limit-mb N       Active subprocess CuPy memory-pool cap in MiB, hard-enforced by CuPy (default: 80% of detected GPU memory when device isn't cpu)
 
   -h, --help              Show this help message and exit
 EOF
@@ -183,6 +170,7 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=1; shift ;;
         --diag-no-plots) DIAG_PLOTS=0; shift ;;
         --device) DEVICE="$2"; shift 2 ;;
+        --rl-workers) RL_WORKERS="$2"; shift 2 ;;
         --vc-sample-count) VC_SAMPLE_COUNT="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --report-output-dir) REPORT_OUTPUT_DIR="$2"; shift 2 ;;
@@ -199,8 +187,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [[ "$JOBS" -lt 1 ]]; then
-    echo "--jobs must be a positive integer, got: $JOBS" >&2
+if [[ "$JOBS" != "1" ]]; then
+    echo "--jobs is fixed at 1; use --rl-workers auto for internal rollout parallelism." >&2
     exit 1
 fi
 
@@ -209,25 +197,13 @@ if ! [[ "$VC_SAMPLE_COUNT" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-if [[ -z "$RUN_LOG_DIR" ]]; then
-    RUN_LOG_DIR="$RESULTS_DIR/_sweep_logs"
-fi
-
 # ------------------------------------------------------------------
-# Concurrency and memory limits
+# Sequential execution and memory limits
 # ------------------------------------------------------------------
 #
-# Memory limits are computed and applied by default -- always, not only
-# when --jobs > 1 -- as a general OOM backstop (e.g. against a runaway leak
-# in a single sequential run), sized from this machine's actual specs
-# (verified: 20 CPU cores, 31779MiB system RAM, one NVIDIA RTX 3050 with
-# 6144MiB VRAM) divided by --jobs, at 80% of the detected total so headroom
-# stays free for the rest of the system. At the default --jobs 1 that's a
-# deliberately generous single-process ceiling (~25.4GiB RAM / ~4.8GiB VRAM
-# here) -- not a routine constraint (observed real usage is a few hundred
-# MiB per process), just a ceiling a bug would have to badly blow through.
-# An explicit --ram-limit-mb/--vram-limit-mb always wins over the
-# auto-computed value.
+# Memory limits remain a general OOM backstop for the one active sweep point.
+# They default to 80% of the detected total so headroom remains for the system;
+# explicit --ram-limit-mb/--vram-limit-mb values always take precedence.
 #
 # RAM is capped with `systemd-run --user --scope -p MemoryMax=... -p
 # MemorySwapMax=0`, a cgroup memory.max limit on actual physical memory --
@@ -244,8 +220,8 @@ USE_CGROUP_RAM_LIMIT=0
 if [[ -z "$RAM_LIMIT_MB" ]]; then
     if [[ -r /proc/meminfo ]]; then
         total_ram_mb=$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)
-        RAM_LIMIT_MB=$(( (total_ram_mb * 80 / 100) / JOBS ))
-        echo "Auto RAM limit per job: ${RAM_LIMIT_MB}MiB (80% of ${total_ram_mb}MiB system RAM / $JOBS job(s))"
+        RAM_LIMIT_MB=$(( total_ram_mb * 80 / 100 ))
+        echo "Auto RAM limit for the active job: ${RAM_LIMIT_MB}MiB (80% of ${total_ram_mb}MiB system RAM)"
     else
         echo "Warning: /proc/meminfo not readable; no RAM limit will be applied. Pass --ram-limit-mb to set one explicitly." >&2
     fi
@@ -262,8 +238,8 @@ if [[ -z "$VRAM_LIMIT_MB" && "$DEVICE" != "cpu" ]]; then
     if command -v nvidia-smi >/dev/null 2>&1; then
         total_vram_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1)
         if [[ -n "$total_vram_mb" ]]; then
-            VRAM_LIMIT_MB=$(( (total_vram_mb * 80 / 100) / JOBS ))
-            echo "Auto VRAM limit per job: ${VRAM_LIMIT_MB}MiB (80% of ${total_vram_mb}MiB total GPU memory / $JOBS job(s))"
+            VRAM_LIMIT_MB=$(( total_vram_mb * 80 / 100 ))
+            echo "Auto VRAM limit for the active job: ${VRAM_LIMIT_MB}MiB (80% of ${total_vram_mb}MiB total GPU memory)"
         fi
     fi
 fi
@@ -299,9 +275,6 @@ else
 fi
 
 mkdir -p "$MODEL_DIR"
-if [[ "$JOBS" -gt 1 ]]; then
-    mkdir -p "$RUN_LOG_DIR"
-fi
 
 # ------------------------------------------------------------------
 # value_coef axis: seeded random sample of grid combinations
@@ -347,17 +320,103 @@ format_duration() {
     fi
 }
 
-# write_run_metadata NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH OUT_FILE
-#
-# One JSON schema, two destinations: the model directory's <name>.json
-# (written right after training) and the diagnostics directory's
-# sweep_run.json (written after the diagnostic, consumed by
-# diagnostics.rl_sweep_table).
+# validate_resume_pair WEIGHTS STATE GPI LR GAMMA VC CRITIC
+validate_resume_pair() {
+    "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$SEED" "$DEVICE" <<'PY'
+import inspect
+import sys
+
+from training.self_play import (
+    _resume_configuration,
+    _validate_resume_configuration,
+    load_resume_state,
+    train,
+)
+from utils.resource_limits import choose_safe_rl_device
+
+try:
+    weights_path, state_path, gpi, learning_rate, gamma, value_coef, critic, seed, requested_device = sys.argv[1:]
+    metadata, _pool = load_resume_state(weights_path, state_path)
+    parameters = inspect.signature(train).parameters
+    default = lambda name: parameters[name].default
+    expected = _resume_configuration(
+        games_per_iteration=int(gpi),
+        training_opponent=default("training_opponent"),
+        learning_rate=float(learning_rate),
+        entropy_coef=default("entropy_coef"),
+        pool_interval=default("pool_interval"),
+        max_pool_size=default("max_pool_size"),
+        use_value_head=bool(int(critic)),
+        value_coef=float(value_coef),
+        gamma=float(gamma),
+        reward_schema=default("reward_schema"),
+        clip_grad_norm=default("clip_grad_norm"),
+        normalize_advantages=default("normalize_advantages"),
+        effective_seed=int(seed),
+        device=choose_safe_rl_device(requested_device)[0],
+    )
+    _validate_resume_configuration(metadata, expected)
+except Exception as exc:
+    print(f"Resume pair validation failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+# find_latest_resume_checkpoint BASE_PATH GPI LR GAMMA VC CRITIC
+# Sets LAST_RESUME_ITERATION/WEIGHTS/STATE to the newest complete, compatible
+# pair at or below RL_ITERATIONS. A weights file without its validated state is
+# intentionally ignored after a sudden interruption.
+find_latest_resume_checkpoint() {
+    local base_path="$1" gpi="$2" lr="$3" gamma="$4" vc="$5" critic="$6"
+    local base_stem="${base_path%.npz}"
+    local state_path weights_path filename digits iteration
+    LAST_RESUME_ITERATION=0
+    LAST_RESUME_WEIGHTS=""
+    LAST_RESUME_STATE=""
+
+    shopt -s nullglob
+    for state_path in "${base_stem}"_iter*.resume.npz; do
+        weights_path="${state_path%.resume.npz}.npz"
+        [[ -f "$weights_path" ]] || continue
+        filename="${weights_path##*/}"
+        if [[ "$filename" =~ _iter([0-9]+)\.npz$ ]]; then
+            digits="${BASH_REMATCH[1]}"
+            iteration=$((10#$digits))
+        else
+            continue
+        fi
+        if [[ "$iteration" -gt "$RL_ITERATIONS" ]]; then
+            continue
+        fi
+        if ! validate_resume_pair \
+            "$weights_path" "$state_path" "$gpi" "$lr" "$gamma" "$vc" "$critic"; then
+            echo "Warning: ignoring invalid resume pair $weights_path / $state_path" >&2
+            continue
+        fi
+        if [[ "$iteration" -gt "$LAST_RESUME_ITERATION" ]]; then
+            LAST_RESUME_ITERATION="$iteration"
+            LAST_RESUME_WEIGHTS="$weights_path"
+            LAST_RESUME_STATE="$state_path"
+        fi
+    done
+    shopt -u nullglob
+}
+
+# write_run_metadata NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH DIAG_DIR
 write_run_metadata() {
-    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" gpi="$6" vc="$7" model_path="$8" out_file="$9"
+    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" gpi="$6" vc="$7" model_path="$8" diag_dir="$9"
     local critic_bool="false"
+    local model_sha256
     if [[ "$critic" -eq 1 ]]; then critic_bool="true"; fi
-    cat > "$out_file" <<EOF
+    model_sha256=$("$PYTHON_BIN" - "$model_path" <<'PY'
+import sys
+
+from diagnostics.rl_sweep_table import file_sha256
+
+print(file_sha256(sys.argv[1]))
+PY
+)
+    cat > "$diag_dir/sweep_run.json" <<EOF
 {
   "run_name": "$name",
   "varied_parameter": "$tag",
@@ -370,9 +429,62 @@ write_run_metadata() {
   "seed": $SEED,
   "diagnostic_games": $DIAGNOSTIC_GAMES,
   "sl_weights_path": "$SL_WEIGHTS_PATH",
-  "model_path": "$model_path"
+  "model_path": "$model_path",
+  "model_sha256": "$model_sha256"
 }
 EOF
+}
+
+# reusable_diagnostics NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH DIAG_DIR
+# Returns success only when every requested diagnostic artifact is complete
+# and belongs to this exact sweep configuration and numbered model checkpoint.
+reusable_diagnostics() {
+    "$PYTHON_BIN" - \
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" \
+        "$RL_ITERATIONS" "$SEED" "$DIAGNOSTIC_GAMES" "$SL_WEIGHTS_PATH" \
+        "$DIAG_PLOTS" <<'PY'
+import sys
+
+from diagnostics.rl_sweep_table import validate_reusable_sweep_diagnostic
+
+(
+    name,
+    tag,
+    critic,
+    learning_rate,
+    gamma,
+    games_per_iteration,
+    value_coef,
+    model_path,
+    diagnostic_dir,
+    rl_iterations,
+    seed,
+    diagnostic_games,
+    sl_weights_path,
+    diagnostic_plots,
+) = sys.argv[1:]
+expected = {
+    "run_name": name,
+    "varied_parameter": tag,
+    "critic_enabled": bool(int(critic)),
+    "learning_rate": float(learning_rate),
+    "gamma": float(gamma),
+    "games_per_iteration": int(games_per_iteration),
+    "value_coef": float(value_coef),
+    "rl_iterations": int(rl_iterations),
+    "seed": int(seed),
+    "diagnostic_games": int(diagnostic_games),
+    "sl_weights_path": sl_weights_path,
+    "model_path": model_path,
+}
+valid, _reason = validate_reusable_sweep_diagnostic(
+    diagnostic_dir,
+    expected,
+    model_path,
+    require_plots=bool(int(diagnostic_plots)),
+)
+raise SystemExit(0 if valid else 1)
+PY
 }
 
 # run_point TAG CRITIC LR GAMMA GPI VC
@@ -384,20 +496,52 @@ run_point() {
     fi
     name="${name}_${tag}"
 
-    # Dedicated per-model directory: weights plus a <name>.json with the
-    # run's hyperparameter combination, mirroring the diagnostics layout.
-    local model_dir="$MODEL_DIR/${name}"
-    local model_path="$model_dir/${name}.npz"
+    local model_base_path="$MODEL_DIR/${name}.npz"
+    local model_path
+    local final_model_path
     local diag_dir="$RESULTS_DIR/${name}"
     local critic_label="off"
     if [[ "$critic" -eq 1 ]]; then
         critic_label="on"
     fi
 
-    if [[ "$RESUME" -eq 1 && -f "$model_path" ]]; then
-        section "[$name] training skipped (--resume, $model_path already exists)"
+    # A compatible final diagnostic proves that this exact numbered final
+    # model completed the point. Check it before loading resumable pool state:
+    # no further computation remains, so a CPU/GPU selection change cannot
+    # invalidate or alter the already completed model and diagnostic.
+    printf -v final_model_path '%s_iter%06d.npz' \
+        "${model_base_path%.npz}" "$RL_ITERATIONS"
+    if [[ "$RESUME" -eq 1 ]] && reusable_diagnostics \
+        "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" \
+        "$final_model_path" "$diag_dir"; then
+        section "[$name] training already complete at iteration $RL_ITERATIONS (--resume: $final_model_path)"
+        section "[$name] diagnostics already complete ($DIAGNOSTIC_GAMES games; --resume: $diag_dir/summary.json)"
+        return
+    fi
+
+    LAST_RESUME_ITERATION=0
+    LAST_RESUME_WEIGHTS=""
+    LAST_RESUME_STATE=""
+    if [[ "$RESUME" -eq 1 ]]; then
+        find_latest_resume_checkpoint \
+            "$model_base_path" "$gpi" "$lr" "$gamma" "$vc" "$critic"
+    fi
+
+    if [[ "$LAST_RESUME_ITERATION" -eq "$RL_ITERATIONS" ]]; then
+        model_path="$LAST_RESUME_WEIGHTS"
+        section "[$name] training already complete at iteration $RL_ITERATIONS (--resume: $model_path)"
     else
-        section "[$name] RL training: $RL_ITERATIONS iterations, lr=$lr gamma=$gamma games/iter=$gpi value_coef=$vc critic=$critic_label -> $model_path"
+        RESUME_ARGS=(--numbered-checkpoints)
+        if [[ "$LAST_RESUME_ITERATION" -gt 0 ]]; then
+            RESUME_ARGS+=(
+                --start-iteration "$LAST_RESUME_ITERATION"
+                --resume-weights-path "$LAST_RESUME_WEIGHTS"
+                --resume-state-file "$LAST_RESUME_STATE"
+            )
+            section "[$name] resuming RL at iteration $LAST_RESUME_ITERATION/$RL_ITERATIONS, lr=$lr gamma=$gamma games/iter=$gpi value_coef=$vc critic=$critic_label"
+        else
+            section "[$name] RL training: $RL_ITERATIONS iterations, lr=$lr gamma=$gamma games/iter=$gpi value_coef=$vc critic=$critic_label"
+        fi
         VALUE_HEAD_FLAG=()
         if [[ "$critic" -eq 1 ]]; then
             VALUE_HEAD_FLAG=(--value-head)
@@ -413,85 +557,37 @@ run_point() {
             --gamma "$gamma" \
             --value-coef "$vc" \
             --sl-weights-path "$SL_WEIGHTS_PATH" \
-            --rl-weights-path "$model_path" \
+            --rl-weights-path "$model_base_path" \
             --seed "$SEED" \
             --device "$DEVICE" \
+            --rl-workers "$RL_WORKERS" \
+            --compact \
+            "${RESUME_ARGS[@]}" \
             "${VALUE_HEAD_FLAG[@]}"
+        model_path="$final_model_path"
     fi
 
-    # Hyperparameter record inside the model's own directory, written even on
-    # a --resume skip so pre-existing checkpoints gain it retroactively.
-    mkdir -p "$model_dir"
-    write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$model_dir/${name}.json"
-
-    section "[$name] diagnostics: rl vs random ($DIAGNOSTIC_GAMES games) -> $diag_dir/"
-    mkdir -p "$diag_dir"
-    DIAG_EXTRA_ARGS=()
-    if [[ "$DIAG_PLOTS" -eq 0 ]]; then
-        DIAG_EXTRA_ARGS+=(--no-plots)
-    fi
-    "$PYTHON_BIN" -u -m diagnostics.pairwise \
-        --agent rl --opponent random \
-        --weights "$model_path" \
-        --games "$DIAGNOSTIC_GAMES" \
-        --seed "$SEED" \
-        --output "$diag_dir" \
-        "${DIAG_EXTRA_ARGS[@]}"
-
-    write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$diag_dir/sweep_run.json"
-}
-
-# ------------------------------------------------------------------
-# Concurrent job pool (--jobs > 1 only)
-# ------------------------------------------------------------------
-#
-# Batch-based, not a rolling pool: launch up to $JOBS points, wait for that
-# whole batch, then launch the next. Simpler and more portable across bash
-# versions than a rolling pool (which needs `wait -n`), at the minor cost of
-# a batch waiting on its slowest point before the next one starts.
-JOB_PIDS=()
-JOB_NAMES=()
-FAILED_NAMES=()
-
-wait_for_batch() {
-    local i pid name
-    for i in "${!JOB_PIDS[@]}"; do
-        pid="${JOB_PIDS[$i]}"
-        name="${JOB_NAMES[$i]}"
-        if wait "$pid"; then
-            echo "[$name] finished"
-        else
-            echo "[$name] FAILED -- see $RUN_LOG_DIR/${name}.log" >&2
-            FAILED_NAMES+=("$name")
+    if [[ "$RESUME" -eq 1 ]] && reusable_diagnostics \
+        "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" \
+        "$model_path" "$diag_dir"; then
+        section "[$name] diagnostics already complete ($DIAGNOSTIC_GAMES games; --resume: $diag_dir/summary.json)"
+    else
+        section "[$name] diagnostics: rl vs random ($DIAGNOSTIC_GAMES games) -> $diag_dir/"
+        mkdir -p "$diag_dir"
+        DIAG_EXTRA_ARGS=()
+        if [[ "$DIAG_PLOTS" -eq 0 ]]; then
+            DIAG_EXTRA_ARGS+=(--no-plots)
         fi
-    done
-    JOB_PIDS=()
-    JOB_NAMES=()
-}
+        "$PYTHON_BIN" -u -m diagnostics.pairwise \
+            --agent rl --opponent random \
+            --weights "$model_path" \
+            --games "$DIAGNOSTIC_GAMES" \
+            --seed "$SEED" \
+            --output "$diag_dir" \
+            "${DIAG_EXTRA_ARGS[@]}"
 
-# launch_point TAG CRITIC LR GAMMA GPI VC
-launch_point() {
-    if [[ "$JOBS" -le 1 ]]; then
-        run_point "$1" "$2" "$3" "$4" "$5" "$6"
-        return
+        write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$diag_dir"
     fi
-
-    local tag="$1" critic="$2"
-    local name="domino_rl"
-    if [[ "$critic" -eq 1 ]]; then
-        name="${name}_critic"
-    fi
-    name="${name}_${tag}"
-
-    if [[ "${#JOB_PIDS[@]}" -ge "$JOBS" ]]; then
-        wait_for_batch
-    fi
-
-    local log_file="$RUN_LOG_DIR/${name}.log"
-    echo "[$name] started in background (log: $log_file)"
-    ( run_point "$1" "$2" "$3" "$4" "$5" "$6" ) >"$log_file" 2>&1 &
-    JOB_PIDS+=("$!")
-    JOB_NAMES+=("$name")
 }
 
 # ------------------------------------------------------------------
@@ -516,49 +612,36 @@ fi
 # Sweep
 # ------------------------------------------------------------------
 
-# One pass over the full cross-product grid, with games_per_iteration as
-# the OUTERMOST loop: every lr x gamma combination for the first (cheapest)
-# games-per-iteration value is queued before the next value starts, so the
-# low-GPI runs get priority. With --jobs > 1 the batch pool only waits when
-# a batch is full, so once all combinations for one GPI value are queued,
-# any idle job slots are filled from the next GPI value automatically.
-# Per base combination: run it critic-off, then critic-on at the baseline
-# value_coef -- the exact same base combinations for both policies -- then,
-# if the combination was sampled for the value_coef axis, once more per
-# remaining value_coef value (critic on only: value_coef has no effect with
-# the critic off). The baseline value_coef is skipped there because the
-# critic-on grid run just above already covers it.
-for GPI in "${GAMES_PER_ITERATION_VALUES[@]}"; do
-    for LR in "${LR_VALUES[@]}"; do
-        for GAMMA in "${GAMMA_VALUES[@]}"; do
+# One pass over the full cross-product grid. Per base combination: run it
+# critic-off, then critic-on at the baseline value_coef -- the exact same
+# base combinations for both policies -- then, if the combination was
+# sampled for the value_coef axis, once more per remaining value_coef value
+# (critic on only: value_coef has no effect with the critic off). The
+# baseline value_coef is skipped there because the critic-on grid run just
+# above already covers it.
+for LR in "${LR_VALUES[@]}"; do
+    for GAMMA in "${GAMMA_VALUES[@]}"; do
+        for GPI in "${GAMES_PER_ITERATION_VALUES[@]}"; do
             if [[ "$LR" == "$BASELINE_LEARNING_RATE" && "$GAMMA" == "$BASELINE_GAMMA" && "$GPI" == "$BASELINE_GAMES_PER_ITERATION" ]]; then
                 TAG="default"
             else
                 TAG="lr${LR}_gamma${GAMMA}_gpi${GPI}"
             fi
 
-            launch_point "$TAG" 0 "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
-            launch_point "$TAG" 1 "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
+            run_point "$TAG" 0 "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
+            run_point "$TAG" 1 "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
 
             if [[ -n "${VC_SAMPLED_LOOKUP["$LR $GAMMA $GPI"]:-}" ]]; then
                 for VC in "${VALUE_COEF_VALUES[@]}"; do
                     if [[ "$VC" == "$BASELINE_VALUE_COEF" ]]; then
                         continue
                     fi
-                    launch_point "${TAG}_vc${VC}" 1 "$LR" "$GAMMA" "$GPI" "$VC"
+                    run_point "${TAG}_vc${VC}" 1 "$LR" "$GAMMA" "$GPI" "$VC"
                 done
             fi
         done
     done
 done
-
-# Reap any still-running jobs from the final (possibly partial) batch --
-# a no-op sequentially (--jobs 1), since JOB_PIDS never gets populated then.
-wait_for_batch
-
-if [[ "${#FAILED_NAMES[@]}" -gt 0 ]]; then
-    echo "WARNING: ${#FAILED_NAMES[@]} sweep point(s) failed: ${FAILED_NAMES[*]}" >&2
-fi
 
 if [[ "$SKIP_REPORT" -eq 1 ]]; then
     section "Comparative table (skipped)"
@@ -574,7 +657,3 @@ section "RL parameter sweep complete: $total_points runs -> $MODEL_DIR/, diagnos
 SWEEP_END_EPOCH=$(date +%s)
 ELAPSED_SECONDS=$((SWEEP_END_EPOCH - SWEEP_START_EPOCH))
 echo "Total elapsed execution time: $(format_duration "$ELAPSED_SECONDS") (${ELAPSED_SECONDS}s)"
-
-if [[ "${#FAILED_NAMES[@]}" -gt 0 ]]; then
-    exit 1
-fi

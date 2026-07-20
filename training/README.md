@@ -22,23 +22,27 @@ and `huge` uses twenty times the default counts. The scaled counts apply to
 dataset games, supervised epochs, RL iterations, and diagnostic games per
 matchup. RL games per iteration stay at 40 so the scale remains linear.
 The default dataset workload is 10,000 heuristic-vs-heuristic games.
-Diagnostics counts are per matchup, and their mode depends on pipeline scale:
+Diagnostics counts are per matchup. Mode labels remain compatible with older
+commands, but all scales evaluate the same five agents against `random`:
 
 | Pipeline scale | Diagnostic mode | Matchups |
 |---|---|---:|
-| `small` | `fast` | 2 |
-| `default` | `default` | 10 |
-| `big` | `complete` | 15 |
-| `huge` | `complete` | 15 |
+| `small` | `fast` | 5 |
+| `default` | `default` | 5 |
+| `big` | `complete` | 5 |
+| `huge` | `complete` | 5 |
 
-For example, `small` runs 2,000 games in each of 2 matchups, for 4,000
+For example, `small` runs 2,000 games in each of 5 matchups, for 10,000
 diagnostic games in total.
 
 | File | Purpose |
 |---|---|
-| `dataset_generator.py` | Simulates games and writes only real decisions to `dataset/supervised_dataset.jsonl`. |
-| `training_loop.py` | Loads the JSONL dataset, trains `SupervisedNeuralNetwork`, and saves `models/domino_sl_weights.npz`. Forced draw/pass and single-option labels are skipped defensively. |
-| `self_play.py` | Loads the supervised policy or an existing RL checkpoint, then trains `PolicyNetwork` from real learner decisions with reward shaping and option-count multipliers. |
+| `dataset_generator.py` | Coordinates retained worker tuning, bounded SQLite aggregation, and atomic ordered JSONL output. |
+| `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
+| `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz`. |
+| `supervised_runtime.py` | Implements CPU/GPU batch candidates, synchronized retained timing, GPU residency probes/windows, and supervised memory telemetry. |
+| `self_play.py` | Loads the supervised policy or an existing RL checkpoint, orchestrates parallel rollouts, and applies parent-only policy updates. |
+| `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed games across memory fallback. |
 
 ## Important Shape Change
 
@@ -67,13 +71,35 @@ Run:
 
 ```bash
 python -m training.dataset_generator
+python -m training.dataset_generator --workers auto --seed 123
+python -m training.dataset_generator --workers 4 --games 5000
 ```
 
 The generator records `(state, target_action)` pairs from games played by
 `StrategicAgent` against itself. Engine states are already compact and do not
 include rendering metadata. The command prints a startup RAM/GPU memory
-snapshot, shows a progress bar, and reports total elapsed time. Its default is
-10,000 games.
+snapshot, shows a progress bar, and reports total elapsed time. The standalone
+command defaults to 30,000 games; the default full pipeline requests 10,000.
+
+Automatic mode benchmarks 1, 2, 4, 6, ... CPU-only workers, capped at 20.
+Every attempt generates and retains 1% of the requested games. Testing stops on
+a memory/error guard or below 10% marginal gain, then the remaining absolute
+game ids run with the selected count. Per-game seeds make fixed-worker and
+automatic runs identical for the same `--seed`, regardless of scheduling or a
+runtime fallback. Use `--help` for benchmark fractions, RAM reserve, per-worker
+RSS, and estimated-worker-memory controls.
+
+Workers serialize one compact payload per game. Only the parent writes those
+payloads to a disposable SQLite database, keeping RAM bounded while results
+arrive out of order. Final rows are emitted in game-id order, and the existing
+JSONL is replaced atomically only after every requested game succeeds.
+
+Automatic dataset and RL game loops use the engine's trusted headless step
+path. They reuse the unchanged legal-action collection already shown to the
+agent and skip the post-action state snapshot that the loop would discard.
+The pre-action state used for supervised examples, policy encoding, opponent
+inference, trajectories, and event rewards is unchanged. Public/default engine
+calls still generate their own legal actions and return a full state.
 
 `StrategicAgent` now uses the exact two-player opponent model from
 `middleware/opponent_model.py`. Dataset generation is therefore slower than the
@@ -104,46 +130,112 @@ The loop:
 - reads `dataset/supervised_dataset.jsonl`;
 - filters out forced draw/pass examples;
 - filters out single-option tile-play examples;
+- scans the JSONL twice and encodes `float32` arrays without retaining decoded records;
+- checks cgroup-aware host RAM before every material allocation;
 - encodes states and tile-play actions with `DominoEncoder`;
-- saves/loads `dataset/supervised_dataset_encoded.npz` to skip repeated JSONL encoding;
+- uses `dataset/supervised_dataset_encoded.npz` when the encoded dataset fits safely in RAM;
+- otherwise atomically builds disk-backed `supervised_dataset_X.npy`,
+  `supervised_dataset_Y.npy`, and `supervised_dataset_metadata.json` files and
+  opens them read-only with `mmap`;
 - splits data into training and validation sets;
-- keeps the encoded dataset and both splits in NumPy host memory;
-- trains the MLP in mini-batches of 1024 examples;
+- selects CPU/GPU independently with `--sl-device {auto,cpu,gpu}` (`--device`
+  is a standalone alias);
+- retains every batch-autotuning epoch as real training;
+- keeps the complete dataset in GPU memory when safe, or rotates one reusable
+  GPU window through a global per-epoch permutation when it is not;
 - keeps the best validation checkpoint in memory;
 - keeps only the 10 most recent archival checkpoints;
 - saves `models/domino_sl_weights.npz`.
 
-`agents/nn.py` uses CuPy automatically when it is installed. Only the current
-training or validation mini-batch is transferred to the GPU; complete datasets
-are never copied into VRAM. GPU memory usage therefore stays proportional to
-the batch size rather than the number of encoded examples. The command prints
-startup memory, checkpoint-to-checkpoint time, and total elapsed time.
+CPU batch candidates are powers of two from 1,024 through 1,048,576; GPU
+candidates start at 2,048. Each candidate runs 10 complete epochs on the same
+live network. Timing includes recurring data materialization/transfers and the
+forward/backward update, synchronizes CUDA around each GPU epoch, excludes
+validation/checkpoint/log time, and compares median **examples/second**. A
+larger candidate is accepted only at a gain of at least 10%; a rejected
+candidate's epochs still remain in the model. Runs shorter than 10 epochs use
+the first safe device default without starting an incomplete benchmark. Use
+`--sl-batch-size N` for a fixed batch or `--sl-no-batch-autotune` for the
+device default.
+
+GPU mode first probes resident example counts from 2,048 through 1,048,576
+without changing weights. It preserves 512 MiB by default for batches,
+activations, gradients, CUDA workspace, and fragmentation. `auto` falls back
+safely to CPU when that reserve cannot be kept; explicit `gpu` fails before a
+training update. Override host and GPU reserves with
+`--sl-memory-reserve-mb` and `--sl-gpu-memory-reserve-mb`. The detailed command
+reports the selected device, residency mode/capacity, one-time full upload,
+batch results, and memory high/low watermarks. `run_pipeline.py` uses
+`quiet=True`, so it continues suppressing per-epoch, checkpoint, scheduler, and
+memory-detail chatter. It does display concise retained-batch benchmark lines
+through `tqdm.write`: candidate size, median epoch time, total test time,
+examples/second, marginal gain, retention decision, and final selected batch.
+
+All supervised inputs, targets, weights, activations, gradients, and new
+checkpoints are `float32`. Legacy `float64` checkpoints remain loadable and are
+cast on input. Archival files in `models/supervised_checkpoints/` are pruned
+after every save, so repeated or large runs retain at most 10 of them.
 Archival files in `models/supervised_checkpoints/` are pruned after every save,
 so repeated or large training runs retain at most 10 of them.
+
+CuPy import alone is not treated as proof of a working GPU. At startup,
+`agents/nn.py` also asks the CUDA runtime for a visible device; a missing driver,
+hidden device, or unusable runtime produces a documented NumPy/CPU fallback
+reason. The root README's **Linux GPU setup and verification** section contains
+the driver checks, CUDA 12.x/13.x installation commands, a real calculation
+test, and troubleshooting steps. `run_pipeline.py` prints the selected
+supervised and RL-parent backends plus free/total RAM and VRAM before dataset
+generation starts.
 
 The encoded cache is rebuilt automatically when the source JSONL file changes,
 the encoder input/output dimensions change, or the feature-version tag changes.
 
-### Optional SL controls
+RL self-play performs a host-memory preflight for the shared snapshot bank and
+expected batch, then checks the actual workspace before each `hstack`. With
+`--device auto`, less than 256 MiB of effective free VRAM causes an announced
+CPU fallback; explicit `--device gpu` fails early instead. Diagnostics later
+run in separate CPU-only processes and never consume training VRAM.
 
-The default command uses a fixed learning rate, no weight decay, and no early
-stopping. It still tracks validation loss and saves the best validation weights.
+The Python pipeline exposes independent dataset, RL rollout, and diagnostic
+worker controls. Dataset generation tunes once for its full workload. RL tunes
+across complete early iterations, and diagnostics tune each matchup separately.
+All three retain benchmark work and enforce the same hard limit of 20 workers.
+
+### Supervised scheduler and controls
+
+The normal command starts at learning rate `0.005` and enables plateau decay by
+default. Validation remains every 10 epochs. The first result establishes the
+global best; after five consecutive checks without strict improvement, the LR
+is multiplied by `0.5` and only the LR-specific failure counter resets. Another
+five failures are required for another reduction. Optional early stopping has
+its own counter; its patience should normally exceed LR patience so a reduced
+rate has time to help.
 
 Enable any control independently by adding its flag:
 
 ```bash
 python -m training.training_loop --weight-decay
 python -m training.training_loop --early-stopping
-python -m training.training_loop --lr-decay
+python -m training.training_loop --lr-decay 0.7 --lr-decay-patience 8
+python -m training.training_loop --no-lr-decay
+python -m training.training_loop --sl-device cpu --sl-seed 123
 ```
 
 Passing a flag without a value uses these defaults:
 
-| Flag | Enabled behavior | Default value when enabled |
+| Flag | Behavior | Default |
 |---|---|---:|
 | `--weight-decay [COEFFICIENT]` | Adds L2 decay to `W1`, `W2`, and `W3`, but not biases | `0.0001` |
 | `--early-stopping [PATIENCE]` | Stops after this many validation checks without improvement | `5` |
-| `--lr-decay [FACTOR]` | Multiplies the learning rate after each failed validation check | `0.5` |
+| `--lr-decay [FACTOR]` | Multiplies LR after the configured consecutive failed checks | `0.5` (on) |
+| `--lr-decay-patience N` | Consecutive failed validation checks before each reduction | `5` |
+| `--no-lr-decay` | Disables plateau scheduling for controlled comparisons | off |
+| `--sl-device` / standalone `--device` | `auto`, forced `cpu`, or required `gpu` | `auto` |
+| `--sl-batch-size N` | Fixed safe batch; bypasses tuning | unset |
+| `--sl-no-batch-autotune` | Uses 1,024 on CPU or 2,048 on GPU | off |
+| `--sl-memory-reserve-mb N` | Free host RAM retained | `512` |
+| `--sl-gpu-memory-reserve-mb N` | Effective free VRAM retained | `512` |
+| `--sl-seed N` | Reproducible initialization and epoch permutations | unset |
 
 Validation is checked every 10 epochs. The options can be combined and can
 receive explicit values:
@@ -151,8 +243,9 @@ receive explicit values:
 ```bash
 python -m training.training_loop \
   --weight-decay 0.00005 \
-  --early-stopping 8 \
-  --lr-decay 0.7
+  --early-stopping 12 \
+  --lr-decay 0.7 --lr-decay-patience 5 \
+  --sl-device gpu
 ```
 
 Reported training and validation losses remain cross-entropy values, allowing
@@ -162,7 +255,7 @@ loss curves to be compared with runs that do not enable weight decay.
 training:
 
 ```bash
-python run_pipeline.py small --weight-decay --early-stopping --lr-decay
+python run_pipeline.py small --weight-decay --early-stopping 12 --sl-device auto
 ```
 
 ## Self-Play RL
@@ -171,6 +264,9 @@ Run:
 
 ```bash
 python -m training.self_play
+python -m training.self_play --compact
+python -m training.self_play --rl-workers auto --seed 123
+python -m training.self_play --rl-workers 4 --device cpu
 ```
 
 Default behavior:
@@ -188,6 +284,67 @@ not build training masks or store trajectories. This exposes the learner to
 more of each snapshot's policy distribution without retaining unused opponent
 experience.
 
+### Parallel rollout generation
+
+All games in an iteration use one immutable learner policy, so rollout work is
+independent until batch aggregation. `training/rl_parallel.py` publishes the
+current policy and at most `max_pool_size` opponent snapshots in a fixed-size
+shared-memory ring. Workers attach NumPy views to that bank, never see the GPU,
+and return finalized trajectories through a bounded dynamic queue. The parent
+sorts results by game id and remains solely responsible for the gradient,
+checkpoint writes, logging, and GPU allocations.
+
+Automatic mode tests 1, 2, 4, 6, ... workers, never exceeding 20 or the number
+of games per iteration. Each candidate uses and retains complete iterations
+totaling about 1% of the planned iteration count. Testing stops below 10%
+marginal rollout-throughput gain, on a resource cap, or when too few untrained
+iterations remain. Runtime RAM pressure terminates the current pool, keeps
+completed game ids, halves the worker count, and retries only unfinished games.
+
+Per-game SplitMix64-style seeds are derived from the run seed, iteration, and
+game id. Parent aggregation is ordered, so the same seed produces bit-identical
+checkpoints with one or multiple workers, including after fallback. Useful
+controls are:
+
+| Flag | Meaning | Default |
+|---|---|---:|
+| `--rl-workers` | CPU-only rollout workers or `auto` | `auto` |
+| `--rl-autotune-fraction` | Planned iteration fraction retained per candidate | `0.01` |
+| `--rl-autotune-min-gain` | Required marginal throughput improvement | `0.10` |
+| `--rl-memory-reserve-mb` | Host RAM that must remain free | `512` |
+| `--rl-estimated-worker-mb` | Conservative worker-memory estimate for preflight | `256` |
+| `--rl-max-worker-rss-mb` | Runtime RSS ceiling for one worker | `1024` |
+
+Checkpoint evaluation games also use the selected rollout pool, but remain
+deterministic and alternate the RL player position.
+
+### Numbered checkpoints and exact resume
+
+Normal pipeline and direct-module calls keep the existing single-file
+checkpoint behavior. The long shell sweep opts into interruption-safe files
+with `--numbered-checkpoints`. Each save adds the absolute completed iteration
+to the name, such as `model_iter000050.npz`, and atomically publishes a paired
+`model_iter000050.resume.npz`. The state file contains a SHA-256 checksum,
+every computation-affecting RL setting, the effective seed, worker count, and
+the exact historical opponent-policy pool. The newest pool state replaces the
+previous one to bound disk use; numbered policy-only files remain available.
+
+To continue manually, pass the matching pair and its completed iteration while
+keeping the original training configuration and total target:
+
+```bash
+python -m training.self_play --iterations 2000 --numbered-checkpoints \
+  --rl-weights-path models/example.npz --start-iteration 500 \
+  --resume-weights-path models/example_iter000500.npz \
+  --resume-state-file models/example_iter000500.resume.npz --seed 42
+```
+
+Resume validates the checksum and configuration before loading anything,
+restores the opponent pool, continues game ids at the next absolute iteration,
+and reuses the saved rollout-worker count when the requested mode is `auto`.
+This is a true continuation. Loading an ordinary `.npz` through the legacy
+path restores only weights and cannot reconstruct the former in-memory pool.
+
 Checkpoint evaluation against `StrategicAgent`, diagnostics, and the UI use
 `mode="evaluation"`, which always selects the highest-probability legal action
 and stores no trajectory. Their results therefore avoid action-sampling noise.
@@ -195,7 +352,11 @@ and stores no trajectory. Their results therefore avoid action-sampling noise.
 The command prints startup memory, checkpoint-to-checkpoint time, and total
 elapsed time. Iteration logs omit entropy and report the direct reward signal
 sent to the policy gradient: reward mean/min/max, good/neutral/bad percentages,
-local reward mean, raw event counts, wins, pool size, and gradient norm.
+wins, pool size, and gradient norm.
+
+Pass `--compact` to suppress iteration and checkpoint lines while retaining
+worker-autotuning messages, one absolute iteration progress bar, and one final
+summary. The parameter-sweep shell enables this presentation automatically.
 
 The learner trajectory stores only real decisions. Draw, pass, and single-option
 tile plays are forced actions, so `RLAgent` returns them directly without
@@ -231,11 +392,10 @@ same supervised checkpoint and use separately archived RL outputs.
 
 ### Optional RL controls
 
-The default command reproduces the original fixed training behavior exactly:
-no terminal-reward discount, the original reward constants, gradient clipping
-at norm `5.0`, no advantage normalization, and unseeded randomness. Every
-control below is opt-in and defaults to that behavior, so omitting all of them
-changes nothing:
+The default command preserves the original learning algorithm: no
+terminal-reward discount, the original reward constants, gradient clipping at
+norm `5.0`, and no advantage normalization. Rollout generation is now parallel
+by default, without moving gradient updates out of the parent process:
 
 | Flag | Meaning | Default |
 |---|---|---:|
@@ -353,5 +513,6 @@ L = -mean(policy_reward * log pi(action | state)) - entropy_coef * entropy
 Gradient clipping remains active in `PolicyNetwork` to limit large updates from
 rare high-choice decisions.
 
-The snapshot pool lives only in memory. Resuming from an RL checkpoint restores
-the policy weights, but not the previous in-memory opponent pool.
+The snapshot pool normally lives only in memory. The opt-in numbered resume
+state described above is the exception: it serializes and restores that pool
+for exact interruption recovery.

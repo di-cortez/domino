@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-import os
+from utils.resource_limits import (
+    MIB,
+    gpu_memory_info,
+    process_rss_bytes,
+    system_memory_info,
+)
 
 
 def format_duration(seconds):
@@ -30,46 +35,37 @@ def _format_bytes(byte_count):
 
 def _process_rss_bytes():
     """Return current process RSS on Linux, or ``None`` when unavailable."""
-    try:
-        with open("/proc/self/statm", "r", encoding="utf-8") as f:
-            pages = int(f.read().split()[1])
-        return pages * os.sysconf("SC_PAGE_SIZE")
-    except (OSError, IndexError, ValueError):
-        return None
+    return process_rss_bytes()
 
 
 def _system_memory_bytes():
     """Return ``(used, total)`` system RAM bytes from Linux meminfo."""
-    try:
-        values = {}
-        with open("/proc/meminfo", "r", encoding="utf-8") as f:
-            for line in f:
-                key, raw_value = line.split(":", 1)
-                values[key] = int(raw_value.strip().split()[0]) * 1024
-
-        total = values["MemTotal"]
-        available = values.get("MemAvailable", values.get("MemFree", 0))
-        return total - available, total
-    except (OSError, KeyError, ValueError):
-        return None
+    info = system_memory_info()
+    return None if info is None else (info.used, info.total)
 
 
 def _gpu_memory_bytes():
     """Return CuPy/CUDA memory info, or ``None`` when no GPU backend is available."""
+    info = gpu_memory_info()
+    if info is None:
+        return None
+    pool_used = 0
+    pool_total = 0
     try:
         import cupy
 
-        free_bytes, total_bytes = cupy.cuda.runtime.memGetInfo()
         pool = cupy.get_default_memory_pool()
-        return {
-            "used": total_bytes - free_bytes,
-            "free": free_bytes,
-            "total": total_bytes,
-            "pool_used": pool.used_bytes(),
-            "pool_total": pool.total_bytes(),
-        }
+        pool_used = pool.used_bytes()
+        pool_total = pool.total_bytes()
     except Exception:
-        return None
+        pass
+    return {
+        "used": info.used,
+        "free": info.available,
+        "total": info.total,
+        "pool_used": pool_used,
+        "pool_total": pool_total,
+    }
 
 
 def memory_report():
@@ -98,6 +94,95 @@ def memory_report():
         )
 
     return " | ".join(parts)
+
+
+def pipeline_compute_report(
+    rl_requested_device="auto",
+    supervised_requested_device="auto",
+):
+    """Describe pipeline backends and currently available RAM/VRAM.
+
+    Supervised and RL parent training can choose independent devices, while
+    dataset, rollout, and diagnostic workers remain deliberately CPU-only.
+    """
+    from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON
+
+    gpu_memory = _gpu_memory_bytes()
+    gpu_name = None
+    cupy_version = None
+    cupy_importable = False
+    try:
+        import cupy
+
+        cupy_importable = True
+        cupy_version = cupy.__version__
+        properties = cupy.cuda.runtime.getDeviceProperties(0)
+        gpu_name = properties.get("name", "CUDA device")
+        if isinstance(gpu_name, bytes):
+            gpu_name = gpu_name.decode(errors="replace")
+    except Exception:
+        pass
+
+    if supervised_requested_device == "cpu":
+        supervised = "CPU (forced)"
+    elif supervised_requested_device == "gpu" and GPU_ENABLED:
+        supervised = (
+            f"GPU ({gpu_name or 'CUDA device'}, CuPy {cupy_version}, forced; "
+            "512 MiB safety preflight pending)"
+        )
+    elif supervised_requested_device == "gpu":
+        reason = GPU_UNAVAILABLE_REASON or "CuPy is not installed"
+        supervised = f"GPU requested but unavailable: {reason}"
+    elif GPU_ENABLED and (
+        gpu_memory is None or gpu_memory["free"] >= 512 * MIB
+    ):
+        supervised = (
+            f"GPU ({gpu_name or 'CUDA device'}, CuPy {cupy_version}, auto; "
+            "memory preflight pending)"
+        )
+    else:
+        reason = GPU_UNAVAILABLE_REASON or "CuPy is not installed"
+        if GPU_ENABLED:
+            reason = "less than the 512 MiB supervised VRAM reserve is free"
+        supervised = f"CPU (automatic fallback: {reason})"
+
+    if rl_requested_device == "cpu":
+        rl_parent = "CPU (forced)"
+    elif rl_requested_device == "gpu":
+        if not cupy_importable:
+            rl_parent = "GPU requested but CuPy is unavailable"
+        elif gpu_memory is not None and gpu_memory["free"] < 256 * MIB:
+            rl_parent = "GPU requested but the 256 MiB VRAM preflight will fail"
+        else:
+            rl_parent = f"GPU ({gpu_name or 'CUDA device'}, forced)"
+    elif GPU_ENABLED and (
+        gpu_memory is None or gpu_memory["free"] >= 256 * MIB
+    ):
+        rl_parent = f"GPU ({gpu_name or 'CUDA device'}, auto)"
+    else:
+        rl_parent = "CPU (automatic fallback)"
+
+    parts = [
+        f"supervised={supervised}",
+        f"RL parent={rl_parent}",
+        "dataset/RL rollout/diagnostic workers=CPU-only",
+    ]
+    system_memory = system_memory_info()
+    if system_memory is None:
+        parts.append("system RAM unavailable")
+    else:
+        parts.append(
+            f"system RAM {_format_bytes(system_memory.available)} free / "
+            f"{_format_bytes(system_memory.total)} total"
+        )
+    if gpu_memory is None:
+        parts.append("GPU VRAM unavailable")
+    else:
+        parts.append(
+            f"GPU VRAM {_format_bytes(gpu_memory['free'])} free / "
+            f"{_format_bytes(gpu_memory['total'])} total"
+        )
+    return "Pipeline compute resources: " + " | ".join(parts)
 
 
 def print_memory_report(label):

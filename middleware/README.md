@@ -32,7 +32,12 @@ public opponent hand size is `h`.
 has its own allowed-tile mask, so a tile drawn later does not inherit negative
 evidence observed before that draw. Canonical slot profiles carry positive
 integer history weights. Injective assignment counts are computed with dynamic
-programming, so two slots cannot contain the same tile.
+programming, so two slots cannot contain the same tile. Tiles with identical
+eligible-slot sets are processed as one group: assigning `r` distinguishable
+tiles from a group of `k` to `r` labelled slots contributes the exact falling
+factorial `(k)_r`. Profiles whose slots all share one domain use `(n)_h`
+directly. These exact counts are retained in a bounded, process-local LRU cache
+of at most 8,192 profiles; each CPU worker owns its own cache.
 
 `MuOpponentBelief` stores the exact posterior as `hand_mask -> mu(H)`, where
 every `mu(H)` is a positive integer. It never normalizes or truncates these
@@ -47,7 +52,16 @@ even if a later draw creates more than 500 hands. `ExactOpponentModel` and
 `HybridOpponentModel` are stable aliases for this exact controller.
 
 The standard path never uses particles and never silently substitutes an
-approximate posterior.
+approximate posterior. Suit, response, and integer total-weight queries are
+cached only for the current immutable belief state and every evidence mutation
+invalidates the dependent caches. Response probabilities are keyed by the
+exact legal-tile mask, not by suit marginals.
+
+Persistent controllers annotate public history once and then extend only the
+new append-only suffix. A new game, observer change, shortened history, or
+incompatible suffix safely rebuilds the exact state. This changes only history
+bookkeeping; evidence order and the one-way slot-to-`mu(H)` transition boundary
+remain unchanged.
 
 ## Draw-Turn Traces
 
@@ -64,6 +78,14 @@ public-turn traces. For an opponent `DRAW -> PASS` turn, the stages are:
 with unchanged history is idempotent. `consume_new_snapshots()` lets a UI or
 logger consume only snapshots it has not seen before.
 
+Direct construction keeps trace recording enabled. Built-in consumers that
+need only the final seven-vector construct the model with
+`record_traces=False`; this skips intermediate snapshots and turn-trace
+allocation while preserving the exact final inference and invoking the same
+slot-to-`mu(H)` transition at the same completed public-turn boundary. Calling
+`update_detailed()` on an explicitly trace-disabled model returns the exact
+final result with empty trace collections.
+
 Values written to `state["opponent_suit_probabilities"]` are output only. The
 persistent model never trusts that field as an input cache; processed history,
 game identity, observer identity, and `MODEL_VERSION` remain the source of
@@ -72,6 +94,10 @@ truth.
 `probability_can_play(ends)` is computed from the exact joint hand posterior.
 `approximate_response_probability_from_marginals()` remains available only as
 an explicitly approximate compatibility helper.
+
+The model stays on CPU. Its small irregular dictionaries, branching bitmask
+operations, and arbitrary-precision integer weights are not moved to GPU. No
+runtime `S_7` suit canonicalization is implemented.
 
 ## Action Format
 
@@ -83,6 +109,28 @@ Every action uses one of these shapes:
 
 The same format is consumed by `DominoEngine.step`, `DominoEngine.valid_actions`,
 and `DominoEncoder`.
+
+## Headless Step Fast Path
+
+`DominoEngine.step(action)` remains the fully validating public path: it
+computes legal actions internally and returns the post-action state in the
+stable `(state, game_over, info)` tuple. Controlled automatic loops that have
+just called `valid_actions()` may instead pass that unchanged collection as
+`legal_actions` and set `return_state=False`. This avoids a second legal-action
+scan and a discarded post-action serialization while still checking that the
+chosen action belongs to the supplied collection. The returned tuple still has
+three items, with `None` in its first position.
+
+The supplied collection is trusted internal data for that exact engine,
+current player, and position. It must be computed immediately before `step`,
+must not be modified by an agent, and must never come from a UI, network, or
+client payload. Human actions continue to use engine-side legal-action
+generation.
+
+`python benchmarks/headless_step_benchmark.py` compares the old repeated-work
+turn structure with this fast path using fixed seeds. The report includes
+games/second and exact counts for legal-action scans, state snapshots, and
+serialized history actions, and rejects any result-fingerprint difference.
 
 ## Game Termination
 

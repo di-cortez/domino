@@ -4,17 +4,18 @@ Personal batch-training driver for the full pipeline described in
 `training/README.md` and the top-level `README.md`:
 
 1. generate supervised examples from heuristic-vs-heuristic games, using the
-   `training.dataset_generator` module defaults (no CLI flags exist for this
-   stage);
-2. train the supervised neural policy, using the `training.training_loop`
-   module defaults (no CLI flags exist for this stage either);
+   `training.dataset_generator` module defaults, including retained automatic
+   dataset-worker tuning;
+2. train the supervised neural policy with its default retained batch tuner and
+   plateau scheduler; the wrapper exposes device, memory, batch, seed, decay,
+   early-stopping, and weight-decay controls;
 3. refine that policy with a **BIG-scale** self-play reinforcement-learning
    run — 5x the default iteration count (1,000 x 5 = 5,000 iterations),
    matching the `big` scale in `run_pipeline.py`'s `SCALE_FACTORS`. This
    stage is fully parameterized from the command line so the script can drive
    repeated batch runs that only vary RL hyperparameters;
-4. run the **all-pairs diagnostics matrix** (`diagnostics.evaluate`) —
-   heuristic/neural/rl vs random and in self-play — evaluating the exact
+4. run the **five agent-vs-random diagnostics** (`diagnostics.evaluate`) —
+   evaluating the exact
    RL/SL checkpoints this run used, at the same BIG scale as the RL stage
    (`run_pipeline.py` maps its `big` scale to `diagnostic_mode="complete"`
    and scales `BASE_DIAGNOSTIC_GAMES=10000` by the scale factor; this script
@@ -27,13 +28,14 @@ Personal batch-training driver for the full pipeline described in
    batch runs that vary RL hyperparameters keep separate diagnostics output
    instead of overwriting a shared directory.
 
-Stage 1 (dataset generation) is left unparameterized: `training.dataset_generator`
-accepts no CLI flags for dataset size or output path. Stage 2 (supervised
-training) runs bare by default too, but accepts three opt-in convergence
-flags (below) that map straight to `training.training_loop`'s own optional
-flags. Use `--skip-dataset`/`--skip-sl`/`--skip-rl`/`--skip-diagnostics` to
-reuse existing artifacts across batch runs that only sweep RL
-hyperparameters.
+Stage 1 (dataset generation) is left unparameterized by this wrapper, so it
+uses the standalone command's 30,000-game default and automatic worker tuner.
+The Python module itself accepts `--games`, `--output`, `--workers`, `--seed`,
+and memory-safety options when called directly. Stage 2 (supervised training)
+forwards the controls below to `training.training_loop`; LR decay is enabled by
+default with factor `0.5` and patience `5`. Use
+`--skip-dataset`/`--skip-sl`/`--skip-rl`/`--skip-diagnostics` to reuse existing
+artifacts across batch runs that only sweep RL hyperparameters.
 
 ## Convergence criteria (from the archived test reports)
 
@@ -45,9 +47,9 @@ average, not the raw log line.** Those reports' validated conclusions:
 
 - **SL**: stop on the validation curve, not a fixed epoch budget (early
   stopping), and decay the learning rate on a validation plateau instead of
-  holding it fixed — both already exist as `training.training_loop` flags and
-  are now forwarded by this script (`--sl-early-stopping-patience`,
-  `--sl-lr-decay-factor`, `--sl-weight-decay`).
+  holding it fixed. LR decay and early stopping have independent counters. The
+  script forwards `--sl-early-stopping-patience`, `--sl-lr-decay-factor`,
+  `--sl-lr-decay-patience`, `--sl-no-lr-decay`, and `--sl-weight-decay`.
 - **RL**: log the return standard deviation next to the mean (a shrinking
   value loss is ambiguous without it — it can mean either learning or just a
   low-variance batch), and use a trailing moving average of value loss and
@@ -126,8 +128,9 @@ train_script/run_training_pipeline.sh --skip-dataset --skip-sl \
 
 Every RL flag forwards directly to `python -m training.self_play`, which also
 accepts these same flags (see `training/self_play.py:add_optional_rl_arguments`).
-Dataset generation and supervised training take no flags at all in this
-script — they run exactly as `README.md` documents.
+This wrapper does not expose dataset-generation controls; that stage uses the
+documented module defaults. Supervised controls map directly to the standalone
+training module.
 
 | Flag | Stage | Meaning | Default |
 |---|---|---|---|
@@ -153,18 +156,32 @@ script — they run exactly as `README.md` documents.
 | `--rl-moving-average-window` | RL | Trailing-iteration window for value-loss/win-rate moving averages in the log | `10` |
 | `--rl-seed` | RL | Fix random/numpy state for reproducible comparisons | unset |
 | `--rl-device` | RL | Array backend: `auto`/`cpu`/`gpu` (see below) | `auto` |
+| `--rl-workers` | RL | CPU-only rollout workers or retained automatic tuning, maximum 20 | `auto` |
+| `--rl-autotune-fraction` | RL | Fraction of complete iterations retained per worker test | `0.01` |
+| `--rl-autotune-min-gain` | RL | Required marginal rollout-throughput improvement | `0.10` |
+| `--rl-memory-reserve-mb` | RL | Host RAM kept free while workers run | `512` |
+| `--rl-estimated-worker-mb` | RL | Preflight memory estimate per worker | `256` |
+| `--rl-max-worker-rss-mb` | RL | Runtime RSS ceiling for one worker | `1024` |
 | `--sl-early-stopping-patience` | SL | Validation checks (every 10 epochs) without improvement before stopping | unset (off) |
-| `--sl-lr-decay-factor` | SL | LR multiplier applied on each validation check without improvement | unset (off) |
+| `--sl-lr-decay-factor` | SL | LR multiplier after a validation plateau | `0.5` |
+| `--sl-lr-decay-patience` | SL | Consecutive failed validation checks before each LR reduction | `5` |
+| `--sl-no-lr-decay` | SL | Disable the default plateau scheduler | off |
 | `--sl-weight-decay` | SL | L2 penalty on the weight matrices | unset (off) |
-| `--diag-mode` | Diagnostics | `default` (10 matchups), `fast` (2), or `complete` (15 matchups) | `complete` (BIG scale) |
+| `--sl-device` | SL | `auto`, forced `cpu`, or required `gpu` | `auto` |
+| `--sl-batch-size` | SL | Fixed mini-batch size; bypasses tuning | unset |
+| `--sl-no-batch-autotune` | SL | Use the device default batch (CPU 1,024; GPU 2,048) | off |
+| `--sl-memory-reserve-mb` | SL | Host RAM kept free | `512` |
+| `--sl-gpu-memory-reserve-mb` | SL | Effective VRAM kept free | `512` |
+| `--sl-seed` | SL | Fix initialization and epoch permutations | unset |
+| `--diag-mode` | Diagnostics | Compatibility label; every value runs the same 5 agent-vs-random matchups | `complete` (BIG scale) |
 | `--diag-games` | Diagnostics | Games per evaluated matchup | `50000` (BIG scale: `10000 x 5`) |
 | `--diag-seed` | Diagnostics | Fix the RNG seed for the diagnostics games | unset |
-| `--diag-no-pair-plots` | Diagnostics | Skip the per-matchup PNG plots (the aggregate table image is still generated) | off (plots on) |
+| `--diag-no-pair-plots` | Diagnostics | Skip per-matchup PNG plots (the aggregate PNG and PDF are still generated) | off (plots on) |
 | `--diag-output-dir` | Diagnostics | Override the output directory | `diagnostics/results/<rl-weights-basename>/` |
 | `--skip-dataset` | control | Skip dataset generation (reuse an existing dataset file) | off |
 | `--skip-sl` | control | Skip supervised training (reuse an existing SL weights file) | off |
 | `--skip-rl` | control | Skip self-play reinforcement learning | off |
-| `--skip-diagnostics` | control | Skip the all-pairs diagnostics stage | off |
+| `--skip-diagnostics` | control | Skip the agent-vs-random diagnostics stage | off |
 
 ### The critic (value-head) toggle
 
@@ -188,50 +205,99 @@ This was verified end-to-end with a tiny run (`--rl-iterations 2
 --rl-games-per-iteration 2`) exercising the RL stage with `--skip-dataset
 --skip-sl`, both with and without `--rl-value-head`.
 
+### RL rollout workers
+
+`--rl-workers auto` benchmarks 1, 2, 4, 6, ... CPU-only workers over complete
+early iterations. Each candidate retains about 1% of the planned iterations,
+and every game contributes to the normal parent-side gradient update. Testing
+stops below 10% marginal gain, on a resource guard, or at the hard limit of 20.
+Use a fixed value to skip tuning.
+
+Workers read the current policy and bounded opponent pool through shared memory;
+they never update weights or access the GPU. The main process sorts trajectories
+by game id, assembles the batch, updates the network, and writes checkpoints.
+Stable seeds make one-worker and multi-worker runs bit-identical for the same
+configuration. Runtime pressure retains completed games and retries unfinished
+ones with half as many workers.
+
 ### Device selection (`--rl-device`)
 
-`--rl-device auto` (the default) reproduces the original behavior exactly:
-CuPy when installed, NumPy otherwise. `--rl-device cpu`/`--rl-device gpu`
-force one backend for the RL stage regardless of what's installed, without
-touching supervised training's own GPU selection. Worth trying `--rl-device
-cpu` if RL training feels slow: profiling shows RL self-play is dominated by
-the exact opponent-hand inference in `middleware/opponent_model.py` (>80% of
+`--rl-device auto` (the default) uses CuPy when available and at least 256 MiB
+of effective VRAM is free; otherwise it announces a safe NumPy/CPU fallback.
+`--rl-device cpu` forces host execution. `--rl-device gpu` requires a usable
+GPU and fails before training when VRAM is below the safety threshold, rather
+than risking an out-of-memory failure mid-batch. These controls do not change
+supervised training's own backend selection. Worth trying `--rl-device cpu`
+if RL training feels slow: profiling shows RL self-play is dominated by the
+exact opponent-hand inference in `middleware/opponent_model.py` (>80% of
 iteration time), not the policy network, so CuPy's per-decision transfer
-overhead during rollout can make GPU measurably slower than CPU for this
-stage specifically. Verified end-to-end with a tiny run (`--rl-device cpu`,
+overhead during rollout can make GPU measurably slower than CPU for this stage
+specifically. Verified end-to-end with a tiny run (`--rl-device cpu`,
 `--rl-iterations 3 --rl-games-per-iteration 4`): the run logged `RL self-play
 array backend: numpy (device='cpu')` and completed correctly.
 
+For Linux driver installation, the correct CUDA 12.x/13.x CuPy wheel, the
+recommended `[ctk]` installation, real GPU calculation tests, and common error
+diagnosis, follow **Linux GPU setup and verification** in the root README before
+starting a long batch. The pipeline startup line reports both training backends
+and current free/total RAM and VRAM before any workload begins.
+
+### Supervised retained batch tuning and storage
+
+`--sl-device auto` independently selects the supervised backend. It uses GPU
+only after the 512 MiB VRAM preflight and a no-update dataset-residency probe;
+automatic mode falls back to CPU, while explicit `gpu` fails before training.
+The tuner tests CPU batches from 1,024 or GPU batches from 2,048, doubling up to
+1,048,576 or the training-set size. Ten complete epochs per candidate update
+the live network and count toward progress. Selection uses synchronized median
+examples/second and requires at least 10% improvement.
+
+When safe, encoded arrays stay in host RAM; otherwise the training module uses
+an atomic disk-backed mmap cache. GPU runs upload the complete dataset once if
+it fits safely, or rotate global-permutation windows through reusable buffers.
+Use `--sl-batch-size N` for a fixed batch, or `--sl-no-batch-autotune` for the
+device default. Detailed standalone logs show all decisions. `run_pipeline.py`
+keeps per-epoch/checkpoint details suppressed, but prints the concise retained
+batch tests (median time, total time, throughput, gain, decision, and selected
+size) around its normal progress bar and one-line SL summary.
+
 ### Diagnostics stage and per-run output directories
 
-Step 4 wraps `python -m diagnostics.evaluate`, the same all-pairs matrix
+Step 4 wraps `python -m diagnostics.evaluate`, the same five agent-vs-random comparisons
 `run_pipeline.py` runs after RL training (`diagnostics/evaluate.py::run_all_pairs`),
 passing `--rl-weights`/`--neural-weights` explicitly so it evaluates the exact
 checkpoints this invocation trained or reused, rather than falling back to
 `diagnostics.pairwise`'s hardcoded `models/domino_rl_weights.npz` /
 `models/domino_sl_weights.npz` defaults.
 
+With no fixed worker option supplied by this wrapper, diagnostics benchmark
+1, 2, 4, 6, ... CPU-only workers independently for every matchup, retain each
+benchmark game's result, stop below 10% marginal gain or on a memory guard,
+and never exceed 20 workers. The aggregate JSON report records the selected
+count for each matchup.
+
 Every invocation gets its own output directory —
 `diagnostics/results/<rl-weights-basename>/` (the `.npz` suffix stripped from
 `--rl-weights-file`) — instead of the single shared `all_pairs/` directory
 `run_pipeline.py` always writes to. A batch of runs that only vary
 `--rl-weights-file` per configuration therefore keeps every configuration's
-matrix, CSV, and plots side by side instead of the next run overwriting the
-last one. Override the computed path directly with `--diag-output-dir` if
-needed.
+comparison table, CSV, and plots side by side instead of the next run
+overwriting the last one. Override the computed path directly with
+`--diag-output-dir` if needed.
 
 This was verified end-to-end with a tiny run (`--diag-mode fast --diag-games 3
 --diag-no-pair-plots --diag-seed 7`, `--rl-weights-file
 models/smoke_test_rl_weights.npz`) chained after a tiny RL stage with
 `--skip-dataset --skip-sl`: the diagnostics stage correctly evaluated the
-just-trained checkpoint and wrote its matrix to
+just-trained checkpoint and wrote its comparison report to
 `diagnostics/results/smoke_test_rl_weights/`.
 
 ### Monitored batch run example
 
 ```bash
 train_script/run_training_pipeline.sh --skip-dataset \
-    --sl-early-stopping-patience 5 --sl-lr-decay-factor 0.5 --sl-weight-decay 0.0001 \
+    --sl-early-stopping-patience 12 --sl-lr-decay-factor 0.5 \
+    --sl-lr-decay-patience 5 --sl-weight-decay 0.0001 \
     --rl-value-head --rl-normalize-advantages --rl-clip-grad-norm 2.0 \
     --rl-moving-average-window 10 --rl-seed 42 \
     --rl-weights-file models/domino_rl_weights_monitored.npz
@@ -253,25 +319,19 @@ diagnostic against the random agent, independent of the full pipeline above
 train_script/run_rl_parameter_sweep.sh
 ```
 
-Trains one dedicated self-play checkpoint per sweep point: a **full grid
-search** (cross product) over the three main hyperparameters --
-`learning_rate` x `gamma` x `games_per_iteration`, 3 values each, 3x3x3 = 27
-combinations -- plus a **separate** `value_coef` axis (10 values,
-one-at-a-time, `learning_rate`/`gamma`/`games_per_iteration` held at
-baseline; `value_coef` isn't crossed into the grid). Each point is diagnosed
-against `random` (`python -m diagnostics.pairwise --agent rl --opponent
-random`). Runs the whole sweep with the critic off, then again with it on,
-with **every point identical between the two** so the two policies are
-compared on the exact same sweep points: 72 training+diagnostics runs by
-default (27 grid + 9 value_coef, per critic setting). Prints total elapsed
-wall-clock time at the end.
+Trains one dedicated self-play model per sweep point. The full cross-product
+grid is 3 learning rates x 4 gamma values x 3 games-per-iteration values = 36
+base configurations. Every base configuration runs with the critic off and on
+(72 runs). A seeded sample of 10 base configurations also runs the two
+non-baseline value coefficients with the critic on (20 more runs), for **92
+training+diagnostic runs** by default. Every point is diagnosed against
+`random`, and the final comparative report groups the 40/80/160 game-batch
+variants into columns.
 
 `value_coef` only affects training inside
 `PolicyNetwork.backward_policy_gradient`'s `use_value_head` branch, so it has
-no effect on direct REINFORCE (critic off) -- those runs are trained and
-swept anyway, for structural symmetry with the critic-on group, and are
-expected to reproduce the grid's `default` checkpoint exactly (same seed,
-same everything else that actually affects training).
+no effect on direct REINFORCE (critic off). The separate value-coefficient
+axis therefore runs only with the critic on.
 
 Baselines and the learning-rate/gamma grid values come from
 `diagnostics/hyperparameter_sweep.py` (`BASELINE_LEARNING_RATE`,
@@ -280,19 +340,16 @@ Baselines and the learning-rate/gamma grid values come from
 games-per-iteration, not a sweep tuple, so its range comes from the
 historical sweep table in
 `references/explicacoes/relatorios/teste_1/plano_correcao.tex` instead:
-games-per-iteration in `{40, 80, 160}`. `value_coef` uses 10 evenly spaced
-values from 0.1 to 1.0 (baseline 0.5 included).
+games-per-iteration in `{40, 80, 160}`. `value_coef` uses `{0.25, 0.5, 0.75}`;
+the `0.5` baseline is already covered by the critic-on grid.
 
-Naming (models and diagnostics share one name per run). Each model gets a
-dedicated directory holding the weights plus a `<name>.json` with the run's
-hyperparameter combination (same format as the diagnostics `sweep_run.json`):
+Naming (models and diagnostics share one name per run):
 
 ```text
-models/rl_test/<name>/<name>.npz + <name>.json, where <name> is
-  domino_rl[_critic]_default                       (learning_rate/gamma/games_per_iteration all at baseline)
-  domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>  (every other grid point)
-  domino_rl_critic_<grid tag>_vc<VC>               (value_coef axis)
-diagnostics/results/rl_test/<name>/
+models/rl_test/domino_rl[_critic]_default_iter002000.npz
+models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>_iter002000.npz
+models/rl_test/domino_rl_critic_<grid-tag>_vc<VC>_iter002000.npz
+diagnostics/results/rl_test/domino_rl[_critic]_<same-tag>/
 ```
 
 `_critic` appears when the value head is on; the grid combination matching
@@ -306,72 +363,73 @@ on parsing the folder name.
 |---|---|---:|
 | `--rl-iterations` | RL training iterations per sweep point | `2000` |
 | `--sl-weights-path` | Input SL weights used to initialize every RL run | `models/domino_sl_weights.npz` |
-| `--diagnostic-games` | Games in the rl-vs-random diagnostic per sweep point | `500` |
+| `--diagnostic-games` | Games in the rl-vs-random diagnostic per sweep point | `10000` |
 | `--seed` | Fix random/NumPy state for both training and diagnostics | `42` |
 | `--model-dir` | Output directory for RL checkpoints | `models/rl_test` |
-| `--resume` | Skip training a checkpoint that already exists on disk; still (re)run its diagnostics | off |
+| `--resume` | Continue incomplete training and reuse complete, compatible diagnostics | off |
 | `--diag-no-plots` | Skip the per-run diagnostic PNG plots (CSV/JSON are always written) | off (plots on) |
 | `--device` | Array backend for every sweep point: `auto`/`cpu`/`gpu` (see `training/README.md`) | `auto` |
-| `--results-dir` | Output directory for per-run diagnostics subdirectories | `diagnostics/results` |
+| `--rl-workers` | CPU-only rollout workers inside the current point | `auto` |
+| `--vc-sample-count` | Seeded base configurations used by the non-baseline value-coefficient axis | `10` |
+| `--results-dir` | Output directory for per-run diagnostics subdirectories | `diagnostics/results/rl_test` |
 | `--report-output-dir` | Where the final comparative table is written | `diagnostics/results/rl_sweep_table` |
 | `--skip-report` | Skip the final comparative-table stage | off |
-| `--jobs` | Run up to N sweep points at once as background subprocesses | `1` (sequential) |
-| `--ram-limit-mb` | Per-subprocess physical-memory cap in MiB (see below) | auto when `--jobs` > 1, else unset |
-| `--vram-limit-mb` | Per-subprocess CuPy memory-pool cap in MiB (see below) | auto when `--jobs` > 1 and device isn't `cpu`, else unset |
+| `--jobs` | Compatibility flag; only `1` is accepted | `1` |
+| `--ram-limit-mb` | Physical-memory cap for the current training subprocess | 80% of detected RAM |
+| `--vram-limit-mb` | CuPy memory-pool cap for the current training subprocess | 80% of detected VRAM when device is not `cpu` |
 
 A fixed `--seed` (default `42`) is used for every sweep point, per the
 historical reports' recommendation to fix randomness when comparing
-hyperparameter configurations. `--resume` matters because a full sweep is
-expensive (72 runs by default): rerunning after an interruption skips
-checkpoints that already exist instead of retraining them.
+hyperparameter configurations.
 
-The naming scheme, `--resume` behavior, and `sweep_run.json` contents were
-verified end-to-end with a tiny run (`--rl-iterations 2 --diagnostic-games 3
---diag-no-plots`) before the sweep became a full grid search with a
-separately-swept `value_coef` axis; the grid/value_coef run-count math and
-tag generation were checked by simulating the loop logic standalone (no
-training invoked), and `diagnostics/rl_sweep_table.py`'s updated sort
-(directly on the numeric hyperparameters rather than parsing the tag string)
-was checked against synthetic grid/value_coef records.
+### Sequential execution, interruption, and safe resume
 
-### Concurrency (`--jobs`) and memory limits
+The shell driver runs exactly one sweep point at a time. `--jobs` is retained
+only for command compatibility and rejects every value except `1`. Parallelism
+is exclusively inside `training.self_play`, where `--rl-workers auto` performs
+the retained worker benchmark and applies the existing 20-worker and memory
+limits. This avoids multiplying outer sweep processes by inner rollout pools.
+Each RL point uses the compact presentation: retained worker-tuning messages,
+one progress bar, and one final summary instead of iteration/checkpoint lines.
 
-Sweep points are fully independent -- each writes to its own unique
-`--rl-weights-path`/diagnostics directory and only *reads* the shared SL
-checkpoint -- so running several at once is safe. `--jobs N` launches up to
-N sweep points at once as background `python -m training.self_play`
-subprocesses; `--jobs 1` (the default) is unchanged from before this existed:
-fully sequential, same terminal output. Measured on a 20-core/32GB machine
-with one shared GPU: `--jobs 4` cut a 58-point tiny sweep from 6m13s to
-3m11s (~1.95x, sub-linear because each batch of 4 waits for its slowest
-member -- see below).
+Every RL save made by this driver is iteration-numbered, for example
+`domino_rl_default_iter000050.npz`. A paired
+`domino_rl_default_iter000050.resume.npz` stores the configuration, checksum,
+completed iteration, selected worker count, and exact historical opponent
+pool. Both files are published atomically. Only the newest pool-state file is
+retained because it can be much larger; all numbered policy checkpoints remain.
 
-Concurrent output doesn't interleave: each background job's full output goes
-to `diagnostics/results/_sweep_logs/<run-name>.log` instead of the terminal,
-with only concise `started`/`finished`/`FAILED` lines printed live. Unlike
-`--jobs 1` (where `set -e` aborts the whole script on the first failure,
-unchanged), a failed point under `--jobs > 1` doesn't stop the rest of the
-sweep -- other points keep running, failures are collected and printed as a
-summary at the end, and the script exits nonzero if any occurred, so
-automation can detect it while still getting every other point's results.
+Press `Ctrl+C` once to stop the foreground point. Resume with the exact same
+options plus `--resume`:
 
-The job pool is batch-based, not a rolling pool: it launches up to `--jobs`
-points, waits for that whole batch, then launches the next. Simpler and
-portable across bash versions (a rolling pool needs `wait -n`), at the cost
-of a batch waiting on its slowest point before the next one starts -- part of
-why the measured speedup above is ~2x rather than ~4x at `--jobs 4`.
+```bash
+train_script/run_rl_parameter_sweep.sh
+# Press Ctrl+C once.
+train_script/run_rl_parameter_sweep.sh --resume
+```
 
-**Memory limits**, auto-computed from detected system RAM / GPU memory
-divided by `--jobs`, **always applied by default** (not only when `--jobs >
-1`) as a general OOM backstop, unless set explicitly with
-`--ram-limit-mb`/`--vram-limit-mb`. 80% of the detected total is used, so
-headroom stays free for the rest of the system. Verified on this machine: 20
-CPU cores, 31779MiB (~31GiB) system RAM, one NVIDIA RTX 3050 with 6144MiB
-(6GiB) VRAM, 2047MiB (2GiB) swap -- giving, at the default `--jobs 1`, a
-~25.4GiB RAM / ~4.8GiB VRAM ceiling for that single process. That's
-deliberately generous relative to real observed usage (a few hundred MiB per
-process) -- it's a backstop against a bug badly leaking memory, not a routine
-constraint, and re-verified not to interfere with a normal run (see below).
+If custom options were used, repeat them unchanged. Resume scans each point for
+the newest complete pair at or below the requested iteration total, verifies
+its hash, seed, and computation-affecting hyperparameters, restores its policy
+and opponent pool, and begins at the following absolute iteration. A lone or
+corrupt file from an interrupted write is ignored. A point already at the
+requested total skips training. A matching final model plus diagnostic is
+checked before resumable opponent-pool state, because no computation remains
+and a later automatic CPU/GPU selection change cannot alter completed output.
+Its diagnostic is reused when the
+configuration, numbered model path, seed, requested-game summary, complete games
+CSV, and requested plots all match. New outputs record the model SHA-256;
+existing outputs without that field are accepted only when their artifacts
+are not older than the model checkpoint. Incomplete, stale, or incompatible
+diagnostics are rerun automatically. Legacy unsuffixed model files cannot prove their completed
+iteration or restore their opponent pool, so safe resume intentionally does
+not treat them as complete.
+
+### Memory limits
+
+Memory limits are computed for the one active training subprocess and applied
+by default unless overridden. The automatic value is 80% of detected system
+RAM and, when GPU use is possible, 80% of detected VRAM.
 
 - `--ram-limit-mb`: a cap on each subprocess's actual physical memory, via
   `systemd-run --user --scope -p MemoryMax=... -p MemorySwapMax=0` (a cgroup
@@ -400,18 +458,9 @@ constraint, and re-verified not to interfere with a normal run (see below).
   `cupy.cuda.memory.OutOfMemoryError` with `limit set to: 1,048,576 bytes`
   in the message. No-op when unset (every existing caller).
 
-Verified end-to-end: the job pool's concurrency and failure-isolation logic
-was checked in isolation first (fake sleep-based jobs, confirmed N=3
-concurrent jobs finish in ~1/3 the sequential time and that one deliberately
-failing job doesn't stop the others). The RAM limit's `RLIMIT_AS` rejection
-was reproduced and diagnosed from an actual failed real run before switching
-to the cgroup approach, which was then verified to (a) not break a real
-`training.self_play` invocation under a generous limit and (b) actually
-enforce a tight one (`MemoryMax=50M` + `MemorySwapMax=0` correctly SIGKILLed
-a process touching 1.6GB). The full `--jobs 4` sweep (58 points) then ran
-end-to-end with zero failures and correct `sweep_run.json`/`summary.json`
-output, timed against an equivalent `--jobs 1` run for the speedup figure
-above.
+The RAM cgroup and CuPy pool implementation details remain unchanged from the
+main training driver; see the flag descriptions above and the top-level
+resource-safety documentation.
 
 ### Comparative table (`diagnostics.rl_sweep_table`)
 
@@ -421,19 +470,29 @@ The very last stage runs `python -m diagnostics.rl_sweep_table`
 (i.e. every point this script has ever produced, not just the current
 invocation -- it accumulates across repeated sweeps the same way
 `diagnostics/hyperparameter_sweep.py`'s JSON log does), joins each run's
-hyperparameters with its rl-vs-random win/draw/loss rates into one row, and
-writes:
+hyperparameters with its rl-vs-random win/draw/loss rates and writes:
 
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.csv`
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.json`
 - `diagnostics/results/rl_sweep_table/rl_sweep_table.png` -- an image table,
-  mirroring `diagnostics/evaluate.py`'s all-pairs matrix output
-  (`_matrix_rows`/`_save_matrix_csv`/`plot_all_pairs_table`)
+  using the same visual style as the aggregate diagnostics report
+- `diagnostics/results/rl_sweep_table/rl_sweep_table.pdf` -- the same compact
+  table as a vector PDF
 
-Rows are grouped critic-off then critic-on, then by which parameter was
-varied, then sorted by that parameter's value, with the win-rate column
-shaded the same way `plot_all_pairs_table` shades its win-rate matrix (light
-blue >= 60%, light orange <= 40%). It also prints an aligned console table.
+The CSV and JSON retain one row per trained model, including its exact
+games-per-iteration value and checkpoint path. The PNG, PDF, and console table group
+models that differ only in games per iteration into one row with win-rate
+columns labelled `40`, `80`, and `160`. Critic, learning rate, gamma, and
+value coefficient remain row dimensions. Percentage cells use red/blue
+win-rate shading around the neutral 50% region.
+
+The `40`, `80`, and `160` columns are a side-by-side comparison, not an
+assumed ranking. Larger training batches usually reduce gradient noise, but
+they do not guarantee a strictly higher final win rate because update count,
+exploration, optimization dynamics, and statistical uncertainty still matter.
+Treat differences as meaningful only when their confidence intervals and
+repeated-seed results support the same conclusion.
+
 Run it standalone at any time to rebuild the table from whatever sweep output
 already exists on disk:
 
@@ -481,7 +540,7 @@ can be run against the same `--model-dir`/`--results-dir`.
 
 CLI flags mirror the shell script's: `--rl-iterations`, `--sl-weights-path`,
 `--diagnostic-games`, `--seed`, `--model-dir`, `--results-dir`, `--resume`,
-`--diag-no-plots`, `--device`, `--report-output-dir`, `--skip-report`, plus
+`--diag-no-plots`, `--device`, `--rl-workers`, `--report-output-dir`, `--skip-report`, plus
 `--quiet-training` (suppresses `self_play`'s per-iteration logs and
 `pairwise`'s per-matchup console summary; off by default, matching the shell
 script's always-verbose behavior).

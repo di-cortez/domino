@@ -19,13 +19,20 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 from itertools import combinations
 from math import comb
 from time import perf_counter
 from typing import Iterable, Sequence
 
+from utils.exact_update_timing import (
+    begin_exact_update_timing,
+    end_exact_update_timing,
+)
+
 
 SWITCH_TO_MU_MAX_HANDS = 500
+PROFILE_ASSIGNMENT_CACHE_SIZE = 8_192
 MODEL_VERSION = "slots-mu-exact-v1"
 
 ALL_TILES = [(i, j) for i in range(7) for j in range(i, 7)]
@@ -181,6 +188,82 @@ def _raw_hand_upper_bound(unknown_mask: int, hand_size: int) -> int:
     return comb(unknown_count, hand_size)
 
 
+def _falling_factorial(value: int, length: int) -> int:
+    """Return ``value * (value - 1) * ...`` using exact Python integers."""
+    result = 1
+    for offset in range(length):
+        result *= value - offset
+    return result
+
+
+@lru_cache(maxsize=PROFILE_ASSIGNMENT_CACHE_SIZE)
+def _count_profile_assignments_cached(profile: tuple[int, ...]) -> int:
+    """Count exact injective slot assignments by tile-eligibility groups.
+
+    Tiles eligible for the same labelled slots induce identical DP
+    transitions. A subset of ``r`` still-empty eligible slots can be filled by
+    a group of ``k`` distinguishable tiles in exactly ``(k)_r`` ways. Grouping
+    those transitions is algebraically identical to scanning every tile, while
+    retaining arbitrary-precision integer counts.
+    """
+    if not profile:
+        return 1
+    if any(domain == 0 for domain in profile):
+        return 0
+
+    if all(domain == profile[0] for domain in profile[1:]):
+        tile_count = profile[0].bit_count()
+        if tile_count < len(profile):
+            return 0
+        return _falling_factorial(tile_count, len(profile))
+
+    slot_count = len(profile)
+    full_slot_mask = (1 << slot_count) - 1
+    tile_union = 0
+    for domain in profile:
+        tile_union |= domain
+
+    eligibility_counts: dict[int, int] = defaultdict(int)
+    for tile_bit in _bits_from_mask(tile_union):
+        eligible_slots = 0
+        for slot_index, domain in enumerate(profile):
+            if domain & tile_bit:
+                eligible_slots |= 1 << slot_index
+        if eligible_slots:
+            eligibility_counts[eligible_slots] += 1
+
+    assignment_counts = [0] * (1 << slot_count)
+    assignment_counts[0] = 1
+    ordered_groups = sorted(
+        eligibility_counts.items(),
+        key=lambda item: (item[0].bit_count(), item[0]),
+    )
+    for eligible_slots, tile_count in ordered_groups:
+        maximum_filled = min(tile_count, eligible_slots.bit_count())
+        falling = [
+            _falling_factorial(tile_count, length)
+            for length in range(maximum_filled + 1)
+        ]
+        next_counts = [0] * len(assignment_counts)
+        for occupied_slots, count in enumerate(assignment_counts):
+            if not count:
+                continue
+            available = eligible_slots & ~occupied_slots & full_slot_mask
+            filled_slots = available
+            while True:
+                filled_count = filled_slots.bit_count()
+                if filled_count <= maximum_filled:
+                    next_counts[occupied_slots | filled_slots] += (
+                        count * falling[filled_count]
+                    )
+                if filled_slots == 0:
+                    break
+                filled_slots = (filled_slots - 1) & available
+        assignment_counts = next_counts
+
+    return assignment_counts[full_slot_mask]
+
+
 def reconstruct_public_actions(state: dict) -> list[PublicAction]:
     """Reconstruct actors, public turns, and board ends for action history.
 
@@ -206,20 +289,45 @@ def reconstruct_public_actions(state: dict) -> list[PublicAction]:
     actor = (current_player - advancing_actions) % player_count
     public_turn = 1
     ends: list[int] | None = None
-    annotated: list[PublicAction] = []
+    return _annotate_public_action_suffix(
+        [],
+        board_history,
+        actor,
+        public_turn,
+        ends,
+        player_count,
+    )
 
-    for action_index, action in enumerate(board_history, start=1):
-        ends_before = tuple(ends) if ends is not None else None
+
+def _annotate_public_action_suffix(
+    prefix: Sequence[PublicAction],
+    actions: Sequence[object],
+    actor: int,
+    public_turn: int,
+    ends: Sequence[int] | None,
+    player_count: int,
+) -> list[PublicAction]:
+    """Extend an annotated prefix without replaying its normalized actions."""
+    annotated = list(prefix)
+    mutable_ends = list(ends) if ends is not None else None
+    for action_index, raw_action in enumerate(
+        actions,
+        start=len(annotated) + 1,
+    ):
+        action = _normalize_action(raw_action)
+        ends_before = tuple(mutable_ends) if mutable_ends is not None else None
 
         if _is_tile_play(action):
             tile, side = action
-            if ends is None:
-                ends = [tile[0], tile[1]]
+            if mutable_ends is None:
+                mutable_ends = [tile[0], tile[1]]
             else:
-                connected_value = ends[side]
-                ends[side] = tile[1] if tile[0] == connected_value else tile[0]
+                connected_value = mutable_ends[side]
+                mutable_ends[side] = (
+                    tile[1] if tile[0] == connected_value else tile[0]
+                )
 
-        ends_after = tuple(ends) if ends is not None else None
+        ends_after = tuple(mutable_ends) if mutable_ends is not None else None
         annotated.append(
             PublicAction(
                 actor=actor,
@@ -254,6 +362,8 @@ class MuOpponentBelief:
         self.opponent_hand_size = int(opponent_hand_size)
         self.weights = dict(weights)
         self._probability_cache: tuple[float, ...] | None = None
+        self._response_probability_cache: dict[int, float] = {}
+        self._total_weight_cache: int | None = None
         self.assert_consistent()
 
     @classmethod
@@ -292,6 +402,8 @@ class MuOpponentBelief:
 
     def _invalidate_cache(self) -> None:
         self._probability_cache = None
+        self._response_probability_cache.clear()
+        self._total_weight_cache = None
 
     def assert_consistent(self) -> None:
         """Validate all exact hand-weight invariants."""
@@ -389,16 +501,23 @@ class MuOpponentBelief:
         if not ends:
             return 1.0
         legal_mask = _legal_mask(ends[0], ends[1])
+        cached = self._response_probability_cache.get(legal_mask)
+        if cached is not None:
+            return cached
         playable_weight = sum(
             weight
             for hand_mask, weight in self.weights.items()
             if hand_mask & legal_mask
         )
-        return playable_weight / self.total_weight
+        probability = playable_weight / self.total_weight
+        self._response_probability_cache[legal_mask] = probability
+        return probability
 
     @property
     def total_weight(self) -> int:
-        return sum(self.weights.values())
+        if self._total_weight_cache is None:
+            self._total_weight_cache = sum(self.weights.values())
+        return self._total_weight_cache
 
     @property
     def state_count(self) -> int:
@@ -434,6 +553,8 @@ class SlotOpponentBelief:
         self._assignment_count_cache: dict[tuple[int, ...], int] = {}
         self._hand_weights_cache: dict[tuple[int, ...], dict[int, int]] = {}
         self._probability_cache: tuple[float, ...] | None = None
+        self._response_probability_cache: dict[int, float] = {}
+        self._assignment_weight_cache: int | None = None
         self.assert_consistent()
 
     @classmethod
@@ -456,6 +577,8 @@ class SlotOpponentBelief:
         belief._assignment_count_cache = {}
         belief._hand_weights_cache = {}
         belief._probability_cache = None
+        belief._response_probability_cache = {}
+        belief._assignment_weight_cache = None
         belief.assert_consistent()
         return belief
 
@@ -463,50 +586,16 @@ class SlotOpponentBelief:
         self._assignment_count_cache.clear()
         self._hand_weights_cache.clear()
         self._probability_cache = None
+        self._response_probability_cache.clear()
+        self._assignment_weight_cache = None
 
     def _count_profile_assignments(self, profile: tuple[int, ...]) -> int:
-        """Count injective assignments without materializing hidden hands.
-
-        The DP scans unknown tiles and tracks which labelled slot positions are
-        occupied. Its state space is ``2**h`` rather than the set of possible
-        hand masks, which keeps slot-mode probability queries compact.
-        """
+        """Count injective assignments with local and bounded process caches."""
         profile = tuple(sorted(profile))
         cached = self._assignment_count_cache.get(profile)
         if cached is not None:
             return cached
-        if not profile:
-            return 1
-        if any(mask == 0 for mask in profile):
-            return 0
-
-        slot_count = len(profile)
-        full_slot_mask = (1 << slot_count) - 1
-        assignment_counts = [0] * (1 << slot_count)
-        assignment_counts[0] = 1
-
-        tile_union = 0
-        for domain in profile:
-            tile_union |= domain
-
-        for tile_bit in _bits_from_mask(tile_union):
-            eligible_slots = 0
-            for slot_index, domain in enumerate(profile):
-                if domain & tile_bit:
-                    eligible_slots |= 1 << slot_index
-
-            next_counts = assignment_counts.copy()
-            for occupied_slots, count in enumerate(assignment_counts):
-                if not count:
-                    continue
-                available_slots = eligible_slots & ~occupied_slots
-                while available_slots:
-                    slot_bit = available_slots & -available_slots
-                    next_counts[occupied_slots | slot_bit] += count
-                    available_slots ^= slot_bit
-            assignment_counts = next_counts
-
-        total = assignment_counts[full_slot_mask]
+        total = _count_profile_assignments_cached(profile)
         self._assignment_count_cache[profile] = total
         return total
 
@@ -676,6 +765,9 @@ class SlotOpponentBelief:
         if not ends:
             return 1.0
         legal_mask = _legal_mask(ends[0], ends[1])
+        cached = self._response_probability_cache.get(legal_mask)
+        if cached is not None:
+            return cached
         denominator = self.assignment_weight
         playable_weight = 0
 
@@ -689,7 +781,9 @@ class SlotOpponentBelief:
                 total_assignments - no_legal_assignments
             )
 
-        return playable_weight / denominator
+        probability = playable_weight / denominator
+        self._response_probability_cache[legal_mask] = probability
+        return probability
 
     def to_hand_weights_dp(self) -> dict[int, int]:
         """Convert profiles to exact ``mu(H)`` weights with incremental merging."""
@@ -711,10 +805,12 @@ class SlotOpponentBelief:
 
     @property
     def assignment_weight(self) -> int:
-        return sum(
-            profile_weight * self._count_profile_assignments(profile)
-            for profile, profile_weight in self.profiles.items()
-        )
+        if self._assignment_weight_cache is None:
+            self._assignment_weight_cache = sum(
+                profile_weight * self._count_profile_assignments(profile)
+                for profile, profile_weight in self.profiles.items()
+            )
+        return self._assignment_weight_cache
 
     @property
     def total_weight(self) -> int:
@@ -733,6 +829,7 @@ class HybridExactOpponentModel:
         *,
         switch_to_mu_max_hands: int = SWITCH_TO_MU_MAX_HANDS,
         trace_history_limit: int = 256,
+        record_traces: bool = True,
         **legacy_options,
     ):
         if switch_to_mu_max_hands <= 0:
@@ -753,10 +850,12 @@ class HybridExactOpponentModel:
 
         self.switch_to_mu_max_hands = int(switch_to_mu_max_hands)
         self.trace_history_limit = int(trace_history_limit)
+        self.record_traces = bool(record_traces)
         self._belief: SlotOpponentBelief | MuOpponentBelief | None = None
         self._game_id = None
         self._observer_player: int | None = None
         self._processed_history_length = 0
+        self._public_history: list[PublicAction] = []
         self._own_draws_consumed = 0
         self._pending_trace: OpponentTurnTrace | None = None
         self._last_snapshot: ProbabilitySnapshot | None = None
@@ -782,6 +881,7 @@ class HybridExactOpponentModel:
         self._game_id = None
         self._observer_player = None
         self._processed_history_length = 0
+        self._public_history = []
         self._own_draws_consumed = 0
         self._pending_trace = None
         self._last_snapshot = None
@@ -799,25 +899,49 @@ class HybridExactOpponentModel:
 
     def update(self, state: dict) -> list[float]:
         """Process new history and return the current seven probabilities."""
-        return list(self.update_detailed(state).probabilities)
+        timing_token = begin_exact_update_timing()
+        try:
+            return list(self._update_state(state))
+        finally:
+            # Timing is inactive outside a full pipeline run. When active, the
+            # finally block also records calls that fail without changing the
+            # model's exception behavior.
+            end_exact_update_timing(timing_token)
 
     def update_detailed(self, state: dict) -> OpponentModelUpdate:
         """Process new history and return probabilities plus labelled new traces."""
+        probabilities = self._update_state(state)
+        return OpponentModelUpdate(
+            probabilities=probabilities,
+            new_snapshots=tuple(self._current_update_snapshots),
+            completed_turn_traces=tuple(self._current_update_traces),
+            mode=self.mode,
+            switched_this_update=self._switched_this_update,
+        )
+
+    def _update_state(self, state: dict) -> tuple[float, ...]:
+        """Apply unseen evidence once and publish the exact final probabilities."""
         self._validate_state(state)
         game_id = state.get("game_id")
         observer_player = int(
             state.get("observer_player", state.get("current_player", 0))
         )
-        history = reconstruct_public_actions(state)
+        raw_history = state.get("board_history", [])
 
         if (
             self._belief is None
             or self._game_id != game_id
             or self._observer_player != observer_player
-            or len(history) < self._processed_history_length
+            or len(raw_history) < self._processed_history_length
+            or len(raw_history) < len(self._public_history)
+            or not self._cached_history_matches(raw_history)
         ):
             self._reset_from_state(state)
-            history = reconstruct_public_actions(state)
+            self._public_history = reconstruct_public_actions(state)
+        elif len(raw_history) > len(self._public_history):
+            self._extend_public_history(state, raw_history)
+
+        history = self._public_history
 
         own_draws = [
             _normalize_tile(tile)
@@ -856,12 +980,47 @@ class HybridExactOpponentModel:
             "processed_history_length": self._processed_history_length,
         }
 
-        return OpponentModelUpdate(
-            probabilities=probabilities,
-            new_snapshots=tuple(self._current_update_snapshots),
-            completed_turn_traces=tuple(self._current_update_traces),
-            mode=self.mode,
-            switched_this_update=self._switched_this_update,
+        return probabilities
+
+    def _cached_history_matches(self, raw_history: Sequence[object]) -> bool:
+        """Reject a replaced history without rescanning an append-only prefix."""
+        cached_length = len(self._public_history)
+        if cached_length == 0 or len(raw_history) < cached_length:
+            return cached_length == 0
+        return (
+            _normalize_action(raw_history[cached_length - 1])
+            == self._public_history[-1].action
+        )
+
+    def _extend_public_history(
+        self,
+        state: dict,
+        raw_history: Sequence[object],
+    ) -> None:
+        """Annotate only actions appended since the preceding model update."""
+        prefix_length = len(self._public_history)
+        if prefix_length == 0:
+            # There is no previous actor/turn/ends anchor. This occurs only when
+            # a model first saw an empty history; reconstruct the first suffix
+            # once, then all later updates use the incremental branch below.
+            self._public_history = reconstruct_public_actions(state)
+            return
+
+        last = self._public_history[-1]
+        if _is_draw(last.action):
+            actor = last.actor
+            public_turn = last.public_turn
+        else:
+            actor = (last.actor + 1) % (len(state.get("hand_sizes", [])) or 2)
+            public_turn = last.public_turn + 1
+        player_count = len(state.get("hand_sizes", [])) or 2
+        self._public_history = _annotate_public_action_suffix(
+            self._public_history,
+            raw_history[prefix_length:],
+            actor,
+            public_turn,
+            last.ends_after,
+            player_count,
         )
 
     def _validate_state(self, state: dict) -> None:
@@ -918,6 +1077,15 @@ class HybridExactOpponentModel:
         if self._belief is None:
             raise RuntimeError("Opponent belief is not initialized.")
 
+        if not self.record_traces:
+            self._process_entry_without_traces(
+                entry,
+                observer_player,
+                own_draws,
+                terminal_turn=terminal_turn,
+            )
+            return
+
         trace = self._start_or_get_trace(entry)
         action = entry.action
         actor_is_opponent = entry.actor != observer_player
@@ -971,6 +1139,51 @@ class HybridExactOpponentModel:
             same_as_previous=same_as_previous,
         )
         self._complete_turn_trace(trace, terminal_turn=terminal_turn)
+
+    def _process_entry_without_traces(
+        self,
+        entry: PublicAction,
+        observer_player: int,
+        own_draws: Sequence[tuple[int, int]],
+        *,
+        terminal_turn: bool,
+    ) -> None:
+        """Apply the same exact evidence while skipping intermediate snapshots."""
+        if self._belief is None:
+            raise RuntimeError("Opponent belief is not initialized.")
+
+        action = entry.action
+        actor_is_opponent = entry.actor != observer_player
+        if _is_draw(action):
+            if actor_is_opponent:
+                if entry.ends_before is not None:
+                    self._belief.condition_no_legal(*entry.ends_before)
+                self._belief.opponent_hidden_draw()
+            else:
+                if self._own_draws_consumed >= len(own_draws):
+                    raise ValueError("Missing private identity for an observer draw.")
+                self._belief.observer_known_draw(
+                    own_draws[self._own_draws_consumed]
+                )
+                self._own_draws_consumed += 1
+            # Draws do not complete the public turn, so the protected one-way
+            # transition remains deferred until the eventual play or pass.
+            return
+
+        if actor_is_opponent:
+            if _is_pass(action):
+                if entry.ends_before is not None:
+                    self._belief.condition_no_legal(*entry.ends_before)
+            elif _is_tile_play(action):
+                self._belief.opponent_reveals_and_plays(action[0])
+        elif _is_tile_play(action):
+            self._belief.observer_known_play(action[0])
+
+        # This is the same completed-turn boundary used by trace completion.
+        self._maybe_switch_to_mu(
+            entry.public_turn,
+            terminal_turn=terminal_turn,
+        )
 
     def _record_snapshot(
         self,
@@ -1152,7 +1365,7 @@ def compute_opponent_suit_probabilities(state: dict) -> list[float]:
     game. This one-shot wrapper intentionally ignores probability values already
     stored in ``state`` so stale output cannot suppress new history processing.
     """
-    model = HybridExactOpponentModel()
+    model = HybridExactOpponentModel(record_traces=False)
     return model.update(state)
 
 

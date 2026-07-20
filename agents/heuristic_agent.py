@@ -18,7 +18,7 @@ class StrategicAgent(Agent):
     def __init__(self, response_tolerance=0.10, mobility_tolerance=0.10):
         self.response_tolerance = float(response_tolerance)
         self.mobility_tolerance = float(mobility_tolerance)
-        self.opponent_model = ExactOpponentModel()
+        self.opponent_model = ExactOpponentModel(record_traces=False)
 
     def choose_move(self, state, legal_actions):
         if not legal_actions:
@@ -27,6 +27,8 @@ class StrategicAgent(Agent):
         tile_moves = [move for move in legal_actions if move is not None and move[0] != "DRAW"]
         if not tile_moves:
             return legal_actions[0]
+        if len(tile_moves) == 1:
+            return tile_moves[0]
 
         probabilities = self.opponent_model.update(state)
         state["opponent_suit_probabilities"] = probabilities

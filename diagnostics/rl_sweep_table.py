@@ -10,11 +10,11 @@ that script: ``sweep_run.json`` (the exact RL hyperparameters used) and
 ``summary.json`` (the rl-vs-random win/draw/loss rates from
 ``diagnostics.pairwise``). This module discovers every such directory, joins
 the two JSON files into one row per run, and writes a comparative table --
-CSV, an aggregate JSON, a console summary, and a PNG image table -- mirroring
-``diagnostics/evaluate.py``'s all-pairs matrix output (``_matrix_rows`` /
-``_save_matrix_csv`` / ``plot_all_pairs_table``). Rows are sorted directly on
-the four numeric hyperparameters (not by parsing the tag string), so both the
-grid-search rows and the value_coef-axis rows sort sensibly together.
+CSV, an aggregate JSON, a console summary, and PNG/PDF visual tables. The raw
+CSV/JSON retain one row per trained model. For the less cluttered console and
+PNG/PDF presentation, runs that differ only by games-per-iteration are pivoted
+into one row with win-rate columns labelled 40, 80, and 160. Rows are sorted
+directly on numeric hyperparameters rather than by parsing tag strings.
 
 Usage:
     python -m diagnostics.rl_sweep_table
@@ -23,7 +23,9 @@ Usage:
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -35,6 +37,14 @@ from diagnostics.plots import plot_sweep_comparison_table
 
 DEFAULT_RESULTS_DIR = ROOT / "diagnostics" / "results"
 DEFAULT_OUTPUT_DIR = DEFAULT_RESULTS_DIR / "rl_sweep_table"
+DEFAULT_GAMES_PER_ITERATION_COLUMNS = (40, 80, 160)
+SWEEP_DIAGNOSTIC_PLOT_FILES = (
+    "cumulative_rates.png",
+    "result_distribution.png",
+    "wins_by_position.png",
+    "game_lengths.png",
+    "choice_opportunities.png",
+)
 
 CSV_FIELDS = [
     "run_name", "critic", "varied_parameter", "learning_rate", "gamma",
@@ -42,6 +52,135 @@ CSV_FIELDS = [
     "win_rate", "draw_rate", "loss_rate", "win_ci95_low", "win_ci95_high",
     "mean_turns", "duration_s", "model_path",
 ]
+
+
+def file_sha256(path):
+    """Return the hexadecimal SHA-256 digest of one file."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_reusable_sweep_diagnostic(
+    run_dir,
+    expected_metadata,
+    model_path,
+    require_plots=True,
+):
+    """Validate that a completed sweep diagnostic can be safely reused.
+
+    The JSON configuration, model identity, requested seed, matchup, counts,
+    CSV row count, and requested artifacts must all match the current sweep
+    point. New metadata records a model SHA-256 digest. Older diagnostics are
+    accepted for backward compatibility only when every artifact is at least
+    as new as the exact numbered model checkpoint.
+
+    Returns ``(is_valid, reason)`` so callers can log or test failures without
+    treating stale output as a fatal error.
+    """
+    run_dir = Path(run_dir)
+    model_path = Path(model_path)
+    metadata_path = run_dir / "sweep_run.json"
+    summary_path = run_dir / "summary.json"
+    games_path = run_dir / "games.csv"
+    artifact_paths = [metadata_path, summary_path, games_path]
+    if require_plots:
+        artifact_paths.extend(run_dir / name for name in SWEEP_DIAGNOSTIC_PLOT_FILES)
+
+    if not model_path.is_file():
+        return False, f"model checkpoint is missing: {model_path}"
+    missing = [str(path) for path in artifact_paths if not path.is_file()]
+    if missing:
+        return False, f"diagnostic artifact is missing: {missing[0]}"
+
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as stream:
+            metadata = json.load(stream)
+        with open(summary_path, "r", encoding="utf-8") as stream:
+            summary = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return False, f"diagnostic JSON is unreadable: {exc}"
+
+    for key, expected in expected_metadata.items():
+        actual = metadata.get(key)
+        if isinstance(expected, bool):
+            matches = isinstance(actual, bool) and actual is expected
+        elif isinstance(expected, float):
+            try:
+                matches = math.isclose(
+                    float(actual), expected, rel_tol=0.0, abs_tol=1e-15
+                )
+            except (TypeError, ValueError):
+                matches = False
+        else:
+            matches = actual == expected
+        if not matches:
+            return False, (
+                f"sweep metadata mismatch for {key}: "
+                f"expected {expected!r}, found {actual!r}"
+            )
+
+    expected_games = int(expected_metadata["diagnostic_games"])
+    expected_seed = int(expected_metadata["seed"])
+    if summary.get("agent") != "rl" or summary.get("opponent") != "random":
+        return False, "diagnostic matchup is not rl vs random"
+    if summary.get("game_count") != expected_games:
+        return False, "diagnostic game count does not match the current request"
+    for seed_key in ("seed", "requested_seed", "effective_seed"):
+        if summary.get(seed_key) != expected_seed:
+            return False, f"diagnostic {seed_key} does not match the current request"
+
+    counts = summary.get("counts")
+    rates = summary.get("rates")
+    if not isinstance(counts, dict) or not isinstance(rates, dict):
+        return False, "diagnostic counts or rates are missing"
+    try:
+        count_total = sum(int(counts[key]) for key in ("win", "draw", "loss"))
+        for key in ("win", "draw", "loss"):
+            rate = float(rates[key])
+            if not math.isfinite(rate) or not math.isclose(
+                rate,
+                int(counts[key]) / expected_games,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                return False, f"diagnostic {key} rate is inconsistent with its count"
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return False, "diagnostic counts or rates are invalid"
+    if count_total != expected_games:
+        return False, "diagnostic result counts do not add up to the game count"
+    win_ci95 = summary.get("win_ci95")
+    if not isinstance(win_ci95, list) or len(win_ci95) != 2:
+        return False, "diagnostic confidence interval is missing"
+    if "mean_turns" not in summary:
+        return False, "diagnostic mean-turn count is missing"
+
+    try:
+        with open(games_path, "r", encoding="utf-8", newline="") as stream:
+            csv_row_count = sum(1 for _row in csv.reader(stream)) - 1
+    except (OSError, UnicodeError, csv.Error) as exc:
+        return False, f"diagnostic games CSV is unreadable: {exc}"
+    if csv_row_count != expected_games:
+        return False, (
+            f"diagnostic games CSV has {csv_row_count} rows; "
+            f"expected {expected_games}"
+        )
+
+    stored_hash = metadata.get("model_sha256")
+    if stored_hash:
+        try:
+            if stored_hash != file_sha256(model_path):
+                return False, "diagnostic model checksum does not match the checkpoint"
+        except OSError as exc:
+            return False, f"model checkpoint cannot be hashed: {exc}"
+    else:
+        model_mtime = model_path.stat().st_mtime_ns
+        if any(path.stat().st_mtime_ns < model_mtime for path in artifact_paths):
+            return False, "legacy diagnostic artifacts predate the model checkpoint"
+
+    return True, "diagnostic is complete and compatible"
 
 
 def discover_sweep_runs(results_dir):
@@ -119,6 +258,73 @@ def build_rows(run_dirs):
     return rows
 
 
+def build_display_rows(
+    rows,
+    games_per_iteration_values=DEFAULT_GAMES_PER_ITERATION_COLUMNS,
+):
+    """Pivot per-model rows into compact games-per-iteration win-rate columns.
+
+    Training output remains untouched: every input row still represents one
+    model and remains present in the raw CSV/JSON. This view groups only runs
+    with identical critic, learning-rate, gamma, value-coefficient, iteration,
+    and seed settings. Duplicate results for the same group and GPI are
+    rejected instead of being silently overwritten.
+    """
+    observed_values = sorted({
+        int(row["games_per_iteration"])
+        for row in rows
+    })
+    column_values = tuple(dict.fromkeys(
+        [int(value) for value in games_per_iteration_values] + observed_values
+    ))
+    grouped = {}
+
+    for row in rows:
+        key = (
+            bool(row["critic_enabled"]),
+            float(row["learning_rate"]),
+            float(row["gamma"]),
+            float(row["value_coef"]),
+            int(row["rl_iterations"]),
+            row.get("seed"),
+        )
+        display_row = grouped.setdefault(key, {
+            "critic": row["critic"],
+            "critic_enabled": bool(row["critic_enabled"]),
+            "learning_rate": row["learning_rate"],
+            "gamma": row["gamma"],
+            "value_coef": row["value_coef"],
+            "rl_iterations": row["rl_iterations"],
+            "seed": row.get("seed"),
+        })
+        gpi = int(row["games_per_iteration"])
+        field = f"win_rate_pct_gpi_{gpi}"
+        if field in display_row:
+            raise ValueError(
+                "multiple sweep results have the same displayed configuration: "
+                f"critic={row['critic']}, learning_rate={row['learning_rate']}, "
+                f"gamma={row['gamma']}, value_coef={row['value_coef']}, "
+                f"games_per_iteration={gpi}"
+            )
+        display_row[field] = row["win_rate_pct"]
+
+    display_rows = list(grouped.values())
+    for row in display_rows:
+        for gpi in column_values:
+            row.setdefault(f"win_rate_pct_gpi_{gpi}", "")
+    display_rows.sort(
+        key=lambda row: (
+            row["critic_enabled"],
+            row["learning_rate"],
+            row["gamma"],
+            row["value_coef"],
+            row["rl_iterations"],
+            -1 if row["seed"] is None else row["seed"],
+        )
+    )
+    return display_rows, column_values
+
+
 def _save_csv(rows, path):
     """Write one row per sweep point (mirrors evaluate.py's ``_save_matrix_csv``)."""
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -127,28 +333,34 @@ def _save_csv(rows, path):
         writer.writerows({field: row.get(field, "") for field in CSV_FIELDS} for row in rows)
 
 
-def _print_console_table(rows):
-    """Print a compact aligned comparison table to the console."""
+def _format_win_rate(value):
+    """Format one optional percentage for the compact display."""
+    return "" if value == "" or value is None else f"{float(value):.1f}%"
+
+
+def _print_console_table(rows, games_per_iteration_values):
+    """Print the pivoted games-per-iteration comparison to the console."""
     if not rows:
         print("No sweep runs found (looked for directories with both "
               "sweep_run.json and summary.json).")
         return
 
-    headers = ["Run", "Critic", "Varied", "LR", "Gamma", "G/Iter", "VCoef", "Win%", "Draw%", "Games"]
+    headers = ["Critic", "LR", "Gamma", "VCoef"] + [
+        str(value) for value in games_per_iteration_values
+    ]
     table_rows = []
     for row in rows:
-        table_rows.append([
-            row["run_name"],
+        base_cells = [
             row["critic"],
-            row["varied_parameter"],
             f"{row['learning_rate']:g}",
             f"{row['gamma']:g}",
-            str(row["games_per_iteration"]),
             f"{row['value_coef']:g}",
-            f"{row['win_rate_pct']:.1f}",
-            f"{row['draw_rate_pct']:.1f}",
-            str(row["games"]),
-        ])
+        ]
+        win_cells = [
+            _format_win_rate(row[f"win_rate_pct_gpi_{value}"])
+            for value in games_per_iteration_values
+        ]
+        table_rows.append(base_cells + win_cells)
 
     widths = [
         max(len(headers[i]), *(len(table_row[i]) for table_row in table_rows))
@@ -167,8 +379,10 @@ def _print_console_table(rows):
 def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR, quiet=False):
     """Discover every RL sweep point under ``results_dir`` and write the comparative table.
 
-    Writes ``rl_sweep_table.csv``, ``rl_sweep_table.json``, and
-    ``rl_sweep_table.png`` to ``output_dir``. Returns the list of row dicts.
+    Writes ``rl_sweep_table.csv``, ``rl_sweep_table.json``,
+    ``rl_sweep_table.png``, and ``rl_sweep_table.pdf`` to ``output_dir``.
+    CSV/JSON and the returned list retain one row per model; console/PNG/PDF
+    use the compact pivoted view.
     """
     results_dir = Path(results_dir)
     output_dir = Path(output_dir)
@@ -176,18 +390,31 @@ def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR,
 
     run_dirs = discover_sweep_runs(results_dir)
     rows = build_rows(run_dirs)
+    display_rows, gpi_columns = build_display_rows(rows)
 
     _save_csv(rows, output_dir / "rl_sweep_table.csv")
     with open(output_dir / "rl_sweep_table.json", "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=2, ensure_ascii=False)
-    plot_sweep_comparison_table(rows, output_dir / "rl_sweep_table.png")
+    plot_sweep_comparison_table(
+        display_rows,
+        output_dir / "rl_sweep_table.png",
+        games_per_iteration_values=gpi_columns,
+    )
+    plot_sweep_comparison_table(
+        display_rows,
+        output_dir / "rl_sweep_table.pdf",
+        games_per_iteration_values=gpi_columns,
+    )
 
     if not quiet:
-        print(f"\nRL hyperparameter sweep comparison ({len(rows)} runs found in {results_dir}/)")
-        _print_console_table(rows)
+        print(
+            f"\nRL hyperparameter sweep comparison ({len(rows)} runs, "
+            f"{len(display_rows)} displayed configurations found in {results_dir}/)"
+        )
+        _print_console_table(display_rows, gpi_columns)
         print(
             f"\nSaved: {output_dir}/rl_sweep_table.csv, "
-            "rl_sweep_table.json, rl_sweep_table.png"
+            "rl_sweep_table.json, rl_sweep_table.png, rl_sweep_table.pdf"
         )
 
     return rows

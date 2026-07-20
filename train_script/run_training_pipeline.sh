@@ -7,19 +7,17 @@
 #      iteration count used by run_pipeline.py's "big" scale), with RL
 #      hyperparameters overridable from the command line so the same script
 #      can drive repeated batch runs that only vary the RL stage;
-#   4. run the all-pairs diagnostics matrix (heuristic/neural/rl vs random and
-#      in self-play), mirroring `run_pipeline.py`'s diagnostics stage at the
+#   4. compare all five supported agents with the random baseline, mirroring
+#      `run_pipeline.py`'s diagnostics stage at the
 #      same BIG scale, writing results to a subdirectory of
 #      `diagnostics/results/` named after the RL weights file this run
 #      produced (or reused), so repeated batch runs that vary RL
 #      hyperparameters keep separate diagnostics output instead of
 #      overwriting a shared `all_pairs/` directory.
 #
-# Stage 1 and 2 are intentionally NOT parameterized here: neither
-# `training.dataset_generator` nor `training.training_loop` currently exposes
-# a dataset-size/epoch-count/output-path CLI (see their module docstrings and
-# `training/README.md`), so this script just runs them exactly as
-# `README.md` documents:
+# Stage 1 keeps the dataset-generator defaults. Stage 2 forwards supervised
+# scheduler, backend, batch, seed, and memory controls while retaining the
+# training module's dataset/epoch/output defaults:
 #
 #   python -m training.dataset_generator
 #   python -m training.training_loop
@@ -27,7 +25,7 @@
 # Stage 3 wraps `python -m training.self_play`, which does accept CLI flags
 # (iterations, games-per-iteration, learning rate, reward schema, gamma,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
-# passing the RL/SL weights this run used so the matrix evaluates the correct
+# passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
 # default paths. This script only chains the four stages and forwards flags
 # through; see `training/self_play.py add_optional_rl_arguments` and
@@ -86,15 +84,27 @@ RL_SEED=""
 # installed, else NumPy) -- unchanged from prior behavior. "cpu"/"gpu" force
 # one backend regardless of what's installed/enabled globally.
 RL_DEVICE="auto"
+RL_WORKERS="auto"
+RL_AUTOTUNE_FRACTION=0.01
+RL_AUTOTUNE_MIN_GAIN=0.10
+RL_MEMORY_RESERVE_MB=512
+RL_ESTIMATED_WORKER_MB=256
+RL_MAX_WORKER_RSS_MB=1024
 
-# SL convergence controls (unset by default so a bare run matches
-# README/module defaults exactly). Early stopping and LR-decay-by-plateau are
-# the validated SL convergence-determination mechanisms from the same
-# reports: stop/slow down on the validation curve, not on a fixed epoch
-# budget.
+# SL convergence, device, memory, and retained-batch controls. Plateau decay is
+# enabled by default and has an independent counter from optional early
+# stopping.
 SL_EARLY_STOPPING_PATIENCE=""
-SL_LR_DECAY_FACTOR=""
+SL_LR_DECAY_FACTOR=0.5
+SL_LR_DECAY_PATIENCE=5
+SL_NO_LR_DECAY=0
 SL_WEIGHT_DECAY=""
+SL_DEVICE="auto"
+SL_BATCH_SIZE=""
+SL_BATCH_AUTOTUNE=1
+SL_MEMORY_RESERVE_MB=512
+SL_GPU_MEMORY_RESERVE_MB=512
+SL_SEED=""
 
 # Diagnostics stage: mirrors run_pipeline.py's diagnostics logic
 # (diagnostics/evaluate.py::run_all_pairs). run_pipeline.py maps its "big"
@@ -118,7 +128,7 @@ usage() {
 Run the domino training pipeline: dataset generation -> supervised training
 (both with README/module defaults) -> a BIG-scale self-play RL run ($BASE_RL_ITERATIONS
 x ${BIG_SCALE_FACTOR} = $RL_ITERATIONS iterations by default, matching run_pipeline.py's
-"big" scale) -> the all-pairs diagnostics matrix at the same BIG scale
+"big" scale) -> five agent-vs-random diagnostics at the same BIG scale
 ($BASE_DIAGNOSTIC_GAMES x ${BIG_SCALE_FACTOR} = $DIAG_GAMES games per matchup by default,
 mode "$DIAG_MODE"), written to diagnostics/results/<rl-weights-basename>/.
 
@@ -146,6 +156,12 @@ Self-play reinforcement learning (all forwarded to training.self_play):
   --rl-value-coef F            Value-loss coefficient, only used when --rl-value-head is set (default: $RL_VALUE_COEF)
   --rl-gamma F                 Terminal-reward discount per remaining real decision, 1.0 = no discount (default: $RL_GAMMA)
   --rl-reward-schema NAME      "default", "sparse", or "shaped" reward preset (default: $RL_REWARD_SCHEMA)
+  --rl-workers N|auto          CPU-only rollout workers with retained autotuning (default: $RL_WORKERS, maximum 20)
+  --rl-autotune-fraction F     Fraction of iterations retained per worker test (default: $RL_AUTOTUNE_FRACTION)
+  --rl-autotune-min-gain F     Minimum marginal throughput gain (default: $RL_AUTOTUNE_MIN_GAIN)
+  --rl-memory-reserve-mb N     Host RAM kept free during rollouts (default: $RL_MEMORY_RESERVE_MB)
+  --rl-estimated-worker-mb N   Preflight RAM estimate per worker (default: $RL_ESTIMATED_WORKER_MB)
+  --rl-max-worker-rss-mb N     Runtime RSS ceiling for one worker (default: $RL_MAX_WORKER_RSS_MB)
 
 RL convergence monitoring (see references/explicacoes/relatorios/relatorio_1407):
   --rl-clip-grad-norm F         Gradient-norm clipping threshold (default: $RL_CLIP_GRAD_NORM)
@@ -155,23 +171,31 @@ RL convergence monitoring (see references/explicacoes/relatorios/relatorio_1407)
   --rl-seed N                   Fix random/numpy state, for reproducible comparisons between configurations
   --rl-device {auto,cpu,gpu}    Array backend; "auto" matches GPU_ENABLED (default: $RL_DEVICE)
 
-SL convergence monitoring (unset by default -> bare README invocation):
+SL training controls:
   --sl-early-stopping-patience N  Validation checks (every 10 epochs) without improvement before stopping
-  --sl-lr-decay-factor F          LR multiplier applied on each validation check without improvement
+  --sl-lr-decay-factor F          LR multiplier after a validation plateau (default: $SL_LR_DECAY_FACTOR)
+  --sl-lr-decay-patience N        Failed validation checks before LR decay (default: $SL_LR_DECAY_PATIENCE)
+  --sl-no-lr-decay                Disable the default supervised LR schedule
   --sl-weight-decay F              L2 penalty on the weight matrices
+  --sl-device {auto,cpu,gpu}       Supervised array backend (default: $SL_DEVICE)
+  --sl-batch-size N                Fixed mini-batch size; disables autotuning
+  --sl-no-batch-autotune           Use the device default mini-batch size
+  --sl-memory-reserve-mb N         Host RAM reserve (default: $SL_MEMORY_RESERVE_MB)
+  --sl-gpu-memory-reserve-mb N     GPU VRAM reserve (default: $SL_GPU_MEMORY_RESERVE_MB)
+  --sl-seed N                      Fix supervised initialization and shuffling
 
-All-pairs diagnostics (forwarded to diagnostics.evaluate, mirrors run_pipeline.py):
-  --diag-mode NAME              "default" (10 matchups), "fast" (2), or "complete" (15 matchups) (default: $DIAG_MODE)
+Agent-vs-random diagnostics (forwarded to diagnostics.evaluate, mirrors run_pipeline.py):
+  --diag-mode NAME              Compatibility label; every value runs the same 5 matchups (default: $DIAG_MODE)
   --diag-games N                Games per evaluated matchup (default: $DIAG_GAMES)
   --diag-seed N                 Fix the RNG seed for the diagnostics games (default: unset)
-  --diag-no-pair-plots          Skip the per-matchup PNG plots (the aggregate table image is still generated)
+  --diag-no-pair-plots          Skip per-matchup PNG plots (the aggregate PNG and PDF are still generated)
   --diag-output-dir PATH        Override the diagnostics output directory (default: diagnostics/results/<rl-weights-basename>/)
 
 Stage control:
   --skip-dataset                Skip dataset generation (reuse an existing dataset file)
   --skip-sl                     Skip supervised training (reuse an existing SL weights file)
   --skip-rl                     Skip self-play reinforcement learning
-  --skip-diagnostics            Skip the all-pairs diagnostics stage
+  --skip-diagnostics            Skip the agent-vs-random diagnostics stage
 
   -h, --help                   Show this help message and exit
 
@@ -215,9 +239,23 @@ while [[ $# -gt 0 ]]; do
         --rl-moving-average-window) RL_MOVING_AVERAGE_WINDOW="$2"; shift 2 ;;
         --rl-seed) RL_SEED="$2"; shift 2 ;;
         --rl-device) RL_DEVICE="$2"; shift 2 ;;
+        --rl-workers) RL_WORKERS="$2"; shift 2 ;;
+        --rl-autotune-fraction) RL_AUTOTUNE_FRACTION="$2"; shift 2 ;;
+        --rl-autotune-min-gain) RL_AUTOTUNE_MIN_GAIN="$2"; shift 2 ;;
+        --rl-memory-reserve-mb) RL_MEMORY_RESERVE_MB="$2"; shift 2 ;;
+        --rl-estimated-worker-mb) RL_ESTIMATED_WORKER_MB="$2"; shift 2 ;;
+        --rl-max-worker-rss-mb) RL_MAX_WORKER_RSS_MB="$2"; shift 2 ;;
         --sl-early-stopping-patience) SL_EARLY_STOPPING_PATIENCE="$2"; shift 2 ;;
         --sl-lr-decay-factor) SL_LR_DECAY_FACTOR="$2"; shift 2 ;;
+        --sl-lr-decay-patience) SL_LR_DECAY_PATIENCE="$2"; shift 2 ;;
+        --sl-no-lr-decay) SL_NO_LR_DECAY=1; shift ;;
         --sl-weight-decay) SL_WEIGHT_DECAY="$2"; shift 2 ;;
+        --sl-device) SL_DEVICE="$2"; shift 2 ;;
+        --sl-batch-size) SL_BATCH_SIZE="$2"; shift 2 ;;
+        --sl-no-batch-autotune) SL_BATCH_AUTOTUNE=0; shift ;;
+        --sl-memory-reserve-mb) SL_MEMORY_RESERVE_MB="$2"; shift 2 ;;
+        --sl-gpu-memory-reserve-mb) SL_GPU_MEMORY_RESERVE_MB="$2"; shift 2 ;;
+        --sl-seed) SL_SEED="$2"; shift 2 ;;
         --diag-mode) DIAG_MODE="$2"; shift 2 ;;
         --diag-games) DIAG_GAMES="$2"; shift 2 ;;
         --diag-seed) DIAG_SEED="$2"; shift 2 ;;
@@ -267,6 +305,14 @@ if [[ -z "$DIAG_OUTPUT_DIR" ]]; then
     DIAG_OUTPUT_DIR="diagnostics/results/$RL_WEIGHTS_BASENAME"
 fi
 
+"$PYTHON_BIN" - "$RL_DEVICE" "$SL_DEVICE" <<'PY'
+import sys
+
+from utils.runtime_status import pipeline_compute_report
+
+print(pipeline_compute_report(sys.argv[1], sys.argv[2]))
+PY
+
 section() {
     echo
     echo "==================================================================="
@@ -284,24 +330,34 @@ fi
 if [[ "$SKIP_SL" -eq 1 ]]; then
     section "Step 2/4: supervised training (skipped)"
 else
-    SL_EXTRA_ARGS=()
+    SL_EXTRA_ARGS=(
+        --lr-decay-patience "$SL_LR_DECAY_PATIENCE"
+        --sl-device "$SL_DEVICE"
+        --sl-memory-reserve-mb "$SL_MEMORY_RESERVE_MB"
+        --sl-gpu-memory-reserve-mb "$SL_GPU_MEMORY_RESERVE_MB"
+    )
     if [[ -n "$SL_EARLY_STOPPING_PATIENCE" ]]; then
         SL_EXTRA_ARGS+=(--early-stopping "$SL_EARLY_STOPPING_PATIENCE")
     fi
-    if [[ -n "$SL_LR_DECAY_FACTOR" ]]; then
+    if [[ "$SL_NO_LR_DECAY" -eq 1 ]]; then
+        SL_EXTRA_ARGS+=(--no-lr-decay)
+    else
         SL_EXTRA_ARGS+=(--lr-decay "$SL_LR_DECAY_FACTOR")
     fi
     if [[ -n "$SL_WEIGHT_DECAY" ]]; then
         SL_EXTRA_ARGS+=(--weight-decay "$SL_WEIGHT_DECAY")
     fi
-
-    if [[ ${#SL_EXTRA_ARGS[@]} -eq 0 ]]; then
-        section "Step 2/4: training supervised policy (README defaults -> models/domino_sl_weights.npz)"
-        "$PYTHON_BIN" -u -m training.training_loop
-    else
-        section "Step 2/4: training supervised policy (convergence controls: ${SL_EXTRA_ARGS[*]} -> models/domino_sl_weights.npz)"
-        "$PYTHON_BIN" -u -m training.training_loop "${SL_EXTRA_ARGS[@]}"
+    if [[ -n "$SL_BATCH_SIZE" ]]; then
+        SL_EXTRA_ARGS+=(--sl-batch-size "$SL_BATCH_SIZE")
+    elif [[ "$SL_BATCH_AUTOTUNE" -eq 0 ]]; then
+        SL_EXTRA_ARGS+=(--sl-no-batch-autotune)
     fi
+    if [[ -n "$SL_SEED" ]]; then
+        SL_EXTRA_ARGS+=(--sl-seed "$SL_SEED")
+    fi
+
+    section "Step 2/4: training supervised policy (${SL_EXTRA_ARGS[*]} -> models/domino_sl_weights.npz)"
+    "$PYTHON_BIN" -u -m training.training_loop "${SL_EXTRA_ARGS[@]}"
 fi
 
 if [[ "$SKIP_RL" -eq 1 ]]; then
@@ -339,15 +395,21 @@ else
         --clip-grad-norm "$RL_CLIP_GRAD_NORM" \
         --moving-average-window "$RL_MOVING_AVERAGE_WINDOW" \
         --device "$RL_DEVICE" \
+        --rl-workers "$RL_WORKERS" \
+        --rl-autotune-fraction "$RL_AUTOTUNE_FRACTION" \
+        --rl-autotune-min-gain "$RL_AUTOTUNE_MIN_GAIN" \
+        --rl-memory-reserve-mb "$RL_MEMORY_RESERVE_MB" \
+        --rl-estimated-worker-mb "$RL_ESTIMATED_WORKER_MB" \
+        --rl-max-worker-rss-mb "$RL_MAX_WORKER_RSS_MB" \
         "$NORMALIZE_FLAG" \
         "${RL_SEED_ARGS[@]}" \
         "${VALUE_HEAD_FLAG[@]}"
 fi
 
 if [[ "$SKIP_DIAGNOSTICS" -eq 1 ]]; then
-    section "Step 4/4: all-pairs diagnostics (skipped)"
+    section "Step 4/4: agent-vs-random diagnostics (skipped)"
 else
-    section "Step 4/4: all-pairs diagnostics ($DIAG_MODE mode, $DIAG_GAMES games/matchup -> $DIAG_OUTPUT_DIR/)"
+    section "Step 4/4: agent-vs-random diagnostics ($DIAG_MODE mode, $DIAG_GAMES games/matchup -> $DIAG_OUTPUT_DIR/)"
     DIAG_EXTRA_ARGS=()
     if [[ -n "$DIAG_SEED" ]]; then
         DIAG_EXTRA_ARGS+=(--seed "$DIAG_SEED")

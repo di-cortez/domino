@@ -13,7 +13,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from utils.runtime_status import format_duration
+from utils.exact_update_timing import (
+    begin_pipeline_stage,
+    end_pipeline_stage,
+    exception_summary,
+    finish_pipeline_timing,
+    start_pipeline_timing,
+)
+from utils.runtime_status import format_duration, pipeline_compute_report
 
 try:
     from tqdm.auto import tqdm
@@ -26,6 +33,7 @@ BASE_SUPERVISED_EPOCHS = 1000
 BASE_RL_ITERATIONS = 1000
 BASE_RL_GAMES_PER_ITERATION = 40
 BASE_DIAGNOSTIC_GAMES = 10000
+EXACT_UPDATE_TIMING_REPORT = ROOT.parent / "exact_opponent_model_timing.json"
 
 SCALE_FACTORS = {
     "default": 1.0,
@@ -103,12 +111,23 @@ def _progress(label, total, unit):
         yield callback
 
 
-def _run_stage(label, total, unit, runner, summary_text):
+def _run_stage(label, total, unit, runner, summary_text, *, timing_stage):
     """Run one pipeline stage with a progress bar and one compact summary line."""
     print(f"\n{label}")
     start_time = time.time()
-    with _progress(label, total, unit) as progress_callback:
-        summary = runner(progress_callback)
+    timing_token = begin_pipeline_stage(timing_stage)
+    try:
+        with _progress(label, total, unit) as progress_callback:
+            summary = runner(progress_callback)
+    except BaseException as error:
+        end_pipeline_stage(
+            timing_token,
+            status="failed",
+            error=exception_summary(error),
+        )
+        raise
+    else:
+        end_pipeline_stage(timing_token, status="completed")
     elapsed_time = time.time() - start_time
     print(
         f"{label} complete in {format_duration(elapsed_time)}"
@@ -117,9 +136,31 @@ def _run_stage(label, total, unit, runner, summary_text):
     return summary
 
 
-def _run_dataset(config):
+def _diagnostic_summary_text(summary):
+    """Format independently selected matchup worker counts for the pipeline."""
+    worker_text = ", ".join(
+        f"{matchup}={worker_count}"
+        for matchup, worker_count in summary[
+            "selected_workers_by_matchup"
+        ].items()
+    )
+    return (
+        f"{summary['evaluated_matchups']} matchups x "
+        f"{summary['game_count_per_matchup']} games = "
+        f"{summary['evaluated_matchups'] * summary['game_count_per_matchup']} "
+        f"total games | workers: {worker_text}"
+    )
+
+
+def _run_dataset(config, args):
     """Generate the supervised JSONL dataset."""
     dataset_generator = importlib.import_module("training.dataset_generator")
+
+    def dataset_status(message):
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
 
     return _run_stage(
         "Dataset generation",
@@ -130,22 +171,35 @@ def _run_dataset(config):
             output_file="dataset/supervised_dataset.jsonl",
             quiet=True,
             progress_callback=progress,
+            workers=args.dataset_workers,
+            safety_config=dataset_generator.ParallelSafetyConfig(
+                memory_reserve_mb=args.dataset_memory_reserve_mb,
+                estimated_worker_mb=args.dataset_estimated_worker_mb,
+                max_worker_rss_mb=args.dataset_max_worker_rss_mb,
+            ),
+            autotune_fraction=args.dataset_autotune_fraction,
+            autotune_minimum_gain=args.dataset_autotune_min_gain,
+            seed=args.dataset_seed,
+            status_callback=dataset_status,
         ),
         lambda summary: (
             f"{summary['saved_turn_count']} real decisions, "
-            f"{summary['skipped_turn_count']} forced turns skipped"
+            f"{summary['skipped_turn_count']} forced turns skipped, "
+            f"{summary['selected_workers']} worker(s)"
         ),
+        timing_stage="dataset_generation",
     )
 
 
-def _run_supervised_training(
-    config,
-    weight_decay=0.0,
-    early_stopping_patience=None,
-    lr_decay_factor=None,
-):
+def _run_supervised_training(config, args):
     """Train the supervised policy with compact epoch progress."""
     training_loop = _silent_import("training.training_loop")
+
+    def supervised_status(message):
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
 
     return _run_stage(
         "Supervised training",
@@ -153,24 +207,38 @@ def _run_supervised_training(
         "epoch",
         lambda progress: training_loop.train_supervised(
             epochs=config.supervised_epochs,
-            batch_size=training_loop.BATCH_SIZE,
+            batch_size=args.sl_batch_size,
             quiet=True,
             progress_callback=progress,
-            weight_decay=weight_decay,
-            early_stopping_patience=early_stopping_patience,
-            lr_decay_factor=lr_decay_factor,
+            status_callback=supervised_status,
+            weight_decay=args.weight_decay,
+            early_stopping_patience=args.early_stopping,
+            lr_decay_factor=args.lr_decay,
+            lr_decay_patience=args.lr_decay_patience,
+            device=args.sl_device,
+            autotune_batch_size=not args.sl_no_batch_autotune,
+            memory_reserve_mb=args.sl_memory_reserve_mb,
+            gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
+            seed=args.sl_seed,
         ),
         lambda summary: (
             f"{summary['epochs']}/{summary['requested_epochs']} epochs, "
             f"best validation loss {summary['best_validation_loss']:.4f}, "
             f"{summary['total_examples']} examples"
         ),
+        timing_stage="supervised_training",
     )
 
 
-def _run_rl_training(config, use_value_head=False):
+def _run_rl_training(config, args):
     """Run reinforcement-learning self-play with compact iteration progress."""
     self_play = importlib.import_module("training.self_play")
+
+    def rl_status(message):
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
 
     return _run_stage(
         "RL self-play",
@@ -179,16 +247,45 @@ def _run_rl_training(config, use_value_head=False):
         lambda progress: self_play.train(
             iterations=config.rl_iterations,
             games_per_iteration=config.rl_games_per_iteration,
+            training_opponent=args.training_opponent,
+            learning_rate=args.learning_rate,
+            entropy_coef=args.entropy_coef,
+            log_interval=args.log_interval,
+            checkpoint_interval=args.checkpoint_interval,
+            pool_interval=args.pool_interval,
+            max_pool_size=args.max_pool_size,
+            evaluation_games=args.evaluation_games,
+            sl_weights_path=args.sl_weights_path,
+            rl_weights_path=args.rl_weights_path,
             quiet=True,
             progress_callback=progress,
-            use_value_head=use_value_head,
+            use_value_head=args.value_head,
+            value_coef=args.value_coef,
+            gamma=args.gamma,
+            reward_schema=args.reward_schema,
+            clip_grad_norm=args.clip_grad_norm,
+            normalize_advantages=args.normalize_advantages,
+            moving_average_window=args.moving_average_window,
+            seed=args.seed,
+            device=args.device,
+            workers=args.rl_workers,
+            safety_config=self_play.ParallelSafetyConfig(
+                memory_reserve_mb=args.rl_memory_reserve_mb,
+                estimated_worker_mb=args.rl_estimated_worker_mb,
+                max_worker_rss_mb=args.rl_max_worker_rss_mb,
+            ),
+            autotune_fraction=args.rl_autotune_fraction,
+            autotune_minimum_gain=args.rl_autotune_min_gain,
+            status_callback=rl_status,
         ),
         lambda summary: (
             f"{summary['iterations']} iterations x "
             f"{summary['games_per_iteration']} games, "
+            f"{summary['selected_workers']} rollout worker(s), "
             f"value head {'on' if summary['use_value_head'] else 'off'}, "
             f"weights {summary['rl_weights_path']}"
         ),
+        timing_stage="rl_self_play",
     )
 
 
@@ -200,9 +297,15 @@ def _diagnostic_workload(config):
     return evaluate, matchup_count, matchup_count * config.diagnostic_games
 
 
-def _run_diagnostics(config):
-    """Run the all-pairs diagnostics matrix with one aggregate progress bar."""
+def _run_diagnostics(config, args, rl_weights, neural_weights):
+    """Run the five agent-vs-random diagnostics with one progress bar."""
     evaluate, matchup_count, total_games = _diagnostic_workload(config)
+
+    def diagnostic_status(message):
+        if tqdm is not None:
+            tqdm.write(message)
+        else:
+            print(message, flush=True)
 
     return _run_stage(
         f"Diagnostics ({matchup_count} matchups)",
@@ -214,13 +317,21 @@ def _run_diagnostics(config):
             quiet=True,
             progress_callback=progress,
             diagnostic_mode=config.diagnostic_mode,
+            workers=args.diagnostic_workers,
+            safety_config=evaluate.ParallelSafetyConfig(
+                memory_reserve_mb=args.diagnostic_memory_reserve_mb,
+                estimated_worker_mb=args.diagnostic_estimated_worker_mb,
+                max_worker_rss_mb=args.diagnostic_max_worker_rss_mb,
+            ),
+            autotune_fraction=args.diagnostic_autotune_fraction,
+            autotune_minimum_gain=args.diagnostic_autotune_min_gain,
+            seed=args.diagnostic_seed,
+            rl_weights=rl_weights,
+            neural_weights=neural_weights,
+            status_callback=diagnostic_status,
         ),
-        lambda summary: (
-            f"{summary['evaluated_matchups']} matchups x "
-            f"{summary['game_count_per_matchup']} games = "
-            f"{summary['evaluated_matchups'] * summary['game_count_per_matchup']} "
-            "total games"
-        ),
+        _diagnostic_summary_text,
+        timing_stage="diagnostics",
     )
 
 
@@ -229,7 +340,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
             "Run dataset generation, supervised training, RL self-play, and "
-            "all-pairs diagnostics with compact progress output."
+            "agent-vs-random diagnostics with compact progress output."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -243,10 +354,59 @@ def parse_args(argv=None):
             "and 'huge' is 20x larger than the defaults."
         ),
     )
+    dataset_generator = importlib.import_module("training.dataset_generator")
+    dataset = parser.add_argument_group("dataset multiprocessing controls")
+    dataset.add_argument(
+        "--dataset-workers",
+        type=dataset_generator._worker_count,
+        default=dataset_generator.DEFAULT_DATASET_WORKERS,
+        help="CPU-only dataset workers or 'auto' for retained online tuning.",
+    )
+    dataset.add_argument(
+        "--dataset-autotune-fraction",
+        type=float,
+        default=dataset_generator.DEFAULT_DATASET_AUTOTUNE_FRACTION,
+        help="Fraction of dataset games retained by each worker-count test.",
+    )
+    dataset.add_argument(
+        "--dataset-autotune-min-gain",
+        type=float,
+        default=dataset_generator.DEFAULT_DATASET_MINIMUM_GAIN,
+        help="Minimum marginal throughput gain required for a larger pool.",
+    )
+    dataset.add_argument("--dataset-memory-reserve-mb", type=int, default=512)
+    dataset.add_argument("--dataset-estimated-worker-mb", type=int, default=256)
+    dataset.add_argument("--dataset-max-worker-rss-mb", type=int, default=1024)
+    dataset.add_argument("--dataset-seed", type=int, default=None)
+
     training_loop = _silent_import("training.training_loop")
     training_loop.add_optional_training_arguments(parser)
     self_play = importlib.import_module("training.self_play")
     self_play.add_optional_rl_arguments(parser)
+    evaluate = _silent_import("diagnostics.evaluate")
+    diagnostics = parser.add_argument_group("diagnostic multiprocessing controls")
+    diagnostics.add_argument(
+        "--diagnostic-workers",
+        type=evaluate._worker_count,
+        default=evaluate.DEFAULT_DIAGNOSTIC_WORKERS,
+        help="CPU-only diagnostic workers or 'auto' for retained online tuning.",
+    )
+    diagnostics.add_argument(
+        "--diagnostic-autotune-fraction",
+        type=float,
+        default=evaluate.DEFAULT_AUTOTUNE_FRACTION,
+        help="Fraction of each matchup retained by each worker-count test.",
+    )
+    diagnostics.add_argument(
+        "--diagnostic-autotune-min-gain",
+        type=float,
+        default=evaluate.DEFAULT_MINIMUM_GAIN,
+        help="Minimum marginal throughput gain required to test a larger pool.",
+    )
+    diagnostics.add_argument("--diagnostic-memory-reserve-mb", type=int, default=512)
+    diagnostics.add_argument("--diagnostic-estimated-worker-mb", type=int, default=256)
+    diagnostics.add_argument("--diagnostic-max-worker-rss-mb", type=int, default=1024)
+    diagnostics.add_argument("--diagnostic-seed", type=int, default=None)
     return parser.parse_args(argv)
 
 
@@ -271,31 +431,113 @@ def main():
         f"{config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
+    print(pipeline_compute_report(args.device, args.sl_device))
+    if args.sl_batch_size is not None:
+        print(f"Supervised batch size: fixed at {args.sl_batch_size:,}.")
+    elif args.sl_no_batch_autotune:
+        print(
+            "Supervised batch autotuning: disabled; using the selected "
+            "device default (CPU 1,024 or GPU 2,048)."
+        )
+    else:
+        print(
+            "Supervised batches: automatic retained benchmark "
+            "(10 complete epochs per candidate; starts at CPU 1,024 or GPU "
+            "2,048, then doubles up to 1,048,576; stops below 10% marginal "
+            "gain)."
+        )
+        print(
+            "Every supervised batch test updates the live model and counts "
+            "toward the requested epoch total."
+        )
+    if args.dataset_workers == "auto":
+        print(
+            "Dataset workers: automatic retained benchmark "
+            "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
+        )
+    else:
+        print(f"Dataset workers: fixed at {args.dataset_workers}.")
+    if args.rl_workers == "auto":
+        print(
+            "RL rollout workers: automatic retained benchmark "
+            "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
+        )
+        print(
+            "Each RL worker test uses complete early iterations, and every "
+            "benchmark game contributes to a policy update."
+        )
+    else:
+        print(f"RL rollout workers: fixed at {args.rl_workers}.")
+    if args.diagnostic_workers == "auto":
+        print(
+            "Diagnostic workers: independent retained benchmark per matchup "
+            "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
+        )
+        print(
+            "Diagnostic worker testing starts after RL so every benchmark game "
+            "uses the newly trained checkpoint and remains in the final report."
+        )
+    else:
+        print(f"Diagnostic workers: fixed at {args.diagnostic_workers}.")
 
+    start_pipeline_timing(
+        EXACT_UPDATE_TIMING_REPORT,
+        {
+            "pipeline_scale": config.scale_name,
+            "scale_factor": config.scale_factor,
+            "dataset_games": config.dataset_games,
+            "supervised_epochs": config.supervised_epochs,
+            "rl_iterations": config.rl_iterations,
+            "rl_games_per_iteration": config.rl_games_per_iteration,
+            "diagnostic_games_per_matchup": config.diagnostic_games,
+            "diagnostic_matchups": diagnostic_matchups,
+            "diagnostic_mode": config.diagnostic_mode,
+        },
+    )
     start_time = time.time()
-    dataset_summary = _run_dataset(config)
-    supervised_summary = _run_supervised_training(
-        config,
-        weight_decay=args.weight_decay,
-        early_stopping_patience=args.early_stopping,
-        lr_decay_factor=args.lr_decay,
-    )
-    rl_summary = _run_rl_training(config, use_value_head=args.value_head)
-    diagnostics_summary = _run_diagnostics(config)
-    elapsed_time = time.time() - start_time
+    try:
+        dataset_summary = _run_dataset(config, args)
+        supervised_summary = _run_supervised_training(config, args)
+        print(
+            "RL startup note: rollout workers are CPU-only; policy aggregation and "
+            "gradient updates remain in the main process."
+        )
+        rl_summary = _run_rl_training(config, args)
+        diagnostics_summary = _run_diagnostics(
+            config,
+            args,
+            rl_weights=rl_summary["rl_weights_path"],
+            neural_weights=supervised_summary["weights_file"],
+        )
+        elapsed_time = time.time() - start_time
 
-    print("\nPipeline complete")
-    print(f"Total elapsed time: {format_duration(elapsed_time)}")
-    print(f"Dataset: {dataset_summary['output_file']}")
-    print(f"Supervised weights: {supervised_summary['weights_file']}")
-    print(f"RL weights: {rl_summary['rl_weights_path']}")
-    print(
-        "Diagnostics: "
-        f"{diagnostics_summary['diagnostic_mode']} mode, "
-        f"{diagnostics_summary['evaluated_matchups']} matchups x "
-        f"{diagnostics_summary['game_count_per_matchup']} games in "
-        "diagnostics/results/all_pairs/"
-    )
+        print("\nPipeline complete")
+        print(f"Total elapsed time: {format_duration(elapsed_time)}")
+        print(f"Dataset: {dataset_summary['output_file']}")
+        print(f"Supervised weights: {supervised_summary['weights_file']}")
+        print(f"RL weights: {rl_summary['rl_weights_path']}")
+        worker_text = ", ".join(
+            f"{matchup}={worker_count}"
+            for matchup, worker_count in diagnostics_summary[
+                "selected_workers_by_matchup"
+            ].items()
+        )
+        print(
+            "Diagnostics: "
+            f"{diagnostics_summary['diagnostic_mode']} mode, "
+            f"{diagnostics_summary['evaluated_matchups']} matchups x "
+            f"{diagnostics_summary['game_count_per_matchup']} games in "
+            f"diagnostics/results/all_pairs/ | workers: {worker_text}"
+        )
+    except BaseException as error:
+        status = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
+        finish_pipeline_timing(
+            status=status,
+            error=exception_summary(error),
+        )
+        raise
+    else:
+        finish_pipeline_timing(status="completed")
 
 
 if __name__ == "__main__":

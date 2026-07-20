@@ -280,7 +280,7 @@ class HumanControlMixin:
         player = self.engine.current_player
 
         try:
-            _state, done, info = self.engine.step(action)
+            _state, done, info = self.engine.step(action, return_state=False)
         except ValueError as exc:
             print(exc)
             self._set_notification("Invalid move")

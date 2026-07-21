@@ -42,14 +42,6 @@ SCALE_FACTORS = {
     "huge": 20.0,
 }
 
-DIAGNOSTIC_MODE_BY_SCALE = {
-    "small": "fast",
-    "default": "default",
-    "big": "complete",
-    "huge": "complete",
-}
-
-
 @dataclass(frozen=True)
 class PipelineConfig:
     """Concrete workload sizes for one pipeline run."""
@@ -61,7 +53,6 @@ class PipelineConfig:
     rl_iterations: int
     rl_games_per_iteration: int
     diagnostic_games: int
-    diagnostic_mode: str
 
 
 def _scaled_count(base_count, scale_factor):
@@ -80,7 +71,6 @@ def _build_config(scale_name):
         rl_iterations=_scaled_count(BASE_RL_ITERATIONS, scale_factor),
         rl_games_per_iteration=BASE_RL_GAMES_PER_ITERATION,
         diagnostic_games=_scaled_count(BASE_DIAGNOSTIC_GAMES, scale_factor),
-        diagnostic_mode=DIAGNOSTIC_MODE_BY_SCALE[scale_name],
     )
 
 
@@ -292,7 +282,7 @@ def _run_rl_training(config, args):
 def _diagnostic_workload(config):
     """Return the diagnostics module, matchup count, and aggregate game count."""
     evaluate = importlib.import_module("diagnostics.evaluate")
-    _agents, matchups = evaluate.diagnostic_plan(config.diagnostic_mode)
+    _agents, matchups = evaluate.diagnostic_plan()
     matchup_count = len(matchups)
     return evaluate, matchup_count, matchup_count * config.diagnostic_games
 
@@ -316,7 +306,6 @@ def _run_diagnostics(config, args, rl_weights, neural_weights):
             output_dir=evaluate.DEFAULT_OUTPUT_DIR,
             quiet=True,
             progress_callback=progress,
-            diagnostic_mode=config.diagnostic_mode,
             workers=args.diagnostic_workers,
             safety_config=evaluate.ParallelSafetyConfig(
                 memory_reserve_mb=args.diagnostic_memory_reserve_mb,
@@ -427,8 +416,7 @@ def main():
         f"{config.dataset_games} dataset games, "
         f"{config.supervised_epochs} supervised epochs, "
         f"{config.rl_iterations} RL iterations, "
-        f"{config.diagnostic_mode} diagnostics with "
-        f"{config.diagnostic_games} games per matchup "
+        f"diagnostics with {config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
     print(pipeline_compute_report(args.device, args.sl_device))
@@ -491,7 +479,6 @@ def main():
             "rl_games_per_iteration": config.rl_games_per_iteration,
             "diagnostic_games_per_matchup": config.diagnostic_games,
             "diagnostic_matchups": diagnostic_matchups,
-            "diagnostic_mode": config.diagnostic_mode,
         },
     )
     start_time = time.time()
@@ -524,7 +511,6 @@ def main():
         )
         print(
             "Diagnostics: "
-            f"{diagnostics_summary['diagnostic_mode']} mode, "
             f"{diagnostics_summary['evaluated_matchups']} matchups x "
             f"{diagnostics_summary['game_count_per_matchup']} games in "
             f"diagnostics/results/all_pairs/ | workers: {worker_text}"

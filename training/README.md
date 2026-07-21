@@ -22,15 +22,15 @@ and `huge` uses twenty times the default counts. The scaled counts apply to
 dataset games, supervised epochs, RL iterations, and diagnostic games per
 matchup. RL games per iteration stay at 40 so the scale remains linear.
 The default dataset workload is 10,000 heuristic-vs-heuristic games.
-Diagnostics counts are per matchup. Mode labels remain compatible with older
-commands, but all scales evaluate the same five agents against `random`:
+Diagnostic counts are explicit per matchup, and all scales evaluate the same
+five agents against `random`:
 
-| Pipeline scale | Diagnostic mode | Matchups |
-|---|---|---:|
-| `small` | `fast` | 5 |
-| `default` | `default` | 5 |
-| `big` | `complete` | 5 |
-| `huge` | `complete` | 5 |
+| Pipeline scale | Games per matchup | Matchups |
+|---|---:|---:|
+| `small` | 2,000 | 5 |
+| `default` | 10,000 | 5 |
+| `big` | 50,000 | 5 |
+| `huge` | 200,000 | 5 |
 
 For example, `small` runs 2,000 games in each of 5 matchups, for 10,000
 diagnostic games in total.
@@ -414,9 +414,7 @@ python -m training.self_play --gamma 0.97 --reward-schema shaped --seed 42
 A point-in-time value loss or win rate is dominated by batch noise; the
 iteration log always reports `reward mean/std/min/max` and a trailing moving
 average of value loss and win rate next to the raw values, so a plateau can be
-judged from the average rather than a single noisy line (see
-`references/explicacoes/relatorios/relatorio_1407` for the methodology this
-follows).
+judged from the average rather than a single noisy line.
 
 ### Device selection (`--device`)
 

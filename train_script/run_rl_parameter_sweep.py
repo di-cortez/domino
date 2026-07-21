@@ -64,10 +64,9 @@ DEFAULT_REPORT_OUTPUT_DIR = DEFAULT_RESULTS_DIR / "rl_sweep_table"
 DEFAULT_DEVICE = "cpu"
 DEFAULT_RL_WORKERS = "auto"
 
-# Baselines and sweep values mirror train_script/run_rl_parameter_sweep.sh
-# exactly -- see that script's header comment for where each range comes
-# from (diagnostics/hyperparameter_sweep.py and the historical sweep table
-# in references/explicacoes/relatorios/teste_1/plano_correcao.tex).
+# Baselines and sweep values mirror train_script/run_rl_parameter_sweep.sh.
+# Learning-rate/gamma values follow diagnostics.hyperparameter_sweep; the
+# games-per-iteration values preserve the established 40/80/160 comparison.
 BASELINE_LEARNING_RATE = 0.001
 BASELINE_GAMMA = 1.0
 BASELINE_GAMES_PER_ITERATION = 40

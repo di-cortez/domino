@@ -57,7 +57,7 @@ from utils.resource_limits import (
 from utils.runtime_status import format_duration, print_memory_report
 
 # The array backend for a given run is resolved once, inside train(), from
-# the `device` parameter (see agents/rl_nn.py::_resolve_device) -- it always
+# the network's resolved `device` parameter -- it always
 # matches whatever PolicyNetwork itself is using, rather than being fixed at
 # import time.
 DEFAULT_DEVICE = "auto"
@@ -278,7 +278,7 @@ def _reward_signal_summary(samples, xp=None):
     predicts close to the batch mean, its loss is approximately
     ``0.5 * reward_std ** 2`` — logging the standard deviation next to the
     loss makes that identity checkable instead of hidden behind a noisy
-    scalar (see references/explicacoes/relatorios/relatorio_1407).
+    scalar.
 
     ``xp`` should be the training run's resolved array backend (``train()``
     passes ``network.xp``); it defaults to NumPy for direct callers, which is
@@ -746,6 +746,7 @@ def train(
     autotune_minimum_gain=DEFAULT_RL_MINIMUM_GAIN,
     worker_candidates=DEFAULT_RL_WORKER_CANDIDATES,
     status_callback=None,
+    metrics_callback=None,
     start_iteration=0,
     resume_weights_path=None,
     resume_state_file=None,
@@ -765,9 +766,8 @@ def train(
     ``reward_schema`` selects one of the named presets in ``REWARD_SCHEMAS``
     for the terminal/event reward constants.
 
-    Convergence-monitoring behavior (validated in
-    ``references/explicacoes/relatorios/relatorio_1407``): a point-in-time
-    value loss or win rate is dominated by batch noise, so ``moving_average_window``
+    A point-in-time value loss or win rate is dominated by batch noise, so
+    ``moving_average_window``
     controls a trailing average of both, logged next to the raw values.
     ``normalize_advantages`` standardizes the policy signal per batch (mean 0,
     std 1) before the gradient step, which keeps the effective step size
@@ -781,8 +781,7 @@ def train(
     ``device`` selects the array backend: ``"auto"`` (default) matches
     ``GPU_ENABLED`` exactly, i.e. CuPy when installed, otherwise NumPy --
     unchanged from prior behavior. ``"cpu"``/``"gpu"`` force one backend
-    regardless of what's installed/enabled globally (see
-    ``agents/rl_nn.py::_resolve_device``); ``"gpu"`` raises if CuPy isn't
+    regardless of what's installed/enabled globally; ``"gpu"`` raises if CuPy isn't
     installed.
 
     ``sl_weights_data`` accepts a pre-loaded mapping of SL weight arrays so a
@@ -801,6 +800,13 @@ def train(
     atomic auxiliary state containing the exact opponent pool. Pass that pair
     back through ``resume_weights_path``/``resume_state_file`` with its absolute
     ``start_iteration`` to continue safely without replaying earlier updates.
+
+    ``metrics_callback``, when provided, receives one JSON-serializable mapping
+    after every completed iteration.  It is deliberately independent from the
+    lightweight ``progress_callback`` so long-running experiment drivers can
+    persist detailed timing, reward, gradient, checkpoint, and worker metrics
+    without parsing console output.  Leaving it as ``None`` preserves the
+    historical training path and avoids reward-summary work in quiet runs.
     """
     if iterations < 1:
         raise ValueError("iterations must be positive")
@@ -1001,7 +1007,12 @@ def train(
     win_rate_window = deque(maxlen=moving_average_window)
 
     start_time = time.time()
+    training_perf_started = time.perf_counter()
     last_checkpoint_time = start_time
+    total_decision_samples = 0
+    clipped_iteration_count = 0
+    total_rollout_duration_s = 0.0
+    total_update_duration_s = 0.0
     configured_worker_target = None
     last_saved_iteration = int(start_iteration)
     final_weights_path = (
@@ -1011,6 +1022,7 @@ def train(
     )
     try:
         for iteration in range(start_iteration + 1, iterations + 1):
+            iteration_started = time.perf_counter()
             if autotuner is not None and not autotuner.finished:
                 candidate = autotuner.current_workers
                 capped, was_capped, cap_reason = cap_parallel_workers(
@@ -1035,6 +1047,7 @@ def train(
                 effective_seed,
             )
             rollout_elapsed = time.perf_counter() - rollout_started
+            total_rollout_duration_s += rollout_elapsed
             _merge_parallel_summary(
                 parallel_summary,
                 rollout_info,
@@ -1062,12 +1075,62 @@ def train(
                     wins += 1
 
             win_rate_window.append(wins / games_per_iteration)
+            moving_win_rate = sum(win_rate_window) / len(win_rate_window)
+
+            checkpoint_written = False
+            checkpoint_path = None
+            checkpoint_eval_games = 0
+            checkpoint_eval_win_rate = None
+            checkpoint_eval_draw_rate = None
+            reward_summary = None
+            gradient_metrics = None
+            update_elapsed = 0.0
 
             if not batch:
                 if progress_callback is not None:
                     progress_callback(iteration, iterations)
+                if metrics_callback is not None:
+                    metrics_callback({
+                        "iteration": int(iteration),
+                        "total_iterations": int(iterations),
+                        "cumulative_training_games": int(iteration * games_per_iteration),
+                        "games_per_iteration": int(games_per_iteration),
+                        "decision_sample_count": 0,
+                        "wins_in_batch": int(wins),
+                        "batch_win_rate": float(wins / games_per_iteration),
+                        "moving_average_win_rate": float(moving_win_rate),
+                        "reward_mean": None,
+                        "reward_std": None,
+                        "reward_min": None,
+                        "reward_max": None,
+                        "good_pct": None,
+                        "neutral_pct": None,
+                        "bad_pct": None,
+                        "entropy": None,
+                        "grad_norm": None,
+                        "applied_grad_norm": None,
+                        "grad_clipped": False,
+                        "value_loss": None,
+                        "moving_average_value_loss": None,
+                        "selected_workers": int(runner.worker_count),
+                        "pool_size": int(len(runner.bank.pool_slots)),
+                        "rollout_duration_s": float(rollout_elapsed),
+                        "update_duration_s": 0.0,
+                        "iteration_duration_s": float(
+                            time.perf_counter() - iteration_started
+                        ),
+                        "checkpoint_written": False,
+                        "checkpoint_path": None,
+                        "checkpoint_eval_games": 0,
+                        "checkpoint_eval_win_rate": None,
+                        "checkpoint_eval_draw_rate": None,
+                        "elapsed_training_s": float(
+                            time.perf_counter() - training_perf_started
+                        ),
+                    })
                 continue
 
+            update_started = time.perf_counter()
             exact_sample_bytes = 0
             for sample in batch:
                 exact_sample_bytes += int(getattr(sample.x, "nbytes", 0))
@@ -1119,7 +1182,7 @@ def train(
                         policy_signal - float(xp.mean(policy_signal))
                     ) / signal_std
 
-            metrics = network.backward_policy_gradient(
+            gradient_metrics = network.backward_policy_gradient(
                 action_indices,
                 policy_signal,
                 legal_masks=legal_masks,
@@ -1128,12 +1191,18 @@ def train(
                 value_coef=value_coef,
                 clip_grad_norm=clip_grad_norm,
             )
+            total_decision_samples += len(batch)
+            if gradient_metrics["grad_clipped"]:
+                clipped_iteration_count += 1
 
             if use_value_head:
-                value_loss_window.append(metrics["value_loss"])
+                value_loss_window.append(gradient_metrics["value_loss"])
 
             if training_opponent == "self_play" and iteration % pool_interval == 0:
                 runner.append_pool_snapshot(network)
+
+            update_elapsed = time.perf_counter() - update_started
+            total_update_duration_s += update_elapsed
 
             if iteration % log_interval == 0 and not quiet:
                 reward_summary = _reward_signal_summary(batch, xp)
@@ -1147,14 +1216,13 @@ def train(
                     if training_opponent == "self_play"
                     else ""
                 )
-                win_rate_moving_avg = sum(win_rate_window) / len(win_rate_window)
                 value_suffix = ""
                 if use_value_head:
                     value_loss_moving_avg = (
                         sum(value_loss_window) / len(value_loss_window)
                     )
                     value_suffix = (
-                        f" | value loss: {metrics['value_loss']:.3f}"
+                        f" | value loss: {gradient_metrics['value_loss']:.3f}"
                         f" (avg/{len(value_loss_window)}: {value_loss_moving_avg:.3f})"
                         f" | advantage mean: {float(xp.mean(policy_signal)):+.3f}"
                     )
@@ -1169,8 +1237,8 @@ def train(
                     f"{reward_summary['neutral_pct']:.0f}%/"
                     f"{reward_summary['bad_pct']:.0f}% | "
                     f"wins {win_label}: {wins}/{games_per_iteration}"
-                    f" (avg/{len(win_rate_window)}: {win_rate_moving_avg:.1%})"
-                    f"{pool_suffix} | grad: {_gradient_log_text(metrics)}"
+                    f" (avg/{len(win_rate_window)}: {moving_win_rate:.1%})"
+                    f"{pool_suffix} | grad: {_gradient_log_text(gradient_metrics)}"
                     f"{value_suffix}"
                 )
 
@@ -1225,6 +1293,11 @@ def train(
                 )
                 win_rate = evaluation_wins / evaluation_games
                 draw_rate = evaluation_draws / evaluation_games
+                checkpoint_written = True
+                checkpoint_path = str(checkpoint_weights_path)
+                checkpoint_eval_games = int(evaluation_games)
+                checkpoint_eval_win_rate = float(win_rate)
+                checkpoint_eval_draw_rate = float(draw_rate)
                 now = time.time()
                 checkpoint_elapsed = now - last_checkpoint_time
                 last_checkpoint_time = now
@@ -1239,6 +1312,59 @@ def train(
 
             if progress_callback is not None:
                 progress_callback(iteration, iterations)
+
+            if metrics_callback is not None:
+                if reward_summary is None:
+                    reward_summary = _reward_signal_summary(batch, xp)
+                moving_value_loss = (
+                    float(sum(value_loss_window) / len(value_loss_window))
+                    if use_value_head and value_loss_window
+                    else None
+                )
+                metrics_callback({
+                    "iteration": int(iteration),
+                    "total_iterations": int(iterations),
+                    "cumulative_training_games": int(iteration * games_per_iteration),
+                    "games_per_iteration": int(games_per_iteration),
+                    "decision_sample_count": int(len(batch)),
+                    "wins_in_batch": int(wins),
+                    "batch_win_rate": float(wins / games_per_iteration),
+                    "moving_average_win_rate": float(moving_win_rate),
+                    "reward_mean": float(reward_summary["reward_mean"]),
+                    "reward_std": float(reward_summary["reward_std"]),
+                    "reward_min": float(reward_summary["reward_min"]),
+                    "reward_max": float(reward_summary["reward_max"]),
+                    "good_pct": float(reward_summary["good_pct"]),
+                    "neutral_pct": float(reward_summary["neutral_pct"]),
+                    "bad_pct": float(reward_summary["bad_pct"]),
+                    "entropy": float(gradient_metrics["entropy"]),
+                    "grad_norm": float(gradient_metrics["grad_norm"]),
+                    "applied_grad_norm": float(
+                        gradient_metrics["applied_grad_norm"]
+                    ),
+                    "grad_clipped": bool(gradient_metrics["grad_clipped"]),
+                    "value_loss": (
+                        None
+                        if gradient_metrics["value_loss"] is None
+                        else float(gradient_metrics["value_loss"])
+                    ),
+                    "moving_average_value_loss": moving_value_loss,
+                    "selected_workers": int(runner.worker_count),
+                    "pool_size": int(len(runner.bank.pool_slots)),
+                    "rollout_duration_s": float(rollout_elapsed),
+                    "update_duration_s": float(update_elapsed),
+                    "iteration_duration_s": float(
+                        time.perf_counter() - iteration_started
+                    ),
+                    "checkpoint_written": bool(checkpoint_written),
+                    "checkpoint_path": checkpoint_path,
+                    "checkpoint_eval_games": int(checkpoint_eval_games),
+                    "checkpoint_eval_win_rate": checkpoint_eval_win_rate,
+                    "checkpoint_eval_draw_rate": checkpoint_eval_draw_rate,
+                    "elapsed_training_s": float(
+                        time.perf_counter() - training_perf_started
+                    ),
+                })
 
         if numbered_checkpoints and last_saved_iteration != iterations:
             final_weights_path, _final_state_path = _save_numbered_resume_checkpoint(
@@ -1304,6 +1430,22 @@ def train(
         "parallel": parallel_summary,
         "rl_weights_path": str(final_weights_path),
         "numbered_checkpoints": bool(numbered_checkpoints),
+        "total_training_games": int(iterations * games_per_iteration),
+        "total_decision_samples": int(total_decision_samples),
+        "decisions_per_game": (
+            float(total_decision_samples / ((iterations - start_iteration) * games_per_iteration))
+            if iterations > start_iteration
+            else 0.0
+        ),
+        "clipped_iteration_count": int(clipped_iteration_count),
+        "clipped_iteration_rate": (
+            float(clipped_iteration_count / (iterations - start_iteration))
+            if iterations > start_iteration
+            else 0.0
+        ),
+        "pool_snapshot_count": int(len(runner.bank.pool_slots)),
+        "total_rollout_duration_s": float(total_rollout_duration_s),
+        "total_update_duration_s": float(total_update_duration_s),
         "duration_s": elapsed_time,
     }
 

@@ -4,8 +4,8 @@ Evaluate every supported domino agent against the random baseline.
 This is the high-level diagnostics entry point. It intentionally delegates each
 single matchup to ``diagnostics.pairwise`` so the two-agent evaluator remains the
 only place that knows how to play games, summarize them, and write per-matchup
-artifacts. The optional historical mode name is retained for CLI compatibility;
-every mode now evaluates the same five agents against ``random``.
+artifacts. The workload is explicit: every canonical agent is evaluated
+against ``random`` for the requested number of games per matchup.
 """
 
 import argparse
@@ -28,7 +28,6 @@ from diagnostics.pairwise import (
     CANONICAL_AGENTS,
     DEFAULT_GAME_COUNT,
     _atomic_replace_directory,
-    remove_legacy_artifacts,
     resolve_weights_path,
     run_pairwise,
 )
@@ -38,8 +37,8 @@ from diagnostics.parallel_runner import (
     DEFAULT_MEMORY_RESERVE_MB,
     MAX_DIAGNOSTIC_WORKERS,
     ParallelSafetyConfig,
+    cap_parallel_workers,
     game_seed,
-    safety_cap_workers,
 )
 from diagnostics.plots import (
     plot_aggregate_choice_opportunities,
@@ -55,8 +54,6 @@ from diagnostics.worker_autotune import (
 )
 
 DEFAULT_OUTPUT_DIR = ROOT / "diagnostics" / "results" / "all_pairs"
-DEFAULT_DIAGNOSTIC_MODE = "default"
-DIAGNOSTIC_MODES = ("default", "fast", "complete")
 RANDOM_BASELINE_OPPONENT = "random"
 RANDOM_BASELINE_MATCHUPS = tuple(
     (agent, RANDOM_BASELINE_OPPONENT)
@@ -123,12 +120,8 @@ def _selected_pairs(agents):
     return tuple((agent, RANDOM_BASELINE_OPPONENT) for agent in agents)
 
 
-def diagnostic_plan(mode=DEFAULT_DIAGNOSTIC_MODE):
-    """Return the fixed five-agent random-baseline plan for any valid mode."""
-    if mode not in DIAGNOSTIC_MODES:
-        raise ValueError(
-            f"Unknown diagnostics mode {mode!r}. Options: {DIAGNOSTIC_MODES}"
-        )
+def diagnostic_plan():
+    """Return the fixed five-agent random-baseline plan."""
     return CANONICAL_AGENTS, RANDOM_BASELINE_MATCHUPS
 
 
@@ -203,7 +196,7 @@ def _network_metadata(agents, matchup_specs):
 
 
 def _remove_stale_pair_outputs(pairs_dir, pairs):
-    """Remove pair folders that do not belong to the selected diagnostics mode."""
+    """Remove pair folders that do not belong to the selected plan."""
     selected_folders = {f"{agent}_vs_{opponent}" for agent, opponent in pairs}
     for path in pairs_dir.iterdir():
         if path.is_dir() and path.name not in selected_folders:
@@ -256,28 +249,25 @@ def run_all_pairs(
     generate_pair_plots=True,
     quiet=False,
     progress_callback=None,
-    diagnostic_mode=DEFAULT_DIAGNOSTIC_MODE,
     workers=DEFAULT_DIAGNOSTIC_WORKERS,
     safety_config=None,
     autotune_fraction=DEFAULT_AUTOTUNE_FRACTION,
     autotune_minimum_gain=DEFAULT_MINIMUM_GAIN,
     status_callback=None,
 ):
-    """Evaluate one diagnostics mode and write its aggregate artifacts.
+    """Evaluate canonical agents and write aggregate artifacts.
 
     Passing ``agents`` retains support for a custom subset, but every selected
     agent is still evaluated only against the random baseline. When omitted,
-    all five canonical agents are evaluated for every historical mode name.
+    all five canonical agents are evaluated.
     """
     if game_count < 1:
         raise ValueError("game_count must be positive")
     if agents is None:
-        agents, pairs = diagnostic_plan(diagnostic_mode)
-        report_mode = diagnostic_mode
+        agents, pairs = diagnostic_plan()
     else:
         agents = tuple(agents)
         pairs = tuple(_selected_pairs(agents))
-        report_mode = "custom"
 
     if workers != "auto":
         workers = int(workers)
@@ -326,11 +316,10 @@ def run_all_pairs(
     ))
     pairs_dir = output_dir / "pairs"
     pairs_dir.mkdir(parents=True, exist_ok=True)
-    remove_legacy_artifacts(output_dir)
 
     fixed_workers = None
     if workers != "auto":
-        fixed_workers, fixed_was_capped, fixed_cap_reason = safety_cap_workers(
+        fixed_workers, fixed_was_capped, fixed_cap_reason = cap_parallel_workers(
             workers,
             safety_config,
         )
@@ -435,14 +424,11 @@ def run_all_pairs(
     choice_opportunities = _aggregate_choice_opportunities(summaries)
     report = {
         "choice_opportunities": choice_opportunities,
-        "diagnostic_mode": report_mode,
         "comparison_opponent": RANDOM_BASELINE_OPPONENT,
         "report_layout": "single_row",
         "agents": list(agents),
         "game_count_per_matchup": game_count,
         "evaluated_matchups": total_pairs,
-        # Retained as a zero-valued compatibility field for older report readers.
-        "unevaluated_matrix_matchups": 0,
         "seed": seed,
         "effective_seed": effective_seed,
         "requested_workers": workers,
@@ -514,16 +500,6 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "mode",
-        nargs="?",
-        choices=DIAGNOSTIC_MODES,
-        default=DEFAULT_DIAGNOSTIC_MODE,
-        help=(
-            "Compatibility label only; every mode evaluates all five agents "
-            "against random."
-        ),
-    )
-    parser.add_argument(
         "-n",
         "--games",
         type=int,
@@ -563,7 +539,6 @@ def main():
         rl_weights=args.rl_weights,
         neural_weights=args.neural_weights,
         generate_pair_plots=not args.no_pair_plots,
-        diagnostic_mode=args.mode,
         workers=args.workers,
         safety_config=ParallelSafetyConfig(
             memory_reserve_mb=args.memory_reserve_mb,
@@ -575,7 +550,6 @@ def main():
     )
 
     print("\n===== Agent-vs-random diagnostics complete =====")
-    print(f"Mode: {report['diagnostic_mode']}")
     print(f"Agents: {', '.join(report['agents'])}")
     print(f"Games per matchup: {report['game_count_per_matchup']}")
     print(f"Evaluated matchups: {report['evaluated_matchups']}")

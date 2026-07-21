@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass
 
-from agents.agent import Agent
 from agents.encoder import DominoEncoder
 from agents.rl_nn import PolicyNetwork
+from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
 
 

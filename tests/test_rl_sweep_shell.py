@@ -18,22 +18,22 @@ class RLSweepShellTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertIn("outer sweep parallelism is disabled", result.stdout)
+        self.assertIn("Outer sweep parallelism is disabled", result.stdout)
         self.assertIn("current sweep point (default: auto)", result.stdout)
         self.assertIn("reuse complete, compatible diagnostics", result.stdout)
         self.assertIn("diagnostic per sweep point (default: 10000)", result.stdout)
         self.assertIn("--compact", SWEEP_SCRIPT.read_text(encoding="utf-8"))
 
-    def test_outer_parallel_jobs_are_rejected_before_training(self):
+    def test_removed_jobs_option_is_rejected_as_unknown(self):
         result = subprocess.run(
-            ["bash", str(SWEEP_SCRIPT), "--jobs", "2"],
+            ["bash", str(SWEEP_SCRIPT), "--jobs", "1"],
             cwd=ROOT,
             check=False,
             capture_output=True,
             text=True,
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn("--jobs is fixed at 1", result.stderr)
+        self.assertIn("Unknown option: --jobs", result.stderr)
 
     def test_completed_diagnostic_is_checked_before_resume_pool_state(self):
         script = SWEEP_SCRIPT.read_text(encoding="utf-8")

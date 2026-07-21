@@ -5,7 +5,7 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 
 | File | Purpose |
 |---|---|
-| `agent.py` | Baseline `RandomAgent` and `GreedyAgent`, plus a small runnable demo. |
+| `agent.py` | Uniform-random `RandomAgent` baseline. |
 | `encoder.py` | Single source of truth for state-to-vector and tile-play action encoding. |
 | `heuristic_agent.py` | `StrategicAgent`, the exact-probability rule-based teacher used for supervised labels and benchmarks. |
 | `nn.py` | Per-network NumPy/CuPy float32 MLP backend with explicit `auto`/`cpu`/`gpu` selection. |

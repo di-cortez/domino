@@ -2,8 +2,6 @@
 
 Diagnostics compare every supported agent with the same random baseline over
 many two-player domino games and write compact metrics, CSV data, and plots.
-Historical mode names remain accepted, but they no longer change the matchup
-set.
 
 ## Supported Agents
 
@@ -15,26 +13,17 @@ set.
 | `heuristic` | `StrategicAgent`, the handcrafted rule-based agent. |
 | `random` | Uniform random legal move. |
 
-The old `greedy` baseline is no longer available in diagnostics. The pairwise
-helper still accepts the legacy alias `sl` for `neural`, but new commands and
-reports use `neural`.
-
-## Diagnostic Modes
-
-The mode is an optional positional argument:
+## Diagnostic Workload
 
 | Command | Matchups |
 |---|---:|
 | `python -m diagnostics.evaluate` | 5: every supported agent vs `random`. |
-| `python -m diagnostics.evaluate fast` | 5: every supported agent vs `random`. |
-| `python -m diagnostics.evaluate complete` | 5: every supported agent vs `random`. |
 
-Every mode uses 10,000 games per matchup by default. Change that count with
-`-n`:
+The command uses 10,000 games per matchup by default. Set the explicit count
+with `-n`/`--games`:
 
 ```bash
-python -m diagnostics.evaluate fast -n 5000
-python -m diagnostics.evaluate complete -n 5000
+python -m diagnostics.evaluate --games 5000
 ```
 
 Diagnostics use CPU-only multiprocessing by default. Immediately before each
@@ -54,7 +43,7 @@ Useful options:
 ```bash
 python -m diagnostics.evaluate --help
 python -m diagnostics.evaluate --seed 123
-python -m diagnostics.evaluate complete --seed 123
+python -m diagnostics.evaluate --games 5000 --seed 123
 python -m diagnostics.evaluate --no-pair-plots
 python -m diagnostics.evaluate --output /tmp/domino_all_pairs
 python -m diagnostics.evaluate --neural-weights models/domino_sl_weights.npz
@@ -80,7 +69,7 @@ payloads.
 
 The output folder defaults to `diagnostics/results/all_pairs/`.
 Reusing that folder replaces the aggregate report and removes pair folders that
-do not belong to the selected mode, keeping its contents internally consistent.
+do not belong to the selected plan, keeping its contents internally consistent.
 
 | File or folder | Contents |
 |---|---|
@@ -91,7 +80,7 @@ do not belong to the selected mode, keeping its contents internally consistent.
 | `all_pairs_summary.json` | Full aggregate report with `selected_workers_by_matchup`, per-matchup retained autotuning reports, accumulated choice-opportunity stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
 
-The aggregate PNG/PDF header records mode, games per matchup, total games,
+The aggregate PNG/PDF header records games per matchup, total games,
 elapsed evaluation time, seed, selected workers, checkpoint names, neural
 architectures, parameter counts, and whether the RL checkpoint contains a
 value head. It also reports the 95% worst-case percentage margin of error as
@@ -129,10 +118,6 @@ By default, pairwise files are written under
 | `wins_by_position.png` | Win rate as player 0 vs. player 1. |
 | `game_lengths.png` | Turn-count histogram. |
 | `choice_opportunities.png` | Histogram of draw/pass/choice opportunities for the evaluated agent. |
-
-Older `compact_to_enumerated_counts.png`, `first_stock_draw_turns.png`, and
-`first_stock_draw_final_state_counts.png` files are obsolete. A new diagnostic
-run removes those names from its output folders.
 
 ## Interpretation
 

@@ -26,11 +26,9 @@
 # Baselines and the learning-rate/gamma sweep values mirror
 # diagnostics/hyperparameter_sweep.py: BASELINE_LEARNING_RATE, BASELINE_GAMMA,
 # BASELINE_VALUE_COEF, DEFAULT_LR_VALUES, DEFAULT_GAMMA_VALUES,
-# DEFAULT_RL_GAMES_PER_ITERATION. That module only exposes
-# DEFAULT_RL_GAMES_PER_ITERATION as a single baseline value, not a sweep
-# tuple, so this script supplies its candidate range from the historical
-# sweep table in references/explicacoes/relatorios/teste_1/plano_correcao.tex
-# (Section 2): games-per-iteration in {40, 80, 160}.
+# DEFAULT_RL_GAMES_PER_ITERATION. That module exposes only one baseline rather
+# than a sweep tuple, so this script preserves the established
+# games-per-iteration comparison {40, 80, 160}.
 #
 # Every sweep point is one training run (per the baseline
 # training-opponent/reward-schema/etc. defaults in training/self_play.py)
@@ -79,9 +77,6 @@ DEVICE="auto"
 # autotuning are already controlled centrally.
 RL_WORKERS=auto
 
-# The outer sweep is deliberately fixed to one job. The legacy --jobs flag is
-# accepted only as --jobs 1 so old sequential commands remain valid.
-JOBS=1
 RAM_LIMIT_MB=""
 VRAM_LIMIT_MB=""
 
@@ -100,8 +95,8 @@ BASELINE_VALUE_COEF=0.5
 
 # Grid-search values (3x4x3 = 36 combinations): DEFAULT_LR_VALUES /
 # DEFAULT_GAMMA_VALUES from diagnostics/hyperparameter_sweep.py.
-# games-per-iteration is not a tuple there (see header comment above) -- its
-# range comes from the historical report instead.
+# Games-per-iteration is not a tuple there, so this driver owns the established
+# 40/80/160 comparison.
 LR_VALUES=(0.0005 0.001 0.005)
 GAMMA_VALUES=(1.0 0.97 0.95 0.92)
 GAMES_PER_ITERATION_VALUES=(40 80 160)
@@ -152,7 +147,7 @@ Options:
   --skip-report           Skip the final comparative-table stage
 
 Sequential execution and memory limits:
-  --jobs 1                Compatibility flag; outer sweep parallelism is disabled
+  Outer sweep parallelism is disabled; points run one at a time.
   --ram-limit-mb N        Active subprocess physical-memory cap in MiB, enforced via a systemd-run --scope cgroup if available (default: 80% of detected system RAM)
   --vram-limit-mb N       Active subprocess CuPy memory-pool cap in MiB, hard-enforced by CuPy (default: 80% of detected GPU memory when device isn't cpu)
 
@@ -175,7 +170,6 @@ while [[ $# -gt 0 ]]; do
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --report-output-dir) REPORT_OUTPUT_DIR="$2"; shift 2 ;;
         --skip-report) SKIP_REPORT=1; shift ;;
-        --jobs) JOBS="$2"; shift 2 ;;
         --ram-limit-mb) RAM_LIMIT_MB="$2"; shift 2 ;;
         --vram-limit-mb) VRAM_LIMIT_MB="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -186,11 +180,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-if [[ "$JOBS" != "1" ]]; then
-    echo "--jobs is fixed at 1; use --rl-workers auto for internal rollout parallelism." >&2
-    exit 1
-fi
 
 if ! [[ "$VC_SAMPLE_COUNT" =~ ^[0-9]+$ ]]; then
     echo "--vc-sample-count must be a non-negative integer, got: $VC_SAMPLE_COUNT" >&2
@@ -249,23 +238,12 @@ fi
 # mechanism, so it doesn't share RLIMIT_AS's incompatibility with CUDA.
 export DOMINO_VRAM_LIMIT_MB="$VRAM_LIMIT_MB"
 
-# Prefer a repo-local .venv for portability; fall back to the pre-provisioned
-# environment at amb_virtual (has cupy/pygame already installed), then to
-# whatever's already on PATH.
-DEFAULT_VIRTUAL_ENV="/home/diego/CCO/amb_virtual"
-if [[ -f "$REPO_ROOT/.venv/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.venv/bin/activate"
-    echo "Activated virtual environment at .venv"
-elif [[ -f "$DEFAULT_VIRTUAL_ENV/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$DEFAULT_VIRTUAL_ENV/bin/activate"
-    echo "Activated virtual environment at $DEFAULT_VIRTUAL_ENV"
-else
-    echo "No .venv at repository root and no environment found at $DEFAULT_VIRTUAL_ENV; using the interpreter already on PATH."
-fi
-
-if command -v python >/dev/null 2>&1; then
+# Prefer the repository interpreter without depending on a user's shell or
+# machine-specific virtual-environment location.
+if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+    echo "Using virtual environment at .venv"
+elif command -v python >/dev/null 2>&1; then
     PYTHON_BIN="python"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"

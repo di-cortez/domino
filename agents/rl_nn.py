@@ -7,15 +7,10 @@ import numpy as np
 from agents.nn import (
     DEVICES,
     SupervisedNeuralNetwork,
-    resolve_device,
 )
 
 _POLICY_WEIGHTS = ("W1", "b1", "W2", "b2", "W3", "b3")
 _VALUE_WEIGHTS = ("Wv", "bv")
-
-def _resolve_device(device):
-    """Compatibility wrapper around the shared per-network device resolver."""
-    return resolve_device(device)
 
 
 class PolicyNetwork(SupervisedNeuralNetwork):

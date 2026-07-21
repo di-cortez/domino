@@ -28,6 +28,33 @@ Run:
 python -m ui.visual_main
 ```
 
+## Controls
+
+| Key | Action |
+|---|---|
+| `Space` | Pause or resume automatic play. |
+| `Right` | Step one turn forward and pause. |
+| `Left` | Step one snapshot backward in history. |
+| `+` / `-` | Change automatic speed from `1/4x` through `4x`. |
+| `J` / `K` | Toggle player 0/player 1 hand visibility when allowed. |
+| `M` | Open or close the player settings menu. |
+| `R` | Restart; a live game requires two presses within two seconds. |
+| `Esc` | Close the menu or quit. |
+
+During a human turn:
+
+| Key | Action |
+|---|---|
+| `Left` / `Right` | Select a hand tile. |
+| `Up` / `Down` / `Tab` | Switch the target end when both ends are legal. |
+| `Enter` | Play the selected tile. |
+| `D` | Draw from the stock when legal. |
+| `P` | Pass when legal. |
+
+The menu cycles each player through `Neural`, `Random NN`, `Heuristic`,
+`Random`, `Human`, and `RL (self-play)`. Neural and RL selections load the
+default checkpoints from `models/`.
+
 The HUD also shows two compact opponent-suit probability rows near the bottom
 of the screen. `P0 opp` is P0's estimate that P1 has each suit; `P1 opp` is the
 reverse. Each value is shown from `0.00` to `1.00` using the same middleware

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Personal batch-training driver: run the full domino pipeline in order:
+# Batch-training driver: run the full domino pipeline in order:
 #   1. generate the supervised dataset with README/module defaults;
 #   2. train the supervised policy with README/module defaults;
 #   3. refine an RL policy with a "BIG" self-play run (5x the default
@@ -68,13 +68,10 @@ RL_VALUE_COEF=0.5
 RL_GAMMA=1.0
 RL_REWARD_SCHEMA="default"
 
-# Convergence-monitoring controls, validated in
-# references/explicacoes/relatorios/{teste_1,teste_2,teste_3,relatorio_1407}:
-# a point-in-time value loss or win rate is dominated by batch noise, so
-# judge a plateau from the moving average, not the raw value; clip-grad-norm
-# and normalize-advantages bound/stabilize the gradient step so that
-# comparison is meaningful; seed fixes randomness for reproducible
-# side-by-side comparisons between hyperparameter configurations.
+# Convergence monitoring uses trailing averages because a point-in-time value
+# loss or win rate is dominated by batch noise. Gradient clipping and optional
+# advantage normalization stabilize comparisons, while a seed makes
+# side-by-side hyperparameter runs reproducible.
 RL_CLIP_GRAD_NORM=5.0
 RL_NORMALIZE_ADVANTAGES=0
 RL_MOVING_AVERAGE_WINDOW=10
@@ -106,13 +103,9 @@ SL_MEMORY_RESERVE_MB=512
 SL_GPU_MEMORY_RESERVE_MB=512
 SL_SEED=""
 
-# Diagnostics stage: mirrors run_pipeline.py's diagnostics logic
-# (diagnostics/evaluate.py::run_all_pairs). run_pipeline.py maps its "big"
-# scale to diagnostic_mode="complete" and scales BASE_DIAGNOSTIC_GAMES=10000
-# by the same scale factor as the other stages; since this script always runs
-# the BIG-scale RL stage, it mirrors that mapping by default.
+# Diagnostics stage: mirrors run_pipeline.py's diagnostics logic and scales
+# BASE_DIAGNOSTIC_GAMES=10000 by the same BIG factor as the other stages.
 BASE_DIAGNOSTIC_GAMES=10000
-DIAG_MODE="complete"
 DIAG_GAMES=$((BASE_DIAGNOSTIC_GAMES * BIG_SCALE_FACTOR))
 DIAG_SEED=""
 DIAG_PAIR_PLOTS=1
@@ -129,8 +122,8 @@ Run the domino training pipeline: dataset generation -> supervised training
 (both with README/module defaults) -> a BIG-scale self-play RL run ($BASE_RL_ITERATIONS
 x ${BIG_SCALE_FACTOR} = $RL_ITERATIONS iterations by default, matching run_pipeline.py's
 "big" scale) -> five agent-vs-random diagnostics at the same BIG scale
-($BASE_DIAGNOSTIC_GAMES x ${BIG_SCALE_FACTOR} = $DIAG_GAMES games per matchup by default,
-mode "$DIAG_MODE"), written to diagnostics/results/<rl-weights-basename>/.
+($BASE_DIAGNOSTIC_GAMES x ${BIG_SCALE_FACTOR} = $DIAG_GAMES games per matchup by default),
+written to diagnostics/results/<rl-weights-basename>/.
 
 Usage: $(basename "$0") [options]
 
@@ -163,7 +156,7 @@ Self-play reinforcement learning (all forwarded to training.self_play):
   --rl-estimated-worker-mb N   Preflight RAM estimate per worker (default: $RL_ESTIMATED_WORKER_MB)
   --rl-max-worker-rss-mb N     Runtime RSS ceiling for one worker (default: $RL_MAX_WORKER_RSS_MB)
 
-RL convergence monitoring (see references/explicacoes/relatorios/relatorio_1407):
+RL convergence monitoring:
   --rl-clip-grad-norm F         Gradient-norm clipping threshold (default: $RL_CLIP_GRAD_NORM)
   --rl-normalize-advantages     Standardize the policy signal per batch before the gradient step; off by default
   --rl-no-normalize-advantages  Explicitly keep advantage normalization off (default)
@@ -185,7 +178,6 @@ SL training controls:
   --sl-seed N                      Fix supervised initialization and shuffling
 
 Agent-vs-random diagnostics (forwarded to diagnostics.evaluate, mirrors run_pipeline.py):
-  --diag-mode NAME              Compatibility label; every value runs the same 5 matchups (default: $DIAG_MODE)
   --diag-games N                Games per evaluated matchup (default: $DIAG_GAMES)
   --diag-seed N                 Fix the RNG seed for the diagnostics games (default: unset)
   --diag-no-pair-plots          Skip per-matchup PNG plots (the aggregate PNG and PDF are still generated)
@@ -256,7 +248,6 @@ while [[ $# -gt 0 ]]; do
         --sl-memory-reserve-mb) SL_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --sl-gpu-memory-reserve-mb) SL_GPU_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --sl-seed) SL_SEED="$2"; shift 2 ;;
-        --diag-mode) DIAG_MODE="$2"; shift 2 ;;
         --diag-games) DIAG_GAMES="$2"; shift 2 ;;
         --diag-seed) DIAG_SEED="$2"; shift 2 ;;
         --diag-no-pair-plots) DIAG_PAIR_PLOTS=0; shift ;;
@@ -274,23 +265,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Prefer a repo-local .venv for portability; fall back to the pre-provisioned
-# environment at amb_virtual (has cupy/pygame already installed), then to
-# whatever's already on PATH.
-DEFAULT_VIRTUAL_ENV="/home/diego/CCO/amb_virtual"
-if [[ -f "$REPO_ROOT/.venv/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.venv/bin/activate"
-    echo "Activated virtual environment at .venv"
-elif [[ -f "$DEFAULT_VIRTUAL_ENV/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$DEFAULT_VIRTUAL_ENV/bin/activate"
-    echo "Activated virtual environment at $DEFAULT_VIRTUAL_ENV"
-else
-    echo "No .venv at repository root and no environment found at $DEFAULT_VIRTUAL_ENV; using the interpreter already on PATH."
-fi
-
-if command -v python >/dev/null 2>&1; then
+# Prefer the repository interpreter without depending on a user's shell or
+# machine-specific virtual-environment location.
+if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+    echo "Using virtual environment at .venv"
+elif command -v python >/dev/null 2>&1; then
     PYTHON_BIN="python"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"
@@ -409,7 +389,7 @@ fi
 if [[ "$SKIP_DIAGNOSTICS" -eq 1 ]]; then
     section "Step 4/4: agent-vs-random diagnostics (skipped)"
 else
-    section "Step 4/4: agent-vs-random diagnostics ($DIAG_MODE mode, $DIAG_GAMES games/matchup -> $DIAG_OUTPUT_DIR/)"
+    section "Step 4/4: agent-vs-random diagnostics ($DIAG_GAMES games/matchup -> $DIAG_OUTPUT_DIR/)"
     DIAG_EXTRA_ARGS=()
     if [[ -n "$DIAG_SEED" ]]; then
         DIAG_EXTRA_ARGS+=(--seed "$DIAG_SEED")
@@ -417,7 +397,7 @@ else
     if [[ "$DIAG_PAIR_PLOTS" -eq 0 ]]; then
         DIAG_EXTRA_ARGS+=(--no-pair-plots)
     fi
-    "$PYTHON_BIN" -u -m diagnostics.evaluate "$DIAG_MODE" \
+    "$PYTHON_BIN" -u -m diagnostics.evaluate \
         --games "$DIAG_GAMES" \
         --output "$DIAG_OUTPUT_DIR" \
         --rl-weights "$RL_WEIGHTS_FILE" \

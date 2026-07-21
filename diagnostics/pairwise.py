@@ -58,20 +58,6 @@ DEFAULT_GENERATE_PLOTS = True
 DEFAULT_WORKERS = 1
 
 CANONICAL_AGENTS = ("rl", "neural", "random_nn", "heuristic", "random")
-LEGACY_AGENT_ALIASES = {
-    "sl": "neural",
-    "random neural": "random_nn",
-    "random-neural": "random_nn",
-    "random nn": "random_nn",
-    "random-nn": "random_nn",
-}
-AVAILABLE_AGENTS = CANONICAL_AGENTS + tuple(LEGACY_AGENT_ALIASES)
-
-LEGACY_ARTIFACT_NAMES = (
-    "compact_to_enumerated_counts.png",
-    "first_stock_draw_final_state_counts.png",
-    "first_stock_draw_turns.png",
-)
 
 DEFAULT_WEIGHTS = {
     "rl": ROOT / "models" / "domino_rl_weights.npz",
@@ -82,7 +68,6 @@ DEFAULT_WEIGHTS = {
 def normalize_agent_name(agent_name):
     """Return the canonical diagnostics name for an agent."""
     normalized = agent_name.strip().lower()
-    normalized = LEGACY_AGENT_ALIASES.get(normalized, normalized)
     if normalized not in CANONICAL_AGENTS:
         raise ValueError(f"Unknown agent {agent_name!r}. Options: {CANONICAL_AGENTS}")
     return normalized
@@ -299,10 +284,6 @@ def evaluate_pair(
     return games
 
 
-# Backward-compatible name for older imports.
-evaluate = evaluate_pair
-
-
 def save_csv(games, path):
     """Write compact per-game records to CSV."""
     fields = [
@@ -402,13 +383,6 @@ def print_summary(summary, duration_s):
             f"pass {choice_info['forced_passes']}"
         )
         print(f"  Choice histogram: {choice_info['choice_histogram']}")
-
-
-def remove_legacy_artifacts(output_dir):
-    """Delete obsolete diagnostic plots left by older runs in ``output_dir``."""
-    output_dir = Path(output_dir)
-    for filename in LEGACY_ARTIFACT_NAMES:
-        (output_dir / filename).unlink(missing_ok=True)
 
 
 def _atomic_replace_directory(staging_dir, output_dir):
@@ -600,7 +574,6 @@ def run_pairwise(
         dir=output_dir.parent,
     ))
     try:
-        remove_legacy_artifacts(staging_dir)
         save_csv(games, staging_dir / "games.csv")
         with open(staging_dir / "summary.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
@@ -634,8 +607,8 @@ def main():
         description="Evaluate one domino agent against another over N games.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--agent", choices=AVAILABLE_AGENTS, default=DEFAULT_AGENT)
-    parser.add_argument("--opponent", choices=AVAILABLE_AGENTS, default=DEFAULT_OPPONENT)
+    parser.add_argument("--agent", choices=CANONICAL_AGENTS, default=DEFAULT_AGENT)
+    parser.add_argument("--opponent", choices=CANONICAL_AGENTS, default=DEFAULT_OPPONENT)
     parser.add_argument(
         "-n",
         "--games",

@@ -21,8 +21,8 @@ from diagnostics.evaluate import run_all_pairs
 from diagnostics.parallel_runner import (
     MAX_DIAGNOSTIC_WORKERS,
     ParallelSafetyConfig,
+    cap_parallel_workers,
     game_seed,
-    safety_cap_workers,
 )
 from diagnostics.worker_autotune import MatchupSpec, autotune_diagnostic_workers
 from diagnostics.plots import (
@@ -97,7 +97,6 @@ class ParallelDiagnosticsTests(unittest.TestCase):
             for agent, rate in zip(agents, rates)
         ]
         metadata = {
-            "diagnostic_mode": "complete",
             "game_count_per_matchup": 10000,
             "evaluated_matchups": 5,
             "duration_s": 125.0,
@@ -176,7 +175,7 @@ class ParallelDiagnosticsTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                capped, was_capped, _reason = safety_cap_workers(999, safety)
+                capped, was_capped, _reason = cap_parallel_workers(999, safety)
                 self.assertEqual(capped, MAX_DIAGNOSTIC_WORKERS)
                 self.assertTrue(was_capped)
 
@@ -188,7 +187,7 @@ class ParallelDiagnosticsTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                capped, was_capped, reason = safety_cap_workers(20, safety)
+                capped, was_capped, reason = cap_parallel_workers(20, safety)
                 self.assertEqual(capped, 2)
                 self.assertTrue(was_capped)
                 self.assertIn("RAM preflight", reason)
@@ -273,7 +272,6 @@ class ParallelDiagnosticsTests(unittest.TestCase):
                 seed=88,
                 generate_pair_plots=False,
                 quiet=True,
-                diagnostic_mode="fast",
                 workers="auto",
                 safety_config=ParallelSafetyConfig(
                     memory_reserve_mb=0,

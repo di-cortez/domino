@@ -29,9 +29,8 @@ from agents.rl_agent import RLAgent, TrajectoryStep
 from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import (
     CANONICAL_AGENTS,
-    LEGACY_ARTIFACT_NAMES,
+    _atomic_replace_directory,
     create_agent,
-    remove_legacy_artifacts,
     save_csv,
 )
 from diagnostics.evaluate import diagnostic_plan
@@ -64,7 +63,7 @@ from training.self_play import (
 )
 from training.training_loop import (
     DEFAULT_EARLY_STOPPING_PATIENCE,
-    DEFAULT_LR_DECAY_FACTOR,
+    DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
     DEFAULT_WEIGHT_DECAY,
     MAX_SUPERVISED_CHECKPOINTS,
     _prune_supervised_checkpoints,
@@ -451,7 +450,7 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     defaults = parse_supervised_args([])
     assert defaults.weight_decay == 0.0
     assert defaults.early_stopping is None
-    assert defaults.lr_decay == DEFAULT_LR_DECAY_FACTOR
+    assert defaults.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
     assert defaults.lr_decay_patience == 5
     assert defaults.sl_device == "auto"
 
@@ -462,7 +461,7 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     ])
     assert enabled.weight_decay == DEFAULT_WEIGHT_DECAY
     assert enabled.early_stopping == DEFAULT_EARLY_STOPPING_PATIENCE
-    assert enabled.lr_decay == DEFAULT_LR_DECAY_FACTOR
+    assert enabled.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
 
     custom = parse_supervised_args([
         "--weight-decay",
@@ -1325,39 +1324,46 @@ def test_random_neural_agent_has_reproducible_untrained_weights():
         )
 
     assert "random_nn" in CANONICAL_AGENTS
-    assert isinstance(create_agent("random nn"), RandomNeuralAgent)
+    assert isinstance(create_agent("random_nn"), RandomNeuralAgent)
+
+    for removed_alias in ("sl", "random nn", "random-neural"):
+        try:
+            create_agent(removed_alias)
+        except ValueError as exc:
+            assert "Unknown agent" in str(exc)
+        else:
+            raise AssertionError(f"Removed agent alias was accepted: {removed_alias}")
 
 
-def test_diagnostics_remove_legacy_plot_artifacts():
+def test_diagnostics_atomic_directory_replacement_drops_stale_files():
     with tempfile.TemporaryDirectory() as folder:
-        output_dir = Path(folder)
-        for filename in LEGACY_ARTIFACT_NAMES:
-            (output_dir / filename).touch()
+        base_dir = Path(folder)
+        output_dir = base_dir / "pair"
+        staging_dir = base_dir / ".pair.tmp"
+        output_dir.mkdir()
+        staging_dir.mkdir()
+        (output_dir / "stale.png").write_text("old", encoding="utf-8")
+        (staging_dir / "summary.json").write_text("{}", encoding="utf-8")
 
-        remove_legacy_artifacts(output_dir)
+        _atomic_replace_directory(staging_dir, output_dir)
 
-        assert all(not (output_dir / filename).exists() for filename in LEGACY_ARTIFACT_NAMES)
+        assert not (output_dir / "stale.png").exists()
+        assert (output_dir / "summary.json").read_text(encoding="utf-8") == "{}"
+        assert not staging_dir.exists()
 
 
-def test_diagnostic_modes_select_expected_matchups():
-    default_agents, default_matchups = diagnostic_plan("default")
-    fast_agents, fast_matchups = diagnostic_plan("fast")
-    complete_agents, complete_matchups = diagnostic_plan("complete")
-
+def test_diagnostic_plan_selects_canonical_random_matchups():
+    agents, matchups = diagnostic_plan()
     expected_matchups = tuple((agent, "random") for agent in CANONICAL_AGENTS)
-    assert default_agents == CANONICAL_AGENTS
-    assert fast_agents == CANONICAL_AGENTS
-    assert complete_agents == CANONICAL_AGENTS
-    assert default_matchups == expected_matchups
-    assert fast_matchups == expected_matchups
-    assert complete_matchups == expected_matchups
+    assert agents == CANONICAL_AGENTS
+    assert matchups == expected_matchups
 
 
-def test_pipeline_scales_select_expected_diagnostic_modes():
-    assert _build_config("small").diagnostic_mode == "fast"
-    assert _build_config("default").diagnostic_mode == "default"
-    assert _build_config("big").diagnostic_mode == "complete"
-    assert _build_config("huge").diagnostic_mode == "complete"
+def test_pipeline_scales_set_explicit_diagnostic_game_counts():
+    assert _build_config("small").diagnostic_games == 2000
+    assert _build_config("default").diagnostic_games == 10000
+    assert _build_config("big").diagnostic_games == 50000
+    assert _build_config("huge").diagnostic_games == 200000
 
 
 def test_pipeline_compute_report_names_backends_and_memory():
@@ -1497,11 +1503,17 @@ def main():
         ),
         ("pairwise CSV initial hands", test_pairwise_csv_writes_initial_hands_as_json_arrays),
         ("random neural baseline", test_random_neural_agent_has_reproducible_untrained_weights),
-        ("legacy diagnostic cleanup", test_diagnostics_remove_legacy_plot_artifacts),
-        ("diagnostic mode matchups", test_diagnostic_modes_select_expected_matchups),
         (
-            "pipeline diagnostic modes",
-            test_pipeline_scales_select_expected_diagnostic_modes,
+            "atomic diagnostic replacement",
+            test_diagnostics_atomic_directory_replacement_drops_stale_files,
+        ),
+        (
+            "diagnostic plan matchups",
+            test_diagnostic_plan_selects_canonical_random_matchups,
+        ),
+        (
+            "pipeline diagnostic game counts",
+            test_pipeline_scales_set_explicit_diagnostic_game_counts,
         ),
         (
             "pipeline compute resource report",

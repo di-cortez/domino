@@ -376,7 +376,6 @@ def diagnostic_table_header_lines(summaries, agents, report_metadata=None):
     )
     matchup_count = int(metadata.get("evaluated_matchups", len(summaries)))
     total_games = game_count * matchup_count
-    mode = metadata.get("diagnostic_mode", "ad hoc")
     margin = (
         100 * worst_case_margin_of_error(game_count)
         if game_count
@@ -386,7 +385,7 @@ def diagnostic_table_header_lines(summaries, agents, report_metadata=None):
     lines = [
         (
             f"Scope: {matchup_count} agents vs random | {game_count:,} games per "
-            f"matchup | {total_games:,} games total | mode: {mode}"
+            f"matchup | {total_games:,} games total"
         ),
         (
             "95% worst-case margin of error for each win rate: "

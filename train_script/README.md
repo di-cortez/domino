@@ -1,6 +1,6 @@
 # train_script
 
-Personal batch-training driver for the full pipeline described in
+Batch-training drivers for the full pipeline described in
 `training/README.md` and the top-level `README.md`:
 
 1. generate supervised examples from heuristic-vs-heuristic games, using the
@@ -17,10 +17,9 @@ Personal batch-training driver for the full pipeline described in
 4. run the **five agent-vs-random diagnostics** (`diagnostics.evaluate`) —
    evaluating the exact
    RL/SL checkpoints this run used, at the same BIG scale as the RL stage
-   (`run_pipeline.py` maps its `big` scale to `diagnostic_mode="complete"`
-   and scales `BASE_DIAGNOSTIC_GAMES=10000` by the scale factor; this script
-   mirrors that: `10,000 x 5 = 50,000` games/matchup, mode `complete`, by
-   default). Results are written to a **fresh subdirectory per run**,
+   (`run_pipeline.py` scales `BASE_DIAGNOSTIC_GAMES=10000` by the scale factor;
+   this script mirrors that: `10,000 x 5 = 50,000` games/matchup by default).
+   Results are written to a **fresh subdirectory per run**,
    `diagnostics/results/<rl-weights-basename>/`, named after the RL weights
    file this run produced or reused (e.g. `--rl-weights-file
    models/domino_rl_weights_critic_lr_0.0005.npz` writes to
@@ -37,13 +36,11 @@ default with factor `0.5` and patience `5`. Use
 `--skip-dataset`/`--skip-sl`/`--skip-rl`/`--skip-diagnostics` to reuse existing
 artifacts across batch runs that only sweep RL hyperparameters.
 
-## Convergence criteria (from the archived test reports)
+## Convergence criteria
 
-`references/explicacoes/relatorios/{teste_1,teste_2,teste_3,relatorio_1407}`
-document an earlier round of pipeline experiments that diagnosed why RL
-training looked stagnant and established how to actually tell: **point-in-time
-values are dominated by batch noise; judge convergence from the moving
-average, not the raw log line.** Those reports' validated conclusions:
+Earlier pipeline experiments established that point-in-time values are
+dominated by batch noise; judge convergence from the moving average, not a
+single raw log line. The retained operational conclusions are:
 
 - **SL**: stop on the validation curve, not a fixed epoch budget (early
   stopping), and decay the learning rate on a validation plateau instead of
@@ -56,15 +53,14 @@ average, not the raw log line.** Those reports' validated conclusions:
   win rate, not the point value, to judge a plateau. `training.self_play` now
   always logs `reward mean/std/min/max` and a `(avg/N: ...)` moving average
   next to both the value loss and the win rate; `--rl-moving-average-window`
-  controls `N` (default 10, matching the reports). `--rl-clip-grad-norm` and
+  controls `N` (default 10). `--rl-clip-grad-norm` and
   `--rl-value-coef` were flagged as needing CLI exposure for any serious
-  investigation of the value-loss plateau — both are now exposed.
+  investigation of a value-loss plateau — both are exposed.
   `--rl-normalize-advantages` (off by default, to not silently change
   training dynamics) standardizes the policy signal per batch, which the
-  reports found necessary to keep the value-loss magnitude comparable across
-  iterations. `--rl-seed` fixes randomness for reproducible side-by-side
-  comparisons between hyperparameter configurations, per the reports'
-  recommended sweep methodology.
+  keeps the value-loss magnitude comparable across iterations. `--rl-seed`
+  fixes randomness for reproducible side-by-side comparisons between
+  hyperparameter configurations.
 
 One historical fix did **not** carry forward as a flag: the old
 `SL_CHECKPOINT_EVERY == SL_EPOCHS` bug (which silenced all but one archived
@@ -173,7 +169,6 @@ training module.
 | `--sl-memory-reserve-mb` | SL | Host RAM kept free | `512` |
 | `--sl-gpu-memory-reserve-mb` | SL | Effective VRAM kept free | `512` |
 | `--sl-seed` | SL | Fix initialization and epoch permutations | unset |
-| `--diag-mode` | Diagnostics | Compatibility label; every value runs the same 5 agent-vs-random matchups | `complete` (BIG scale) |
 | `--diag-games` | Diagnostics | Games per evaluated matchup | `50000` (BIG scale: `10000 x 5`) |
 | `--diag-seed` | Diagnostics | Fix the RNG seed for the diagnostics games | unset |
 | `--diag-no-pair-plots` | Diagnostics | Skip per-matchup PNG plots (the aggregate PNG and PDF are still generated) | off (plots on) |
@@ -285,7 +280,7 @@ comparison table, CSV, and plots side by side instead of the next run
 overwriting the last one. Override the computed path directly with
 `--diag-output-dir` if needed.
 
-This was verified end-to-end with a tiny run (`--diag-mode fast --diag-games 3
+This was verified end-to-end with a tiny run (`--diag-games 3
 --diag-no-pair-plots --diag-seed 7`, `--rl-weights-file
 models/smoke_test_rl_weights.npz`) chained after a tiny RL stage with
 `--skip-dataset --skip-sl`: the diagnostics stage correctly evaluated the
@@ -336,12 +331,9 @@ axis therefore runs only with the critic on.
 Baselines and the learning-rate/gamma grid values come from
 `diagnostics/hyperparameter_sweep.py` (`BASELINE_LEARNING_RATE`,
 `BASELINE_GAMMA`, `BASELINE_VALUE_COEF`, `DEFAULT_LR_VALUES`,
-`DEFAULT_GAMMA_VALUES`). That module only exposes a single baseline value for
-games-per-iteration, not a sweep tuple, so its range comes from the
-historical sweep table in
-`references/explicacoes/relatorios/teste_1/plano_correcao.tex` instead:
-games-per-iteration in `{40, 80, 160}`. `value_coef` uses `{0.25, 0.5, 0.75}`;
-the `0.5` baseline is already covered by the critic-on grid.
+`DEFAULT_GAMMA_VALUES`). The established games-per-iteration comparison is
+`{40, 80, 160}`. `value_coef` uses `{0.25, 0.5, 0.75}`; the `0.5` baseline is
+already covered by the critic-on grid.
 
 Naming (models and diagnostics share one name per run):
 
@@ -374,19 +366,16 @@ on parsing the folder name.
 | `--results-dir` | Output directory for per-run diagnostics subdirectories | `diagnostics/results/rl_test` |
 | `--report-output-dir` | Where the final comparative table is written | `diagnostics/results/rl_sweep_table` |
 | `--skip-report` | Skip the final comparative-table stage | off |
-| `--jobs` | Compatibility flag; only `1` is accepted | `1` |
 | `--ram-limit-mb` | Physical-memory cap for the current training subprocess | 80% of detected RAM |
 | `--vram-limit-mb` | CuPy memory-pool cap for the current training subprocess | 80% of detected VRAM when device is not `cpu` |
 
-A fixed `--seed` (default `42`) is used for every sweep point, per the
-historical reports' recommendation to fix randomness when comparing
-hyperparameter configurations.
+A fixed `--seed` (default `42`) is used for every sweep point so randomness is
+held stable when comparing hyperparameter configurations.
 
 ### Sequential execution, interruption, and safe resume
 
-The shell driver runs exactly one sweep point at a time. `--jobs` is retained
-only for command compatibility and rejects every value except `1`. Parallelism
-is exclusively inside `training.self_play`, where `--rl-workers auto` performs
+The shell driver runs exactly one sweep point at a time. Parallelism is
+exclusively inside `training.self_play`, where `--rl-workers auto` performs
 the retained worker benchmark and applies the existing 20-worker and memory
 limits. This avoids multiplying outer sweep processes by inner rollout pools.
 Each RL point uses the compact presentation: retained worker-tuning messages,
@@ -556,3 +545,173 @@ checkpoint (a resume-probe that fails since it doesn't exist yet, and the
 diagnostics stage reading back the checkpoint it just trained), which is
 unrelated to the SL-weight redundancy this script fixes and happens
 identically in the shell-script version.
+
+## Controlled games-per-iteration sweep
+
+`run_rl_games_per_iteration_sweep.py` answers a narrower experimental
+question than the parameter sweep above: given a fixed training-game budget,
+which `games_per_iteration` range offers a useful quality/throughput tradeoff?
+Every point in a critic cohort starts from the same supervised checkpoint and
+uses the same learning rate, reward configuration, training opponent, seeds,
+and final diagnostics. For a point with GPI `B`, the driver enforces:
+
+```text
+iterations = total_training_games // B
+iterations * B == total_training_games
+```
+
+It refuses non-divisible budgets before the first game. This is not a
+comparison with literally everything equal: GPI, the number of network
+updates, and pool-refresh frequency per training game deliberately change.
+Those differences are the effect under study. The implementation remains the
+existing on-policy REINFORCE/optional actor-critic algorithm: one fresh batch,
+one update, then discard the batch. It adds no replay, offline buffer, PPO, or
+multi-epoch update.
+
+Install the XLSX-only dependency once (the rest of the project environment is
+unchanged):
+
+```bash
+python -m pip install -r train_script/requirements_gpi_sweep.txt
+```
+
+Use `--csv-only` to skip both the dependency check and workbook generation.
+The presets are:
+
+- `quick`: 38,400 training games, seed 42, 1,000 final games per opponent;
+- `standard`: 384,000 training games, seeds 42/43/44, 10,000 final games per
+  opponent;
+- `thorough`: 1,152,000 training games, seeds 42-46, 20,000 final games per
+  opponent.
+
+All use GPI values `40 80 160 320 640 960 1280` and ten evenly spaced
+checkpoint evaluations unless overridden. The main study defaults to critic
+off. `--critic-mode both` creates separate critic-off and critic-on cohorts;
+their results are never aggregated together.
+
+### Commands
+
+Inspect the full execution matrix and all game budgets without creating any
+output:
+
+```bash
+python train_script/run_rl_games_per_iteration_sweep.py \
+    --preset standard --dry-run
+```
+
+Quick critic-off run:
+
+```bash
+python train_script/run_rl_games_per_iteration_sweep.py \
+    --preset quick \
+    --critic-mode off \
+    --device cpu \
+    --rl-workers auto \
+    --diag-no-plots \
+    --run-id gpi_quick_off
+```
+
+Standard and two-cohort runs:
+
+```bash
+python train_script/run_rl_games_per_iteration_sweep.py \
+    --preset standard \
+    --critic-mode off \
+    --sl-weights-path models/domino_sl_weights.npz \
+    --device auto \
+    --rl-workers auto \
+    --diagnostic-workers 8 \
+    --run-id gpi_standard_off
+
+python train_script/run_rl_games_per_iteration_sweep.py \
+    --preset standard --critic-mode both --run-id gpi_standard_both
+```
+
+Resume the exact saved plan/configuration or rebuild its report without
+training or diagnostics:
+
+```bash
+python train_script/run_rl_games_per_iteration_sweep.py \
+    --preset standard --critic-mode off --run-id gpi_standard_off --resume
+
+python train_script/run_rl_games_per_iteration_sweep.py \
+    --run-id gpi_standard_off --report-only
+```
+
+A custom exact budget and CSV-only run are also supported:
+
+```bash
+python train_script/run_rl_games_per_iteration_sweep.py \
+    --total-training-games 384000 \
+    --games-per-iteration-values 40 80 160 320 640 960 1280 \
+    --seeds 42 43 44 45 46 \
+    --critic-mode on \
+    --diagnostic-games 20000 \
+    --run-id gpi_custom_critic
+
+python train_script/run_rl_games_per_iteration_sweep.py \
+    --preset quick --csv-only --run-id gpi_csv_only
+```
+
+### Execution, artifacts, and safe resume
+
+The complete plan is saved before training. GPI order is deterministically
+permuted for each seed to reduce warm-cache/order bias; external points remain
+strictly sequential, while each point may use internal rollout workers. The
+SL NPZ is loaded once into host arrays, its SHA-256 is recorded, and every new
+point instantiates a fresh network from those same arrays. An RL checkpoint
+from another GPI is never used as initialization.
+
+Default output roots are:
+
+```text
+models/rl_gpi_sweep/<run-id>/<run-key>/
+diagnostics/results/rl_gpi_sweep/<run-id>/
+diagnostics/results/rl_gpi_sweep/<run-id>/report/
+```
+
+The experiment directory contains `experiment_manifest.json`, `run_plan.csv`,
+`sweep.log`, `events.jsonl`, and one `runs/<run-key>/` directory per point.
+Each point retains its canonical configuration/fingerprint, per-iteration
+JSONL and CSV metrics, complete training summary, final-model hash and resume
+state, plus full `vs_heuristic` and `vs_random` diagnostics. Training metrics
+include cumulative games, decision samples, reward distribution, entropy,
+gradient norm/clipping, value loss when enabled, worker/pool state, rollout
+and update times, and checkpoint evaluation results.
+
+Resume accepts only the newest valid numbered `weights + .resume.npz` pair,
+validates the saved computation-affecting configuration and SL hash, restores
+the opponent pool/worker count, and truncates metrics beyond that checkpoint.
+A lone weight file is ignored. A completed model skips training only after its
+hash/resume state validate; each final diagnostic is independently validated
+and rerun if missing or incompatible. A configuration difference is printed
+and refused instead of being silently accepted.
+
+### Reports and interpretation
+
+`diagnostics.rl_gpi_sweep_report` can rebuild every report artifact from disk:
+
+```bash
+python -m diagnostics.rl_gpi_sweep_report \
+    diagnostics/results/rl_gpi_sweep/gpi_standard_off
+```
+
+The report directory contains run-level, seed-aggregate, ranking, autotuner,
+and paired-delta CSVs; `gpi_sweep_report.json`; comparative PNGs; and
+`gpi_sweep_results.xlsx`. Workbook sheets are `Runs`, `Aggregate`, `Ranking`,
+`Autotune`, `Configuration`, `Data_dictionary`, and `Pairwise_deltas`.
+Incomplete/failed points keep empty metrics and explicit status rather than
+becoming zeros.
+
+The report presents four distinct views per critic cohort: best mean win rate
+against the heuristic, best median end-to-end throughput, the
+quality/throughput Pareto frontier, and an operational one-standard-error
+rule. That rule chooses the fastest point whose mean heuristic win rate is no
+lower than the best mean minus the best point's seed-level standard error. It
+is an explicit heuristic, not a significance test, and is marked exploratory
+with fewer than three seeds. Score rate (win + half a draw) is reported as a
+cross-check. Training-batch win rate is retained as an optimization trace, not
+used as final strength: self-play is a moving environment. Decisions within a
+game are correlated and GPI changes the number of real gradient samples, so
+`total_decision_samples` and decisions/game remain visible alongside the fixed
+game budget.

@@ -50,10 +50,6 @@ def resolve_device(device="auto"):
     return host_np, "cpu"
 
 
-# Compatibility alias retained for code that imported the former module-wide
-# backend. New code must use ``network.xp`` instead.
-np = _cupy if GPU_ENABLED else host_np
-
 if GPU_ENABLED:
     # Cap this process's CuPy pool when concurrent sweep jobs share one GPU.
     _vram_limit_mb = os.environ.get("DOMINO_VRAM_LIMIT_MB")
@@ -244,9 +240,6 @@ class SupervisedNeuralNetwork:
         self.cache = {}
         if self.device == "gpu":
             self.xp.get_default_memory_pool().free_all_blocks()
-
-    # Backward-compatible name used by older callers.
-    _release_gpu_cache = release_disposable_cache
 
     def _run_array_training_epoch(self, x_train, y_train, batch_size):
         """Train one complete shuffled epoch from host or backend arrays."""

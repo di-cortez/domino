@@ -8,7 +8,8 @@ Batch-training drivers for the full pipeline described in
    dataset-worker tuning;
 2. train the supervised neural policy with its default retained batch tuner and
    plateau scheduler; the wrapper exposes device, memory, batch, seed, decay,
-   early-stopping, and weight-decay controls;
+   training-loss saturation, validation early-stopping, and weight-decay
+   controls;
 3. refine that policy with a **BIG-scale** self-play reinforcement-learning
    run — 5x the default iteration count (1,000 x 5 = 5,000 iterations),
    matching the `big` scale in `run_pipeline.py`'s `SCALE_FACTORS`. This
@@ -31,8 +32,8 @@ Stage 1 (dataset generation) is left unparameterized by this wrapper, so it
 uses the standalone command's 30,000-game default and automatic worker tuner.
 The Python module itself accepts `--games`, `--output`, `--workers`, `--seed`,
 and memory-safety options when called directly. Stage 2 (supervised training)
-forwards the controls below to `training.training_loop`; LR decay is enabled by
-default with factor `0.5` and patience `5`. Use
+forwards the controls below to `training.training_loop`; training-loss plateau
+stopping and validation-based LR decay are enabled by default. Use
 `--skip-dataset`/`--skip-sl`/`--skip-rl`/`--skip-diagnostics` to reuse existing
 artifacts across batch runs that only sweep RL hyperparameters.
 
@@ -42,11 +43,12 @@ Earlier pipeline experiments established that point-in-time values are
 dominated by batch noise; judge convergence from the moving average, not a
 single raw log line. The retained operational conclusions are:
 
-- **SL**: stop on the validation curve, not a fixed epoch budget (early
-  stopping), and decay the learning rate on a validation plateau instead of
-  holding it fixed. LR decay and early stopping have independent counters. The
-  script forwards `--sl-early-stopping-patience`, `--sl-lr-decay-factor`,
-  `--sl-lr-decay-patience`, `--sl-no-lr-decay`, and `--sl-weight-decay`.
+- **SL**: treat the epoch count as a maximum budget. The default training-loss
+  detector requires four consecutive low-improvement median blocks of 25
+  epochs, begins only after epoch 100 and after batch tuning, and resets on a
+  meaningful improvement. Validation-based LR decay and optional validation
+  early stopping retain independent counters. The wrapper forwards all
+  training-loss plateau, validation scheduler, and regularization controls.
 - **RL**: log the return standard deviation next to the mean (a shrinking
   value loss is ambiguous without it — it can mean either learning or just a
   low-variance batch), and use a trailing moving average of value loss and
@@ -162,6 +164,11 @@ training module.
 | `--sl-lr-decay-factor` | SL | LR multiplier after a validation plateau | `0.5` |
 | `--sl-lr-decay-patience` | SL | Consecutive failed validation checks before each LR reduction | `5` |
 | `--sl-no-lr-decay` | SL | Disable the default plateau scheduler | off |
+| `--sl-no-training-plateau-stop` | SL | Disable automatic training-loss saturation stopping | off |
+| `--sl-training-plateau-window` | SL | Epochs per non-overlapping median-loss block | `25` |
+| `--sl-training-plateau-patience` | SL | Consecutive saturated blocks required to stop | `4` |
+| `--sl-training-plateau-min-epochs` | SL | Minimum total epochs before stopping is allowed | `100` |
+| `--sl-training-plateau-min-relative-improvement` | SL | Improvement threshold below which a block counts as saturated | `0.001` |
 | `--sl-weight-decay` | SL | L2 penalty on the weight matrices | unset (off) |
 | `--sl-device` | SL | `auto`, forced `cpu`, or required `gpu` | `auto` |
 | `--sl-batch-size` | SL | Fixed mini-batch size; bypasses tuning | unset |
@@ -256,6 +263,12 @@ keeps per-epoch/checkpoint details suppressed, but prints the concise retained
 batch tests (median time, total time, throughput, gain, decision, and selected
 size) around its normal progress bar and one-line SL summary.
 
+After tuning selects a stable batch, the default saturation detector starts
+collecting independent loss blocks. It never uses the changing-batch tuning
+epochs as evidence and records the final stop reason. Use
+`--sl-no-training-plateau-stop` when a controlled experiment requires the full
+fixed epoch budget.
+
 ### Diagnostics stage and per-run output directories
 
 Step 4 wraps `python -m diagnostics.evaluate`, the same five agent-vs-random comparisons
@@ -322,6 +335,11 @@ non-baseline value coefficients with the critic on (20 more runs), for **92
 training+diagnostic runs** by default. Every point is diagnosed against
 `random`, and the final comparative report groups the 40/80/160 game-batch
 variants into columns.
+
+Each new point explicitly starts from `--sl-weights-path`, even if an older RL
+file already exists for that point. `--resume` is the only path that continues
+RL history: it requires a compatible numbered checkpoint plus its paired
+resume state.
 
 `value_coef` only affects training inside
 `PolicyNetwork.backward_policy_gradient`'s `use_value_head` branch, so it has
@@ -521,6 +539,11 @@ parameter (also threaded through `agents/rl_nn.py::PolicyNetwork.load_from_sl`'s
 subprocess for each. `sl_weights_data` defaults to `None` everywhere it was
 added, so every existing caller (the `.sh` script, `run_pipeline.py`, direct
 CLI use) is unaffected.
+
+Like the shell version, every non-resumed point starts fresh from that shared
+SL checkpoint and ignores an older point checkpoint. With `--resume`, a point
+whose final output already exists is reused; a missing point starts fresh from
+SL.
 
 This does not replace the shell script -- both exist, produce interchangeable
 output (the same `diagnostics/results/domino_rl*/sweep_run.json` schema, so

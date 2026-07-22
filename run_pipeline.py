@@ -205,6 +205,13 @@ def _run_supervised_training(config, args):
             early_stopping_patience=args.early_stopping,
             lr_decay_factor=args.lr_decay,
             lr_decay_patience=args.lr_decay_patience,
+            training_plateau_enabled=not args.disable_training_plateau,
+            training_plateau_window=args.sl_training_plateau_window,
+            training_plateau_patience=args.sl_training_plateau_patience,
+            training_plateau_min_epochs=args.sl_training_plateau_min_epochs,
+            training_plateau_min_relative_improvement=(
+                args.sl_training_plateau_min_relative_improvement
+            ),
             device=args.sl_device,
             autotune_batch_size=not args.sl_no_batch_autotune,
             memory_reserve_mb=args.sl_memory_reserve_mb,
@@ -214,7 +221,8 @@ def _run_supervised_training(config, args):
         lambda summary: (
             f"{summary['epochs']}/{summary['requested_epochs']} epochs, "
             f"best validation loss {summary['best_validation_loss']:.4f}, "
-            f"{summary['total_examples']} examples"
+            f"{summary['total_examples']} examples, "
+            f"stop={summary.get('stopping_reason', 'epoch_limit').replace('_', ' ')}"
         ),
         timing_stage="supervised_training",
     )
@@ -247,6 +255,7 @@ def _run_rl_training(config, args):
             evaluation_games=args.evaluation_games,
             sl_weights_path=args.sl_weights_path,
             rl_weights_path=args.rl_weights_path,
+            fresh_from_sl=args.fresh_from_sl,
             quiet=True,
             progress_callback=progress,
             use_value_head=args.value_head,
@@ -371,7 +380,7 @@ def parse_args(argv=None):
     training_loop = _silent_import("training.training_loop")
     training_loop.add_optional_training_arguments(parser)
     self_play = importlib.import_module("training.self_play")
-    self_play.add_optional_rl_arguments(parser)
+    self_play.add_optional_rl_arguments(parser, fresh_from_sl_default=True)
     evaluate = _silent_import("diagnostics.evaluate")
     diagnostics = parser.add_argument_group("diagnostic multiprocessing controls")
     diagnostics.add_argument(
@@ -414,12 +423,20 @@ def main():
         "Pipeline scale "
         f"{config.scale_name} ({config.scale_factor:g}x): "
         f"{config.dataset_games} dataset games, "
-        f"{config.supervised_epochs} supervised epochs, "
+        f"up to {config.supervised_epochs} supervised epochs, "
         f"{config.rl_iterations} RL iterations, "
         f"diagnostics with {config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
     print(pipeline_compute_report(args.device, args.sl_device))
+    if args.fresh_from_sl:
+        print(
+            "RL initialization: fresh from the supervised checkpoint produced "
+            "by this pipeline run; an existing RL output is ignored until the "
+            "new model atomically replaces it."
+        )
+    else:
+        print("RL initialization: continue from the existing RL checkpoint when present.")
     if args.sl_batch_size is not None:
         print(f"Supervised batch size: fixed at {args.sl_batch_size:,}.")
     elif args.sl_no_batch_autotune:
@@ -438,6 +455,17 @@ def main():
             "Every supervised batch test updates the live model and counts "
             "toward the requested epoch total."
         )
+    if not args.disable_training_plateau:
+        print(
+            "Supervised training-loss plateau stop: enabled after batch "
+            f"tuning and at least {args.sl_training_plateau_min_epochs} "
+            f"epochs; {args.sl_training_plateau_patience} consecutive "
+            f"{args.sl_training_plateau_window}-epoch median blocks below "
+            f"{args.sl_training_plateau_min_relative_improvement:.3%} "
+            "relative improvement."
+        )
+    else:
+        print("Supervised training-loss plateau stop: disabled.")
     if args.dataset_workers == "auto":
         print(
             "Dataset workers: automatic retained benchmark "
@@ -502,6 +530,8 @@ def main():
         print(f"Total elapsed time: {format_duration(elapsed_time)}")
         print(f"Dataset: {dataset_summary['output_file']}")
         print(f"Supervised weights: {supervised_summary['weights_file']}")
+        if supervised_summary.get("loss_plot_file"):
+            print(f"Supervised loss graph: {supervised_summary['loss_plot_file']}")
         print(f"RL weights: {rl_summary['rl_weights_path']}")
         worker_text = ", ".join(
             f"{matchup}={worker_count}"

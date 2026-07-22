@@ -426,16 +426,20 @@ def _load_initial_network(
     use_value_head=False,
     device=DEFAULT_DEVICE,
     sl_weights_data=None,
+    fresh_from_sl=False,
 ):
-    """Load a compatible RL checkpoint or initialize from compatible SL weights.
+    """Load an RL checkpoint or initialize from compatible SL weights.
 
     ``sl_weights_data`` accepts a pre-loaded mapping of SL weight arrays (see
     ``PolicyNetwork.load_from_sl``), so a caller warm-starting many runs from
     the same SL checkpoint (e.g. a hyperparameter sweep) can read it from
     disk once and reuse it, instead of every run re-reading
     ``sl_weights_path``. Unused when resuming from an existing RL checkpoint.
+    ``fresh_from_sl=True`` deliberately ignores ``rl_weights_path`` as an
+    initialization source while leaving that file intact until the completed
+    new model atomically replaces it.
     """
-    if rl_weights_path is not None:
+    if rl_weights_path is not None and not fresh_from_sl:
         try:
             network = PolicyNetwork.load(
                 rl_weights_path,
@@ -751,6 +755,7 @@ def train(
     resume_weights_path=None,
     resume_state_file=None,
     numbered_checkpoints=False,
+    fresh_from_sl=False,
 ):
     """Train with direct REINFORCE or an optional learned value baseline.
 
@@ -801,6 +806,10 @@ def train(
     back through ``resume_weights_path``/``resume_state_file`` with its absolute
     ``start_iteration`` to continue safely without replaying earlier updates.
 
+    ``fresh_from_sl=True`` starts the policy from ``sl_weights_path`` even if
+    ``rl_weights_path`` already exists. The old RL file is not deleted before
+    training; it is atomically replaced only after the new run succeeds.
+
     ``metrics_callback``, when provided, receives one JSON-serializable mapping
     after every completed iteration.  It is deliberately independent from the
     lightweight ``progress_callback`` so long-running experiment drivers can
@@ -832,6 +841,8 @@ def train(
         raise ValueError("A positive start_iteration requires a complete resume pair")
     if start_iteration == 0 and has_resume_weights:
         raise ValueError("A resume pair requires a positive start_iteration")
+    if fresh_from_sl and has_resume_weights:
+        raise ValueError("fresh_from_sl cannot be combined with a resume pair")
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
     if reward_schema not in REWARD_SCHEMAS:
@@ -906,6 +917,14 @@ def train(
         if resume_metadata is not None
         else (None if numbered_checkpoints else rl_weights_path)
     )
+    if resume_metadata is not None:
+        initialization_source = "numbered_rl_resume"
+    elif fresh_from_sl or initial_rl_weights_path is None:
+        initialization_source = "supervised"
+    elif Path(initial_rl_weights_path).exists():
+        initialization_source = "existing_rl"
+    else:
+        initialization_source = "supervised"
     network = _load_initial_network(
         learning_rate,
         sl_weights_path,
@@ -914,6 +933,7 @@ def train(
         use_value_head=use_value_head,
         device=device,
         sl_weights_data=sl_weights_data,
+        fresh_from_sl=fresh_from_sl,
     )
     xp = network.xp
     policy_bytes = 0
@@ -1257,7 +1277,7 @@ def train(
                     final_weights_path = checkpoint_weights_path
                     last_saved_iteration = iteration
                 else:
-                    network.save(rl_weights_path)
+                    _atomic_network_save(network, rl_weights_path)
                     checkpoint_weights_path = Path(rl_weights_path)
                 runner.sync_current(network)
                 evaluation_seed = game_seed(
@@ -1398,7 +1418,7 @@ def train(
         }
     parallel_summary["final_workers"] = final_runtime_workers
     if not numbered_checkpoints:
-        network.save(rl_weights_path)
+        _atomic_network_save(network, rl_weights_path)
         final_weights_path = Path(rl_weights_path)
     elapsed_time = time.time() - start_time
     if not quiet:
@@ -1429,6 +1449,8 @@ def train(
         "autotune": autotune_summary,
         "parallel": parallel_summary,
         "rl_weights_path": str(final_weights_path),
+        "initialization_source": initialization_source,
+        "fresh_from_sl": bool(fresh_from_sl),
         "numbered_checkpoints": bool(numbered_checkpoints),
         "total_training_games": int(iterations * games_per_iteration),
         "total_decision_samples": int(total_decision_samples),
@@ -1450,7 +1472,7 @@ def train(
     }
 
 
-def add_optional_rl_arguments(parser):
+def add_optional_rl_arguments(parser, *, fresh_from_sl_default=False):
     """Add self-play hyperparameter and rollout-resource flags to ``parser``."""
     group = parser.add_argument_group("optional reinforcement-learning controls")
     group.add_argument("--iterations", type=int, default=1000, help="Training iterations.")
@@ -1472,6 +1494,23 @@ def add_optional_rl_arguments(parser):
     group.add_argument("--evaluation-games", type=int, default=200)
     group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
     group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
+    initialization = group.add_mutually_exclusive_group()
+    initialization.add_argument(
+        "--fresh-from-sl",
+        dest="fresh_from_sl",
+        action="store_true",
+        default=fresh_from_sl_default,
+        help=(
+            "Initialize the policy from --sl-weights-path even when the RL "
+            "output already exists; replace that output only after success."
+        ),
+    )
+    initialization.add_argument(
+        "--continue-existing-rl",
+        dest="fresh_from_sl",
+        action="store_false",
+        help="Continue from --rl-weights-path when it exists.",
+    )
     group.add_argument(
         "--numbered-checkpoints",
         action="store_true",
@@ -1618,6 +1657,7 @@ def _training_kwargs_from_args(args):
         "evaluation_games": args.evaluation_games,
         "sl_weights_path": args.sl_weights_path,
         "rl_weights_path": args.rl_weights_path,
+        "fresh_from_sl": args.fresh_from_sl,
         "use_value_head": args.value_head,
         "value_coef": args.value_coef,
         "gamma": args.gamma,

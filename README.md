@@ -44,6 +44,15 @@ Run the complete dataset -> supervised learning -> RL -> diagnostics pipeline:
 python run_pipeline.py
 ```
 
+By default the RL stage ignores an older `models/domino_rl_weights.npz` and
+starts from the supervised checkpoint produced by that same pipeline run. Use
+`python run_pipeline.py --continue-existing-rl` only when you intentionally
+want to continue the existing RL checkpoint.
+
+Supervised epoch counts are maximum budgets. Training stops earlier by default
+after a conservative repeated-block check confirms that training loss has
+saturated; use `--sl-no-training-plateau-stop` for fixed-epoch experiments.
+
 The optional scale is `small`, `default`, `big`, or `huge`:
 
 ```bash
@@ -57,8 +66,13 @@ Run stages directly when iterating on one component:
 python -m training.dataset_generator --workers auto --seed 123
 python -m training.training_loop --sl-device auto --sl-seed 123
 python -m training.self_play --rl-workers auto --seed 123
+python -m training.self_play --fresh-from-sl --rl-workers auto --seed 123
 python -m diagnostics.evaluate --games 10000 --seed 123
 ```
+
+The standalone self-play command preserves its historical default of
+continuing a compatible RL checkpoint when one exists; `--fresh-from-sl`
+forces a new RL run from the supervised checkpoint.
 
 The long RL parameter sweep and the controlled games-per-iteration study have
 safe resume and reporting commands documented in
@@ -115,6 +129,7 @@ locations are:
 | `dataset/supervised_dataset.jsonl` | Heuristic-labelled real decisions. |
 | `dataset/supervised_dataset_encoded.npz` | Encoded supervised cache. |
 | `models/domino_sl_weights.npz` | Supervised policy checkpoint. |
+| `models/domino_sl_loss.png` | Training and validation loss curves from the latest supervised run. |
 | `models/domino_rl_weights.npz` | Self-play policy checkpoint. |
 | `models/rl_test/` | Numbered parameter-sweep checkpoints and resume state. |
 | `models/rl_gpi_sweep/` | Games-per-iteration sweep checkpoints and manifests. |

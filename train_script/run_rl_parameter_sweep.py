@@ -14,6 +14,7 @@ axis of 10 values) and the same critic-off-then-on structure, but as a
 single persistent process: the SL checkpoint is read from disk exactly once
 into memory (``_load_sl_weights_once``) and reused for every one of the 72
 default sweep points via ``training.self_play.train(..., sl_weights_data=...)``,
+explicitly starts every non-resumed point from those supervised weights,
 and every point calls ``training.self_play.train()`` and
 ``diagnostics.pairwise.run_pairwise()`` directly instead of spawning a
 subprocess. The final comparative-table stage
@@ -172,6 +173,7 @@ def run_sweep_point(
             sl_weights_path=str(sl_weights_path),
             sl_weights_data=sl_weights_data,
             rl_weights_path=str(model_path),
+            fresh_from_sl=True,
             seed=seed,
             device=device,
             workers=rl_workers,

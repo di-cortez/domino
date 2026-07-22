@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SWEEP_SCRIPT = ROOT / "train_script" / "run_rl_parameter_sweep.sh"
+PYTHON_SWEEP = ROOT / "train_script" / "run_rl_parameter_sweep.py"
+HYPERPARAMETER_SWEEP = ROOT / "diagnostics" / "hyperparameter_sweep.py"
 
 
 class RLSweepShellTests(unittest.TestCase):
@@ -48,6 +50,15 @@ class RLSweepShellTests(unittest.TestCase):
             "a CPU/GPU selection change cannot",
             run_point[completed_check - 800:completed_check],
         )
+
+    def test_parameter_sweeps_explicitly_start_new_points_from_supervised(self):
+        shell_source = SWEEP_SCRIPT.read_text(encoding="utf-8")
+        python_source = PYTHON_SWEEP.read_text(encoding="utf-8")
+        diagnostic_source = HYPERPARAMETER_SWEEP.read_text(encoding="utf-8")
+
+        self.assertIn("FRESH_START_ARGS=(--fresh-from-sl)", shell_source)
+        self.assertIn("fresh_from_sl=True", python_source)
+        self.assertIn("fresh_from_sl=True", diagnostic_source)
 
 
 if __name__ == "__main__":

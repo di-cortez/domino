@@ -19,7 +19,7 @@ python run_pipeline.py huge
 The default runner uses the same workload as the individual commands. `small`
 uses one fifth of the default counts, `big` uses five times the default counts,
 and `huge` uses twenty times the default counts. The scaled counts apply to
-dataset games, supervised epochs, RL iterations, and diagnostic games per
+dataset games, maximum supervised epochs, RL iterations, and diagnostic games per
 matchup. RL games per iteration stay at 40 so the scale remains linear.
 The default dataset workload is 10,000 heuristic-vs-heuristic games.
 Diagnostic counts are explicit per matchup, and all scales evaluate the same
@@ -39,7 +39,7 @@ diagnostic games in total.
 |---|---|
 | `dataset_generator.py` | Coordinates retained worker tuning, bounded SQLite aggregation, and atomic ordered JSONL output. |
 | `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
-| `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz`. |
+| `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
 | `supervised_runtime.py` | Implements CPU/GPU batch candidates, synchronized retained timing, GPU residency probes/windows, and supervised memory telemetry. |
 | `self_play.py` | Loads the supervised policy or an existing RL checkpoint, orchestrates parallel rollouts, and applies parent-only policy updates. |
 | `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed games across memory fallback. |
@@ -144,8 +144,21 @@ The loop:
 - keeps the complete dataset in GPU memory when safe, or rotates one reusable
   GPU window through a global per-epoch permutation when it is not;
 - keeps the best validation checkpoint in memory;
+- stops automatically after conservative repeated blocks confirm that
+  training loss has saturated;
 - keeps only the 10 most recent archival checkpoints;
-- saves `models/domino_sl_weights.npz`.
+- saves `models/domino_sl_weights.npz`;
+- writes `models/domino_sl_loss.png`, with one training-loss value per epoch
+  and the validation-loss values already computed at validation intervals.
+
+The loss graph uses only metrics collected by the current supervised run; it
+does not run extra games or include win-rate data. A custom weights path such
+as `models/experiment.npz` produces the sibling
+`models/experiment_loss.png`. The PNG is replaced atomically after it is
+rendered, so a plotting failure does not destroy the previous graph. Its lower
+limit sits slightly below the terminal training loss and its upper limit is
+the maximum observed loss, making the learned change visible instead of
+spending most of the plot on the unused interval down to zero.
 
 CPU batch candidates are powers of two from 1,024 through 1,048,576; GPU
 candidates start at 2,048. Each candidate runs 10 complete epochs on the same
@@ -203,13 +216,24 @@ All three retain benchmark work and enforce the same hard limit of 20 workers.
 
 ### Supervised scheduler and controls
 
-The normal command starts at learning rate `0.005` and enables plateau decay by
-default. Validation remains every 10 epochs. The first result establishes the
-global best; after five consecutive checks without strict improvement, the LR
-is multiplied by `0.5` and only the LR-specific failure counter resets. Another
-five failures are required for another reduction. Optional early stopping has
-its own counter; its patience should normally exceed LR patience so a reduced
-rate has time to help.
+The normal command starts at learning rate `0.005` and treats the requested
+epoch count as a maximum. Automatic training-loss stopping is enabled by
+default. After retained batch tuning finishes, it compares medians of
+non-overlapping 25-epoch blocks. A block counts as saturated when its relative
+improvement over the previous block is below `0.001` (0.1%). The run stops only
+after four consecutive saturated blocks and never before epoch 100. A genuine
+improvement resets the counter, and no autotuning epoch contributes plateau
+evidence, so a batch-size transition cannot cause an early stop.
+
+Validation remains every 10 epochs, and validation-based LR decay is also on
+by default. The first validation result establishes the global best; after
+five consecutive checks without strict improvement, the LR is multiplied by
+`0.5` and only the LR-specific failure counter resets. Another five failures
+are required for another reduction. Optional validation early stopping has its
+own counter; its patience should normally exceed LR patience so a reduced rate
+has time to help. Whichever enabled stopping rule triggers first ends the run,
+and the summary records `training loss plateau`, `validation loss plateau`, or
+`epoch limit`.
 
 Enable any control independently by adding its flag:
 
@@ -218,10 +242,11 @@ python -m training.training_loop --weight-decay
 python -m training.training_loop --early-stopping
 python -m training.training_loop --lr-decay 0.7 --lr-decay-patience 8
 python -m training.training_loop --no-lr-decay
+python -m training.training_loop --sl-no-training-plateau-stop
 python -m training.training_loop --sl-device cpu --sl-seed 123
 ```
 
-Passing a flag without a value uses these defaults:
+The supervised controls use these defaults:
 
 | Flag | Behavior | Default |
 |---|---|---:|
@@ -230,6 +255,11 @@ Passing a flag without a value uses these defaults:
 | `--lr-decay [FACTOR]` | Multiplies LR after the configured consecutive failed checks | `0.5` (on) |
 | `--lr-decay-patience N` | Consecutive failed validation checks before each reduction | `5` |
 | `--no-lr-decay` | Disables plateau scheduling for controlled comparisons | off |
+| `--sl-no-training-plateau-stop` | Disables automatic training-loss saturation stopping | off |
+| `--sl-training-plateau-window N` | Epochs in each non-overlapping median-loss block | `25` |
+| `--sl-training-plateau-patience N` | Consecutive saturated blocks required to stop | `4` |
+| `--sl-training-plateau-min-epochs N` | Minimum total epochs before this stop is allowed | `100` |
+| `--sl-training-plateau-min-relative-improvement F` | Block improvement below this fraction counts as saturated | `0.001` |
 | `--sl-device` / standalone `--device` | `auto`, forced `cpu`, or required `gpu` | `auto` |
 | `--sl-batch-size N` | Fixed safe batch; bypasses tuning | unset |
 | `--sl-no-batch-autotune` | Uses 1,024 on CPU or 2,048 on GPU | off |
@@ -267,6 +297,7 @@ python -m training.self_play
 python -m training.self_play --compact
 python -m training.self_play --rl-workers auto --seed 123
 python -m training.self_play --rl-workers 4 --device cpu
+python -m training.self_play --fresh-from-sl
 ```
 
 Default behavior:
@@ -276,6 +307,16 @@ Default behavior:
 - train against a pool of frozen snapshots of the current policy;
 - periodically evaluate deterministic RL play against `StrategicAgent`;
 - save `models/domino_rl_weights.npz`.
+
+That compatibility-first policy is the default for the standalone module.
+Pass `--fresh-from-sl` to ignore an older RL checkpoint and start from the SL
+weights, or `--continue-existing-rl` to state the historical behavior
+explicitly. The main `python run_pipeline.py` command reverses the default:
+its RL stage starts from the supervised checkpoint trained in that same run;
+`python run_pipeline.py --continue-existing-rl` opts back into continuation.
+When starting fresh, the old RL file is ignored but kept intact until the new
+checkpoint is atomically saved, so an interrupted run does not erase a usable
+model.
 
 The learner uses `RLAgent(..., mode="training")`: it samples from the masked
 policy and stores trajectory steps. Frozen pool opponents use
@@ -399,6 +440,7 @@ by default, without moving gradient updates out of the parent process:
 
 | Flag | Meaning | Default |
 |---|---|---:|
+| `--fresh-from-sl` / `--continue-existing-rl` | Force initialization from SL or allow a compatible existing RL checkpoint | continue existing RL (standalone); fresh from SL in `run_pipeline.py` |
 | `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
 | `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/tie/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
 | `--clip-grad-norm` | Gradient-norm clipping threshold for the policy-gradient update | `5.0` |

@@ -95,6 +95,11 @@ SL_EARLY_STOPPING_PATIENCE=""
 SL_LR_DECAY_FACTOR=0.5
 SL_LR_DECAY_PATIENCE=5
 SL_NO_LR_DECAY=0
+SL_TRAINING_PLATEAU_STOP=1
+SL_TRAINING_PLATEAU_WINDOW=25
+SL_TRAINING_PLATEAU_PATIENCE=4
+SL_TRAINING_PLATEAU_MIN_EPOCHS=100
+SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT=0.001
 SL_WEIGHT_DECAY=""
 SL_DEVICE="auto"
 SL_BATCH_SIZE=""
@@ -130,7 +135,8 @@ Usage: $(basename "$0") [options]
 Dataset generation runs with no extra flags (see training/README.md):
 dataset -> dataset/supervised_dataset.jsonl (10,000 games). Supervised
 training runs with no extra flags by default too (-> models/domino_sl_weights.npz,
-1,000 epochs), unless one of the SL convergence flags below is passed.
+up to 2,000 epochs with automatic training-loss plateau stopping), unless one
+of the SL convergence flags below is passed.
 
 Self-play reinforcement learning (all forwarded to training.self_play):
   --rl-weights-file PATH       Output RL weights path (default: $RL_WEIGHTS_FILE)
@@ -169,6 +175,11 @@ SL training controls:
   --sl-lr-decay-factor F          LR multiplier after a validation plateau (default: $SL_LR_DECAY_FACTOR)
   --sl-lr-decay-patience N        Failed validation checks before LR decay (default: $SL_LR_DECAY_PATIENCE)
   --sl-no-lr-decay                Disable the default supervised LR schedule
+  --sl-no-training-plateau-stop   Disable automatic training-loss saturation stopping
+  --sl-training-plateau-window N  Epochs per non-overlapping loss block (default: $SL_TRAINING_PLATEAU_WINDOW)
+  --sl-training-plateau-patience N  Consecutive saturated blocks before stopping (default: $SL_TRAINING_PLATEAU_PATIENCE)
+  --sl-training-plateau-min-epochs N  Minimum total epochs before stopping (default: $SL_TRAINING_PLATEAU_MIN_EPOCHS)
+  --sl-training-plateau-min-relative-improvement F  Improvement threshold (default: $SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT)
   --sl-weight-decay F              L2 penalty on the weight matrices
   --sl-device {auto,cpu,gpu}       Supervised array backend (default: $SL_DEVICE)
   --sl-batch-size N                Fixed mini-batch size; disables autotuning
@@ -241,6 +252,11 @@ while [[ $# -gt 0 ]]; do
         --sl-lr-decay-factor) SL_LR_DECAY_FACTOR="$2"; shift 2 ;;
         --sl-lr-decay-patience) SL_LR_DECAY_PATIENCE="$2"; shift 2 ;;
         --sl-no-lr-decay) SL_NO_LR_DECAY=1; shift ;;
+        --sl-no-training-plateau-stop) SL_TRAINING_PLATEAU_STOP=0; shift ;;
+        --sl-training-plateau-window) SL_TRAINING_PLATEAU_WINDOW="$2"; shift 2 ;;
+        --sl-training-plateau-patience) SL_TRAINING_PLATEAU_PATIENCE="$2"; shift 2 ;;
+        --sl-training-plateau-min-epochs) SL_TRAINING_PLATEAU_MIN_EPOCHS="$2"; shift 2 ;;
+        --sl-training-plateau-min-relative-improvement) SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT="$2"; shift 2 ;;
         --sl-weight-decay) SL_WEIGHT_DECAY="$2"; shift 2 ;;
         --sl-device) SL_DEVICE="$2"; shift 2 ;;
         --sl-batch-size) SL_BATCH_SIZE="$2"; shift 2 ;;
@@ -315,6 +331,10 @@ else
         --sl-device "$SL_DEVICE"
         --sl-memory-reserve-mb "$SL_MEMORY_RESERVE_MB"
         --sl-gpu-memory-reserve-mb "$SL_GPU_MEMORY_RESERVE_MB"
+        --sl-training-plateau-window "$SL_TRAINING_PLATEAU_WINDOW"
+        --sl-training-plateau-patience "$SL_TRAINING_PLATEAU_PATIENCE"
+        --sl-training-plateau-min-epochs "$SL_TRAINING_PLATEAU_MIN_EPOCHS"
+        --sl-training-plateau-min-relative-improvement "$SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT"
     )
     if [[ -n "$SL_EARLY_STOPPING_PATIENCE" ]]; then
         SL_EXTRA_ARGS+=(--early-stopping "$SL_EARLY_STOPPING_PATIENCE")
@@ -323,6 +343,9 @@ else
         SL_EXTRA_ARGS+=(--no-lr-decay)
     else
         SL_EXTRA_ARGS+=(--lr-decay "$SL_LR_DECAY_FACTOR")
+    fi
+    if [[ "$SL_TRAINING_PLATEAU_STOP" -eq 0 ]]; then
+        SL_EXTRA_ARGS+=(--sl-no-training-plateau-stop)
     fi
     if [[ -n "$SL_WEIGHT_DECAY" ]]; then
         SL_EXTRA_ARGS+=(--weight-decay "$SL_WEIGHT_DECAY")

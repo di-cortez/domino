@@ -120,6 +120,7 @@ def _train_rl_checkpoint(
         learning_rate=learning_rate,
         sl_weights_path=str(sl_weights_path),
         rl_weights_path=str(rl_weights_path),
+        fresh_from_sl=True,
         use_value_head=use_value_head,
         value_coef=value_coef,
         gamma=gamma,

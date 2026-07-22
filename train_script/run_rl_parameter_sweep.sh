@@ -510,7 +510,9 @@ run_point() {
         section "[$name] training already complete at iteration $RL_ITERATIONS (--resume: $model_path)"
     else
         RESUME_ARGS=(--numbered-checkpoints)
+        FRESH_START_ARGS=(--fresh-from-sl)
         if [[ "$LAST_RESUME_ITERATION" -gt 0 ]]; then
+            FRESH_START_ARGS=()
             RESUME_ARGS+=(
                 --start-iteration "$LAST_RESUME_ITERATION"
                 --resume-weights-path "$LAST_RESUME_WEIGHTS"
@@ -540,6 +542,7 @@ run_point() {
             --device "$DEVICE" \
             --rl-workers "$RL_WORKERS" \
             --compact \
+            "${FRESH_START_ARGS[@]}" \
             "${RESUME_ARGS[@]}" \
             "${VALUE_HEAD_FLAG[@]}"
         model_path="$final_model_path"

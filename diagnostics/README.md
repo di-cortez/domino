@@ -143,6 +143,10 @@ python -m diagnostics.hyperparameter_sweep
 python -m diagnostics.hyperparameter_sweep --rl-iterations 300 --diagnostic-games 1000
 ```
 
+Every point loads the same supervised checkpoint and explicitly ignores any
+older RL file at its target path, keeping the comparison centered on the
+tested hyperparameters rather than prior RL history.
+
 Every record — the exact RL hyperparameters used plus every matchup's
 win/draw/loss rates — is appended to a single JSON array on disk
 (`--output`, default `diagnostics/results/hyperparameter_sweep.json`), so

@@ -97,13 +97,13 @@ dataset/supervised_dataset.jsonl
           |
           v
 encoded float32 cache -> supervised MLP -> domino_sl_weights.npz
-                                           |
-                                           v
-                          on-policy RL iterations
-                          frozen rollouts -> one update
-                                           |
-                                           v
-                              domino_rl_weights.npz
+                              |                    |
+                              v                    v
+                    domino_sl_loss.png    on-policy RL iterations
+                                         frozen rollouts -> one update
+                                                    |
+                                                    v
+                                       domino_rl_weights.npz
 ```
 
 Dataset generation retains only real policy decisions and writes deterministic
@@ -112,7 +112,10 @@ rebuilt when the dataset metadata or encoder contract changes.
 
 Supervised training can keep encoded arrays in host RAM, use atomic disk-backed
 memory maps, and place all or rotating windows of data on the GPU. It saves the
-best validation checkpoint atomically.
+best validation checkpoint atomically and renders the training/validation loss
+history already collected during that run. The epoch count is a maximum
+budget: after batch-size tuning is complete, repeated low-improvement blocks
+of training loss can stop a saturated run early.
 
 RL uses fresh on-policy trajectories: all games in an iteration observe the
 same frozen policy, then the parent performs one update and discards the batch.
@@ -145,6 +148,12 @@ point can use internal rollout workers. Their manifests, fingerprints, hashes,
 numbered checkpoints, metrics, and diagnostic artifacts support conservative
 resume. Report builders consume those immutable run artifacts to create CSV,
 JSON, XLSX, PNG, and PDF outputs.
+
+The main pipeline and every new parameter-sweep point initialize RL from the
+selected supervised checkpoint, independent of an older RL output. An
+explicit resume restores a sweep point's exact numbered RL state. Direct
+`training.self_play` calls continue an existing compatible RL checkpoint by
+default, with `--fresh-from-sl` available for controlled new runs.
 
 ## UI
 

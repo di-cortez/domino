@@ -22,6 +22,7 @@ from diagnostics.parallel_runner import (
 from training.rl_parallel import RLRolloutRunner, worker_count
 from training.self_play import (
     REWARD_SCHEMAS,
+    _load_initial_network,
     load_resume_state,
     numbered_checkpoint_path,
     parse_args as parse_self_play_args,
@@ -144,6 +145,43 @@ class ParallelRLTests(unittest.TestCase):
                         np.testing.assert_array_equal(one[name], two[name])
             self.assertEqual(summaries[0]["effective_seed"], 987)
             self.assertEqual(summaries[1]["effective_seed"], 987)
+
+    def test_fresh_from_sl_ignores_existing_rl_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sl_path = root / "sl.npz"
+            rl_path = root / "rl.npz"
+            with np.load(
+                ROOT / "models" / "domino_sl_weights.npz",
+                allow_pickle=False,
+            ) as source:
+                np.savez(sl_path, **{name: source[name] for name in source.files})
+
+            existing_rl = PolicyNetwork.load_from_sl(sl_path, device="cpu")
+            existing_rl.W1 += 1.0
+            existing_rl.save(rl_path)
+
+            fresh = _load_initial_network(
+                0.001,
+                sl_path,
+                rl_path,
+                quiet=True,
+                device="cpu",
+                fresh_from_sl=True,
+            )
+            continued = _load_initial_network(
+                0.001,
+                sl_path,
+                rl_path,
+                quiet=True,
+                device="cpu",
+                fresh_from_sl=False,
+            )
+
+            with np.load(sl_path, allow_pickle=False) as supervised:
+                np.testing.assert_array_equal(fresh.W1, supervised["W1"])
+            np.testing.assert_array_equal(continued.W1, existing_rl.W1)
+            self.assertFalse(np.array_equal(fresh.W1, continued.W1))
 
     def test_numbered_checkpoint_resume_matches_uninterrupted_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -64,6 +64,10 @@ from training.self_play import (
 from training.training_loop import (
     DEFAULT_EARLY_STOPPING_PATIENCE,
     DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
+    DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
+    DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
+    DEFAULT_TRAINING_PLATEAU_PATIENCE,
+    DEFAULT_TRAINING_PLATEAU_WINDOW,
     DEFAULT_WEIGHT_DECAY,
     MAX_SUPERVISED_CHECKPOINTS,
     _prune_supervised_checkpoints,
@@ -452,6 +456,20 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     assert defaults.early_stopping is None
     assert defaults.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
     assert defaults.lr_decay_patience == 5
+    assert not defaults.disable_training_plateau
+    assert defaults.sl_training_plateau_window == DEFAULT_TRAINING_PLATEAU_WINDOW
+    assert (
+        defaults.sl_training_plateau_patience
+        == DEFAULT_TRAINING_PLATEAU_PATIENCE
+    )
+    assert (
+        defaults.sl_training_plateau_min_epochs
+        == DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS
+    )
+    assert (
+        defaults.sl_training_plateau_min_relative_improvement
+        == DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT
+    )
     assert defaults.sl_device == "auto"
 
     enabled = parse_supervised_args([
@@ -475,8 +493,14 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     assert custom.early_stopping == 8
     assert custom.lr_decay == 0.8
 
-    disabled = parse_supervised_args(["--no-lr-decay", "--device", "cpu"])
+    disabled = parse_supervised_args([
+        "--no-lr-decay",
+        "--sl-no-training-plateau-stop",
+        "--device",
+        "cpu",
+    ])
     assert disabled.lr_decay is None
+    assert disabled.disable_training_plateau
     assert disabled.sl_device == "cpu"
 
     pipeline = parse_pipeline_args([
@@ -1177,6 +1201,13 @@ def test_value_head_cli_is_disabled_by_default():
     assert parse_self_play_args(["--value-head"]).value_head
 
 
+def test_rl_initialization_cli_defaults_are_context_specific():
+    assert not parse_self_play_args([]).fresh_from_sl
+    assert parse_self_play_args(["--fresh-from-sl"]).fresh_from_sl
+    assert parse_pipeline_args([]).fresh_from_sl
+    assert not parse_pipeline_args(["--continue-existing-rl"]).fresh_from_sl
+
+
 def test_reward_signal_summary_classifies_rewards():
     samples = [
         TrainingSample(None, 0, None, 1.0, 1.0, 0.20, 0.80, 1.0, 2),
@@ -1484,6 +1515,10 @@ def main():
         ("optional value baseline", test_optional_value_head_learns_reward_baseline),
         ("policy checkpoint keys", test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys),
         ("value head CLI", test_value_head_cli_is_disabled_by_default),
+        (
+            "RL initialization CLI defaults",
+            test_rl_initialization_cli_defaults_are_context_specific,
+        ),
         ("reward signal summary", test_reward_signal_summary_classifies_rewards),
         (
             "hybrid one-way threshold switch",

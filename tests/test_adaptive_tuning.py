@@ -9,6 +9,7 @@ import tempfile
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from agents.rl_nn import PolicyNetwork
 from diagnostics.parallel_runner import ParallelSafetyConfig
@@ -24,6 +25,7 @@ from training.adaptive_tuning import (
     restore_isolation_state,
     run_adaptive_tuning,
     select_fastest,
+    selected_worker_candidate,
 )
 from training.self_play import REWARD_SCHEMAS
 
@@ -161,9 +163,50 @@ def test_worker_benchmark_uses_exact_one_percent_with_partial_final_block():
     assert rows[0]["actual_games"] == 1000
     assert rows[0]["blocks"] == 2
     assert rows[0]["success"]
+    assert rows[0]["accepted"]
+    assert rows[0]["improvement_over_previous"] is None
 
 
-def test_tie_rules_prefer_smaller_gpi_or_fewer_workers():
+def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
+    runner = _Runner()
+    messages = []
+    with (
+        mock.patch(
+            "training.adaptive_tuning._new_runner",
+            return_value=runner,
+        ),
+        mock.patch(
+            "training.adaptive_tuning.time.perf_counter",
+            side_effect=(0.0, 1.0, 2.0, 2.8, 4.0, 4.75),
+        ),
+    ):
+        test_games, rows = benchmark_worker_candidates(
+            _FrozenNetwork(),
+            selected_gpi=100,
+            total_training_games=10_000,
+            benchmark_fraction=0.01,
+            minimum_gain=0.10,
+            candidates=(1, 2, 4, 6),
+            base_seed=42,
+            training_opponent="self_play",
+            schema=REWARD_SCHEMAS["default"],
+            gamma=1.0,
+            max_pool_size=2,
+            safety=ParallelSafetyConfig(memory_reserve_mb=0),
+            status_callback=messages.append,
+        )
+
+    assert test_games == 100
+    assert [row["requested_workers"] for row in rows] == [1, 2, 4]
+    assert [row["accepted"] for row in rows] == [True, True, False]
+    assert rows[1]["improvement_over_previous"] == pytest.approx(0.25)
+    assert rows[2]["improvement_over_previous"] == pytest.approx(1 / 15)
+    assert selected_worker_candidate(rows)["requested_workers"] == 2
+    assert {call[3] for call in runner.calls} == {1, 2, 4}
+    assert any("below 10%" in message for message in messages)
+
+
+def test_gpi_tie_rule_prefers_smaller_candidate():
     close = [
         {"success": True, "gpi": 100, "games_per_second": 98.0},
         {"success": True, "gpi": 200, "games_per_second": 100.0},
@@ -172,14 +215,8 @@ def test_tie_rules_prefer_smaller_gpi_or_fewer_workers():
         {"success": True, "gpi": 100, "games_per_second": 96.0},
         {"success": True, "gpi": 200, "games_per_second": 100.0},
     ]
-    workers = [
-        {"success": True, "requested_workers": 1, "games_per_second": 99.0},
-        {"success": True, "requested_workers": 2, "games_per_second": 100.0},
-    ]
-
     assert select_fastest(close, key="gpi", tie_fraction=0.03)["gpi"] == 100
     assert select_fastest(clear, key="gpi", tie_fraction=0.03)["gpi"] == 200
-    assert select_fastest(workers, key="requested_workers", tie_fraction=0.02)["requested_workers"] == 1
 
 
 def test_capture_restore_recovers_weights_optimizer_rng_and_pool():
@@ -228,8 +265,8 @@ def test_integrated_tuning_restores_state_and_writes_required_metadata():
 
     def fake_workers(policy, **kwargs):
         return 1000, [
-            {"success": True, "requested_workers": 1, "games_per_second": 10.0, "actual_games": 1000},
-            {"success": True, "requested_workers": 2, "games_per_second": 12.0, "actual_games": 1000},
+            {"success": True, "accepted": True, "requested_workers": 1, "games_per_second": 10.0, "actual_games": 1000},
+            {"success": True, "accepted": True, "requested_workers": 2, "games_per_second": 12.0, "actual_games": 1000},
         ]
 
     with tempfile.TemporaryDirectory() as temporary:
@@ -250,6 +287,7 @@ def test_integrated_tuning_restores_state_and_writes_required_metadata():
                 gpi_candidates=(100, 200),
                 gpi_benchmark_games_target=2000,
                 worker_benchmark_fraction=0.01,
+                worker_minimum_gain=0.10,
                 worker_candidates=(1, 2),
                 base_seed=42,
                 training_opponent="self_play",
@@ -267,8 +305,9 @@ def test_integrated_tuning_restores_state_and_writes_required_metadata():
     assert metadata["worker_test_games"] == 1000
     assert metadata["initial_weights_sha256"] == initial_hash
     assert metadata["isolation_verified"]
-    assert saved["version"] == 2
+    assert saved["version"] == 3
     assert saved["gpi_benchmark_workers"] == DEFAULT_GPI_BENCHMARK_WORKERS
+    assert saved["worker_minimum_gain"] == 0.10
     assert saved["base_seed"] == 42
     assert saved["total_training_games"] == 100_000
     assert policy_sha256(network) == initial_hash
@@ -302,6 +341,7 @@ def test_saved_tuning_is_reused_without_new_benchmarks():
             gpi_candidates=DEFAULT_GPI_CANDIDATES,
             gpi_benchmark_games_target=2000,
             worker_benchmark_fraction=0.01,
+            worker_minimum_gain=0.10,
             worker_candidates=(1, 2, 4, 6),
             base_seed=42,
             training_opponent="self_play",

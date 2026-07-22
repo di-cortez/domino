@@ -1065,6 +1065,8 @@ def train(
         raise ValueError("moving_average_window must be positive")
     if not 0 < float(autotune_fraction) <= 1:
         raise ValueError("autotune_fraction must be in (0, 1]")
+    if float(autotune_minimum_gain) < 0:
+        raise ValueError("autotune_minimum_gain must be non-negative")
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
     if reward_schema not in REWARD_SCHEMAS:
@@ -1219,6 +1221,7 @@ def train(
         gpi_candidates=gpi_candidates,
         gpi_benchmark_games_target=gpi_benchmark_games_target,
         worker_benchmark_fraction=autotune_fraction,
+        worker_minimum_gain=autotune_minimum_gain,
         worker_candidates=worker_candidates,
         base_seed=effective_seed,
         training_opponent=training_opponent,
@@ -1988,7 +1991,10 @@ def add_optional_rl_arguments(parser, *, fresh_from_sl_default=False):
         "--rl-autotune-min-gain",
         type=float,
         default=DEFAULT_RL_MINIMUM_GAIN,
-        help="Compatibility field; worker selection uses the fixed 2%% tie rule.",
+        help=(
+            "Stop worker tuning when marginal rollout-throughput gain over the "
+            "previous accepted candidate is below this value."
+        ),
     )
     group.add_argument("--rl-memory-reserve-mb", type=int, default=512)
     group.add_argument("--rl-estimated-worker-mb", type=int, default=256)

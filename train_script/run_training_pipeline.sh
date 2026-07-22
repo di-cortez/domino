@@ -164,6 +164,7 @@ training.self_play):
   --rl-reward-schema NAME      "default", "sparse", or "shaped" reward preset (default: $RL_REWARD_SCHEMA)
   --rl-workers N|auto          CPU-only rollout workers with isolated tuning (default: $RL_WORKERS, maximum 20)
   --rl-autotune-fraction F     Discarded real-budget fraction per worker candidate (default: $RL_AUTOTUNE_FRACTION)
+  --rl-autotune-min-gain F     Minimum marginal worker-throughput gain (default: $RL_AUTOTUNE_MIN_GAIN)
   --rl-memory-reserve-mb N     Host RAM kept free during rollouts (default: $RL_MEMORY_RESERVE_MB)
   --rl-estimated-worker-mb N   Preflight RAM estimate per worker (default: $RL_ESTIMATED_WORKER_MB)
   --rl-max-worker-rss-mb N     Runtime RSS ceiling for one worker (default: $RL_MAX_WORKER_RSS_MB)

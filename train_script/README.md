@@ -151,6 +151,7 @@ training module.
 | `--rl-device` | RL | Array backend: `auto`/`cpu`/`gpu` (see below) | `auto` |
 | `--rl-workers` | RL | CPU-only workers or isolated discarded tuning, maximum 20 | `auto` |
 | `--rl-autotune-fraction` | RL | Real-budget fraction discarded per worker candidate | `0.01` |
+| `--rl-autotune-min-gain` | RL | Required gain over the previous accepted worker candidate | `0.10` |
 | `--rl-memory-reserve-mb` | RL | Host RAM kept free while workers run | `512` |
 | `--rl-estimated-worker-mb` | RL | Preflight memory estimate per worker | `256` |
 | `--rl-max-worker-rss-mb` | RL | Runtime RSS ceiling for one worker | `1024` |
@@ -211,8 +212,10 @@ This was verified end-to-end with a tiny run (`--rl-iterations 2
 `--rl-workers auto` benchmarks 1, 2, 4, 6, ... CPU-only workers on exactly 1%
 of the real game budget per candidate. All benchmark trajectories are discarded
 and use separate seeds; weights, optimizer, RNG, pool, and real counters are
-restored. The fastest safe candidate wins, with fewer workers preferred within
-2%. Use a fixed value to skip worker tuning.
+restored. Starting from the one-worker baseline, every larger candidate must
+improve throughput by at least 10% over the previously accepted candidate. The
+first candidate below that threshold ends tuning and is not selected. Use a
+fixed value to skip worker tuning.
 
 Workers read the current policy and bounded opponent pool through shared memory;
 they never update weights or access the GPU. The main process sorts trajectories

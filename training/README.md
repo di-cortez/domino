@@ -350,8 +350,10 @@ Before real training, adaptive GPI mode tests exactly
 games per candidate (`floor(2000 / GPI)` complete batches). It chooses the
 highest throughput, preferring the smaller GPI within 3%. Worker tuning then
 tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1% of the real
-game budget per candidate; it prefers fewer workers within 2%. Warm-up and
-benchmark games use independent deterministic seed streams and are discarded.
+game budget per candidate. Starting from the one-worker baseline, each larger
+candidate must improve throughput by at least 10% over the previously accepted
+candidate; the first smaller gain stops tuning and is not selected. Warm-up
+and benchmark games use independent deterministic seed streams and are discarded.
 Weights, optimizer, RNG, opponent pool, and real counters are restored and
 verified before training begins. Results are saved as `adaptive_tuning.json`.
 
@@ -368,6 +370,7 @@ controls are:
 |---|---|---:|
 | `--rl-workers` | CPU-only rollout workers or `auto` | `auto` |
 | `--rl-autotune-fraction` | Real-budget fraction discarded per worker candidate | `0.01` |
+| `--rl-autotune-min-gain` | Required gain over the previous accepted worker candidate | `0.10` |
 | `--retune-gpi` / `--retune-workers` / `--retune-all` | Explicitly rerun saved tuning on resume | off |
 | `--rl-memory-reserve-mb` | Host RAM that must remain free | `512` |
 | `--rl-estimated-worker-mb` | Conservative worker-memory estimate for preflight | `256` |

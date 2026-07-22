@@ -16,6 +16,7 @@ import numpy as np
 
 from training.ppo import PPOBuffer, stable_seed
 from training.rl_parallel import (
+    DEFAULT_RL_MINIMUM_GAIN,
     DEFAULT_RL_WORKER_CANDIDATES,
     RLRolloutRunner,
     _candidate_counts,
@@ -28,13 +29,12 @@ from utils.resource_limits import (
 )
 
 
-TUNING_VERSION = 2
+TUNING_VERSION = 3
 DEFAULT_GPI_CANDIDATES = (100, 200, 400, 600, 800, 1000, 2000)
 DEFAULT_GPI_BENCHMARK_GAMES_TARGET = 2000
 DEFAULT_GPI_BENCHMARK_WORKERS = 10
 DEFAULT_WORKER_BENCHMARK_FRACTION = 0.01
 DEFAULT_GPI_TIE_FRACTION = 0.03
-DEFAULT_WORKER_TIE_FRACTION = 0.02
 MINIMUM_SAFE_VRAM_MB = 256
 
 
@@ -400,6 +400,7 @@ def benchmark_worker_candidates(
     selected_gpi,
     total_training_games,
     benchmark_fraction,
+    minimum_gain=DEFAULT_RL_MINIMUM_GAIN,
     candidates,
     base_seed,
     training_opponent,
@@ -410,8 +411,10 @@ def benchmark_worker_candidates(
     pool_snapshots=(),
     status_callback=None,
 ):
-    """Benchmark each worker count on the same exact discarded game budget."""
+    """Benchmark workers until marginal throughput gain falls below the limit."""
     emit = status_callback or (lambda _message: None)
+    if float(minimum_gain) < 0:
+        raise ValueError("minimum_gain must be non-negative.")
     test_games = max(1, int(int(total_training_games) * float(benchmark_fraction)))
     candidates = _candidate_counts(candidates, safety, max(selected_gpi, test_games))
     runner = _new_runner(
@@ -424,6 +427,7 @@ def benchmark_worker_candidates(
         pool_snapshots=pool_snapshots,
     )
     results = []
+    previous_success = None
     try:
         for requested_workers in candidates:
             base = {
@@ -504,28 +508,64 @@ def benchmark_worker_candidates(
                 )
                 result["selected_workers"] = int(runner.worker_count)
                 result["blocks"] = len(run_infos)
-            results.append(result)
             if result["success"]:
+                improvement = (
+                    None
+                    if previous_success is None
+                    else (
+                        float(result["games_per_second"])
+                        / float(previous_success["games_per_second"])
+                        - 1.0
+                    )
+                )
+                accepted = improvement is None or improvement >= float(minimum_gain)
+                result["improvement_over_previous"] = improvement
+                result["accepted"] = bool(accepted)
+                results.append(result)
+                comparison = (
+                    "baseline"
+                    if improvement is None
+                    else f"{improvement:+.1%} vs previous"
+                )
                 emit(
                     f"  workers {requested_workers:2d}: "
-                    f"{test_games} games, {result['games_per_second']:.1f} games/s"
+                    f"{test_games} games, {result['games_per_second']:.1f} games/s "
+                    f"({comparison})"
                 )
+                if not accepted:
+                    emit(
+                        "  Marginal worker gain is below "
+                        f"{float(minimum_gain):.0%}; keeping "
+                        f"{previous_success['requested_workers']} workers and "
+                        "stopping worker tuning."
+                    )
+                    break
+                previous_success = result
             else:
+                result["improvement_over_previous"] = None
+                result["accepted"] = False
+                results.append(result)
                 emit(
                     f"  workers {requested_workers:2d}: failed "
                     f"({result['failure']})"
                 )
-                # A larger pool cannot be safer after a preflight cap or a
-                # runtime memory fallback. Preserve the best completed result.
-                unsafe_worker_memory = any(
-                    info.safety_capped or info.fallback_count
-                    for info in run_infos
-                )
-                if result["status"] == "oom" or unsafe_worker_memory:
-                    break
+                # Match the pipeline's other worker tuners: preserve the last
+                # accepted candidate and do not probe beyond a failed one.
+                break
     finally:
         runner.close()
     return test_games, results
+
+
+def selected_worker_candidate(results):
+    """Return the last candidate accepted by marginal-gain worker tuning."""
+    accepted = [row for row in results if row.get("success") and row.get("accepted")]
+    if not accepted:
+        raise RuntimeError(
+            "The one-worker RL baseline could not complete, so no safe worker "
+            "configuration can be selected."
+        )
+    return accepted[-1]
 
 
 def _gpu_name():
@@ -604,6 +644,7 @@ def run_adaptive_tuning(
     gpi_candidates,
     gpi_benchmark_games_target,
     worker_benchmark_fraction,
+    worker_minimum_gain,
     worker_candidates,
     base_seed,
     training_opponent,
@@ -665,13 +706,16 @@ def run_adaptive_tuning(
                 int(int(total_training_games) * float(worker_benchmark_fraction)),
             )
             emit(
-                f"Selecting worker count with {worker_test_games} benchmark games..."
+                f"Selecting worker count with {worker_test_games} benchmark games "
+                f"per candidate and {float(worker_minimum_gain):.0%} minimum "
+                "marginal gain..."
             )
             worker_test_games, worker_results = benchmark_worker_candidates(
                 network,
                 selected_gpi=selected_gpi,
                 total_training_games=total_training_games,
                 benchmark_fraction=worker_benchmark_fraction,
+                minimum_gain=worker_minimum_gain,
                 candidates=worker_candidates,
                 base_seed=base_seed,
                 training_opponent=training_opponent,
@@ -682,11 +726,9 @@ def run_adaptive_tuning(
                 pool_snapshots=pool_snapshots,
                 status_callback=emit,
             )
-            selected_workers = int(select_fastest(
-                worker_results,
-                key="requested_workers",
-                tie_fraction=DEFAULT_WORKER_TIE_FRACTION,
-            )["requested_workers"])
+            selected_workers = int(
+                selected_worker_candidate(worker_results)["requested_workers"]
+            )
             worker_source = "autotune"
         else:
             selected_workers = int(workers)
@@ -707,6 +749,7 @@ def run_adaptive_tuning(
             "gpi_source": gpi_source,
             "worker_test_games": int(worker_test_games),
             "worker_benchmark_fraction": float(worker_benchmark_fraction),
+            "worker_minimum_gain": float(worker_minimum_gain),
             "worker_results": worker_results,
             "selected_workers": selected_workers,
             "worker_source": worker_source,

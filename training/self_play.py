@@ -93,7 +93,8 @@ DEFAULT_PPO_ENABLED = True
 SL_WEIGHTS = "models/domino_sl_weights.npz"
 RL_WEIGHTS = "models/domino_rl_weights.npz"
 TRAINING_OPPONENT = "self_play"
-RESUME_STATE_VERSION = 2
+RESUME_STATE_VERSION = 3
+SUPPORTED_RESUME_STATE_VERSIONS = (2, RESUME_STATE_VERSION)
 RESUME_POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 PPO_TRAINING_ALGORITHM = "ppo_v1"
 LEGACY_TRAINING_ALGORITHM = "reinforce_v1"
@@ -507,6 +508,8 @@ def _atomic_network_save(network, path):
     )
     try:
         network.save(str(temporary))
+        with open(temporary, "rb") as stream:
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -528,6 +531,8 @@ def _atomic_resume_state_save(path, metadata, pool_snapshots):
     )
     try:
         np.savez_compressed(temporary, **arrays)
+        with open(temporary, "rb") as stream:
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -539,7 +544,7 @@ def load_resume_state(weights_path, state_path):
     state_path = Path(state_path)
     with np.load(state_path, allow_pickle=False) as state:
         metadata = json.loads(str(state["metadata_json"].item()))
-        if metadata.get("version") != RESUME_STATE_VERSION:
+        if metadata.get("version") not in SUPPORTED_RESUME_STATE_VERSIONS:
             raise ValueError(
                 f"Unsupported RL resume-state version in {state_path}: "
                 f"{metadata.get('version')!r}."
@@ -725,6 +730,7 @@ def _save_numbered_resume_checkpoint(
         "rng_state": _rng_state_metadata(),
         "adaptive_tuning": adaptive_tuning,
         "training_state": training_state,
+        "opponent_pool_metadata": list(runner.export_pool_metadata()),
     }
     _atomic_resume_state_save(
         state_path,
@@ -866,18 +872,23 @@ def _training_state_payload(
     value_loss_window,
     ppo_window,
     total_decision_samples,
+    ppo_updates_completed,
     clipped_iteration_count,
     total_rollout_duration_s,
     total_update_duration_s,
+    elapsed_rl_seconds,
 ):
     return {
         "win_rate_window": list(win_rate_window),
         "value_loss_window": list(value_loss_window),
         "ppo_window": list(ppo_window),
         "total_decision_samples": int(total_decision_samples),
+        "trainable_decisions_seen": int(total_decision_samples),
+        "ppo_updates_completed": int(ppo_updates_completed),
         "clipped_iteration_count": int(clipped_iteration_count),
         "total_rollout_duration_s": float(total_rollout_duration_s),
         "total_update_duration_s": float(total_update_duration_s),
+        "elapsed_rl_seconds": float(elapsed_rl_seconds),
     }
 
 
@@ -1016,6 +1027,12 @@ def train(
     ppo_min_decisions_per_minibatch=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
     prefer_gpu_buffer=True,
     gpu_buffer_safety_fraction=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
+    stop_after_training_games=None,
+    shutdown_requested=None,
+    allow_total_training_games_extension=False,
+    adaptive_tuning_training_games=None,
+    force_resume_incompatible=False,
+    checkpoint_callback=None,
 ):
     """Train an exact game budget with isolated adaptive tuning and PPO v1.
 
@@ -1055,6 +1072,13 @@ def train(
             adaptive_gpi = DEFAULT_ADAPTIVE_GPI and not manual_gpi_explicit
     if total_training_games < 1:
         raise ValueError("total_training_games must be positive")
+    tuning_training_games = (
+        int(total_training_games)
+        if adaptive_tuning_training_games is None
+        else int(adaptive_tuning_training_games)
+    )
+    if tuning_training_games < 1:
+        raise ValueError("adaptive_tuning_training_games must be positive")
     if checkpoint_interval < 1 or log_interval < 1:
         raise ValueError("checkpoint_interval and log_interval must be positive")
     if pool_refresh_games < 1:
@@ -1117,8 +1141,6 @@ def train(
         raise ValueError("start_iteration must be non-negative")
     if start_iteration > 0 and not has_resume_weights:
         raise ValueError("A positive start_iteration requires a complete resume pair")
-    if start_iteration == 0 and has_resume_weights:
-        raise ValueError("A resume pair requires a positive start_iteration")
     if fresh_from_sl and has_resume_weights:
         raise ValueError("fresh_from_sl cannot be combined with a resume pair")
 
@@ -1150,6 +1172,16 @@ def train(
     if completed_training_games >= total_training_games:
         raise ValueError(
             "The resume checkpoint has already completed the requested game budget."
+        )
+    invocation_target_games = (
+        int(total_training_games)
+        if stop_after_training_games is None
+        else int(stop_after_training_games)
+    )
+    if not completed_training_games < invocation_target_games <= total_training_games:
+        raise ValueError(
+            "stop_after_training_games must be above completed games and no "
+            "greater than total_training_games"
         )
 
     random.seed(effective_seed)
@@ -1211,7 +1243,7 @@ def train(
     emit_status("-" * 70)
     adaptive_tuning = run_adaptive_tuning(
         network,
-        total_training_games=total_training_games,
+        total_training_games=tuning_training_games,
         manual_gpi=games_per_iteration,
         adaptive_gpi=adaptive_gpi,
         workers=workers,
@@ -1285,17 +1317,25 @@ def train(
         # in v2 still makes that extension exact.
         if iterations is not None:
             ignored.append("total_training_games")
+        if allow_total_training_games_extension:
+            ignored.append("total_training_games")
         if retune_gpi:
             ignored.append("selected_gpi")
         if retune_workers:
             ignored.append("selected_workers")
-        _validate_resume_configuration(
-            resume_metadata,
-            resume_configuration,
-            ignored_keys=ignored,
-        )
+        if force_resume_incompatible:
+            emit_status(
+                "SEVERE WARNING: exact resume compatibility validation was "
+                "explicitly overridden. Reproducibility is not guaranteed."
+            )
+        else:
+            _validate_resume_configuration(
+                resume_metadata,
+                resume_configuration,
+                ignored_keys=ignored,
+            )
 
-    remaining_training_games = total_training_games - completed_training_games
+    remaining_training_games = invocation_target_games - completed_training_games
     iterations_to_run = math.ceil(remaining_training_games / selected_gpi)
     final_iteration = int(start_iteration) + iterations_to_run
     estimated_batch_bytes = min(selected_gpi, remaining_training_games) * 52 * 4096
@@ -1328,7 +1368,10 @@ def train(
         safety=safety_config,
     )
     if resume_pool_snapshots:
-        runner.restore_pool_snapshots(resume_pool_snapshots)
+        runner.restore_pool_snapshots(
+            resume_pool_snapshots,
+            metadata=(resume_metadata or {}).get("opponent_pool_metadata"),
+        )
     actual_workers, was_capped, cap_reason = runner.set_workers(selected_workers)
     if was_capped:
         emit_status(
@@ -1352,12 +1395,16 @@ def train(
         _restore_training_windows(resume_metadata, moving_average_window)
     )
     total_decision_samples = int(restored_state.get("total_decision_samples", 0))
+    ppo_updates_completed = int(restored_state.get("ppo_updates_completed", 0))
     clipped_iteration_count = int(restored_state.get("clipped_iteration_count", 0))
     total_rollout_duration_s = float(
         restored_state.get("total_rollout_duration_s", 0.0)
     )
     total_update_duration_s = float(
         restored_state.get("total_update_duration_s", 0.0)
+    )
+    restored_elapsed_rl_seconds = float(
+        restored_state.get("elapsed_rl_seconds", 0.0)
     )
     parallel_summary = _new_parallel_summary(workers)
     parallel_summary["initial_workers"] = int(actual_workers)
@@ -1377,13 +1424,18 @@ def train(
         else Path(rl_weights_path)
     )
     completed_this_invocation = 0
+    completed_iterations_this_invocation = 0
+    stopped_by_shutdown = False
     try:
         for local_iteration in range(1, iterations_to_run + 1):
+            if shutdown_requested is not None and shutdown_requested():
+                stopped_by_shutdown = True
+                break
             iteration = int(start_iteration) + local_iteration
             iteration_started = time.perf_counter()
             games_this_iteration = min(
                 selected_gpi,
-                total_training_games - completed_training_games,
+                invocation_target_games - completed_training_games,
             )
             previous_training_games = completed_training_games
             runner.sync_current(network)
@@ -1474,15 +1526,20 @@ def train(
                     clipped_iteration_count += 1
                 if use_value_head:
                     value_loss_window.append(gradient_metrics["value_loss"])
+                ppo_updates_completed += 1
 
             completed_training_games += games_this_iteration
             completed_this_invocation += games_this_iteration
+            completed_iterations_this_invocation += 1
             crossed_pool_refresh = (
                 previous_training_games // pool_refresh_games
                 < completed_training_games // pool_refresh_games
             )
             if batch and training_opponent == "self_play" and crossed_pool_refresh:
-                runner.append_pool_snapshot(network)
+                runner.append_pool_snapshot(network, metadata={
+                    "origin": "training_update",
+                    "introduced_at_rl_games": int(completed_training_games),
+                })
 
             ppo_log_row = None
             if ppo_metrics is not None:
@@ -1497,18 +1554,24 @@ def train(
 
             checkpoint_written = False
             checkpoint_path = None
+            checkpoint_resume_path = None
             if iteration % checkpoint_interval == 0:
                 training_state = _training_state_payload(
                     win_rate_window=win_rate_window,
                     value_loss_window=value_loss_window,
                     ppo_window=ppo_window,
                     total_decision_samples=total_decision_samples,
+                    ppo_updates_completed=ppo_updates_completed,
                     clipped_iteration_count=clipped_iteration_count,
                     total_rollout_duration_s=total_rollout_duration_s,
                     total_update_duration_s=total_update_duration_s,
+                    elapsed_rl_seconds=(
+                        restored_elapsed_rl_seconds
+                        + time.perf_counter() - training_perf_started
+                    ),
                 )
                 if numbered_checkpoints:
-                    checkpoint_weights_path, _state_path = (
+                    checkpoint_weights_path, checkpoint_state_path = (
                         _save_numbered_resume_checkpoint(
                             network,
                             runner,
@@ -1523,6 +1586,7 @@ def train(
                     )
                     final_weights_path = checkpoint_weights_path
                     last_saved_iteration = iteration
+                    checkpoint_resume_path = str(checkpoint_state_path)
                 else:
                     _atomic_network_save(network, rl_weights_path)
                     checkpoint_weights_path = Path(rl_weights_path)
@@ -1639,38 +1703,68 @@ def train(
             metrics_stream.write(json.dumps(row, sort_keys=True) + "\n")
             metrics_stream.flush()
             os.fsync(metrics_stream.fileno())
+            if (
+                checkpoint_callback is not None
+                and checkpoint_written
+                and numbered_checkpoints
+            ):
+                checkpoint_callback({
+                    "rl_weights_path": checkpoint_path,
+                    "resume_state_path": checkpoint_resume_path,
+                    "completed_training_games": int(completed_training_games),
+                    "rl_iterations_completed": int(iteration),
+                    "games_per_iteration": int(selected_gpi),
+                    "final_workers": int(runner.worker_count),
+                })
             if metrics_callback is not None:
                 metrics_callback(dict(row))
             if progress_callback is not None:
-                progress_callback(iteration, final_iteration)
+                progress_callback(completed_training_games, total_training_games)
 
-        if completed_training_games != total_training_games:
+            if shutdown_requested is not None and shutdown_requested():
+                stopped_by_shutdown = True
+                break
+
+        if completed_training_games != invocation_target_games and not stopped_by_shutdown:
             raise AssertionError(
                 f"RL completed {completed_training_games} games, expected "
-                f"{total_training_games}."
+                f"{invocation_target_games}."
             )
-        if numbered_checkpoints and last_saved_iteration != final_iteration:
+        actual_final_iteration = (
+            int(start_iteration) + completed_iterations_this_invocation
+        )
+        final_resume_path = resume_state_path(final_weights_path)
+        if numbered_checkpoints and (
+            last_saved_iteration != actual_final_iteration
+            or not final_weights_path.is_file()
+            or not final_resume_path.is_file()
+        ):
             training_state = _training_state_payload(
                 win_rate_window=win_rate_window,
                 value_loss_window=value_loss_window,
                 ppo_window=ppo_window,
                 total_decision_samples=total_decision_samples,
+                ppo_updates_completed=ppo_updates_completed,
                 clipped_iteration_count=clipped_iteration_count,
                 total_rollout_duration_s=total_rollout_duration_s,
                 total_update_duration_s=total_update_duration_s,
+                elapsed_rl_seconds=(
+                    restored_elapsed_rl_seconds
+                    + time.perf_counter() - training_perf_started
+                ),
             )
             final_weights_path, _final_state_path = _save_numbered_resume_checkpoint(
                 network,
                 runner,
                 rl_weights_path,
-                final_iteration,
+                actual_final_iteration,
                 resume_configuration,
                 runner.worker_count,
                 completed_training_games,
                 adaptive_tuning,
                 training_state,
             )
-            last_saved_iteration = final_iteration
+            last_saved_iteration = actual_final_iteration
     finally:
         metrics_stream.close()
         final_runtime_workers = runner.worker_count
@@ -1704,16 +1798,21 @@ def train(
         ),
         "attempts": worker_results,
     }
-    completed_iterations = final_iteration - int(start_iteration)
+    completed_iterations = completed_iterations_this_invocation
     return {
-        "iterations": int(final_iteration),
+        "iterations": int(actual_final_iteration),
+        "rl_iterations_completed": int(actual_final_iteration),
         "completed_iterations_this_run": int(completed_iterations),
         "start_iteration": int(start_iteration),
-        "start_training_games": int(total_training_games - completed_this_invocation),
+        "start_training_games": int(
+            completed_training_games - completed_this_invocation
+        ),
         "games_per_iteration": int(selected_gpi),
         "requested_games_per_iteration": int(games_per_iteration),
         "total_training_games": int(total_training_games),
         "completed_training_games": int(completed_training_games),
+        "invocation_target_training_games": int(invocation_target_games),
+        "shutdown_requested": bool(stopped_by_shutdown),
         "training_opponent": training_opponent,
         "learning_rate": learning_rate,
         "entropy_coef": entropy_coef,
@@ -1743,15 +1842,26 @@ def train(
         "numbered_checkpoints": bool(numbered_checkpoints),
         "pool_refresh_games": int(pool_refresh_games),
         "total_decision_samples": int(total_decision_samples),
-        "decisions_per_game": float(total_decision_samples / completed_training_games),
+        "trainable_decisions_seen": int(total_decision_samples),
+        "ppo_updates_completed": int(ppo_updates_completed),
+        "decisions_per_game": float(
+            total_decision_samples / max(1, completed_training_games)
+        ),
         "clipped_iteration_count": int(clipped_iteration_count),
         "clipped_iteration_rate": float(
-            clipped_iteration_count / max(1, final_iteration)
+            clipped_iteration_count / max(1, actual_final_iteration)
         ),
         "pool_snapshot_count": int(pool_snapshot_count),
         "total_rollout_duration_s": float(total_rollout_duration_s),
         "total_update_duration_s": float(total_update_duration_s),
         "optimizer_step_count": int(network.optimizer_step_count),
+        "elapsed_rl_seconds": float(
+            restored_elapsed_rl_seconds + time.perf_counter() - training_perf_started
+        ),
+        "resume_state_path": (
+            str(resume_state_path(final_weights_path))
+            if numbered_checkpoints else None
+        ),
         "rl_training_algorithm": algorithm,
         "ppo_enabled": bool(ppo_enabled),
         "ppo_configuration": {
@@ -2071,7 +2181,7 @@ def parse_args(argv=None):
         "--compact",
         action="store_true",
         help=(
-            "Show isolated adaptive tuning, one iteration progress bar, and one "
+            "Show isolated adaptive tuning, one game progress bar, and one "
             "final summary instead of per-iteration/checkpoint logs."
         ),
     )
@@ -2175,16 +2285,22 @@ def _run_compact_cli(args, training_kwargs):
             else args.total_training_games
         )
     )
-    estimated_iterations = max(1, math.ceil(planned_games / manual_gpi))
+    initial_games = 0
+    if args.resume_weights_path and args.resume_state_file:
+        resume_metadata, _pool = load_resume_state(
+            args.resume_weights_path,
+            args.resume_state_file,
+        )
+        initial_games = int(resume_metadata["completed_training_games"])
 
     if tqdm is None:
-        progress_interval = max(1, estimated_iterations // 10)
-        last_reported = args.start_iteration
+        progress_interval = max(1, planned_games // 10)
+        last_reported = initial_games
 
         def progress(done, total):
             nonlocal last_reported
             if done == total or done - last_reported >= progress_interval:
-                print(f"RL self-play progress: {done}/{total} iterations", flush=True)
+                print(f"RL self-play progress: {done}/{total} games", flush=True)
                 last_reported = done
 
         def status(message):
@@ -2198,10 +2314,10 @@ def _run_compact_cli(args, training_kwargs):
         )
     else:
         with tqdm(
-            total=estimated_iterations,
-            initial=args.start_iteration,
+            total=planned_games,
+            initial=initial_games,
             desc="RL self-play",
-            unit="iter",
+            unit="game",
             leave=True,
         ) as progress_bar:
 

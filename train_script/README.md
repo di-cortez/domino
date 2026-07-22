@@ -10,17 +10,16 @@ Batch-training drivers for the full pipeline described in
    plateau scheduler; the wrapper exposes device, memory, batch, seed, decay,
    training-loss saturation, validation early-stopping, and weight-decay
    controls;
-3. refine that policy with a **BIG-scale** self-play reinforcement-learning
-   run — 5x the default exact budget (100,000 x 5 = 500,000 real games),
-   with adaptive GPI, isolated worker tuning, and PPO, matching the `big`
-   scale in `run_pipeline.py`'s `SCALE_FACTORS`. This
+3. refine that policy with the wrapper's historical **500,000-game experiment
+   profile**, with adaptive GPI, isolated worker tuning, and PPO. This profile
+   is distinct from the canonical `big` pipeline, which owns 2,000,000
+   cumulative RL games. This
    stage is fully parameterized from the command line so the script can drive
    repeated batch runs that only vary RL hyperparameters;
 4. run the **five agent-vs-random diagnostics** (`diagnostics.evaluate`) —
    evaluating the exact
-   RL/SL checkpoints this run used, at the same BIG scale as the RL stage
-   (`run_pipeline.py` scales `BASE_DIAGNOSTIC_GAMES=10000` by the scale factor;
-   this script mirrors that: `10,000 x 5 = 50,000` games/matchup by default).
+   RL/SL checkpoints this run used, with the wrapper's historical 50,000
+   games/matchup. Canonical `big`/`huge` use 1,000,000 per matchup.
    Results are written to a **fresh subdirectory per run**,
    `diagnostics/results/<rl-weights-basename>/`, named after the RL weights
    file this run produced or reused (e.g. `--rl-weights-file
@@ -37,6 +36,10 @@ forwards the controls below to `training.training_loop`; training-loss plateau
 stopping and validation-based LR decay are enabled by default. Use
 `--skip-dataset`/`--skip-sl`/`--skip-rl`/`--skip-diagnostics` to reuse existing
 artifacts across batch runs that only sweep RL hyperparameters.
+
+Use `python -m training.pipeline <level>` for canonical seed-addressed assets,
+game-budget levels, periodic monitoring, complete resume, and `forever`. This
+shell wrapper remains an independent hyperparameter-experiment driver.
 
 ## Convergence criteria
 
@@ -85,7 +88,7 @@ train_script/run_training_pipeline.sh --help
 
 ## Examples
 
-Full pipeline with defaults (fresh dataset, fresh SL weights, BIG-scale RL):
+Full wrapper with defaults (fresh dataset, fresh SL weights, historical RL profile):
 
 ```bash
 train_script/run_training_pipeline.sh

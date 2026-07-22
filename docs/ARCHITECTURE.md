@@ -93,17 +93,20 @@ float64 arrays by casting them to float32.
 StrategicAgent vs StrategicAgent games
           |
           v
-dataset/supervised_dataset.jsonl
+standard_seed<seed> dataset + metadata/hash
           |
           v
-encoded float32 cache -> supervised MLP -> domino_sl_weights.npz
-                              |                    |
-                              v                    v
-                    domino_sl_loss.png    adaptive on-policy RL
-                                         frozen rollouts -> PPO minibatches
-                                                    |
-                                                    v
-                                       domino_rl_weights.npz
+encoded float32 cache -> supervised MLP -> standard_seed<seed> SL + metadata
+                              |                              |
+                              v                              v
+                         loss PNG                  adaptive on-policy RL
+                                                    frozen rollouts -> PPO
+                                                               |
+                                                               v
+                                               level/seed RL run directory
+                                                  |             |
+                                                  v             v
+                                      exact resume state   periodic monitor
 ```
 
 Dataset generation retains only real policy decisions and writes deterministic
@@ -126,6 +129,14 @@ the number of legal choices. Opponent-pool snapshots refresh by cumulative
 training-game thresholds, and a checksummed `.resume.npz` preserves policy,
 optimizer, RNG, adaptive selections, counters, and pool.
 
+`training.pipeline` owns canonical orchestration. Dataset and supervised
+configuration are invariant across `small`, `default`, `big`, `huge`, and
+`forever`; seed-addressed metadata and hashes determine safe reuse. The RL
+budget is cumulative games, with shortened final and milestone iterations.
+Canonical `big`, `huge`, and `forever` state uses immutable payload generations
+and an atomic `training_state.json` marker so resume restores weights,
+optimizer, RNGs, pool order/provenance, adaptive choices, and counters.
+
 ## Parallelism and device policy
 
 Dataset games, RL rollouts, and diagnostic games are independent CPU work.
@@ -147,17 +158,23 @@ and can generate plots. `diagnostics.evaluate` runs the five canonical agents
 against `random` and atomically replaces the aggregate output directory only
 after all requested artifacts are complete.
 
+`diagnostics.rl_progress` owns the canonical RL learning curve. It evaluates
+RL versus random on a fixed periodic seed namespace, appends deduplicated JSONL
+points, and derives CSV/PNG reports. Final all-pairs evaluation uses a distinct
+holdout namespace. Diagnostic execution preserves parent training RNG state
+and never mutates the checkpoint or training schedule.
+
 Parameter and games-per-iteration sweeps train points sequentially while each
 point can use internal rollout workers. Their manifests, fingerprints, hashes,
 numbered checkpoints, metrics, and diagnostic artifacts support conservative
 resume. Report builders consume those immutable run artifacts to create CSV,
 JSON, XLSX, PNG, and PDF outputs.
 
-The main pipeline and every new parameter-sweep point initialize RL from the
-selected supervised checkpoint, independent of an older RL output. An
-explicit resume restores a sweep point's exact numbered RL state. Direct
-`training.self_play` calls continue an existing compatible RL checkpoint by
-default, with `--fresh-from-sl` available for controlled new runs.
+Every new canonical pipeline and parameter-sweep point initializes RL from its
+selected supervised checkpoint, independent of an older RL output. Canonical
+`--resume`/`--resume-from` and sweep resume restore exact numbered state.
+Direct `training.self_play` calls continue an existing compatible RL checkpoint
+by default, with `--fresh-from-sl` available for controlled new runs.
 
 ## UI
 

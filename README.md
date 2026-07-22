@@ -38,40 +38,69 @@ all controls and interaction rules.
 
 ## Train the agents
 
-Run the complete dataset -> supervised learning -> RL -> diagnostics pipeline:
+Run the canonical dataset -> supervised learning -> RL -> diagnostics pipeline:
 
 ```bash
-python run_pipeline.py
+python -m training.pipeline default
+# Equivalent compatibility entry point:
+python run_pipeline.py default
 ```
 
-By default the RL stage ignores an older `models/domino_rl_weights.npz` and
-starts from the supervised checkpoint produced by that same pipeline run. Use
-`python run_pipeline.py --continue-existing-rl` only when you intentionally
-want to continue the existing RL checkpoint.
+Every level shares the seed-addressed standard dataset and supervised model.
+The canonical dataset uses 100,000 games and supervised training allows up to
+5,000 epochs, while retaining the existing conservative early-stop rules.
+Compatible artifacts are reused by metadata and SHA-256; incompatible files
+are refused unless `--rebuild-dataset`, `--retrain-supervised`, or
+`--rebuild-supervised-assets` is explicit. The default seed is 42.
 
-The default RL workload is exactly 100,000 real training games. Before those
-games begin, an isolated benchmark selects GPI from
+Pipeline levels differ primarily in exact cumulative RL games:
+
+| Level | RL games | Final games/matchup | Periodic RL-vs-random |
+|---|---:|---:|---|
+| `small` | 100,000 | 10,000 | No |
+| `default` | 500,000 | 10,000 | No |
+| `big` | 2,000,000 | 1,000,000 | Every 100,000 games |
+| `huge` | 10,000,000 | 1,000,000 | Every 100,000 games |
+| `forever` | No limit | None automatically | Every 100,000 games |
+
+Before real RL games begin, the existing isolated benchmark selects GPI from
 `100, 200, 400, 600, 800, 1000, 2000`, then selects the rollout-worker count;
 benchmark games are discarded. Training uses masked PPO with adaptive
 minibatches and up to four epochs. Opponent snapshots refresh every 400
 cumulative real games, and checkpoint saves do not run an extra evaluation
 matchup.
 
-RL writes the selected GPI/worker benchmarks to
-`models/adaptive_tuning.json` and the per-iteration PPO trace to
-`models/domino_rl_weights_training_metrics.jsonl` by default. Override them
-with `--adaptive-tuning-path` and `--metrics-output-path`.
+`big`, `huge`, and `forever` persist weights, optimizer, RNGs, counters, and
+the opponent pool. Continue the same cumulative target with `--resume`, or
+extend a lineage with `--resume-from`:
+
+```bash
+python -m training.pipeline big --resume
+python -m training.pipeline huge \
+  --resume-from models/rl/domino_rl_big_seed42
+python -m training.pipeline forever --resume
+python -m training.pipeline forever \
+  --resume models/rl/domino_rl_forever_seed42
+```
+
+`--resume` without a value uses the level/seed default directory. For
+convenience, `--resume RUN_DIR` is also accepted and is equivalent to
+`--resume-from RUN_DIR`.
+
+The `forever` periodic RL-vs-random worker autotune runs once. Its selection is
+stored in `periodic_diagnostic_tuning.json` and reused at every later milestone
+and after resume. The RL progress bar reports one `avg_games_s` value computed
+over the full persisted RL training lineage.
+
+The first SIGINT/SIGTERM finishes the current iteration, publishes a safe
+checkpoint, and exits; `forever` never launches the final all-pairs diagnostic.
 
 Supervised epoch counts are maximum budgets. Training stops earlier by default
 after a conservative repeated-block check confirms that training loss has
 saturated; use `--sl-no-training-plateau-stop` for fixed-epoch experiments.
 
-The optional scale is `small`, `default`, `big`, or `huge`:
-
-```bash
-python run_pipeline.py small
-python run_pipeline.py --help
-```
+Use `python -m training.pipeline --help` for rebuild, resume, worker, device,
+PPO, and diagnostic controls.
 
 Run stages directly when iterating on one component:
 
@@ -139,11 +168,12 @@ locations are:
 
 | Path | Contents |
 |---|---|
-| `dataset/supervised_dataset.jsonl` | Heuristic-labelled real decisions. |
-| `dataset/supervised_dataset_encoded.npz` | Encoded supervised cache. |
-| `models/domino_sl_weights.npz` | Supervised policy checkpoint. |
-| `models/domino_sl_loss.png` | Training and validation loss curves from the latest supervised run. |
-| `models/domino_rl_weights.npz` | Self-play policy checkpoint. |
+| `dataset/supervised_dataset_standard_seed42.jsonl` | Canonical heuristic-labelled real decisions for seed 42. |
+| `dataset/supervised_dataset_standard_seed42.meta.json` | Dataset identity, provenance, and SHA-256. |
+| `models/domino_sl_standard_seed42.npz` | Canonical supervised policy. |
+| `models/domino_sl_standard_seed42.meta.json` | Supervised origin, configuration, convergence, and SHA-256. |
+| `models/domino_sl_standard_seed42_loss.png` | Canonical training and validation loss curves. |
+| `models/rl/domino_rl_<level>_seed42/` | Complete RL state, milestones, diagnostics, and progress curve. |
 | `models/rl_test/` | Numbered parameter-sweep checkpoints and resume state. |
 | `models/rl_gpi_sweep/` | Games-per-iteration sweep checkpoints and manifests. |
 | `diagnostics/results/` | Pairwise, aggregate, sweep, CSV, JSON, XLSX, and plot outputs. |

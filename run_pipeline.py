@@ -28,8 +28,8 @@ except ImportError:
     tqdm = None
 
 ROOT = Path(__file__).resolve().parent
-BASE_DATASET_GAMES = 10000
-BASE_SUPERVISED_EPOCHS = 1000
+BASE_DATASET_GAMES = 100000
+BASE_SUPERVISED_EPOCHS = 5000
 BASE_RL_ITERATIONS = 1000
 BASE_RL_GAMES_PER_ITERATION = 100
 BASE_DIAGNOSTIC_GAMES = 10000
@@ -615,6 +615,19 @@ def main():
         raise
     else:
         finish_pipeline_timing(status="completed")
+
+
+# Keep the historical stage helpers importable for focused tests and tooling,
+# while making both public entry points execute the canonical game-budgeted
+# pipeline. ``python run_pipeline.py`` and ``python -m training.pipeline`` are
+# therefore equivalent.
+from training import pipeline as _canonical_pipeline
+
+PipelineConfig = _canonical_pipeline.PipelineConfig
+SCALE_FACTORS = _canonical_pipeline.SCALE_FACTORS
+_build_config = _canonical_pipeline._build_config
+parse_args = _canonical_pipeline.parse_args
+main = _canonical_pipeline.main
 
 
 if __name__ == "__main__":

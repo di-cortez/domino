@@ -104,6 +104,8 @@ class SharedPolicyBank:
 
         self.max_pool_size = int(max_pool_size)
         self.pool_slots = []
+        self._pool_metadata = {}
+        self._next_snapshot_id = 0
         self._next_pool_slot = 0
         self.write_current(network)
 
@@ -143,7 +145,7 @@ class SharedPolicyBank:
         """Publish the learner policy after the previous gradient update."""
         self._write_slot(0, network)
 
-    def append_pool_snapshot(self, network):
+    def append_pool_snapshot(self, network, metadata=None):
         """Append a frozen opponent snapshot, overwriting the oldest ring slot."""
         if self.max_pool_size == 0:
             return
@@ -152,6 +154,15 @@ class SharedPolicyBank:
         if slot in self.pool_slots:
             self.pool_slots.remove(slot)
         self.pool_slots.append(slot)
+        metadata = dict(metadata or {})
+        snapshot_id = int(metadata.get("snapshot_id", self._next_snapshot_id))
+        metadata.update({
+            "snapshot_id": snapshot_id,
+            "logical_order": len(self.pool_slots) - 1,
+            "sampling_rule": "uniform_random",
+        })
+        self._pool_metadata[slot] = metadata
+        self._next_snapshot_id = max(self._next_snapshot_id, snapshot_id + 1)
         self._next_pool_slot = (slot + 1) % self.max_pool_size
 
     def export_pool_snapshots(self):
@@ -172,24 +183,45 @@ class SharedPolicyBank:
             snapshots.append(weights)
         return tuple(snapshots)
 
-    def restore_pool_snapshots(self, snapshots):
+    def export_pool_metadata(self):
+        """Return JSON-safe metadata in the same logical order as snapshots."""
+        values = []
+        for logical_order, slot in enumerate(self.pool_slots):
+            metadata = dict(self._pool_metadata.get(slot, {}))
+            metadata["logical_order"] = logical_order
+            metadata.setdefault("sampling_rule", "uniform_random")
+            values.append(metadata)
+        return tuple(values)
+
+    def restore_pool_snapshots(self, snapshots, metadata=None):
         """Replace the ring with serialized snapshots from a resume state."""
         snapshots = tuple(snapshots)
+        if metadata is None:
+            metadata = tuple({} for _snapshot in snapshots)
+        else:
+            metadata = tuple(metadata)
+        if len(metadata) != len(snapshots):
+            raise ValueError("Opponent-pool metadata count does not match snapshots.")
         if len(snapshots) > self.max_pool_size:
             raise ValueError(
                 f"Resume state contains {len(snapshots)} opponent snapshots, "
                 f"but max_pool_size is {self.max_pool_size}."
             )
         self.pool_slots = []
+        self._pool_metadata = {}
+        self._next_snapshot_id = 0
         self._next_pool_slot = 0
-        for weights in snapshots:
+        for weights, snapshot_metadata in zip(snapshots, metadata):
             missing = [name for name in POLICY_WEIGHT_NAMES if name not in weights]
             if missing:
                 raise ValueError(
                     "Resume opponent snapshot is missing policy weights: "
                     + ", ".join(missing)
                 )
-            self.append_pool_snapshot(_CPUInferencePolicy(weights))
+            self.append_pool_snapshot(
+                _CPUInferencePolicy(weights),
+                metadata=snapshot_metadata,
+            )
 
     def close(self):
         """Release every shared segment, even after a failed training run."""
@@ -370,7 +402,10 @@ class RLRolloutRunner:
         self.gamma = float(gamma)
         self.bank = SharedPolicyBank(network, max_pool_size)
         if training_opponent == "self_play":
-            self.bank.append_pool_snapshot(network)
+            self.bank.append_pool_snapshot(network, metadata={
+                "origin": "initial_policy",
+                "introduced_at_rl_games": 0,
+            })
         self.executor = None
         self.requested_workers = 1
         self.worker_count = 1
@@ -386,18 +421,22 @@ class RLRolloutRunner:
         """Publish weights only while no worker task is in flight."""
         self.bank.write_current(network)
 
-    def append_pool_snapshot(self, network):
+    def append_pool_snapshot(self, network, metadata=None):
         """Publish a new frozen opponent after the iteration update."""
-        self.bank.append_pool_snapshot(network)
+        self.bank.append_pool_snapshot(network, metadata=metadata)
 
     def export_pool_snapshots(self):
         """Return copies suitable for an atomic parent-side resume file."""
         return self.bank.export_pool_snapshots()
 
-    def restore_pool_snapshots(self, snapshots):
+    def export_pool_metadata(self):
+        """Return persisted provenance for exported opponent snapshots."""
+        return self.bank.export_pool_metadata()
+
+    def restore_pool_snapshots(self, snapshots, metadata=None):
         """Restore the exact opponent pool before starting resumed rollouts."""
         self._shutdown_executor()
-        self.bank.restore_pool_snapshots(snapshots)
+        self.bank.restore_pool_snapshots(snapshots, metadata=metadata)
 
     def _shutdown_executor(self, terminate=False):
         if self.executor is None:

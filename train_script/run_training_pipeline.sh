@@ -3,13 +3,12 @@
 # Batch-training driver: run the full domino pipeline in order:
 #   1. generate the supervised dataset with README/module defaults;
 #   2. train the supervised policy with README/module defaults;
-#   3. refine an RL policy with a "BIG" self-play run (5x the default exact
-#      game budget used by run_pipeline.py's "big" scale), with RL
+#   3. refine an RL policy with the wrapper's historical 500,000-game
+#      experiment profile, with RL
 #      hyperparameters overridable from the command line so the same script
 #      can drive repeated batch runs that only vary the RL stage;
-#   4. compare all five supported agents with the random baseline, mirroring
-#      `run_pipeline.py`'s diagnostics stage at the
-#      same BIG scale, writing results to a subdirectory of
+#   4. compare all five supported agents with the random baseline over the
+#      wrapper's historical 50,000-game profile, writing results to a subdirectory of
 #      `diagnostics/results/` named after the RL weights file this run
 #      produced (or reused), so repeated batch runs that vary RL
 #      hyperparameters keep separate diagnostics output instead of
@@ -46,8 +45,8 @@ cd "$REPO_ROOT"
 # Defaults
 # ------------------------------------------------------------------
 
-# Mirrors run_pipeline.py: 100,000 real games, "big" scale = 5x. GPI is
-# adaptively selected unless the caller explicitly supplies one.
+# Historical experiment profile. The canonical `big` pipeline is separate and
+# trains 2,000,000 cumulative RL games.
 BASE_RL_TOTAL_TRAINING_GAMES=100000
 BIG_SCALE_FACTOR=5
 RL_TOTAL_TRAINING_GAMES=$((BASE_RL_TOTAL_TRAINING_GAMES * BIG_SCALE_FACTOR))
@@ -111,8 +110,8 @@ SL_MEMORY_RESERVE_MB=512
 SL_GPU_MEMORY_RESERVE_MB=512
 SL_SEED=""
 
-# Diagnostics stage: mirrors run_pipeline.py's diagnostics logic and scales
-# BASE_DIAGNOSTIC_GAMES=10000 by the same BIG factor as the other stages.
+# Historical diagnostics profile. Canonical `big` and `huge` use 1,000,000
+# games per matchup.
 BASE_DIAGNOSTIC_GAMES=10000
 DIAG_GAMES=$((BASE_DIAGNOSTIC_GAMES * BIG_SCALE_FACTOR))
 DIAG_SEED=""
@@ -127,16 +126,19 @@ SKIP_DIAGNOSTICS=0
 usage() {
     cat <<EOF
 Run the domino training pipeline: dataset generation -> supervised training
-(both with README/module defaults) -> a BIG-scale self-play RL run ($BASE_RL_TOTAL_TRAINING_GAMES
-x ${BIG_SCALE_FACTOR} = $RL_TOTAL_TRAINING_GAMES real games by default, matching run_pipeline.py's
-"big" scale) -> five agent-vs-random diagnostics at the same BIG scale
+(both with README/module defaults) -> the wrapper's historical self-play RL
+profile ($BASE_RL_TOTAL_TRAINING_GAMES x ${BIG_SCALE_FACTOR} =
+$RL_TOTAL_TRAINING_GAMES real games by default) -> five agent-vs-random diagnostics
 ($BASE_DIAGNOSTIC_GAMES x ${BIG_SCALE_FACTOR} = $DIAG_GAMES games per matchup by default),
 written to diagnostics/results/<rl-weights-basename>/.
+
+For canonical levels, shared seed-addressed supervised assets, complete resume,
+periodic monitoring, and forever mode, use: python -m training.pipeline --help
 
 Usage: $(basename "$0") [options]
 
 Dataset generation runs with no extra flags (see training/README.md):
-dataset -> dataset/supervised_dataset.jsonl (10,000 games). Supervised
+dataset -> dataset/supervised_dataset.jsonl (30,000 games). Supervised
 training runs with no extra flags by default too (-> models/domino_sl_weights.npz,
 up to 2,000 epochs with automatic training-loss plateau stopping), unless one
 of the SL convergence flags below is passed.
@@ -197,7 +199,7 @@ SL training controls:
   --sl-gpu-memory-reserve-mb N     GPU VRAM reserve (default: $SL_GPU_MEMORY_RESERVE_MB)
   --sl-seed N                      Fix supervised initialization and shuffling
 
-Agent-vs-random diagnostics (forwarded to diagnostics.evaluate, mirrors run_pipeline.py):
+Agent-vs-random diagnostics (forwarded to diagnostics.evaluate):
   --diag-games N                Games per evaluated matchup (default: $DIAG_GAMES)
   --diag-seed N                 Fix the RNG seed for the diagnostics games (default: unset)
   --diag-no-pair-plots          Skip per-matchup PNG plots (the aggregate PNG and PDF are still generated)
@@ -212,7 +214,7 @@ Stage control:
   -h, --help                   Show this help message and exit
 
 Examples:
-  # Full pipeline: default dataset + SL, BIG-scale RL with defaults, then diagnostics
+  # Full historical wrapper profile: dataset + SL + RL + diagnostics
   train_script/run_training_pipeline.sh
 
   # Batch run: only vary RL hyperparameters, reuse existing dataset/SL weights;
@@ -379,7 +381,7 @@ fi
 if [[ "$SKIP_RL" -eq 1 ]]; then
     section "Step 3/4: self-play reinforcement learning (skipped)"
 else
-    section "Step 3/4: BIG-scale RL self-play ($RL_TOTAL_TRAINING_GAMES exact real games -> $RL_WEIGHTS_FILE)"
+    section "Step 3/4: historical RL profile ($RL_TOTAL_TRAINING_GAMES exact real games -> $RL_WEIGHTS_FILE)"
     VALUE_HEAD_FLAG=()
     if [[ "$RL_VALUE_HEAD" -eq 1 ]]; then
         VALUE_HEAD_FLAG=(--value-head)

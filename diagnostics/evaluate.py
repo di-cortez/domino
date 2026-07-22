@@ -45,6 +45,7 @@ from diagnostics.plots import (
     plot_all_pairs_table,
     worst_case_margin_of_error,
 )
+from utils.artifacts import file_sha256
 from utils.runtime_status import format_duration, print_memory_report
 from diagnostics.worker_autotune import (
     DEFAULT_AUTOTUNE_FRACTION,
@@ -155,6 +156,7 @@ def _checkpoint_network_metadata(agent, weights_path):
         "total_parameters": policy_parameters + value_parameters,
         "checkpoint": str(path),
         "checkpoint_name": path.name,
+        "checkpoint_sha256": file_sha256(path),
         "checkpoint_bytes": path.stat().st_size,
     }
 

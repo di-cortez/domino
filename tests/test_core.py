@@ -1211,7 +1211,8 @@ def test_rl_workload_and_pool_defaults_use_games():
     pipeline = _build_config("default")
 
     # ``None`` preserves whether a value was explicitly supplied; the CLI
-    # translation resolves these to the normal 100,000-game adaptive run.
+    # translation resolves standalone self-play independently; the canonical
+    # default pipeline owns a 500,000-game RL budget.
     assert standalone.iterations is None
     assert standalone.total_training_games is None
     assert standalone.games_per_iteration is None
@@ -1220,7 +1221,8 @@ def test_rl_workload_and_pool_defaults_use_games():
     assert standalone.pool_refresh_games == 400
     assert not hasattr(standalone, "evaluation_games")
     assert not hasattr(standalone, "pool_interval")
-    assert pipeline.rl_iterations * pipeline.rl_games_per_iteration == 100_000
+    assert pipeline.total_rl_games == 500_000
+    assert pipeline.rl_iterations * pipeline.rl_games_per_iteration == 500_000
 
 
 def test_reward_signal_summary_classifies_rewards():
@@ -1406,10 +1408,19 @@ def test_diagnostic_plan_selects_canonical_random_matchups():
 
 
 def test_pipeline_scales_set_explicit_diagnostic_game_counts():
-    assert _build_config("small").diagnostic_games == 2000
+    assert all(
+        _build_config(level).dataset_games == 100_000
+        for level in ("small", "default", "big", "huge", "forever")
+    )
+    assert all(
+        _build_config(level).supervised_epochs == 5_000
+        for level in ("small", "default", "big", "huge", "forever")
+    )
+    assert _build_config("small").diagnostic_games == 10000
     assert _build_config("default").diagnostic_games == 10000
-    assert _build_config("big").diagnostic_games == 50000
-    assert _build_config("huge").diagnostic_games == 200000
+    assert _build_config("big").diagnostic_games == 1_000_000
+    assert _build_config("huge").diagnostic_games == 1_000_000
+    assert _build_config("forever").diagnostic_games == 0
 
 
 def test_pipeline_compute_report_names_backends_and_memory():

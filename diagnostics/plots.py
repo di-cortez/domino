@@ -359,6 +359,8 @@ def _network_header_text(label, metadata):
     parameters = f"{int(metadata['total_parameters']):,} params"
     if metadata.get("checkpoint_name"):
         source = metadata["checkpoint_name"]
+        if metadata.get("checkpoint_sha256"):
+            source += f" (sha256 {metadata['checkpoint_sha256'][:12]}...)"
     else:
         source = metadata.get("initialization", "no checkpoint")
     value_head = "value head on" if metadata.get("value_head") else "value head off"

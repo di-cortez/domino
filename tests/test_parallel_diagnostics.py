@@ -111,6 +111,7 @@ class ParallelDiagnosticsTests(unittest.TestCase):
                     "total_parameters": 83384,
                     "value_head": False,
                     "checkpoint_name": "rl.npz",
+                    "checkpoint_sha256": "0123456789abcdef",
                 },
             },
         }
@@ -122,6 +123,7 @@ class ParallelDiagnosticsTests(unittest.TestCase):
         )
         self.assertTrue(any("±0.98 percentage points" in line for line in header))
         self.assertTrue(any("168→256→128→56" in line for line in header))
+        self.assertTrue(any("sha256 0123456789ab" in line for line in header))
 
         with tempfile.TemporaryDirectory() as temp_dir:
             png_path = Path(temp_dir) / "table.png"

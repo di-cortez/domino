@@ -40,6 +40,7 @@ from utils.resource_limits import (
     gpu_memory_info,
     host_allocation_status,
 )
+from utils.artifacts import atomic_savez
 from utils.runtime_status import format_duration, memory_report
 
 
@@ -633,6 +634,7 @@ def train_supervised(
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
     gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
     seed=None,
+    resume_existing_weights=True,
 ):
     """Train the policy and return scheduler, storage, tuning, and memory data."""
     if epochs < 1:
@@ -778,7 +780,7 @@ def train_supervised(
             f"{validation_count} validation"
         )
 
-    if os.path.exists(weights_file):
+    if resume_existing_weights and os.path.exists(weights_file):
         _load_existing_weights(network, weights_file)
         if not quiet:
             print(f"Existing supervised model found at {weights_file}. Resuming training.")
@@ -816,7 +818,11 @@ def train_supervised(
     )
 
     tracker = SupervisedResourceTracker(selected_device)
-    best_state = {"validation_loss": float("inf"), "weights": None}
+    best_state = {
+        "validation_loss": float("inf"),
+        "epoch": None,
+        "weights": None,
+    }
     last_checkpoint_time = {"value": started}
 
     def save_checkpoint(current_network, epoch, validation_loss):
@@ -828,8 +834,8 @@ def train_supervised(
             f"domino_sl_epoch_{epoch:04d}_val_{validation_loss:.4f}.npz"
         )
         payload = _network_weight_payload(current_network)
-        np.savez(checkpoint_file, **payload)
-        np.savez(weights_path, **payload)
+        atomic_savez(checkpoint_file, **payload)
+        atomic_savez(weights_path, **payload)
         removed = _prune_supervised_checkpoints(checkpoint_dir)
         now = time.time()
         checkpoint_elapsed = now - last_checkpoint_time["value"]
@@ -853,6 +859,7 @@ def train_supervised(
             save_checkpoint(current_network, epoch, validation_loss)
         if validation_loss < best_state["validation_loss"]:
             best_state["validation_loss"] = validation_loss
+            best_state["epoch"] = int(epoch) + 1
             best_state["weights"] = {
                 name: getattr(current_network, name).copy()
                 for name in current_network.weight_names
@@ -906,7 +913,7 @@ def train_supervised(
         )
         weights_path = Path(weights_file)
         weights_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
+        atomic_savez(
             weights_path,
             **_network_weight_payload(network, best_state["weights"]),
         )
@@ -923,6 +930,14 @@ def train_supervised(
     elapsed = time.time() - started
     tuning_summary = autotuner.to_dict()
     training_summary = network.last_training_summary
+    final_validation_loss = next(
+        (
+            float(metrics["validation_loss"])
+            for metrics in reversed(epoch_metrics)
+            if metrics.get("validation_loss") is not None
+        ),
+        None,
+    )
     resource_summary = tracker.to_dict()
     if data_plan.peak_gpu_pool_used_bytes:
         resource_summary["peak_gpu_pool_used_bytes"] = max(
@@ -970,6 +985,12 @@ def train_supervised(
     return {
         "epochs": len(loss_history),
         "requested_epochs": epochs,
+        "best_epoch": best_state["epoch"],
+        "early_stopping_triggered": (
+            training_summary["stopping_reason"] != "epoch_limit"
+        ),
+        "final_training_loss": float(loss_history[-1]),
+        "final_validation_loss": final_validation_loss,
         "batch_size": tuning_summary["selected_batch_size"],
         "selected_batch_size": tuning_summary["selected_batch_size"],
         "total_examples": total_examples,

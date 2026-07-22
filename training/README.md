@@ -6,35 +6,78 @@ This folder contains the full training pipeline:
 2. train a supervised neural policy;
 3. refine that policy through self-play reinforcement learning.
 
-From the repository root, `run_pipeline.py` runs the full sequence with compact
-progress bars and one summary line per stage:
+From the repository root, the canonical pipeline runs the full sequence:
 
 ```bash
-python run_pipeline.py
-python run_pipeline.py small
-python run_pipeline.py big
-python run_pipeline.py huge
+python -m training.pipeline small
+python -m training.pipeline default
+python -m training.pipeline big
+python -m training.pipeline huge
+python -m training.pipeline forever
 ```
 
-The default runner uses the same workload as the individual commands. `small`
-uses one fifth of the default counts, `big` uses five times the default counts,
-and `huge` uses twenty times the default counts. The scaled counts apply to
-dataset games, maximum supervised epochs, the exact RL game budget, and
-diagnostic games per matchup. The default RL budget is 100,000 real games;
-GPI is selected adaptively unless supplied explicitly.
-The default dataset workload is 10,000 heuristic-vs-heuristic games.
-Diagnostic counts are explicit per matchup, and all scales evaluate the same
-five agents against `random`:
+`run_pipeline.py` is an equivalent compatibility entry point. All five levels
+use one 100,000-game standard supervised dataset and the same supervised
+training configuration for a given seed; only the RL and diagnostic budgets
+change:
 
-| Pipeline scale | Games per matchup | Matchups |
-|---|---:|---:|
-| `small` | 2,000 | 5 |
-| `default` | 10,000 | 5 |
-| `big` | 50,000 | 5 |
-| `huge` | 200,000 | 5 |
+| Level | Cumulative RL games | Final games/matchup | Periodic monitor | Resume |
+|---|---:|---:|---|---|
+| `small` | 100,000 | 10,000 | No | Not exposed |
+| `default` | 500,000 | 10,000 | No | Not exposed |
+| `big` | 2,000,000 | 1,000,000 | 100,000 RL games | Yes |
+| `huge` | 10,000,000 | 1,000,000 | 100,000 RL games | Yes |
+| `forever` | Unbounded | None | 100,000 RL games | Yes |
 
-For example, `small` runs 2,000 games in each of 5 matchups, for 10,000
-diagnostic games in total.
+The standard assets are built from 100,000 heuristic games with a maximum
+supervised budget of 5,000 epochs (the convergence/plateau stopping rules can
+finish earlier). They are
+`dataset/supervised_dataset_standard_seed<seed>.jsonl` and
+`models/domino_sl_standard_seed<seed>.npz`. Their sibling `meta.json` files
+record structural versions, configuration, provenance, convergence fields,
+and SHA-256. Presence alone is never enough for reuse. An incompatible asset
+stops the run unless one of these explicit replacement controls is supplied:
+
+```bash
+python -m training.pipeline default --rebuild-dataset
+python -m training.pipeline default --retrain-supervised
+python -m training.pipeline default --rebuild-supervised-assets
+```
+
+RL output lives at `models/rl/domino_rl_<level>_seed<seed>/`. `big`, `huge`,
+and `forever` publish immutable exact resume generations plus the convenience
+aliases `latest_weights.npz`, `optimizer_state.npz`, `rng_state.json`, and
+`opponent_pool/pool_manifest.json`. `training_state.json` is the commit marker;
+resume restores policy, optimizer, RNG state, opponent pool/order, adaptive
+selection, PPO windows, and cumulative counters. Examples:
+
+The marker advances at the normal numbered-checkpoint interval, not only at a
+100,000-game diagnostic boundary. Superseded non-milestone latest payloads are
+pruned only after the replacement marker is durable; full milestone resume
+pairs remain available for recovery and diagnostic replay.
+
+```bash
+python -m training.pipeline big --resume
+python -m training.pipeline huge \
+  --resume-from models/rl/domino_rl_big_seed42
+python -m training.pipeline forever --resume
+python -m training.pipeline forever \
+  --resume models/rl/domino_rl_forever_seed42
+```
+
+The optional value accepted by `--resume` is a convenience alias for
+`--resume-from`. In `forever`, diagnostic-worker autotuning is performed once,
+persisted in `periodic_diagnostic_tuning.json`, and reused at subsequent
+100,000-game monitors and after resume. Progress exposes a single cumulative
+`avg_games_s` rate across the persisted RL training lineage.
+
+`forever` has no percentage or target. SIGINT/SIGTERM stops admission of a new
+iteration, lets an in-flight iteration finish, atomically publishes state, and
+exits without an automatic all-pairs evaluation. The current GPI candidates,
+benchmark sizes, ten-worker GPI benchmark, selection criterion, and worker
+autotune are unchanged; only the post-tuning budget is expressed in exact
+games. A boundary iteration is shortened so a periodic or final target is
+never exceeded.
 
 | File | Purpose |
 |---|---|
@@ -46,6 +89,9 @@ diagnostic games in total.
 | `ppo.py` | Builds immutable decision buffers, selects minibatches, manages GPU/RAM storage, and performs KL-limited PPO epochs. |
 | `adaptive_tuning.py` | Selects GPI/workers with isolated seed streams, state restoration, safety checks, and `adaptive_tuning.json`. |
 | `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed real games across memory fallback. |
+| `canonical_assets.py` | Names, validates, hashes, and records reusable standard dataset/SL assets. |
+| `canonical_run.py` | Publishes and validates complete atomic RL generations and lineage. |
+| `pipeline.py` | Owns canonical levels, exact game boundaries, periodic diagnostics, resume, and safe shutdown. |
 
 ## Important Shape Change
 
@@ -82,7 +128,7 @@ The generator records `(state, target_action)` pairs from games played by
 `StrategicAgent` against itself. Engine states are already compact and do not
 include rendering metadata. The command prints a startup RAM/GPU memory
 snapshot, shows a progress bar, and reports total elapsed time. The standalone
-command defaults to 30,000 games; the default full pipeline requests 10,000.
+command defaults to 30,000 games; the canonical pipeline requests 100,000.
 
 Automatic mode benchmarks 1, 2, 4, 6, ... CPU-only workers, capped at 20.
 Every attempt generates and retains 1% of the requested games. Testing stops on
@@ -284,11 +330,11 @@ python -m training.training_loop \
 Reported training and validation losses remain cross-entropy values, allowing
 loss curves to be compared with runs that do not enable weight decay.
 
-`run_pipeline.py` accepts the same flags and forwards them only to supervised
-training:
+The canonical pipeline accepts the same supervised controls:
 
 ```bash
-python run_pipeline.py small --weight-decay --early-stopping 12 --sl-device auto
+python -m training.pipeline small \
+  --weight-decay --early-stopping 12 --sl-device auto
 ```
 
 ## Self-Play RL
@@ -315,9 +361,10 @@ Default behavior:
 That compatibility-first policy is the default for the standalone module.
 Pass `--fresh-from-sl` to ignore an older RL checkpoint and start from the SL
 weights, or `--continue-existing-rl` to state the historical behavior
-explicitly. The main `python run_pipeline.py` command reverses the default:
-its RL stage starts from the supervised checkpoint trained in that same run;
-`python run_pipeline.py --continue-existing-rl` opts back into continuation.
+explicitly. A new canonical pipeline run always starts from its compatible
+seed-addressed supervised checkpoint. Canonical continuation is deliberately
+separate and complete: use `--resume` or `--resume-from`, never the
+weights-only `--continue-existing-rl` path.
 When starting fresh, the old RL file is ignored but kept intact until the new
 checkpoint is atomically saved, so an interrupted run does not erase a usable
 model.
@@ -378,9 +425,9 @@ controls are:
 
 ### Numbered checkpoints and exact resume
 
-Normal pipeline and direct-module calls keep the existing single-file
-checkpoint behavior. The long shell sweep opts into interruption-safe files
-with `--numbered-checkpoints`. Each save adds the absolute completed iteration
+Direct-module calls keep the existing single-file checkpoint behavior unless
+`--numbered-checkpoints` is requested. The canonical pipeline and long shell
+sweep always use interruption-safe numbered pairs. Each save adds the absolute completed iteration
 to the name, such as `model_iter000050.npz`, and atomically publishes a paired
 `model_iter000050.resume.npz`. The state file contains a SHA-256 checksum,
 every computation-affecting RL/PPO setting, completed real games, optimizer
@@ -453,11 +500,9 @@ finalized policy reward is the value target, and the masked policy update uses
 `reward - V(s)` as its advantage. The value-loss coefficient defaults to `0.5`
 (`--value-coef`). In this mode checkpoints also contain `Wv` and `bv`.
 
-`run_pipeline.py` forwards the same flag to RL training:
-
-```bash
-python run_pipeline.py small --value-head
-```
+The canonical pipeline intentionally fixes the current policy-only PPO
+algorithm. Value-head regression remains available only to direct self-play
+and experiment wrappers.
 
 Policy-only loading ignores `Wv`/`bv`, while value-head loading initializes
 them to zero when they are absent. This permits mode changes without changing
@@ -472,7 +517,7 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 
 | Flag | Meaning | Default |
 |---|---|---:|
-| `--fresh-from-sl` / `--continue-existing-rl` | Force initialization from SL or allow a compatible existing RL checkpoint | continue existing RL (standalone); fresh from SL in `run_pipeline.py` |
+| `--fresh-from-sl` / `--continue-existing-rl` | Force initialization from SL or allow a compatible existing RL checkpoint | continue existing RL (standalone); canonical continuation uses `--resume` |
 | `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
 | `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/tie/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
 | `--clip-grad-norm` | Gradient-norm clipping threshold for the policy-gradient update | `5.0` |

@@ -53,6 +53,15 @@ python -m diagnostics.evaluate --workers auto --autotune-fraction 0.01
 python -m diagnostics.evaluate --memory-reserve-mb 1024
 ```
 
+When comparing a canonical run manually, pass both checkpoints from the same
+lineage instead of relying on the legacy default filenames:
+
+```bash
+python -m diagnostics.evaluate \
+  --rl-weights models/rl/domino_rl_forever_seed42/latest_weights.npz \
+  --neural-weights models/domino_sl_standard_seed42.npz
+```
+
 Worker subprocesses cannot see the GPU, use a bounded dynamic job queue, and
 return records to the parent for aggregation/writing. RAM is checked before a
 pool starts and while it runs. Under pressure, unfinished game ids are retried
@@ -82,8 +91,9 @@ do not belong to the selected plan, keeping its contents internally consistent.
 
 The aggregate PNG/PDF header records games per matchup, total games,
 elapsed evaluation time, seed, selected workers, checkpoint names, neural
-architectures, parameter counts, and whether the RL checkpoint contains a
-value head. It also reports the 95% worst-case percentage margin of error as
+architectures, parameter counts, checkpoint SHA-256 prefixes, and whether the
+RL checkpoint contains a value head. It also reports the 95% worst-case
+percentage margin of error as
 `sqrt(0.9604 / n)`, rounded to two significant digits, where `n` is the games
 per matchup.
 
@@ -91,6 +101,42 @@ Win-rate cells use red-to-blue intensity bands at five-percentage-point
 intervals: `<30%`, `30–35%`, ..., `65–70%`, and `≥70%`. This makes both weak
 and strong deviations from 50% visible without changing the underlying
 numeric percentages.
+
+## Canonical RL Progress Monitor
+
+The `big`, `huge`, and `forever` pipelines evaluate only RL versus `random` at
+0, 100,000, 200,000, ... cumulative RL games. Point zero is the canonical
+supervised checkpoint. Every point uses the same seed namespace and the same
+100,000 game identities, so checkpoints are compared on a paired monitor set.
+The final five-matchup evaluation uses a separate holdout namespace.
+
+Each milestone is saved before evaluation. Diagnostics use separate RNG state
+and cannot change policy weights, optimizer, opponent pool, counters, GPI, or
+rollout workers. The RL run directory receives:
+
+| File | Contents |
+|---|---|
+| `periodic_diagnostics.jsonl` | Append-safe source of truth; one deduplicated monitor point per checkpoint identity. |
+| `rl_vs_random_progress.csv` | Derived tabular learning curve. |
+| `rl_vs_random_progress.png` | Linear game-count curve with point zero and 95% intervals. |
+| `rl_vs_random_progress_logx.png` | Optional separate symlog rendering. |
+| `best_checkpoint.json` | Highest periodic win rate; never used implicitly for resume. |
+| `periodic_diagnostic_tuning.json` | Forever's one-time diagnostic-worker selection, reused after resume. |
+
+In `forever`, automatic diagnostic-worker selection runs once and is reused at
+all later monitor points. Existing runs without the tuning file recover the
+most recent compatible selection from the JSONL history. The progress plot
+footer records the exact point-zero checkpoint name and SHA-256 prefix.
+
+A killed final JSONL append is tolerated and repaired before the next append.
+Rebuild CSV and plots without starting training:
+
+```bash
+python -m diagnostics.plot_rl_progress \
+  --run-dir models/rl/domino_rl_big_seed42
+python -m diagnostics.plot_rl_progress \
+  --run-dir models/rl/domino_rl_forever_seed42 --log-x
+```
 
 ## Pairwise Helper
 

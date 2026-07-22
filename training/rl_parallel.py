@@ -9,8 +9,8 @@ gradient updates, checkpoints, logging, and GPU use.
 
 Per-game seeds depend only on the run seed and absolute game id. Scheduling,
 worker count, autotuning, and memory fallback therefore do not change rollout
-contents. Autotuning benchmarks complete training iterations, and every tested
-game remains part of the training run.
+contents. Adaptive tuning uses separate labeled seed streams and discards all
+benchmark trajectories before the real training-game counter starts.
 """
 
 from __future__ import annotations
@@ -331,29 +331,6 @@ def _worker_collect_rollouts(job):
     return results
 
 
-def _worker_evaluate_against_heuristic(game_specs):
-    """Play deterministic checkpoint evaluation games on the shared policy."""
-    from agents.heuristic_agent import StrategicAgent
-    from agents.rl_agent import RLAgent
-    from training.self_play import _play_game
-
-    results = []
-    for game_index, seed in game_specs:
-        random.seed(seed)
-        np.random.seed(seed & 0xFFFFFFFF)
-        learner_position = game_index % 2
-        agents = [None, None]
-        agents[learner_position] = RLAgent(_WORKER_CURRENT_POLICY, mode="evaluation")
-        agents[1 - learner_position] = StrategicAgent()
-        results.append({
-            "game_index": int(game_index),
-            "game_seed": int(seed),
-            "winner": int(_play_game(agents)),
-            "learner_position": int(learner_position),
-        })
-    return results
-
-
 def _worker_ready():
     """Confirm that a spawned worker initialized without GPU visibility."""
     return {
@@ -651,15 +628,18 @@ class RLRolloutRunner:
 
         return [results_by_index[index] for index, _seed in specs], run_info
 
-    def collect_training_iteration(self, iteration_index, game_count, base_seed):
-        """Return one ordered, deterministic rollout batch for an iteration."""
-        first_absolute_game = int(iteration_index) * int(game_count)
+    def collect_games(self, first_absolute_game, game_count, base_seed):
+        """Collect an exact absolute game-id range, including partial batches."""
+        first_absolute_game = int(first_absolute_game)
+        game_count = int(game_count)
+        if first_absolute_game < 0 or game_count < 1:
+            raise ValueError("RL absolute game offset must be non-negative and count positive")
         specs = [
             (
-                game_index,
-                game_seed(base_seed, first_absolute_game + game_index),
+                first_absolute_game + local_index,
+                game_seed(base_seed, first_absolute_game + local_index),
             )
-            for game_index in range(game_count)
+            for local_index in range(game_count)
         ]
         pool_slots = tuple(self.bank.pool_slots)
         return self._execute_specs(
@@ -668,16 +648,12 @@ class RLRolloutRunner:
             lambda chunks: [(chunk, pool_slots) for chunk in chunks],
         )
 
-    def evaluate_current_against_heuristic(self, game_count, base_seed):
-        """Evaluate the current shared policy using the same safe worker pool."""
-        specs = [
-            (game_index, game_seed(base_seed, game_index))
-            for game_index in range(game_count)
-        ]
-        return self._execute_specs(
-            specs,
-            _worker_evaluate_against_heuristic,
-            lambda chunks: chunks,
+    def collect_training_iteration(self, iteration_index, game_count, base_seed):
+        """Backward-compatible fixed-size wrapper around :meth:`collect_games`."""
+        return self.collect_games(
+            int(iteration_index) * int(game_count),
+            game_count,
+            base_seed,
         )
 
     def close(self):

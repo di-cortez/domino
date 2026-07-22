@@ -99,8 +99,8 @@ dataset/supervised_dataset.jsonl
 encoded float32 cache -> supervised MLP -> domino_sl_weights.npz
                               |                    |
                               v                    v
-                    domino_sl_loss.png    on-policy RL iterations
-                                         frozen rollouts -> one update
+                    domino_sl_loss.png    adaptive on-policy RL
+                                         frozen rollouts -> PPO minibatches
                                                     |
                                                     v
                                        domino_rl_weights.npz
@@ -118,18 +118,22 @@ budget: after batch-size tuning is complete, repeated low-improvement blocks
 of training loss can stop a saturated run early.
 
 RL uses fresh on-policy trajectories: all games in an iteration observe the
-same frozen policy, then the parent performs one update and discards the batch.
-There is no replay buffer, PPO epoch, or offline reuse. Opponent-pool snapshots
-and a checksummed `.resume.npz` file make numbered checkpoints resumable without
-reconstructing earlier training.
+same frozen policy and save their masked collection-time log-probabilities.
+The parent normalizes advantages once over the complete decision buffer, then
+runs masked PPO in deterministic minibatches for up to four epochs. There is no
+replay buffer or cross-iteration reuse. Decision returns are not rescaled by
+the number of legal choices. Opponent-pool snapshots refresh by cumulative
+training-game thresholds, and a checksummed `.resume.npz` preserves policy,
+optimizer, RNG, adaptive selections, counters, and pool.
 
 ## Parallelism and device policy
 
 Dataset games, RL rollouts, and diagnostic games are independent CPU work.
-Their bounded worker pools use stable per-game seeds, retain safe autotuning
-samples, preserve game-id ordering, and reduce worker counts after resource or
-execution failures. The process running supervised or RL network updates is the
-only process allowed to use CuPy/GPU.
+Their bounded worker pools use stable per-game seeds, preserve game-id ordering,
+and reduce worker counts after resource or execution failures. RL GPI/worker
+autotunes use separate seed streams and discard every benchmark trajectory.
+The process running supervised or RL network updates is the only process
+allowed to use CuPy/GPU.
 
 This boundary prevents multiple worker processes from creating competing CUDA
 contexts and keeps deterministic seeded results independent of scheduling.

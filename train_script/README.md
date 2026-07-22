@@ -11,8 +11,9 @@ Batch-training drivers for the full pipeline described in
    training-loss saturation, validation early-stopping, and weight-decay
    controls;
 3. refine that policy with a **BIG-scale** self-play reinforcement-learning
-   run — 5x the default iteration count (1,000 x 5 = 5,000 iterations),
-   matching the `big` scale in `run_pipeline.py`'s `SCALE_FACTORS`. This
+   run — 5x the default exact budget (100,000 x 5 = 500,000 real games),
+   with adaptive GPI, isolated worker tuning, and PPO, matching the `big`
+   scale in `run_pipeline.py`'s `SCALE_FACTORS`. This
    stage is fully parameterized from the command line so the script can drive
    repeated batch runs that only vary RL hyperparameters;
 4. run the **five agent-vs-random diagnostics** (`diagnostics.evaluate`) —
@@ -49,20 +50,12 @@ single raw log line. The retained operational conclusions are:
   meaningful improvement. Validation-based LR decay and optional validation
   early stopping retain independent counters. The wrapper forwards all
   training-loss plateau, validation scheduler, and regularization controls.
-- **RL**: log the return standard deviation next to the mean (a shrinking
-  value loss is ambiguous without it — it can mean either learning or just a
-  low-variance batch), and use a trailing moving average of value loss and
-  win rate, not the point value, to judge a plateau. `training.self_play` now
-  always logs `reward mean/std/min/max` and a `(avg/N: ...)` moving average
-  next to both the value loss and the win rate; `--rl-moving-average-window`
-  controls `N` (default 10). `--rl-clip-grad-norm` and
-  `--rl-value-coef` were flagged as needing CLI exposure for any serious
-  investigation of a value-loss plateau — both are exposed.
-  `--rl-normalize-advantages` (off by default, to not silently change
-  training dynamics) standardizes the policy signal per batch, which the
-  keeps the value-loss magnitude comparable across iterations. `--rl-seed`
-  fixes randomness for reproducible side-by-side comparisons between
-  hyperparameter configurations.
+- **RL**: PPO logs reward distribution, decision count, requested/effective
+  minibatches, optimizer steps, epochs, whole-buffer KL, clipping, entropy,
+  gradient norms, buffer placement, and rollout/update time. Advantages are
+  normalized once over the complete iteration by default. Use final diagnostics
+  and repeated seeds for quality comparisons; self-play batch win rate remains
+  only an optimization trace. `--rl-seed` fixes side-by-side experiments.
 
 One historical fix did **not** carry forward as a flag: the old
 `SL_CHECKPOINT_EVERY == SL_EPOCHS` bug (which silenced all but one archived
@@ -134,29 +127,30 @@ training module.
 |---|---|---|---|
 | `--rl-weights-file` | RL | Output weights path | `models/domino_rl_weights.npz` |
 | `--rl-sl-weights-path` | RL | Input SL weights used to initialize a fresh RL run | `models/domino_sl_weights.npz` |
-| `--rl-iterations` | RL | Training iterations | `5000` (BIG scale: `1000 x 5`) |
-| `--rl-games-per-iteration` | RL | Games played per iteration | `40` |
+| `--rl-total-training-games` | RL | Exact real-game budget | `500000` |
+| `--rl-iterations` | RL | Legacy fixed iteration budget | unset |
+| `--rl-games-per-iteration` | RL | Explicit manual GPI | adaptive (fallback `100`) |
+| `--rl-adaptive-gpi` / `--rl-no-adaptive-gpi` | RL | Force or disable GPI selection | adaptive |
 | `--rl-training-opponent` | RL | `self_play` or `heuristic` | `self_play` |
 | `--rl-learning-rate` | RL | Learning rate | `0.001` |
 | `--rl-entropy-coef` | RL | Entropy bonus coefficient | `0.01` |
 | `--rl-log-interval` | RL | Iterations between log lines | `10` |
 | `--rl-checkpoint-interval` | RL | Iterations between checkpoints | `50` |
-| `--rl-pool-interval` | RL | Iterations between self-play pool snapshots | `10` |
+| `--rl-pool-refresh-games` | RL | Training games between self-play pool snapshots | `400` |
 | `--rl-max-pool-size` | RL | Max frozen snapshots kept in the pool | `50` |
-| `--rl-evaluation-games` | RL | Games per checkpoint evaluation | `200` |
-| `--rl-value-head` | RL | Turn the critic (learned `V(s)` baseline) ON | off (direct REINFORCE) |
+| `--rl-value-head` | RL | Turn the legacy critic ON; implies no PPO | off |
 | `--rl-value-coef` | RL | Value-loss coefficient (only used with `--rl-value-head`) | `0.5` |
 | `--rl-gamma` | RL | Terminal-reward discount per remaining real decision; `1.0` disables | `1.0` |
 | `--rl-reward-schema` | RL | `default`, `sparse`, or `shaped` reward preset | `default` |
 | `--rl-clip-grad-norm` | RL | Gradient-norm clipping threshold | `5.0` |
-| `--rl-normalize-advantages` | RL | Standardize the policy signal per batch before the gradient step | off |
-| `--rl-no-normalize-advantages` | RL | Explicitly keep advantage normalization off | (default) |
+| `--rl-ppo` / `--rl-no-ppo` | RL | PPO or historical one-update regression | PPO |
+| `--rl-normalize-advantages` | RL | Normalize once over the complete decision buffer | on for PPO |
+| `--rl-no-normalize-advantages` | RL | Explicitly disable normalization | off |
 | `--rl-moving-average-window` | RL | Trailing-iteration window for value-loss/win-rate moving averages in the log | `10` |
 | `--rl-seed` | RL | Fix random/numpy state for reproducible comparisons | unset |
 | `--rl-device` | RL | Array backend: `auto`/`cpu`/`gpu` (see below) | `auto` |
-| `--rl-workers` | RL | CPU-only rollout workers or retained automatic tuning, maximum 20 | `auto` |
-| `--rl-autotune-fraction` | RL | Fraction of complete iterations retained per worker test | `0.01` |
-| `--rl-autotune-min-gain` | RL | Required marginal rollout-throughput improvement | `0.10` |
+| `--rl-workers` | RL | CPU-only workers or isolated discarded tuning, maximum 20 | `auto` |
+| `--rl-autotune-fraction` | RL | Real-budget fraction discarded per worker candidate | `0.01` |
 | `--rl-memory-reserve-mb` | RL | Host RAM kept free while workers run | `512` |
 | `--rl-estimated-worker-mb` | RL | Preflight memory estimate per worker | `256` |
 | `--rl-max-worker-rss-mb` | RL | Runtime RSS ceiling for one worker | `1024` |
@@ -185,13 +179,18 @@ training module.
 | `--skip-rl` | control | Skip self-play reinforcement learning | off |
 | `--skip-diagnostics` | control | Skip the agent-vs-random diagnostics stage | off |
 
+The BIG wrapper trains exactly 500,000 real RL games by default; its final
+iteration may be partial for the selected GPI. The old
+iteration-based `--rl-pool-interval` and checkpoint-evaluation
+`--rl-evaluation-games` options were removed; checkpoints are saved without an
+auxiliary matchup, and pool refresh uses `--rl-pool-refresh-games`.
+
 ### The critic (value-head) toggle
 
-`--rl-value-head` is the same switch as `training.self_play --value-head`
-(and `run_pipeline.py --value-head`): direct REINFORCE (no critic) is the
-default; passing the flag adds a linear `V(s)` baseline and trains the policy
-from `reward - V(s)` advantages instead of raw rewards. `--rl-value-coef`
-only has an effect when the critic is on.
+`--rl-value-head` selects the historical actor-critic regression path and
+therefore implies `--rl-no-ppo`. The default is policy-only PPO. The critic
+adds a linear `V(s)` baseline and uses `reward - V(s)` advantages;
+`--rl-value-coef` only has an effect in that legacy mode.
 
 ### Reward schema and gamma
 
@@ -209,11 +208,11 @@ This was verified end-to-end with a tiny run (`--rl-iterations 2
 
 ### RL rollout workers
 
-`--rl-workers auto` benchmarks 1, 2, 4, 6, ... CPU-only workers over complete
-early iterations. Each candidate retains about 1% of the planned iterations,
-and every game contributes to the normal parent-side gradient update. Testing
-stops below 10% marginal gain, on a resource guard, or at the hard limit of 20.
-Use a fixed value to skip tuning.
+`--rl-workers auto` benchmarks 1, 2, 4, 6, ... CPU-only workers on exactly 1%
+of the real game budget per candidate. All benchmark trajectories are discarded
+and use separate seeds; weights, optimizer, RNG, pool, and real counters are
+restored. The fastest safe candidate wins, with fewer workers preferred within
+2%. Use a fixed value to skip worker tuning.
 
 Workers read the current policy and bounded opponent pool through shared memory;
 they never update weights or access the GPU. The main process sorts trajectories
@@ -343,7 +342,7 @@ resume state.
 
 `value_coef` only affects training inside
 `PolicyNetwork.backward_policy_gradient`'s `use_value_head` branch, so it has
-no effect on direct REINFORCE (critic off). The separate value-coefficient
+no effect on policy-only PPO (critic off). The separate value-coefficient
 axis therefore runs only with the critic on.
 
 Baselines and the learning-rate/gamma grid values come from
@@ -394,16 +393,17 @@ held stable when comparing hyperparameter configurations.
 
 The shell driver runs exactly one sweep point at a time. Parallelism is
 exclusively inside `training.self_play`, where `--rl-workers auto` performs
-the retained worker benchmark and applies the existing 20-worker and memory
+the isolated worker benchmark and applies the existing 20-worker and memory
 limits. This avoids multiplying outer sweep processes by inner rollout pools.
-Each RL point uses the compact presentation: retained worker-tuning messages,
+Each RL point uses the compact presentation: adaptive-tuning messages,
 one progress bar, and one final summary instead of iteration/checkpoint lines.
 
 Every RL save made by this driver is iteration-numbered, for example
 `domino_rl_default_iter000050.npz`. A paired
 `domino_rl_default_iter000050.resume.npz` stores the configuration, checksum,
-completed iteration, selected worker count, and exact historical opponent
-pool. Both files are published atomically. Only the newest pool-state file is
+completed games/iteration, optimizer and RNG state, selected GPI/workers, PPO
+configuration, and exact historical opponent pool. Both files are published
+atomically. Only the newest pool-state file is
 retained because it can be much larger; all numbered policy checkpoints remain.
 
 Press `Ctrl+C` once to stop the foreground point. Resume with the exact same
@@ -583,13 +583,11 @@ iterations = total_training_games // B
 iterations * B == total_training_games
 ```
 
-It refuses non-divisible budgets before the first game. This is not a
-comparison with literally everything equal: GPI, the number of network
-updates, and pool-refresh frequency per training game deliberately change.
-Those differences are the effect under study. The implementation remains the
-existing on-policy REINFORCE/optional actor-critic algorithm: one fresh batch,
-one update, then discard the batch. It adds no replay, offline buffer, PPO, or
-multi-epoch update.
+It refuses non-divisible budgets before the first game. GPI, adaptive PPO
+minibatches, and optimizer-step count deliberately change, while opponent-pool
+refresh stays fixed by cumulative training games. Critic-off points use PPO;
+the optional critic-on cohort is the explicit legacy `--no-ppo` regression.
+Neither path uses replay or cross-iteration experience.
 
 Install the XLSX-only dependency once (the rest of the project environment is
 unchanged):
@@ -608,7 +606,8 @@ The presets are:
   opponent.
 
 All use GPI values `40 80 160 320 640 960 1280` and ten evenly spaced
-checkpoint evaluations unless overridden. The main study defaults to critic
+checkpoint saves unless overridden. Pool snapshots default to every 400
+training games for every GPI. The main study defaults to critic
 off. `--critic-mode both` creates separate critic-off and critic-on cohorts;
 their results are never aggregated together.
 
@@ -698,13 +697,14 @@ The experiment directory contains `experiment_manifest.json`, `run_plan.csv`,
 Each point retains its canonical configuration/fingerprint, per-iteration
 JSONL and CSV metrics, complete training summary, final-model hash and resume
 state, plus full `vs_heuristic` and `vs_random` diagnostics. Training metrics
-include cumulative games, decision samples, reward distribution, entropy,
-gradient norm/clipping, value loss when enabled, worker/pool state, rollout
-and update times, and checkpoint evaluation results.
+include cumulative games, decision samples, reward distribution, PPO
+minibatches/epochs/KL/clipping/optimizer steps, entropy, gradient norms, buffer
+placement, value loss in legacy critic runs, worker/pool state, rollout/update
+times, and checkpoint writes.
 
 Resume accepts only the newest valid numbered `weights + .resume.npz` pair,
 validates the saved computation-affecting configuration and SL hash, restores
-the opponent pool/worker count, and truncates metrics beyond that checkpoint.
+optimizer/RNG/pool/adaptive selections, and truncates metrics beyond that checkpoint.
 A lone weight file is ignored. A completed model skips training only after its
 hash/resume state validate; each final diagnostic is independently validated
 and rerun if missing or incompatible. A configuration difference is printed

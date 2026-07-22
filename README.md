@@ -49,6 +49,19 @@ starts from the supervised checkpoint produced by that same pipeline run. Use
 `python run_pipeline.py --continue-existing-rl` only when you intentionally
 want to continue the existing RL checkpoint.
 
+The default RL workload is exactly 100,000 real training games. Before those
+games begin, an isolated benchmark selects GPI from
+`100, 200, 400, 600, 800, 1000, 2000`, then selects the rollout-worker count;
+benchmark games are discarded. Training uses masked PPO with adaptive
+minibatches and up to four epochs. Opponent snapshots refresh every 400
+cumulative real games, and checkpoint saves do not run an extra evaluation
+matchup.
+
+RL writes the selected GPI/worker benchmarks to
+`models/adaptive_tuning.json` and the per-iteration PPO trace to
+`models/domino_rl_weights_training_metrics.jsonl` by default. Override them
+with `--adaptive-tuning-path` and `--metrics-output-path`.
+
 Supervised epoch counts are maximum budgets. Training stops earlier by default
 after a conservative repeated-block check confirms that training loss has
 saturated; use `--sl-no-training-plateau-stop` for fixed-epoch experiments.

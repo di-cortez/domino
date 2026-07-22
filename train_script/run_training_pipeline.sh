@@ -3,8 +3,8 @@
 # Batch-training driver: run the full domino pipeline in order:
 #   1. generate the supervised dataset with README/module defaults;
 #   2. train the supervised policy with README/module defaults;
-#   3. refine an RL policy with a "BIG" self-play run (5x the default
-#      iteration count used by run_pipeline.py's "big" scale), with RL
+#   3. refine an RL policy with a "BIG" self-play run (5x the default exact
+#      game budget used by run_pipeline.py's "big" scale), with RL
 #      hyperparameters overridable from the command line so the same script
 #      can drive repeated batch runs that only vary the RL stage;
 #   4. compare all five supported agents with the random baseline, mirroring
@@ -23,7 +23,7 @@
 #   python -m training.training_loop
 #
 # Stage 3 wraps `python -m training.self_play`, which does accept CLI flags
-# (iterations, games-per-iteration, learning rate, reward schema, gamma,
+# (exact games, optional manual games-per-iteration, learning rate, reward schema, gamma,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
 # passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
@@ -46,23 +46,25 @@ cd "$REPO_ROOT"
 # Defaults
 # ------------------------------------------------------------------
 
-# Mirrors run_pipeline.py: BASE_RL_ITERATIONS=1000, "big" scale = 5x, RL
-# games-per-iteration stays fixed at 40 across every scale.
-BASE_RL_ITERATIONS=1000
+# Mirrors run_pipeline.py: 100,000 real games, "big" scale = 5x. GPI is
+# adaptively selected unless the caller explicitly supplies one.
+BASE_RL_TOTAL_TRAINING_GAMES=100000
 BIG_SCALE_FACTOR=5
-RL_ITERATIONS=$((BASE_RL_ITERATIONS * BIG_SCALE_FACTOR))
+RL_TOTAL_TRAINING_GAMES=$((BASE_RL_TOTAL_TRAINING_GAMES * BIG_SCALE_FACTOR))
+RL_ITERATIONS=""
 
 RL_WEIGHTS_FILE="models/domino_rl_weights.npz"
 RL_SL_WEIGHTS_PATH="models/domino_sl_weights.npz"
-RL_GAMES_PER_ITERATION=40
+RL_GAMES_PER_ITERATION=100
+RL_GPI_EXPLICIT=0
+RL_ADAPTIVE_GPI="auto"
 RL_TRAINING_OPPONENT="self_play"
 RL_LEARNING_RATE=0.001
 RL_ENTROPY_COEF=0.01
 RL_LOG_INTERVAL=10
 RL_CHECKPOINT_INTERVAL=50
-RL_POOL_INTERVAL=10
+RL_POOL_REFRESH_GAMES=400
 RL_MAX_POOL_SIZE=50
-RL_EVALUATION_GAMES=200
 RL_VALUE_HEAD=0
 RL_VALUE_COEF=0.5
 RL_GAMMA=1.0
@@ -73,7 +75,7 @@ RL_REWARD_SCHEMA="default"
 # advantage normalization stabilize comparisons, while a seed makes
 # side-by-side hyperparameter runs reproducible.
 RL_CLIP_GRAD_NORM=5.0
-RL_NORMALIZE_ADVANTAGES=0
+RL_NORMALIZE_ADVANTAGES="auto"
 RL_MOVING_AVERAGE_WINDOW=10
 RL_SEED=""
 
@@ -87,6 +89,7 @@ RL_AUTOTUNE_MIN_GAIN=0.10
 RL_MEMORY_RESERVE_MB=512
 RL_ESTIMATED_WORKER_MB=256
 RL_MAX_WORKER_RSS_MB=1024
+RL_PPO=1
 
 # SL convergence, device, memory, and retained-batch controls. Plateau decay is
 # enabled by default and has an independent counter from optional early
@@ -124,8 +127,8 @@ SKIP_DIAGNOSTICS=0
 usage() {
     cat <<EOF
 Run the domino training pipeline: dataset generation -> supervised training
-(both with README/module defaults) -> a BIG-scale self-play RL run ($BASE_RL_ITERATIONS
-x ${BIG_SCALE_FACTOR} = $RL_ITERATIONS iterations by default, matching run_pipeline.py's
+(both with README/module defaults) -> a BIG-scale self-play RL run ($BASE_RL_TOTAL_TRAINING_GAMES
+x ${BIG_SCALE_FACTOR} = $RL_TOTAL_TRAINING_GAMES real games by default, matching run_pipeline.py's
 "big" scale) -> five agent-vs-random diagnostics at the same BIG scale
 ($BASE_DIAGNOSTIC_GAMES x ${BIG_SCALE_FACTOR} = $DIAG_GAMES games per matchup by default),
 written to diagnostics/results/<rl-weights-basename>/.
@@ -138,34 +141,39 @@ training runs with no extra flags by default too (-> models/domino_sl_weights.np
 up to 2,000 epochs with automatic training-loss plateau stopping), unless one
 of the SL convergence flags below is passed.
 
-Self-play reinforcement learning (all forwarded to training.self_play):
+Self-play reinforcement learning ($RL_TOTAL_TRAINING_GAMES exact real games by
+default; adaptive GPI and discarded worker tuning; all forwarded to
+training.self_play):
   --rl-weights-file PATH       Output RL weights path (default: $RL_WEIGHTS_FILE)
   --rl-sl-weights-path PATH    Input SL weights used to initialize a fresh RL run (default: $RL_SL_WEIGHTS_PATH)
-  --rl-iterations N            Training iterations (default: $RL_ITERATIONS, i.e. the BIG scale)
-  --rl-games-per-iteration N   Games played per iteration (default: $RL_GAMES_PER_ITERATION)
+  --rl-total-training-games N  Exact real-game budget (default: $RL_TOTAL_TRAINING_GAMES)
+  --rl-iterations N            Legacy fixed iteration budget; implies manual GPI
+  --rl-games-per-iteration N   Explicit manual GPI (fallback: $RL_GAMES_PER_ITERATION; default is adaptive)
+  --rl-adaptive-gpi            Force GPI autotuning even with an explicit GPI fallback
+  --rl-no-adaptive-gpi         Use GPI 100 (or the explicit manual value) directly
   --rl-training-opponent NAME  "self_play" or "heuristic" (default: $RL_TRAINING_OPPONENT)
   --rl-learning-rate F         Learning rate (default: $RL_LEARNING_RATE)
   --rl-entropy-coef F          Entropy bonus coefficient (default: $RL_ENTROPY_COEF)
   --rl-log-interval N          Iterations between log lines (default: $RL_LOG_INTERVAL)
   --rl-checkpoint-interval N   Iterations between checkpoints (default: $RL_CHECKPOINT_INTERVAL)
-  --rl-pool-interval N         Iterations between self-play pool snapshots (default: $RL_POOL_INTERVAL)
+  --rl-pool-refresh-games N    Training games between self-play pool snapshots (default: $RL_POOL_REFRESH_GAMES)
   --rl-max-pool-size N         Max frozen snapshots kept in the pool (default: $RL_MAX_POOL_SIZE)
-  --rl-evaluation-games N      Games per checkpoint evaluation (default: $RL_EVALUATION_GAMES)
-  --rl-value-head              Turn the critic (learned V(s) baseline) ON; off by default (direct REINFORCE)
+  --rl-value-head              Turn the legacy critic ON; implies --rl-no-ppo
   --rl-value-coef F            Value-loss coefficient, only used when --rl-value-head is set (default: $RL_VALUE_COEF)
   --rl-gamma F                 Terminal-reward discount per remaining real decision, 1.0 = no discount (default: $RL_GAMMA)
   --rl-reward-schema NAME      "default", "sparse", or "shaped" reward preset (default: $RL_REWARD_SCHEMA)
-  --rl-workers N|auto          CPU-only rollout workers with retained autotuning (default: $RL_WORKERS, maximum 20)
-  --rl-autotune-fraction F     Fraction of iterations retained per worker test (default: $RL_AUTOTUNE_FRACTION)
-  --rl-autotune-min-gain F     Minimum marginal throughput gain (default: $RL_AUTOTUNE_MIN_GAIN)
+  --rl-workers N|auto          CPU-only rollout workers with isolated tuning (default: $RL_WORKERS, maximum 20)
+  --rl-autotune-fraction F     Discarded real-budget fraction per worker candidate (default: $RL_AUTOTUNE_FRACTION)
   --rl-memory-reserve-mb N     Host RAM kept free during rollouts (default: $RL_MEMORY_RESERVE_MB)
   --rl-estimated-worker-mb N   Preflight RAM estimate per worker (default: $RL_ESTIMATED_WORKER_MB)
   --rl-max-worker-rss-mb N     Runtime RSS ceiling for one worker (default: $RL_MAX_WORKER_RSS_MB)
 
 RL convergence monitoring:
   --rl-clip-grad-norm F         Gradient-norm clipping threshold (default: $RL_CLIP_GRAD_NORM)
-  --rl-normalize-advantages     Standardize the policy signal per batch before the gradient step; off by default
-  --rl-no-normalize-advantages  Explicitly keep advantage normalization off (default)
+  --rl-ppo                      Use masked PPO with minibatches (default)
+  --rl-no-ppo                   Use historical one-update REINFORCE for regression
+  --rl-normalize-advantages     Normalize once over the complete decision buffer (PPO default)
+  --rl-no-normalize-advantages  Explicitly disable normalization
   --rl-moving-average-window N  Trailing-iteration window for value-loss/win-rate moving averages in the log (default: $RL_MOVING_AVERAGE_WINDOW)
   --rl-seed N                   Fix random/numpy state, for reproducible comparisons between configurations
   --rl-device {auto,cpu,gpu}    Array backend; "auto" matches GPU_ENABLED (default: $RL_DEVICE)
@@ -222,23 +230,27 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --rl-weights-file) RL_WEIGHTS_FILE="$2"; shift 2 ;;
         --rl-sl-weights-path) RL_SL_WEIGHTS_PATH="$2"; shift 2 ;;
+        --rl-total-training-games) RL_TOTAL_TRAINING_GAMES="$2"; shift 2 ;;
         --rl-iterations) RL_ITERATIONS="$2"; shift 2 ;;
-        --rl-games-per-iteration) RL_GAMES_PER_ITERATION="$2"; shift 2 ;;
+        --rl-games-per-iteration) RL_GAMES_PER_ITERATION="$2"; RL_GPI_EXPLICIT=1; shift 2 ;;
+        --rl-adaptive-gpi) RL_ADAPTIVE_GPI=1; shift ;;
+        --rl-no-adaptive-gpi) RL_ADAPTIVE_GPI=0; shift ;;
         --rl-training-opponent) RL_TRAINING_OPPONENT="$2"; shift 2 ;;
         --rl-learning-rate) RL_LEARNING_RATE="$2"; shift 2 ;;
         --rl-entropy-coef) RL_ENTROPY_COEF="$2"; shift 2 ;;
         --rl-log-interval) RL_LOG_INTERVAL="$2"; shift 2 ;;
         --rl-checkpoint-interval) RL_CHECKPOINT_INTERVAL="$2"; shift 2 ;;
-        --rl-pool-interval) RL_POOL_INTERVAL="$2"; shift 2 ;;
+        --rl-pool-refresh-games) RL_POOL_REFRESH_GAMES="$2"; shift 2 ;;
         --rl-max-pool-size) RL_MAX_POOL_SIZE="$2"; shift 2 ;;
-        --rl-evaluation-games) RL_EVALUATION_GAMES="$2"; shift 2 ;;
-        --rl-value-head) RL_VALUE_HEAD=1; shift ;;
+        --rl-value-head) RL_VALUE_HEAD=1; RL_PPO=0; shift ;;
         --rl-value-coef) RL_VALUE_COEF="$2"; shift 2 ;;
         --rl-gamma) RL_GAMMA="$2"; shift 2 ;;
         --rl-reward-schema) RL_REWARD_SCHEMA="$2"; shift 2 ;;
         --rl-clip-grad-norm) RL_CLIP_GRAD_NORM="$2"; shift 2 ;;
         --rl-normalize-advantages) RL_NORMALIZE_ADVANTAGES=1; shift ;;
         --rl-no-normalize-advantages) RL_NORMALIZE_ADVANTAGES=0; shift ;;
+        --rl-ppo) RL_PPO=1; shift ;;
+        --rl-no-ppo) RL_PPO=0; shift ;;
         --rl-moving-average-window) RL_MOVING_AVERAGE_WINDOW="$2"; shift 2 ;;
         --rl-seed) RL_SEED="$2"; shift 2 ;;
         --rl-device) RL_DEVICE="$2"; shift 2 ;;
@@ -366,32 +378,51 @@ fi
 if [[ "$SKIP_RL" -eq 1 ]]; then
     section "Step 3/4: self-play reinforcement learning (skipped)"
 else
-    section "Step 3/4: BIG-scale RL self-play ($RL_ITERATIONS iterations -> $RL_WEIGHTS_FILE)"
+    section "Step 3/4: BIG-scale RL self-play ($RL_TOTAL_TRAINING_GAMES exact real games -> $RL_WEIGHTS_FILE)"
     VALUE_HEAD_FLAG=()
     if [[ "$RL_VALUE_HEAD" -eq 1 ]]; then
         VALUE_HEAD_FLAG=(--value-head)
     fi
-    NORMALIZE_FLAG="--no-normalize-advantages"
-    if [[ "$RL_NORMALIZE_ADVANTAGES" -eq 1 ]]; then
-        NORMALIZE_FLAG="--normalize-advantages"
+    NORMALIZE_ARGS=()
+    if [[ "$RL_NORMALIZE_ADVANTAGES" == "1" ]]; then
+        NORMALIZE_ARGS=(--normalize-advantages)
+    elif [[ "$RL_NORMALIZE_ADVANTAGES" == "0" ]]; then
+        NORMALIZE_ARGS=(--no-normalize-advantages)
+    fi
+    BUDGET_ARGS=(--total-training-games "$RL_TOTAL_TRAINING_GAMES")
+    if [[ -n "$RL_ITERATIONS" ]]; then
+        BUDGET_ARGS=(--iterations "$RL_ITERATIONS" --games-per-iteration "$RL_GAMES_PER_ITERATION")
+    elif [[ "$RL_GPI_EXPLICIT" -eq 1 ]]; then
+        BUDGET_ARGS+=(--games-per-iteration "$RL_GAMES_PER_ITERATION")
+    fi
+    ADAPTIVE_ARGS=()
+    if [[ "$RL_ADAPTIVE_GPI" == "1" ]]; then
+        ADAPTIVE_ARGS=(--adaptive-gpi)
+    elif [[ "$RL_ADAPTIVE_GPI" == "0" ]]; then
+        ADAPTIVE_ARGS=(--no-adaptive-gpi)
+    fi
+    PPO_FLAG="--ppo"
+    if [[ "$RL_PPO" -eq 0 ]]; then
+        PPO_FLAG="--no-ppo"
     fi
     RL_SEED_ARGS=()
     if [[ -n "$RL_SEED" ]]; then
         RL_SEED_ARGS+=(--seed "$RL_SEED")
     fi
     "$PYTHON_BIN" -u -m training.self_play \
-        --iterations "$RL_ITERATIONS" \
-        --games-per-iteration "$RL_GAMES_PER_ITERATION" \
+        "${BUDGET_ARGS[@]}" \
+        "${ADAPTIVE_ARGS[@]}" \
         --training-opponent "$RL_TRAINING_OPPONENT" \
         --learning-rate "$RL_LEARNING_RATE" \
         --entropy-coef "$RL_ENTROPY_COEF" \
         --log-interval "$RL_LOG_INTERVAL" \
         --checkpoint-interval "$RL_CHECKPOINT_INTERVAL" \
-        --pool-interval "$RL_POOL_INTERVAL" \
+        --pool-refresh-games "$RL_POOL_REFRESH_GAMES" \
         --max-pool-size "$RL_MAX_POOL_SIZE" \
-        --evaluation-games "$RL_EVALUATION_GAMES" \
         --sl-weights-path "$RL_SL_WEIGHTS_PATH" \
         --rl-weights-path "$RL_WEIGHTS_FILE" \
+        --adaptive-tuning-path "${RL_WEIGHTS_FILE%.npz}_adaptive_tuning.json" \
+        --fresh-from-sl \
         --value-coef "$RL_VALUE_COEF" \
         --gamma "$RL_GAMMA" \
         --reward-schema "$RL_REWARD_SCHEMA" \
@@ -404,7 +435,8 @@ else
         --rl-memory-reserve-mb "$RL_MEMORY_RESERVE_MB" \
         --rl-estimated-worker-mb "$RL_ESTIMATED_WORKER_MB" \
         --rl-max-worker-rss-mb "$RL_MAX_WORKER_RSS_MB" \
-        "$NORMALIZE_FLAG" \
+        "$PPO_FLAG" \
+        "${NORMALIZE_ARGS[@]}" \
         "${RL_SEED_ARGS[@]}" \
         "${VALUE_HEAD_FLAG[@]}"
 fi

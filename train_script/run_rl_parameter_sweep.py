@@ -173,11 +173,15 @@ def run_sweep_point(
             sl_weights_path=str(sl_weights_path),
             sl_weights_data=sl_weights_data,
             rl_weights_path=str(model_path),
+            adaptive_tuning_path=str(
+                model_path.with_name(f"{model_path.stem}_adaptive_tuning.json")
+            ),
             fresh_from_sl=True,
             seed=seed,
             device=device,
             workers=rl_workers,
             use_value_head=critic_enabled,
+            ppo_enabled=not critic_enabled,
             quiet=quiet_training,
         )
         print(f"[{name}] training complete in {format_duration(time.time() - start_time)}")

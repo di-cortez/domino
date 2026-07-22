@@ -19,8 +19,9 @@ python run_pipeline.py huge
 The default runner uses the same workload as the individual commands. `small`
 uses one fifth of the default counts, `big` uses five times the default counts,
 and `huge` uses twenty times the default counts. The scaled counts apply to
-dataset games, maximum supervised epochs, RL iterations, and diagnostic games per
-matchup. RL games per iteration stay at 40 so the scale remains linear.
+dataset games, maximum supervised epochs, the exact RL game budget, and
+diagnostic games per matchup. The default RL budget is 100,000 real games;
+GPI is selected adaptively unless supplied explicitly.
 The default dataset workload is 10,000 heuristic-vs-heuristic games.
 Diagnostic counts are explicit per matchup, and all scales evaluate the same
 five agents against `random`:
@@ -41,8 +42,10 @@ diagnostic games in total.
 | `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
 | `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
 | `supervised_runtime.py` | Implements CPU/GPU batch candidates, synchronized retained timing, GPU residency probes/windows, and supervised memory telemetry. |
-| `self_play.py` | Loads the supervised policy or an existing RL checkpoint, orchestrates parallel rollouts, and applies parent-only policy updates. |
-| `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed games across memory fallback. |
+| `self_play.py` | Orchestrates exact-budget on-policy collection, PPO, logs, pool refresh, checkpoints, and resume. |
+| `ppo.py` | Builds immutable decision buffers, selects minibatches, manages GPU/RAM storage, and performs KL-limited PPO epochs. |
+| `adaptive_tuning.py` | Selects GPI/workers with isolated seed streams, state restoration, safety checks, and `adaptive_tuning.json`. |
+| `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed real games across memory fallback. |
 
 ## Important Shape Change
 
@@ -305,7 +308,8 @@ Default behavior:
 - if a compatible `models/domino_rl_weights.npz` exists, resume from it;
 - otherwise warm-start from a compatible `models/domino_sl_weights.npz`;
 - train against a pool of frozen snapshots of the current policy;
-- periodically evaluate deterministic RL play against `StrategicAgent`;
+- select GPI and rollout workers with isolated, discarded benchmarks;
+- update the policy with masked PPO minibatches for at most four epochs;
 - save `models/domino_rl_weights.npz`.
 
 That compatibility-first policy is the default for the standalone module.
@@ -335,12 +339,25 @@ and return finalized trajectories through a bounded dynamic queue. The parent
 sorts results by game id and remains solely responsible for the gradient,
 checkpoint writes, logging, and GPU allocations.
 
-Automatic mode tests 1, 2, 4, 6, ... workers, never exceeding 20 or the number
-of games per iteration. Each candidate uses and retains complete iterations
-totaling about 1% of the planned iteration count. Testing stops below 10%
-marginal rollout-throughput gain, on a resource cap, or when too few untrained
-iterations remain. Runtime RAM pressure terminates the current pool, keeps
-completed game ids, halves the worker count, and retries only unfinished games.
+Opponent snapshots are scheduled by cumulative training games, not by
+iteration count. `--pool-refresh-games` defaults to 400. A threshold crossed
+inside an iteration publishes the newly updated policy after that batch; if a
+single large batch crosses multiple thresholds, it publishes only one snapshot
+instead of storing duplicate copies of the same weights.
+
+Before real training, adaptive GPI mode tests exactly
+`100, 200, 400, 600, 800, 1000, 2000` with ten workers and a target of 2,000
+games per candidate (`floor(2000 / GPI)` complete batches). It chooses the
+highest throughput, preferring the smaller GPI within 3%. Worker tuning then
+tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1% of the real
+game budget per candidate; it prefers fewer workers within 2%. Warm-up and
+benchmark games use independent deterministic seed streams and are discarded.
+Weights, optimizer, RNG, opponent pool, and real counters are restored and
+verified before training begins. Results are saved as `adaptive_tuning.json`.
+
+Runtime RAM pressure during real rollout generation terminates the current
+pool, keeps completed game ids, halves the worker count, and retries only
+unfinished games.
 
 Per-game SplitMix64-style seeds are derived from the run seed, iteration, and
 game id. Parent aggregation is ordered, so the same seed produces bit-identical
@@ -350,14 +367,11 @@ controls are:
 | Flag | Meaning | Default |
 |---|---|---:|
 | `--rl-workers` | CPU-only rollout workers or `auto` | `auto` |
-| `--rl-autotune-fraction` | Planned iteration fraction retained per candidate | `0.01` |
-| `--rl-autotune-min-gain` | Required marginal throughput improvement | `0.10` |
+| `--rl-autotune-fraction` | Real-budget fraction discarded per worker candidate | `0.01` |
+| `--retune-gpi` / `--retune-workers` / `--retune-all` | Explicitly rerun saved tuning on resume | off |
 | `--rl-memory-reserve-mb` | Host RAM that must remain free | `512` |
 | `--rl-estimated-worker-mb` | Conservative worker-memory estimate for preflight | `256` |
 | `--rl-max-worker-rss-mb` | Runtime RSS ceiling for one worker | `1024` |
-
-Checkpoint evaluation games also use the selected rollout pool, but remain
-deterministic and alternate the RL player position.
 
 ### Numbered checkpoints and exact resume
 
@@ -366,9 +380,10 @@ checkpoint behavior. The long shell sweep opts into interruption-safe files
 with `--numbered-checkpoints`. Each save adds the absolute completed iteration
 to the name, such as `model_iter000050.npz`, and atomically publishes a paired
 `model_iter000050.resume.npz`. The state file contains a SHA-256 checksum,
-every computation-affecting RL setting, the effective seed, worker count, and
-the exact historical opponent-policy pool. The newest pool state replaces the
-previous one to bound disk use; numbered policy-only files remain available.
+every computation-affecting RL/PPO setting, completed real games, optimizer
+state, RNGs, supervised-checkpoint hash, adaptive GPI/workers, rolling logs,
+and the exact opponent-policy pool. The newest pool state replaces the previous
+one to bound disk use; numbered policy-only files remain available.
 
 To continue manually, pass the matching pair and its completed iteration while
 keeping the original training configuration and total target:
@@ -381,19 +396,21 @@ python -m training.self_play --iterations 2000 --numbered-checkpoints \
 ```
 
 Resume validates the checksum and configuration before loading anything,
-restores the opponent pool, continues game ids at the next absolute iteration,
-and reuses the saved rollout-worker count when the requested mode is `auto`.
+restores optimizer/RNG/pool state, continues at the next absolute game id, and
+reuses saved GPI/workers without rerunning autotune.
 This is a true continuation. Loading an ordinary `.npz` through the legacy
 path restores only weights and cannot reconstruct the former in-memory pool.
 
-Checkpoint evaluation against `StrategicAgent`, diagnostics, and the UI use
-`mode="evaluation"`, which always selects the highest-probability legal action
-and stores no trajectory. Their results therefore avoid action-sampling noise.
+Diagnostics and the UI use `mode="evaluation"`, which always selects the
+highest-probability legal action and stores no trajectory. Their results
+therefore avoid action-sampling noise. Checkpoints are saved without running
+an auxiliary matchup during training.
 
-The command prints startup memory, checkpoint-to-checkpoint time, and total
-elapsed time. Iteration logs omit entropy and report the direct reward signal
-sent to the policy gradient: reward mean/min/max, good/neutral/bad percentages,
-wins, pool size, and gradient norm.
+The command prints startup memory, tuning throughput, checkpoint-to-checkpoint
+time, and total elapsed time. Every ten iterations it aggregates PPO decisions,
+requested/effective minibatches, optimizer steps, epochs, KL stops, clipping,
+entropy, gradient norms, buffer location/bytes, rollout time, and update time.
+Every iteration is also appended to `<weights>_training_metrics.jsonl`.
 
 Pass `--compact` to suppress iteration and checkpoint lines while retaining
 worker-autotuning messages, one absolute iteration progress bar, and one final
@@ -402,20 +419,33 @@ summary. The parameter-sweep shell enables this presentation automatically.
 The learner trajectory stores only real decisions. Draw, pass, and single-option
 tile plays are forced actions, so `RLAgent` returns them directly without
 calling the network or saving a trajectory step. Each saved step carries the
-legal-action mask, the decision turn, and the number of legal tile-play options.
-Sampling and gradient calculation use the same masked policy distribution.
+legal-action mask and decision turn. Sampling and gradient calculation use the
+same masked policy distribution.
 
-`PolicyNetwork` uses direct policy-only REINFORCE by default. Default RL
-checkpoints contain only the six policy weights shared with supervised
-checkpoints: `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`.
+`PolicyNetwork` uses masked PPO by default with the critic disabled. At the
+start of an iteration, one policy is frozen for all rollouts. Every real
+decision stores its legal mask and `old_log_prob`; draw, pass, and single-choice
+plays never enter the buffer. Advantages use the existing finalized reward and
+are normalized once over the complete iteration.
+
+The canonical contiguous buffer stays in RAM. If it fits within 70% of reported
+free VRAM and a dry first-minibatch workspace probe succeeds, a complete GPU
+copy is retained across epochs. Otherwise minibatches stream from RAM. No
+fallback restarts a partially applied epoch.
+
+Requested minibatches are `clamp(ceil(actual_games / 125), 4, 16)`, further
+capped to keep roughly 128 decisions per minibatch. Each epoch visits every
+decision exactly once with a deterministic new permutation. PPO uses clip
+epsilon `0.2`, target KL `0.01`, and does not start another epoch after
+whole-buffer approximate KL exceeds `0.015`; at most four epochs run.
 
 Enable the optional actor-critic baseline with:
 
 ```bash
-python -m training.self_play --value-head
+python -m training.self_play --no-ppo --value-head
 ```
 
-This adds a linear `V(s)` head over the second hidden layer. The current
+This legacy regression mode adds a linear `V(s)` head over the second hidden layer. The current
 finalized policy reward is the value target, and the masked policy update uses
 `reward - V(s)` as its advantage. The value-loss coefficient defaults to `0.5`
 (`--value-coef`). In this mode checkpoints also contain `Wv` and `bv`.
@@ -433,10 +463,9 @@ same supervised checkpoint and use separately archived RL outputs.
 
 ### Optional RL controls
 
-The default command preserves the original learning algorithm: no
-terminal-reward discount, the original reward constants, gradient clipping at
-norm `5.0`, and no advantage normalization. Rollout generation is now parallel
-by default, without moving gradient updates out of the parent process:
+The default command uses PPO, the original reward constants, no terminal-reward
+discount, gradient clipping at norm `5.0`, and whole-buffer advantage
+normalization. Rollouts remain parallel while all updates stay in the parent:
 
 | Flag | Meaning | Default |
 |---|---|---:|
@@ -444,7 +473,10 @@ by default, without moving gradient updates out of the parent process:
 | `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
 | `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/tie/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
 | `--clip-grad-norm` | Gradient-norm clipping threshold for the policy-gradient update | `5.0` |
-| `--normalize-advantages` / `--no-normalize-advantages` | Standardize the policy signal per batch (mean 0, std 1) before the gradient step | off |
+| `--ppo` / `--no-ppo` | Masked PPO or historical one-update REINFORCE regression | PPO |
+| `--normalize-advantages` / `--no-normalize-advantages` | Standardize once over the complete iteration buffer | on for PPO |
+| `--total-training-games` | Exact real-game budget; final iteration may be partial | `100000` |
+| `--games-per-iteration` | Explicit manual GPI; disables only GPI autotune | adaptive (manual fallback `100`) |
 | `--moving-average-window` | Trailing-iteration window for the value-loss/win-rate moving averages printed in the iteration log | `10` |
 | `--seed` | Fix `random`/NumPy state, for reproducible comparisons between hyperparameter configurations | unset |
 | `--device` | Array backend: `auto` matches `GPU_ENABLED` exactly (CuPy when installed, else NumPy); `cpu`/`gpu` force one backend regardless of what's installed/enabled globally | `auto` |
@@ -474,12 +506,18 @@ transfer/kernel-launch overhead during rollout can make GPU measurably
 *slower* than CPU for this stage specifically -- `--device cpu` is worth
 trying if RL training feels slow.
 
-`training.self_play` also accepts `--iterations`, `--games-per-iteration`,
+`training.self_play` also accepts `--iterations`, `--total-training-games`,
+`--games-per-iteration`, `--adaptive-gpi`, `--gpi-candidates`,
 `--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
-`--checkpoint-interval`, `--pool-interval`, `--max-pool-size`,
-`--evaluation-games`, `--sl-weights-path`, and `--rl-weights-path`; see
+`--checkpoint-interval`, `--pool-refresh-games`, `--max-pool-size`,
+`--sl-weights-path`, and `--rl-weights-path`; see
 `training/self_play.py:add_optional_rl_arguments` for the authoritative
 definitions, or run `python -m training.self_play --help`.
+
+The former iteration-based `--pool-interval` and auxiliary
+`--evaluation-games` options were removed. Existing numbered resume states
+that contain `pool_interval` are rejected rather than silently reinterpreted
+as a game count; start a new run with `--pool-refresh-games`.
 
 `train()` also accepts a programmatic-only `sl_weights_data` parameter (no
 CLI flag): a pre-loaded mapping of SL weight arrays, for a caller that runs
@@ -526,32 +564,23 @@ alternate preset, see above):
 
 Multiple local events are summed. A learner draw/pass penalty is applied to all
 earlier real decisions with the same decay rule, not just to the most recent
-decision. The final pip penalty is applied to the learner's own final hand.
-
-Each saved decision return is then multiplied by the number of tile-play options
-available at that decision:
-
-| Legal tile-play options | Multiplier |
-|---:|---:|
-| 2 | `1.0` |
-| 3 | `2.0` |
-| 4 | `5.0` |
-| 5 or more | `10.0` |
-
-The final training weight for each decision is:
+decision. The final pip penalty is applied to the learner's own final hand. The
+number of legal choices does not rescale a decision's return. The final
+training weight for every decision is:
 
 ```text
-policy_reward = multiplier * (terminal_reward + local_reward)
+policy_reward = terminal_reward + local_reward
 ```
 
-The policy gradient uses that value directly:
+PPO uses that value as the pre-normalization advantage. For one decision:
 
 ```text
-L = -mean(policy_reward * log pi(action | state)) - entropy_coef * entropy
+ratio = exp(new_log_prob - old_log_prob)
+surrogate = min(ratio * advantage, clip(ratio, 0.8, 1.2) * advantage)
+L = -mean(surrogate) - entropy_coef * mean(entropy)
 ```
 
-Gradient clipping remains active in `PolicyNetwork` to limit large updates from
-rare high-choice decisions.
+Gradient clipping remains active in `PolicyNetwork` to limit large updates.
 
 The snapshot pool normally lives only in memory. The opt-in numbered resume
 state described above is the exception: it serializes and restores that pool

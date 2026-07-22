@@ -11,14 +11,16 @@ from agents.nn import (
 
 _POLICY_WEIGHTS = ("W1", "b1", "W2", "b2", "W3", "b3")
 _VALUE_WEIGHTS = ("Wv", "bv")
+_OPTIMIZER_STEP_KEY = "optimizer_step_count"
+_ALGORITHM_KEY = "rl_training_algorithm"
 
 
 class PolicyNetwork(SupervisedNeuralNetwork):
-    """Supervised policy architecture with masked REINFORCE gradients.
+    """Supervised policy architecture with masked PPO/REINFORCE gradients.
 
-    Direct REINFORCE is the default and keeps exactly the six supervised policy
-    weights. ``use_value_head=True`` adds a linear ``V(s)`` head over the second
-    hidden layer so the policy can train from reward-minus-value advantages.
+    PPO is the default self-play algorithm and keeps the critic disabled.
+    ``use_value_head=True`` adds a linear ``V(s)`` head for the explicit legacy
+    REINFORCE regression path.
 
     ``device`` selects the array backend independently of the parent class:
     ``"auto"`` (default) matches ``GPU_ENABLED`` exactly, reproducing prior
@@ -29,6 +31,10 @@ class PolicyNetwork(SupervisedNeuralNetwork):
     def __init__(self, *args, use_value_head=False, device="auto", **kwargs):
         super().__init__(*args, device=device, **kwargs)
         self.use_value_head = use_value_head
+        # The current optimizer is plain SGD and therefore has no momentum or
+        # adaptive tensors. Its step counter is still checkpointed so resume
+        # metadata and PPO optimizer-step accounting remain exact.
+        self.optimizer_step_count = 0
         if use_value_head:
             hidden2_size = self.W3.shape[1]
             self.Wv = self.xp.zeros(
@@ -103,6 +109,14 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                             dtype=network.xp.float32,
                         ),
                     )
+            if _OPTIMIZER_STEP_KEY in data:
+                network.optimizer_step_count = int(
+                    np.asarray(data[_OPTIMIZER_STEP_KEY]).item()
+                )
+            if _ALGORITHM_KEY in data:
+                network.rl_training_algorithm = str(
+                    np.asarray(data[_ALGORITHM_KEY]).item()
+                )
             return network
         finally:
             if owns_data:
@@ -144,7 +158,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         )
 
     def save(self, weights_path):
-        """Save only the six policy weights shared with supervised checkpoints."""
+        """Save policy/value weights and the state of the stateless SGD optimizer."""
         def to_numpy(matrix):
             return matrix.get() if hasattr(matrix, "get") else matrix
 
@@ -156,10 +170,17 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         if getattr(self, "use_value_head", False):
             weight_names += _VALUE_WEIGHTS
 
-        np.savez(weights_path, **{
+        arrays = {
             name: to_numpy(getattr(self, name))
             for name in weight_names
-        })
+        }
+        arrays[_OPTIMIZER_STEP_KEY] = np.asarray(
+            getattr(self, "optimizer_step_count", 0),
+            dtype=np.int64,
+        )
+        if hasattr(self, "rl_training_algorithm"):
+            arrays[_ALGORITHM_KEY] = np.asarray(self.rl_training_algorithm)
+        np.savez(weights_path, **arrays)
 
     def clone(self):
         """Return a frozen copy for the self-play opponent pool."""
@@ -177,7 +198,33 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             weight_names += _VALUE_WEIGHTS
         for name in weight_names:
             setattr(clone, name, getattr(self, name).copy())
+        clone.optimizer_step_count = int(getattr(self, "optimizer_step_count", 0))
+        if hasattr(self, "rl_training_algorithm"):
+            clone.rl_training_algorithm = self.rl_training_algorithm
         return clone
+
+    def optimizer_state_dict(self):
+        """Return the complete state of the current plain-SGD optimizer."""
+        return {
+            "algorithm": "sgd",
+            "learning_rate": float(self.lr),
+            "step_count": int(getattr(self, "optimizer_step_count", 0)),
+        }
+
+    def load_optimizer_state_dict(self, state):
+        """Restore and validate the plain-SGD optimizer state."""
+        state = dict(state or {})
+        if state.get("algorithm") != "sgd":
+            raise ValueError(
+                f"Unsupported RL optimizer state: {state.get('algorithm')!r}."
+            )
+        saved_lr = float(state["learning_rate"])
+        if saved_lr != float(self.lr):
+            raise ValueError(
+                "RL optimizer learning rate does not match the checkpoint: "
+                f"checkpoint={saved_lr}, requested={self.lr}."
+            )
+        self.optimizer_step_count = int(state["step_count"])
 
     def predict_values(self, x):
         """Return ``V(s)`` for each state column when the value head is enabled."""
@@ -185,6 +232,163 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             raise RuntimeError("The value head is not enabled for this network.")
         self.forward(x)
         return self.xp.dot(self.Wv, self.cache["A2"]) + self.bv
+
+    def evaluate_actions(self, x, legal_masks, action_indices):
+        """Evaluate observed actions under the normalized masked policy.
+
+        Returns one log-probability and entropy value per sample while leaving
+        the forward cache ready for a subsequent policy-gradient update.
+        """
+        xp = self.xp
+        self.forward(x)
+        logits = self.cache["Z3"]
+        sample_count = logits.shape[1]
+        action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
+        legal_masks = xp.asarray(legal_masks, dtype=xp.bool_)
+        if action_indices.shape[0] != sample_count:
+            raise ValueError(
+                "action_indices must contain one action per sample: "
+                f"expected {sample_count}, got {action_indices.shape[0]}."
+            )
+        if legal_masks.shape != logits.shape:
+            raise ValueError(
+                "legal_masks must have the same shape as policy logits: "
+                f"expected {logits.shape}, got {legal_masks.shape}."
+            )
+        legal_counts = xp.sum(legal_masks, axis=0)
+        if self._as_float(xp.any(legal_counts < 2)):
+            raise ValueError(
+                "Every saved RL decision must have at least two legal policy actions."
+            )
+        columns = xp.arange(sample_count)
+        if self._as_float(xp.any(~legal_masks[action_indices, columns])):
+            raise ValueError("An observed PPO action is not legal under its saved mask.")
+
+        masked_logits = xp.where(legal_masks, logits, -xp.inf)
+        shifted = masked_logits - xp.max(masked_logits, axis=0, keepdims=True)
+        exponentials = xp.exp(shifted)
+        policy = exponentials / xp.sum(exponentials, axis=0, keepdims=True)
+        probability_floor = xp.asarray(
+            np.finfo(np.float32).tiny,
+            dtype=policy.dtype,
+        )
+        log_policy = xp.log(xp.maximum(policy, probability_floor))
+        log_probs = log_policy[action_indices, columns]
+        entropy = -xp.sum(policy * log_policy, axis=0)
+        return log_probs, entropy, policy
+
+    def backward_ppo(
+        self,
+        x,
+        action_indices,
+        legal_masks,
+        old_log_probs,
+        advantages,
+        *,
+        clip_epsilon=0.2,
+        entropy_coef=0.01,
+        clip_grad_norm=5.0,
+    ):
+        """Apply one masked PPO clipped-surrogate SGD step."""
+        if getattr(self, "use_value_head", False):
+            raise ValueError("PPO v1 requires the critic/value head to be disabled.")
+        xp = self.xp
+        new_log_probs, entropy, masked_policy = self.evaluate_actions(
+            x,
+            legal_masks,
+            action_indices,
+        )
+        sample_count = int(new_log_probs.shape[0])
+        action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
+        old_log_probs = xp.asarray(
+            old_log_probs,
+            dtype=self.cache["Z3"].dtype,
+        ).reshape(-1)
+        advantages = xp.asarray(
+            advantages,
+            dtype=self.cache["Z3"].dtype,
+        ).reshape(-1)
+        if old_log_probs.shape[0] != sample_count or advantages.shape[0] != sample_count:
+            raise ValueError("PPO old_log_probs and advantages must match the batch size.")
+
+        log_ratio = new_log_probs - old_log_probs
+        ratio = xp.exp(log_ratio)
+        lower = 1.0 - float(clip_epsilon)
+        upper = 1.0 + float(clip_epsilon)
+        clipped_ratio = xp.clip(ratio, lower, upper)
+        unclipped = ratio * advantages
+        clipped = clipped_ratio * advantages
+        surrogate = xp.minimum(unclipped, clipped)
+        policy_loss = -xp.mean(surrogate)
+
+        # Where the clipped branch is strictly smaller, its derivative with
+        # respect to theta is zero. Else d[-ratio*A]/dlogpi = -ratio*A.
+        active_weights = xp.where(unclipped <= clipped, ratio * advantages, 0.0)
+        sampled = xp.zeros_like(masked_policy)
+        sampled[action_indices, xp.arange(sample_count)] = 1.0
+        entropy_row = entropy.reshape(1, -1)
+        probability_floor = xp.asarray(
+            np.finfo(np.float32).tiny,
+            dtype=masked_policy.dtype,
+        )
+        log_policy = xp.log(xp.maximum(masked_policy, probability_floor))
+        dz3_policy = (masked_policy - sampled) * active_weights.reshape(1, -1)
+        dz3_entropy = masked_policy * (log_policy + entropy_row)
+        dz3 = dz3_policy + float(entropy_coef) * dz3_entropy
+
+        a2 = self.cache["A2"]
+        a1 = self.cache["A1"]
+        x_cached = self.cache["X"]
+        inverse_count = xp.asarray(1.0 / sample_count, dtype=dz3.dtype)
+        dW3 = inverse_count * xp.dot(dz3, a2.T)
+        db3 = inverse_count * xp.sum(dz3, axis=1, keepdims=True)
+        da2 = xp.dot(self.W3.T, dz3)
+        dz2 = da2 * self.relu_derivative(self.cache["Z2"])
+        dW2 = inverse_count * xp.dot(dz2, a1.T)
+        db2 = inverse_count * xp.sum(dz2, axis=1, keepdims=True)
+        da1 = xp.dot(self.W2.T, dz2)
+        dz1 = da1 * self.relu_derivative(self.cache["Z1"])
+        dW1 = inverse_count * xp.dot(dz1, x_cached.T)
+        db1 = inverse_count * xp.sum(dz1, axis=1, keepdims=True)
+        gradients = {
+            "W1": dW1,
+            "b1": db1,
+            "W2": dW2,
+            "b2": db2,
+            "W3": dW3,
+            "b3": db3,
+        }
+        grad_norm = self._as_float(
+            xp.sqrt(sum(xp.sum(gradient ** 2) for gradient in gradients.values()))
+        )
+        grad_clipped = False
+        applied_grad_norm = grad_norm
+        if clip_grad_norm is not None and grad_norm > clip_grad_norm:
+            scale = float(clip_grad_norm) / (grad_norm + 1e-8)
+            gradients = {name: gradient * scale for name, gradient in gradients.items()}
+            grad_clipped = True
+            applied_grad_norm = float(clip_grad_norm)
+        learning_rate = xp.asarray(self.lr, dtype=dz3.dtype)
+        for name, gradient in gradients.items():
+            setattr(self, name, getattr(self, name) - learning_rate * gradient)
+        self.optimizer_step_count = int(getattr(self, "optimizer_step_count", 0)) + 1
+
+        clip_fraction = xp.mean((ratio < lower) | (ratio > upper))
+        approx_kl = xp.mean((ratio - 1.0) - log_ratio)
+        return {
+            "policy_loss": self._as_float(policy_loss),
+            "entropy": self._as_float(xp.mean(entropy)),
+            "approx_kl": self._as_float(approx_kl),
+            "clip_fraction": self._as_float(clip_fraction),
+            "ratio_mean": self._as_float(xp.mean(ratio)),
+            "ratio_min": self._as_float(xp.min(ratio)),
+            "ratio_max": self._as_float(xp.max(ratio)),
+            "grad_norm": grad_norm,
+            "grad_clipped": grad_clipped,
+            "applied_grad_norm": applied_grad_norm,
+            "optimizer_steps": 1,
+            "value_loss": None,
+        }
 
     def backward_policy_gradient(
         self,
@@ -312,6 +516,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
 
         for name, grad in gradients.items():
             setattr(self, name, getattr(self, name) - self.lr * grad)
+        self.optimizer_step_count = int(getattr(self, "optimizer_step_count", 0)) + 1
 
         return {
             "entropy": float(xp.mean(entropy)),

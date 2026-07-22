@@ -55,7 +55,6 @@ from training.self_play import (
     OPPONENT_PASS_REWARD,
     EventStats,
     TrainingSample,
-    _choice_multiplier,
     _event_reward_for_action,
     _finish_episode_with_rewards,
     _reward_signal_summary,
@@ -896,8 +895,8 @@ def test_rl_agent_saves_legal_mask_for_real_decision():
     assert legal_mask.shape == (encoder.ACTION_SIZE, 1)
     assert legal_mask.sum() == 2.0
     assert legal_mask[step.action_index, 0] == 1.0
+    assert host_np.isclose(step.old_log_prob, host_np.log(0.5))
     assert step.decision_turn == state["turn"]
-    assert step.option_count == 2
     assert step.local_reward == 0.0
 
 
@@ -994,7 +993,7 @@ def test_decayed_event_reward_exponents():
     for event_turn, expected in cases:
         agent = RLAgent(UniformPolicyNetwork(), mode="training")
         agent.trajectory = [
-            TrajectoryStep(None, 0, None, decision_turn=10, option_count=2),
+            TrajectoryStep(None, 0, None, decision_turn=10),
         ]
 
         agent.add_decayed_event_reward(event_turn, 0.10, EVENT_REWARD_DECAY)
@@ -1019,8 +1018,8 @@ def test_event_reward_signs_and_counts():
 def test_multiple_events_and_all_previous_decisions_receive_rewards():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=10, option_count=2),
-        TrajectoryStep(None, 0, None, decision_turn=12, option_count=2),
+        TrajectoryStep(None, 0, None, decision_turn=10),
+        TrajectoryStep(None, 0, None, decision_turn=12),
     ]
 
     agent.add_decayed_event_reward(13, 0.10, EVENT_REWARD_DECAY)
@@ -1041,8 +1040,8 @@ def test_event_reward_without_decisions_is_noop():
 def test_terminal_reward_is_uniform_before_local_shaping():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=2, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=3, option_count=2, local_reward=-0.05),
+        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=3, local_reward=-0.05),
     ]
 
     steps = agent.finish_episode(0.50)
@@ -1053,24 +1052,18 @@ def test_terminal_reward_is_uniform_before_local_shaping():
     assert abs(steps[1].raw_reward - 0.45) < 1e-12
 
 
-def test_option_multipliers_apply_after_terminal_and_local_rewards():
+def test_choice_count_does_not_weight_terminal_or_local_rewards():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=2, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=3, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=4, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=5, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=6, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
     ]
 
     samples = _finish_episode_with_rewards(agent, 0.50)
 
-    assert _choice_multiplier(2) == 1.0
-    assert _choice_multiplier(3) == 2.0
-    assert _choice_multiplier(4) == 5.0
-    assert _choice_multiplier(5) == 10.0
-    assert _choice_multiplier(6) == 10.0
-    assert [sample.policy_reward for sample in samples] == [0.60, 1.20, 3.00, 6.00, 6.00]
+    assert [sample.policy_reward for sample in samples] == [0.60, 0.60]
+    assert all(not hasattr(sample, "multiplier") for sample in samples)
+    assert all(not hasattr(sample, "option_count") for sample in samples)
 
 
 def test_positive_reward_increases_chosen_masked_probability():
@@ -1154,8 +1147,12 @@ def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "policy.npz"
         network.save(path)
-        saved = host_np.load(path)
-        assert set(saved.files) == {"W1", "b1", "W2", "b2", "W3", "b3"}
+        with host_np.load(path) as saved:
+            assert set(saved.files) == {
+                "W1", "b1", "W2", "b2", "W3", "b3",
+                "optimizer_step_count",
+            }
+            assert int(saved["optimizer_step_count"]) == 0
 
         legacy_path = Path(folder) / "legacy.npz"
         host_np.savez(
@@ -1179,10 +1176,11 @@ def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
         value_network.bv[:] = -0.10
         value_path = Path(folder) / "value_policy.npz"
         value_network.save(value_path)
-        value_saved = host_np.load(value_path)
-        assert set(value_saved.files) == {
-            "W1", "b1", "W2", "b2", "W3", "b3", "Wv", "bv"
-        }
+        with host_np.load(value_path) as value_saved:
+            assert set(value_saved.files) == {
+                "W1", "b1", "W2", "b2", "W3", "b3", "Wv", "bv",
+                "optimizer_step_count",
+            }
 
         value_loaded = PolicyNetwork.load(value_path, use_value_head=True)
         policy_only_loaded = PolicyNetwork.load(value_path)
@@ -1208,11 +1206,28 @@ def test_rl_initialization_cli_defaults_are_context_specific():
     assert not parse_pipeline_args(["--continue-existing-rl"]).fresh_from_sl
 
 
+def test_rl_workload_and_pool_defaults_use_games():
+    standalone = parse_self_play_args([])
+    pipeline = _build_config("default")
+
+    # ``None`` preserves whether a value was explicitly supplied; the CLI
+    # translation resolves these to the normal 100,000-game adaptive run.
+    assert standalone.iterations is None
+    assert standalone.total_training_games is None
+    assert standalone.games_per_iteration is None
+    assert standalone.adaptive_gpi is None
+    assert standalone.ppo_enabled
+    assert standalone.pool_refresh_games == 400
+    assert not hasattr(standalone, "evaluation_games")
+    assert not hasattr(standalone, "pool_interval")
+    assert pipeline.rl_iterations * pipeline.rl_games_per_iteration == 100_000
+
+
 def test_reward_signal_summary_classifies_rewards():
     samples = [
-        TrainingSample(None, 0, None, 1.0, 1.0, 0.20, 0.80, 1.0, 2),
-        TrainingSample(None, 0, None, 0.0, 0.0, 0.00, 0.00, 1.0, 2),
-        TrainingSample(None, 0, None, -1.0, -1.0, -0.10, -0.90, 1.0, 2),
+        TrainingSample(None, 0, None, 1.0, 1.0, 0.20, 0.80),
+        TrainingSample(None, 0, None, 0.0, 0.0, 0.00, 0.00),
+        TrainingSample(None, 0, None, -1.0, -1.0, -0.10, -0.90),
     ]
 
     summary = _reward_signal_summary(samples)
@@ -1503,7 +1518,7 @@ def main():
         ),
         ("event reward no decisions", test_event_reward_without_decisions_is_noop),
         ("uniform terminal reward", test_terminal_reward_is_uniform_before_local_shaping),
-        ("option reward multipliers", test_option_multipliers_apply_after_terminal_and_local_rewards),
+        ("uniform choice reward", test_choice_count_does_not_weight_terminal_or_local_rewards),
         (
             "positive reward gradient",
             test_positive_reward_increases_chosen_masked_probability,
@@ -1519,6 +1534,7 @@ def main():
             "RL initialization CLI defaults",
             test_rl_initialization_cli_defaults_are_context_specific,
         ),
+        ("RL workload defaults", test_rl_workload_and_pool_defaults_use_games),
         ("reward signal summary", test_reward_signal_summary_classifies_rewards),
         (
             "hybrid one-way threshold switch",

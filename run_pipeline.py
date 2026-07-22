@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent
 BASE_DATASET_GAMES = 10000
 BASE_SUPERVISED_EPOCHS = 1000
 BASE_RL_ITERATIONS = 1000
-BASE_RL_GAMES_PER_ITERATION = 40
+BASE_RL_GAMES_PER_ITERATION = 100
 BASE_DIAGNOSTIC_GAMES = 10000
 EXACT_UPDATE_TIMING_REPORT = ROOT.parent / "exact_opponent_model_timing.json"
 
@@ -94,7 +94,10 @@ def _progress(label, total, unit):
 
     with tqdm(total=total, desc=label, unit=unit, leave=True) as bar:
 
-        def callback(done, _total):
+        def callback(done, reported_total):
+            if reported_total != bar.total:
+                bar.total = reported_total
+                bar.refresh()
             if done > bar.n:
                 bar.update(done - bar.n)
 
@@ -238,23 +241,56 @@ def _run_rl_training(config, args):
         else:
             print(message, flush=True)
 
+    manual_gpi = (
+        config.rl_games_per_iteration
+        if args.games_per_iteration is None
+        else args.games_per_iteration
+    )
+    explicit_iterations = args.iterations
+    total_training_games = (
+        explicit_iterations * manual_gpi
+        if explicit_iterations is not None
+        else (
+            args.total_training_games
+            if args.total_training_games is not None
+            else config.rl_iterations * config.rl_games_per_iteration
+        )
+    )
+    adaptive_gpi = (
+        (args.games_per_iteration is None and explicit_iterations is None)
+        if args.adaptive_gpi is None
+        else bool(args.adaptive_gpi)
+    )
+
     return _run_stage(
         "RL self-play",
         config.rl_iterations,
         "iter",
         lambda progress: self_play.train(
-            iterations=config.rl_iterations,
-            games_per_iteration=config.rl_games_per_iteration,
+            iterations=explicit_iterations,
+            total_training_games=(
+                args.total_training_games
+                if explicit_iterations is not None
+                else total_training_games
+            ),
+            games_per_iteration=manual_gpi,
+            adaptive_gpi=adaptive_gpi,
+            gpi_candidates=tuple(args.gpi_candidates),
+            gpi_benchmark_games_target=args.gpi_benchmark_games_target,
+            retune_gpi=args.retune_gpi,
+            retune_workers=args.retune_workers,
+            retune_all=args.retune_all,
             training_opponent=args.training_opponent,
             learning_rate=args.learning_rate,
             entropy_coef=args.entropy_coef,
             log_interval=args.log_interval,
             checkpoint_interval=args.checkpoint_interval,
-            pool_interval=args.pool_interval,
+            pool_refresh_games=args.pool_refresh_games,
             max_pool_size=args.max_pool_size,
-            evaluation_games=args.evaluation_games,
             sl_weights_path=args.sl_weights_path,
             rl_weights_path=args.rl_weights_path,
+            adaptive_tuning_path=args.adaptive_tuning_path,
+            metrics_output_path=args.metrics_output_path,
             fresh_from_sl=args.fresh_from_sl,
             quiet=True,
             progress_callback=progress,
@@ -275,13 +311,27 @@ def _run_rl_training(config, args):
             ),
             autotune_fraction=args.rl_autotune_fraction,
             autotune_minimum_gain=args.rl_autotune_min_gain,
+            ppo_enabled=args.ppo_enabled,
+            ppo_clip_epsilon=args.ppo_clip_epsilon,
+            ppo_target_kl=args.ppo_target_kl,
+            ppo_stop_kl=args.ppo_stop_kl,
+            ppo_max_epochs=args.ppo_max_epochs,
+            ppo_min_minibatches=args.ppo_min_minibatches,
+            ppo_max_minibatches=args.ppo_max_minibatches,
+            ppo_games_per_minibatch_scale=args.ppo_games_per_minibatch_scale,
+            ppo_min_decisions_per_minibatch=(
+                args.ppo_min_decisions_per_minibatch
+            ),
+            prefer_gpu_buffer=args.prefer_gpu_buffer,
+            gpu_buffer_safety_fraction=args.gpu_buffer_safety_fraction,
             status_callback=rl_status,
         ),
         lambda summary: (
-            f"{summary['iterations']} iterations x "
-            f"{summary['games_per_iteration']} games, "
+            f"{summary['total_training_games']} exact games in "
+            f"{summary['completed_iterations_this_run']} iteration(s), "
+            f"selected GPI {summary['games_per_iteration']}, "
             f"{summary['selected_workers']} rollout worker(s), "
-            f"value head {'on' if summary['use_value_head'] else 'off'}, "
+            f"algorithm {summary['rl_training_algorithm']}, "
             f"weights {summary['rl_weights_path']}"
         ),
         timing_stage="rl_self_play",
@@ -416,6 +466,16 @@ def main():
         sys.path.insert(0, str(ROOT))
 
     config = _build_config(args.scale)
+    requested_rl_games = (
+        args.iterations
+        * (args.games_per_iteration or config.rl_games_per_iteration)
+        if args.iterations is not None
+        else (
+            args.total_training_games
+            if args.total_training_games is not None
+            else config.rl_iterations * config.rl_games_per_iteration
+        )
+    )
     _evaluate, diagnostic_matchups, diagnostic_total_games = (
         _diagnostic_workload(config)
     )
@@ -424,7 +484,8 @@ def main():
         f"{config.scale_name} ({config.scale_factor:g}x): "
         f"{config.dataset_games} dataset games, "
         f"up to {config.supervised_epochs} supervised epochs, "
-        f"{config.rl_iterations} RL iterations, "
+        f"{requested_rl_games} exact RL games with "
+        f"{'adaptive' if args.adaptive_gpi is not False and args.games_per_iteration is None and args.iterations is None else 'manual'} GPI, "
         f"diagnostics with {config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
@@ -475,12 +536,12 @@ def main():
         print(f"Dataset workers: fixed at {args.dataset_workers}.")
     if args.rl_workers == "auto":
         print(
-            "RL rollout workers: automatic retained benchmark "
-            "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
+            "RL rollout workers: isolated discarded throughput benchmark "
+            "(1, 2, 4, 6, ... up to 20; 1% of the real budget per candidate)."
         )
         print(
-            "Each RL worker test uses complete early iterations, and every "
-            "benchmark game contributes to a policy update."
+            "Worker-tuning games use separate seeds and do not change weights, "
+            "the pool, RNG state, or the real training-game counter."
         )
     else:
         print(f"RL rollout workers: fixed at {args.rl_workers}.")

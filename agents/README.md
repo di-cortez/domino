@@ -11,7 +11,7 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 | `nn.py` | Per-network NumPy/CuPy float32 MLP backend with explicit `auto`/`cpu`/`gpu` selection. |
 | `neural_agent.py` | Loads `models/domino_sl_weights.npz` and plays the supervised policy. |
 | `random_neural_agent.py` | Uses the same supervised architecture with fixed random initialization and no checkpoint. |
-| `rl_nn.py` | Masked REINFORCE network with entropy regularization and an optional value head. |
+| `rl_nn.py` | Masked PPO/REINFORCE network with entropy regularization and an optional legacy value head. |
 | `rl_agent.py` | Wraps `PolicyNetwork` for training trajectories or deterministic evaluation play. |
 
 The opponent belief model lives in `middleware/opponent_model.py` because it is
@@ -113,20 +113,19 @@ option before running exact inference. These are not learned RL decisions, and
 | `stochastic_evaluation` | Samples from the masked distribution | No |
 | `evaluation` | Selects the largest masked probability | No |
 
-Self-play pool opponents use stochastic evaluation. UI play, diagnostics, and
-checkpoint evaluation use deterministic evaluation.
+Self-play pool opponents use stochastic evaluation. UI play and diagnostics
+use deterministic evaluation.
 
 RL trajectory steps store the encoded state, sampled action index, legal-action
-mask, decision turn, option count, and local reward accumulator. During
-self-play, draw/pass events are distributed to earlier real decisions with
-temporal decay. The policy-gradient backward pass uses the saved mask to
-renormalize the softmax over legal actions only, so illegal actions receive no
-direct policy or entropy gradient.
+mask, collection-time masked `old_log_prob`, decision turn, and local reward
+accumulator. During self-play, draw/pass events are distributed to earlier real
+decisions with temporal decay. PPO reuses exactly that mask and log-probability;
+illegal actions receive zero probability and no direct policy or entropy
+gradient. A decision's reward is not weighted by its number of legal choices.
 
-`PolicyNetwork` is policy-only by default. Optional value-head training adds a
-linear `V(s)` prediction from the second hidden layer and stores `Wv`/`bv` next
-to `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`. Policy-only loading ignores those
-extra arrays, while value-head loading initializes them to zero when absent.
+`PolicyNetwork` is policy-only by default and self-play updates it with PPO.
+Optional value-head training is retained only for explicit `--no-ppo`
+regression runs; it adds `Wv`/`bv` next to the six policy arrays.
 
 Because the input/output shapes changed from the old 86/58 encoder to the new
 168/56 encoder, old `domino_sl_weights.npz` and `domino_rl_weights.npz`

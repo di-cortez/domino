@@ -1,9 +1,9 @@
 """Controlled, resumable RL sweep over games per iteration.
 
 Every point starts from the same supervised checkpoint and trains on exactly
-the same number of games.  Games per iteration, update count, and pool-refresh
-frequency per game deliberately change; no replay buffer or multi-epoch update
-is introduced.
+the same number of games. Games per iteration, PPO minibatches, and update
+count deliberately change, while opponent-pool refresh stays fixed by
+cumulative training games. There is no replay or cross-iteration reuse.
 
 Examples:
   python train_script/run_rl_games_per_iteration_sweep.py --preset standard --dry-run
@@ -45,13 +45,12 @@ from training import self_play
 from utils.resource_limits import gpu_memory_info, system_memory_info
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 DEFAULT_GPI_VALUES = (40, 80, 160, 320, 640, 960, 1280)
 DEFAULT_TOTAL_TRAINING_GAMES = 384_000
 DEFAULT_SEEDS = (42, 43, 44)
 DEFAULT_DIAGNOSTIC_GAMES = 10_000
 DEFAULT_CHECKPOINT_COUNT = 10
-DEFAULT_CHECKPOINT_EVALUATION_GAMES = 200
 DEFAULT_SL_WEIGHTS_PATH = ROOT / "models" / "domino_sl_weights.npz"
 DEFAULT_LEARNING_RATE = 0.001
 DEFAULT_GAMMA = 1.0
@@ -62,7 +61,7 @@ DEFAULT_TRAINING_OPPONENT = "self_play"
 DEFAULT_DEVICE = "auto"
 DEFAULT_RL_WORKERS = "auto"
 DEFAULT_DIAGNOSTIC_WORKERS = 1
-DEFAULT_POOL_INTERVAL = 10
+DEFAULT_POOL_REFRESH_GAMES = self_play.DEFAULT_POOL_REFRESH_GAMES
 DEFAULT_MAX_POOL_SIZE = 50
 DEFAULT_REWARD_SCHEMA = "default"
 DEFAULT_CLIP_GRAD_NORM = 5.0
@@ -217,8 +216,8 @@ def validate_configuration(config: dict[str, Any]) -> None:
         )
     if int(config["diagnostic_games"]) <= 0:
         raise ValueError("diagnostic_games must be positive.")
-    if int(config["checkpoint_evaluation_games"]) <= 0:
-        raise ValueError("checkpoint_evaluation_games must be positive.")
+    if int(config["pool_refresh_games"]) <= 0:
+        raise ValueError("pool_refresh_games must be positive.")
     if checkpoint_count < 1:
         raise ValueError("checkpoint_count must be at least one.")
     bad_checkpoints = []
@@ -587,6 +586,12 @@ def _run_point(
     metrics_path = run_dir / "training_metrics.jsonl"
     metrics_csv_path = run_dir / "training_metrics.csv"
     use_critic = point["critic"] == "on"
+    ppo_enabled = not use_critic
+    normalize_advantages = (
+        ppo_enabled
+        if config["normalize_advantages"] is None
+        else bool(config["normalize_advantages"])
+    )
     run_config = {
         "schema_version": SCHEMA_VERSION,
         **{key: value for key, value in config.items() if key not in {"seeds", "gpi_values"}},
@@ -595,6 +600,12 @@ def _run_point(
         "seed": point["seed"],
         "critic": point["critic"],
         "use_value_head": use_critic,
+        "rl_training_algorithm": (
+            self_play.PPO_TRAINING_ALGORITHM
+            if ppo_enabled else self_play.LEGACY_TRAINING_ALGORITHM
+        ),
+        "ppo_enabled": ppo_enabled,
+        "normalize_advantages": normalize_advantages,
         "games_per_iteration": point["games_per_iteration"],
         "iterations": point["iterations"],
         "total_training_games": point["total_training_games"],
@@ -641,20 +652,42 @@ def _run_point(
                 config["device"]
             )
             expected_resume_configuration = self_play._resume_configuration(
-                games_per_iteration=point["games_per_iteration"],
+                total_training_games=point["total_training_games"],
+                selected_gpi=point["games_per_iteration"],
+                selected_workers=int(
+                    resume_metadata["configuration"]["selected_workers"]
+                ),
+                rl_training_algorithm=run_config["rl_training_algorithm"],
                 training_opponent=config["training_opponent"],
                 learning_rate=config["learning_rate"],
                 entropy_coef=config["entropy_coef"],
-                pool_interval=config["pool_interval"],
+                pool_refresh_games=config["pool_refresh_games"],
                 max_pool_size=config["max_pool_size"],
                 use_value_head=use_critic,
                 value_coef=config["value_coef"],
                 gamma=config["gamma"],
                 reward_schema=config["reward_schema"],
                 clip_grad_norm=config["clip_grad_norm"],
-                normalize_advantages=config["normalize_advantages"],
+                normalize_advantages=normalize_advantages,
                 effective_seed=point["seed"],
                 device=selected_device,
+                sl_weights_sha256=sl_hash,
+                ppo_clip_epsilon=self_play.DEFAULT_CLIP_EPSILON,
+                ppo_target_kl=self_play.DEFAULT_TARGET_KL,
+                ppo_stop_kl=self_play.DEFAULT_STOP_KL,
+                ppo_max_epochs=self_play.DEFAULT_MAX_EPOCHS,
+                ppo_min_minibatches=self_play.DEFAULT_MIN_MINIBATCHES,
+                ppo_max_minibatches=self_play.DEFAULT_MAX_MINIBATCHES,
+                ppo_games_per_minibatch_scale=(
+                    self_play.DEFAULT_GAMES_PER_MINIBATCH_SCALE
+                ),
+                ppo_min_decisions_per_minibatch=(
+                    self_play.DEFAULT_MIN_DECISIONS_PER_MINIBATCH
+                ),
+                prefer_gpu_buffer=True,
+                gpu_buffer_safety_fraction=(
+                    self_play.DEFAULT_GPU_BUFFER_SAFETY_FRACTION
+                ),
             )
             self_play._validate_resume_configuration(
                 resume_metadata,
@@ -706,36 +739,39 @@ def _run_point(
                 summary = self_play.train(
                     iterations=point["iterations"],
                     games_per_iteration=point["games_per_iteration"],
+                    adaptive_gpi=False,
                     training_opponent=config["training_opponent"],
                     learning_rate=config["learning_rate"],
                     entropy_coef=config["entropy_coef"],
                     checkpoint_interval=run_config["checkpoint_interval"],
-                    pool_interval=config["pool_interval"],
+                    pool_refresh_games=config["pool_refresh_games"],
                     max_pool_size=config["max_pool_size"],
-                    evaluation_games=config["checkpoint_evaluation_games"],
                     sl_weights_path=config["sl_weights_path"],
                     sl_weights_data=sl_weights_data,
                     rl_weights_path=str(base_model_path),
+                    fresh_from_sl=not bool(resume_kwargs),
                     quiet=config["quiet_training"],
                     use_value_head=use_critic,
                     value_coef=config["value_coef"],
                     gamma=config["gamma"],
                     reward_schema=config["reward_schema"],
                     clip_grad_norm=config["clip_grad_norm"],
-                    normalize_advantages=config["normalize_advantages"],
+                    normalize_advantages=normalize_advantages,
                     seed=point["seed"],
                     device=config["device"],
                     workers=config["rl_workers"],
+                    adaptive_tuning_path=str(run_dir / "adaptive_tuning.json"),
                     numbered_checkpoints=True,
                     metrics_callback=metrics_callback,
                     status_callback=status_callback,
+                    ppo_enabled=ppo_enabled,
                     **resume_kwargs,
                 )
             finally:
                 metrics_stream.close()
             training_wall = time.perf_counter() - training_started
             metrics = _metrics_to_csv(metrics_path, metrics_csv_path)
-            if int(summary["iterations"]) * int(summary["games_per_iteration"]) != point["total_training_games"]:
+            if int(summary["completed_training_games"]) != point["total_training_games"]:
                 raise RuntimeError("Training summary violated the exact game budget.")
             if int(summary["effective_seed"]) != point["seed"] or bool(summary["use_value_head"]) != use_critic:
                 raise RuntimeError("Training summary identity does not match the run plan.")
@@ -828,7 +864,7 @@ def _print_plan(config: dict[str, Any], plan: list[dict[str, Any]], paths: dict[
     print("RL games-per-iteration sweep plan")
     print("=" * 86)
     print("Important: training games, SL checkpoint, hyperparameters and diagnostics are controlled;")
-    print("GPI, update count, and pool-refresh frequency per game deliberately change.")
+    print("GPI and update count deliberately change; pool refresh is fixed by training games.")
     print(f"Canonical GPI values: {list(config['gpi_values'])}")
     print("order | critic | seed | GPI | iterations | training games | run key")
     for point in plan:
@@ -841,7 +877,6 @@ def _print_plan(config: dict[str, Any], plan: list[dict[str, Any]], paths: dict[
     print("-" * 86)
     print(f"Models: {models}")
     print(f"Aggregate training games: {models * config['total_training_games']:,}")
-    print(f"Auxiliary checkpoint-evaluation games: {models * config['checkpoint_count'] * config['checkpoint_evaluation_games']:,}")
     print(f"Final diagnostic games: {models * 2 * config['diagnostic_games']:,}")
     print(f"Results: {paths['results_dir']}")
     print(f"Models: {paths['model_dir']}")
@@ -880,11 +915,10 @@ def resolve_configuration(args: argparse.Namespace) -> tuple[dict[str, Any], dic
         "training_opponent": args.training_opponent,
         "reward_schema": args.reward_schema,
         "clip_grad_norm": args.clip_grad_norm,
-        "normalize_advantages": bool(args.normalize_advantages),
-        "pool_interval": args.pool_interval,
+        "normalize_advantages": args.normalize_advantages,
+        "pool_refresh_games": args.pool_refresh_games,
         "max_pool_size": args.max_pool_size,
         "checkpoint_count": int(checkpoint_count),
-        "checkpoint_evaluation_games": args.checkpoint_evaluation_games,
         "diagnostic_games": int(diagnostic_games),
         "device": args.device,
         "rl_workers": args.rl_workers,
@@ -970,10 +1004,9 @@ def run_experiment(args: argparse.Namespace) -> dict[str, Any] | None:
                 "model_count": models,
                 "training_games_per_model": config["total_training_games"],
                 "aggregate_training_games": models * config["total_training_games"],
-                "auxiliary_checkpoint_games_per_model": config["checkpoint_count"] * config["checkpoint_evaluation_games"],
                 "final_diagnostic_games_per_model": 2 * config["diagnostic_games"],
             },
-            "methodology_note": "Training games, initial SL checkpoint, hyperparameters and diagnostics are controlled. GPI, update count, and pool-refresh frequency per game deliberately change.",
+            "methodology_note": "Training games, initial SL checkpoint, pool-refresh frequency, hyperparameters and diagnostics are controlled. GPI and update count deliberately change.",
         }
         _write_plan(experiment_dir, manifest)
 
@@ -1084,11 +1117,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     normalization = parser.add_mutually_exclusive_group()
     normalization.add_argument("--normalize-advantages", action="store_true", dest="normalize_advantages")
     normalization.add_argument("--no-normalize-advantages", action="store_false", dest="normalize_advantages")
-    parser.set_defaults(normalize_advantages=False)
-    parser.add_argument("--pool-interval", type=int, default=DEFAULT_POOL_INTERVAL)
+    parser.set_defaults(normalize_advantages=None)
+    parser.add_argument(
+        "--pool-refresh-games",
+        type=int,
+        default=DEFAULT_POOL_REFRESH_GAMES,
+        help="Training games between opponent-pool snapshots.",
+    )
     parser.add_argument("--max-pool-size", type=int, default=DEFAULT_MAX_POOL_SIZE)
     parser.add_argument("--checkpoint-count", type=int, default=None)
-    parser.add_argument("--checkpoint-evaluation-games", type=int, default=DEFAULT_CHECKPOINT_EVALUATION_GAMES)
     parser.add_argument("--diagnostic-games", type=int, default=None)
     parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default=DEFAULT_DEVICE)
     parser.add_argument("--rl-workers", type=self_play.parse_rl_worker_count, default=DEFAULT_RL_WORKERS, metavar="N|auto")

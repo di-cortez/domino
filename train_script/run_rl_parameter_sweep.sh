@@ -4,13 +4,12 @@
 # every point in a full grid search over the three main hyperparameters
 # (learning_rate x gamma x games_per_iteration, 3x4x3 = 36 combinations),
 # then diagnose it against the random agent. The full grid runs for both
-# policies -- critic off (direct REINFORCE) and critic on (actor-critic) at
-# the baseline value_coef -- with every base combination identical between
-# the two, so the two policies can be compared directly.
+# policies -- critic off (PPO) and critic on (legacy actor-critic/REINFORCE) at
+# the baseline value_coef. The algorithm difference is recorded explicitly.
 #
 # value_coef only affects the actor-critic value head -- it enters the
 # gradient exclusively inside PolicyNetwork.backward_policy_gradient's
-# use_value_head branch and has no effect on direct REINFORCE -- so it is
+# use_value_head branch and has no effect on policy-only PPO -- so it is
 # swept with the critic ON only. Its sweep: VC_SAMPLE_COUNT base combinations
 # are drawn at random (seeded with --seed, so reproducible) from the grid,
 # and each sampled combination is trained once per value_coef value. The
@@ -73,7 +72,7 @@ DIAG_PLOTS=1
 # exactly (CuPy when installed, else NumPy); "cpu"/"gpu" force one backend.
 DEVICE="auto"
 # Sweep points run sequentially. Parallelism belongs inside self_play's
-# CPU-only rollout pool, where game ids, memory fallback, and retained worker
+# CPU-only rollout pool, where game ids, memory fallback, and isolated worker
 # autotuning are already controlled centrally.
 RL_WORKERS=auto
 
@@ -300,38 +299,63 @@ format_duration() {
 
 # validate_resume_pair WEIGHTS STATE GPI LR GAMMA VC CRITIC
 validate_resume_pair() {
-    "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$SEED" "$DEVICE" <<'PY'
-import inspect
+    "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$SEED" "$DEVICE" "$RL_ITERATIONS" "$SL_WEIGHTS_PATH" <<'PY'
 import sys
 
 from training.self_play import (
+    DEFAULT_CLIP_EPSILON,
+    DEFAULT_GAMES_PER_MINIBATCH_SCALE,
+    DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
+    DEFAULT_MAX_EPOCHS,
+    DEFAULT_MAX_MINIBATCHES,
+    DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
+    DEFAULT_MIN_MINIBATCHES,
+    DEFAULT_STOP_KL,
+    DEFAULT_TARGET_KL,
+    LEGACY_TRAINING_ALGORITHM,
+    PPO_TRAINING_ALGORITHM,
+    _file_sha256,
     _resume_configuration,
     _validate_resume_configuration,
     load_resume_state,
-    train,
 )
 from utils.resource_limits import choose_safe_rl_device
 
 try:
-    weights_path, state_path, gpi, learning_rate, gamma, value_coef, critic, seed, requested_device = sys.argv[1:]
+    (weights_path, state_path, gpi, learning_rate, gamma, value_coef,
+     critic, seed, requested_device, iterations, sl_weights_path) = sys.argv[1:]
     metadata, _pool = load_resume_state(weights_path, state_path)
-    parameters = inspect.signature(train).parameters
-    default = lambda name: parameters[name].default
+    critic_enabled = bool(int(critic))
+    ppo_enabled = not critic_enabled
     expected = _resume_configuration(
-        games_per_iteration=int(gpi),
-        training_opponent=default("training_opponent"),
+        total_training_games=int(iterations) * int(gpi),
+        selected_gpi=int(gpi),
+        selected_workers=int(metadata["configuration"]["selected_workers"]),
+        rl_training_algorithm=(PPO_TRAINING_ALGORITHM if ppo_enabled else LEGACY_TRAINING_ALGORITHM),
+        training_opponent="self_play",
         learning_rate=float(learning_rate),
-        entropy_coef=default("entropy_coef"),
-        pool_interval=default("pool_interval"),
-        max_pool_size=default("max_pool_size"),
-        use_value_head=bool(int(critic)),
+        entropy_coef=0.01,
+        pool_refresh_games=400,
+        max_pool_size=50,
+        use_value_head=critic_enabled,
         value_coef=float(value_coef),
         gamma=float(gamma),
-        reward_schema=default("reward_schema"),
-        clip_grad_norm=default("clip_grad_norm"),
-        normalize_advantages=default("normalize_advantages"),
+        reward_schema="default",
+        clip_grad_norm=5.0,
+        normalize_advantages=ppo_enabled,
         effective_seed=int(seed),
         device=choose_safe_rl_device(requested_device)[0],
+        sl_weights_sha256=_file_sha256(sl_weights_path),
+        ppo_clip_epsilon=DEFAULT_CLIP_EPSILON,
+        ppo_target_kl=DEFAULT_TARGET_KL,
+        ppo_stop_kl=DEFAULT_STOP_KL,
+        ppo_max_epochs=DEFAULT_MAX_EPOCHS,
+        ppo_min_minibatches=DEFAULT_MIN_MINIBATCHES,
+        ppo_max_minibatches=DEFAULT_MAX_MINIBATCHES,
+        ppo_games_per_minibatch_scale=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
+        ppo_min_decisions_per_minibatch=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
+        prefer_gpu_buffer=True,
+        gpu_buffer_safety_fraction=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
     )
     _validate_resume_configuration(metadata, expected)
 except Exception as exc:
@@ -523,8 +547,10 @@ run_point() {
             section "[$name] RL training: $RL_ITERATIONS iterations, lr=$lr gamma=$gamma games/iter=$gpi value_coef=$vc critic=$critic_label"
         fi
         VALUE_HEAD_FLAG=()
+        PPO_FLAG=(--ppo)
         if [[ "$critic" -eq 1 ]]; then
             VALUE_HEAD_FLAG=(--value-head)
+            PPO_FLAG=(--no-ppo)
         fi
         RUN_PREFIX=()
         if [[ "$USE_CGROUP_RAM_LIMIT" -eq 1 ]]; then
@@ -538,9 +564,11 @@ run_point() {
             --value-coef "$vc" \
             --sl-weights-path "$SL_WEIGHTS_PATH" \
             --rl-weights-path "$model_base_path" \
+            --adaptive-tuning-path "${model_base_path%.npz}_adaptive_tuning.json" \
             --seed "$SEED" \
             --device "$DEVICE" \
             --rl-workers "$RL_WORKERS" \
+            "${PPO_FLAG[@]}" \
             --compact \
             "${FRESH_START_ARGS[@]}" \
             "${RESUME_ARGS[@]}" \

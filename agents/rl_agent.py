@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from agents.encoder import DominoEncoder
 from agents.rl_nn import PolicyNetwork
 from middleware.middleware import Agent
@@ -10,13 +12,13 @@ from middleware.opponent_model import ExactOpponentModel
 
 @dataclass
 class TrajectoryStep:
-    """One real learner decision saved for REINFORCE training."""
+    """One real learner decision sampled from the frozen rollout policy."""
 
     x: object
     action_index: int
     legal_mask: object
     decision_turn: int
-    option_count: int
+    old_log_prob: float = 0.0
     local_reward: float = 0.0
 
 
@@ -30,7 +32,7 @@ class FinishedTrajectoryStep:
     raw_reward: float
     local_reward: float
     terminal_reward: float
-    option_count: int
+    old_log_prob: float = 0.0
 
 
 class RLAgent(Agent):
@@ -38,9 +40,10 @@ class RLAgent(Agent):
 
     Draw, pass, and single-option tile plays are forced by the rules engine in
     the current rule set. They bypass the network and are not stored as
-    policy-gradient decisions. Real decisions store their turn and option count
-    so self-play can apply temporally decayed local rewards and option-count
-    multipliers outside the agent.
+    policy-gradient decisions. Real decisions store their turn so self-play can
+    apply temporally decayed local rewards outside the agent. Training steps
+    also retain the masked-policy log-probability from collection time so PPO
+    never has to reconstruct ``pi_old`` after the policy has changed.
     """
 
     VALID_MODES = {"training", "stochastic_evaluation", "evaluation"}
@@ -84,17 +87,55 @@ class RLAgent(Agent):
             probabilities = probabilities.get()
 
         if self.mode in {"training", "stochastic_evaluation"}:
-            move, action_index = self.encoder.sample_action(probabilities, policy_actions)
+            host_legal_mask = np.zeros(
+                self.encoder.ACTION_SIZE,
+                dtype=np.bool_,
+            )
+            for action in policy_actions:
+                host_legal_mask[self.encoder._action_index(action)] = True
+            logits = getattr(self.network, "cache", {}).get("Z3")
+            if logits is None:
+                legal_probabilities = np.asarray(
+                    probabilities[host_legal_mask, 0],
+                    dtype=np.float32,
+                ).copy()
+            else:
+                if hasattr(logits, "get"):
+                    logits = logits.get()
+                legal_logits = np.asarray(
+                    logits[host_legal_mask, 0],
+                    dtype=np.float32,
+                )
+                legal_logits = legal_logits - np.max(legal_logits)
+                legal_probabilities = np.exp(legal_logits)
+            legal_total = float(legal_probabilities.sum())
+            if not np.isfinite(legal_total) or legal_total <= 0.0:
+                raise FloatingPointError(
+                    "Masked RL rollout policy produced invalid probabilities."
+                )
+            legal_probabilities /= legal_total
+            sampling_probabilities = np.zeros_like(probabilities, dtype=np.float32)
+            sampling_probabilities[host_legal_mask, 0] = legal_probabilities
+            move, action_index = self.encoder.sample_action(
+                sampling_probabilities,
+                policy_actions,
+            )
             if self.mode == "training":
-                legal_mask = self.encoder.policy_action_mask(policy_actions)
-                legal_mask = self.network.xp.asarray(legal_mask)
+                old_probability = float(sampling_probabilities[action_index, 0])
+                old_log_prob = float(
+                    np.log(max(old_probability, np.finfo(np.float32).tiny))
+                )
+                legal_mask = self.network.xp.asarray(
+                    host_legal_mask.reshape(-1, 1),
+                    dtype=self.network.xp.bool_,
+                )
                 self.trajectory.append(
                     TrajectoryStep(
                         x=x,
                         action_index=action_index,
                         legal_mask=legal_mask,
+                        old_log_prob=old_log_prob,
                         decision_turn=int(state["turn"]),
-                        option_count=len(policy_actions),
                     )
                 )
             return move
@@ -119,10 +160,10 @@ class RLAgent(Agent):
                 x=step.x,
                 action_index=step.action_index,
                 legal_mask=step.legal_mask,
+                old_log_prob=step.old_log_prob,
                 raw_reward=float(final_reward) + step.local_reward,
                 local_reward=step.local_reward,
                 terminal_reward=float(final_reward),
-                option_count=step.option_count,
             )
             for step in self.trajectory
         ]

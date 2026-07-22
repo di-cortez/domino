@@ -20,7 +20,7 @@ import tempfile
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"
 REPORT_CSV_FILES = {
     "runs": "gpi_sweep_runs.csv",
     "aggregates": "gpi_sweep_aggregate.csv",
@@ -32,6 +32,7 @@ AUTOTUNE_FIELDS = (
     "run_key", "critic", "seed", "games_per_iteration", "attempt",
     "workers", "duration_s", "games_per_second", "marginal_gain",
     "passed", "failure_reason", "planned_games", "reused_games",
+    "discarded_games",
 )
 RANKING_FIELDS = (
     "critic", "games_per_iteration", "quality_rank", "throughput_rank",
@@ -317,6 +318,7 @@ def build_run_rows(experiment_dir: Path | str) -> tuple[list[dict[str, Any]], li
         reward_stds = [item.get("reward_std") for item in metrics]
         value_losses = [item.get("value_loss") for item in metrics if item.get("value_loss") is not None]
         clipped_count = sum(bool(item.get("grad_clipped")) for item in metrics)
+        ppo_rows = [item for item in metrics if item.get("epochs_completed") is not None]
         completed_iterations = len({int(item["iteration"]) for item in metrics if "iteration" in item})
         parallel = summary.get("parallel", {})
         autotune = summary.get("autotune", {})
@@ -350,10 +352,20 @@ def build_run_rows(experiment_dir: Path | str) -> tuple[list[dict[str, Any]], li
             "normalize_advantages": config.get("normalize_advantages", experiment_config.get("normalize_advantages")),
             "clip_grad_norm": config.get("clip_grad_norm", experiment_config.get("clip_grad_norm")),
             "training_opponent": config.get("training_opponent", experiment_config.get("training_opponent")),
-            "pool_interval": config.get("pool_interval", experiment_config.get("pool_interval")),
+            "rl_training_algorithm": summary.get(
+                "rl_training_algorithm",
+                config.get("rl_training_algorithm"),
+            ),
+            "pool_refresh_games": config.get(
+                "pool_refresh_games",
+                experiment_config.get("pool_refresh_games"),
+            ),
+            "legacy_pool_interval_iterations": config.get(
+                "pool_interval",
+                experiment_config.get("pool_interval"),
+            ),
             "max_pool_size": config.get("max_pool_size", experiment_config.get("max_pool_size")),
             "checkpoint_count": config.get("checkpoint_count", experiment_config.get("checkpoint_count")),
-            "checkpoint_evaluation_games": config.get("checkpoint_evaluation_games", experiment_config.get("checkpoint_evaluation_games")),
             "sl_checkpoint": config.get("sl_weights_resolved"),
             "sl_sha256": sl_hash,
             "model_path": str(model_path) if model_path else None,
@@ -379,14 +391,17 @@ def build_run_rows(experiment_dir: Path | str) -> tuple[list[dict[str, Any]], li
             "autotune_iterations_per_test": autotune.get("iterations_per_test"),
             "autotune_games_per_test": autotune.get("games_per_test"),
             "autotune_reused_games": autotune.get("reused_game_count"),
-            "autotune_duration_s": sum(float(item.get("duration_s", 0.0)) for item in autotune.get("attempts", [])),
+            "autotune_duration_s": sum(
+                float(item.get("elapsed_seconds", item.get("duration_s", 0.0)))
+                for item in autotune.get("attempts", [])
+            ),
+            "autotune_discarded_games": autotune.get("discarded_game_count"),
             "fallback_count": parallel.get("fallback_count"),
             "safety_capped": parallel.get("safety_capped"),
             "min_available_memory_mb": parallel.get("min_available_memory_mb"),
             "peak_worker_rss_mb": parallel.get("peak_worker_rss_mb"),
             "peak_total_children_rss_mb": parallel.get("peak_total_children_rss_mb"),
             "pool_snapshot_count": summary.get("pool_snapshot_count", metrics[-1].get("pool_size") if metrics else None),
-            "auxiliary_checkpoint_games": int(config.get("checkpoint_count", 0)) * int(config.get("checkpoint_evaluation_games", 0)),
             "final_diagnostic_games": 2 * int(config.get("diagnostic_games", experiment_config.get("diagnostic_games", 0))),
             "mean_grad_norm": _mean(grad_norms),
             "std_grad_norm": _std(grad_norms),
@@ -403,6 +418,34 @@ def build_run_rows(experiment_dir: Path | str) -> tuple[list[dict[str, Any]], li
             "final_training_moving_average_win_rate": metrics[-1].get("moving_average_win_rate") if metrics else None,
             "mean_value_loss": _mean(value_losses),
             "final_value_loss": value_losses[-1] if value_losses else None,
+            "ppo_optimizer_steps": sum(
+                int(item.get("optimizer_steps", 0)) for item in ppo_rows
+            ),
+            "ppo_mean_epochs": _mean(
+                [item.get("epochs_completed") for item in ppo_rows]
+            ),
+            "ppo_kl_stop_count": sum(
+                bool(item.get("stopped_by_kl")) for item in ppo_rows
+            ),
+            "ppo_mean_final_kl": _mean(
+                [item.get("final_approx_kl") for item in ppo_rows]
+            ),
+            "ppo_max_kl": max(
+                (float(item["max_approx_kl"]) for item in ppo_rows),
+                default=None,
+            ),
+            "ppo_mean_clip_fraction": _mean(
+                [item.get("final_clip_fraction") for item in ppo_rows]
+            ),
+            "ppo_mean_effective_minibatches": _mean(
+                [item.get("effective_minibatches") for item in ppo_rows]
+            ),
+            "ppo_gpu_buffer_iterations": sum(
+                item.get("buffer_location") == "gpu" for item in ppo_rows
+            ),
+            "ppo_ram_buffer_iterations": sum(
+                item.get("buffer_location") != "gpu" for item in ppo_rows
+            ),
             "failure_type": point.get("failure", {}).get("type"),
             "failure_message": point.get("failure", {}).get("message"),
             "failure_stage": point.get("failure", {}).get("stage"),
@@ -634,13 +677,16 @@ def build_autotune_rows(experiment_dir: Path, run_rows: list[dict[str, Any]]) ->
                 "games_per_iteration": run["games_per_iteration"],
                 "attempt": index,
                 "workers": attempt.get("requested_workers"),
-                "duration_s": attempt.get("duration_s"),
+                "duration_s": attempt.get("elapsed_seconds", attempt.get("duration_s")),
                 "games_per_second": attempt.get("games_per_second"),
                 "marginal_gain": attempt.get("improvement_over_previous"),
-                "passed": attempt.get("passed"),
-                "failure_reason": attempt.get("failure_reason"),
+                "passed": attempt.get("success", attempt.get("passed")),
+                "failure_reason": attempt.get("failure", attempt.get("failure_reason")),
                 "planned_games": attempt.get("planned_games"),
-                "reused_games": attempt.get("completed_games"),
+                "reused_games": 0 if "success" in attempt else attempt.get("completed_games"),
+                "discarded_games": (
+                    attempt.get("actual_games") if "success" in attempt else 0
+                ),
             })
     return rows
 
@@ -809,8 +855,8 @@ def _configuration_rows(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     for section in ("configuration", "environment", "budget", "sl_checkpoint"):
         for key, value in (manifest.get(section) or {}).items():
             rows.append({"section": section, "name": key, "value": json.dumps(value) if isinstance(value, (dict, list)) else value})
-    rows.append({"section": "methodology", "name": "controlled_fields", "value": "training games, SL checkpoint, hyperparameters, diagnostics"})
-    rows.append({"section": "methodology", "name": "deliberately_changed_fields", "value": "games per iteration, update count, pool-refresh frequency per game"})
+    rows.append({"section": "methodology", "name": "controlled_fields", "value": "training games, SL checkpoint, pool-refresh frequency, hyperparameters, diagnostics"})
+    rows.append({"section": "methodology", "name": "deliberately_changed_fields", "value": "games per iteration, update count"})
     return rows
 
 

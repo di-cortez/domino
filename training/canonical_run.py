@@ -12,7 +12,7 @@ import subprocess
 import numpy as np
 
 from agents.encoder import DominoEncoder
-from training.self_play import load_resume_state
+from training.rl_resume import load_resume_state
 from utils.artifacts import (
     atomic_copy,
     atomic_savez,

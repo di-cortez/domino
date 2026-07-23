@@ -50,10 +50,6 @@ def resolve_device(device="auto"):
     return host_np, "cpu"
 
 
-# Compatibility alias retained for code that imported the former module-wide
-# backend. New code must use ``network.xp`` instead.
-np = _cupy if GPU_ENABLED else host_np
-
 if GPU_ENABLED:
     # Cap this process's CuPy pool when concurrent sweep jobs share one GPU.
     _vram_limit_mb = os.environ.get("DOMINO_VRAM_LIMIT_MB")
@@ -245,9 +241,6 @@ class SupervisedNeuralNetwork:
         if self.device == "gpu":
             self.xp.get_default_memory_pool().free_all_blocks()
 
-    # Backward-compatible name used by older callers.
-    _release_gpu_cache = release_disposable_cache
-
     def _run_array_training_epoch(self, x_train, y_train, batch_size):
         """Train one complete shuffled epoch from host or backend arrays."""
         sample_count = x_train.shape[1]
@@ -298,13 +291,20 @@ class SupervisedNeuralNetwork:
         validation_runner=None,
         batch_controller=None,
         epoch_metrics_callback=None,
+        training_plateau_window=None,
+        training_plateau_patience=4,
+        training_plateau_min_epochs=100,
+        training_plateau_min_relative_improvement=0.001,
     ):
         """Train sequential epochs with independent plateau counters.
 
         ``epoch_runner`` and ``validation_runner`` let the supervised pipeline
         provide RAM, mmap, full-GPU, or windowed-GPU data access without moving
         storage policy into the network. The default path retains the public
-        array-based API used by tests and small direct callers.
+        array-based API used by tests and small direct callers. Passing a
+        ``training_plateau_window`` enables conservative block-median early
+        stopping; direct callers remain opt-in while the supervised pipeline
+        enables it by default.
         """
         if epochs < 1:
             raise ValueError("epochs must be positive")
@@ -316,6 +316,16 @@ class SupervisedNeuralNetwork:
             raise ValueError("lr_decay_patience must be positive")
         if validation_interval < 1:
             raise ValueError("validation_interval must be positive")
+        if training_plateau_window is not None and training_plateau_window < 1:
+            raise ValueError("training_plateau_window must be positive")
+        if training_plateau_patience < 1:
+            raise ValueError("training_plateau_patience must be positive")
+        if training_plateau_min_epochs < 1:
+            raise ValueError("training_plateau_min_epochs must be positive")
+        if training_plateau_min_relative_improvement < 0:
+            raise ValueError(
+                "training_plateau_min_relative_improvement must be non-negative"
+            )
 
         loss_history = []
         best_validation_loss = float("inf")
@@ -324,6 +334,16 @@ class SupervisedNeuralNetwork:
         lr_decay_count = 0
         initial_learning_rate = self.lr
         completed_epochs = 0
+        training_plateau_checks_without_improvement = 0
+        training_plateau_last_relative_improvement = None
+        training_plateau_stopped = False
+        stopping_reason = "epoch_limit"
+        plateau_loss_start = (
+            0
+            if batch_controller is None
+            or getattr(batch_controller, "finished", True)
+            else None
+        )
 
         for epoch in range(epochs):
             current_batch_size = (
@@ -375,6 +395,11 @@ class SupervisedNeuralNetwork:
 
             if batch_controller is not None:
                 batch_controller.record_epoch(epoch, training_seconds)
+                if plateau_loss_start is None and batch_controller.finished:
+                    # The epoch that completed/rejected the benchmark may use
+                    # a different batch. Begin plateau evidence on the next
+                    # epoch, after the selected batch is stable.
+                    plateau_loss_start = completed_epochs
 
             validation_loss = None
             if epoch % validation_interval == 0 and x_val is not None:
@@ -425,29 +450,90 @@ class SupervisedNeuralNetwork:
             elif epoch % validation_interval == 0 and not quiet:
                 print(f"Epoch {epoch} | training loss: {mean_loss:.4f}")
 
+            training_plateau_checked = False
+            training_plateau_relative_improvement = None
+            if (
+                training_plateau_window is not None
+                and plateau_loss_start is not None
+                and completed_epochs >= training_plateau_min_epochs
+            ):
+                stable_losses = loss_history[plateau_loss_start:]
+                stable_epoch_count = len(stable_losses)
+                if (
+                    stable_epoch_count >= 2 * training_plateau_window
+                    and stable_epoch_count % training_plateau_window == 0
+                ):
+                    previous_block = stable_losses[
+                        -2 * training_plateau_window:-training_plateau_window
+                    ]
+                    current_block = stable_losses[-training_plateau_window:]
+                    previous_median = float(host_np.median(previous_block))
+                    current_median = float(host_np.median(current_block))
+                    denominator = max(abs(previous_median), 1e-12)
+                    training_plateau_relative_improvement = (
+                        previous_median - current_median
+                    ) / denominator
+                    training_plateau_last_relative_improvement = (
+                        training_plateau_relative_improvement
+                    )
+                    training_plateau_checked = True
+                    if (
+                        training_plateau_relative_improvement
+                        < training_plateau_min_relative_improvement
+                    ):
+                        training_plateau_checks_without_improvement += 1
+                    else:
+                        training_plateau_checks_without_improvement = 0
+
+                    training_plateau_stopped = (
+                        training_plateau_checks_without_improvement
+                        >= training_plateau_patience
+                    )
+
             metrics = {
                 "epoch": epoch,
                 "batch_size": current_batch_size,
                 "training_seconds": training_seconds,
                 "optimizer_updates": optimizer_updates,
                 "window_rotations": window_rotations,
+                "training_loss": float(mean_loss),
                 "validation_loss": validation_loss,
+                "training_plateau_checked": training_plateau_checked,
+                "training_plateau_relative_improvement": (
+                    training_plateau_relative_improvement
+                ),
+                "training_plateau_checks_without_improvement": (
+                    training_plateau_checks_without_improvement
+                ),
             }
             if epoch_metrics_callback is not None:
                 epoch_metrics_callback(metrics)
             if progress_callback is not None:
                 progress_callback(completed_epochs, epochs)
 
-            if (
+            validation_stopped = (
                 early_stopping_patience is not None
                 and early_checks_without_improvement
                 >= early_stopping_patience
-            ):
+            )
+            if validation_stopped:
+                stopping_reason = "validation_loss_plateau"
                 if not quiet:
                     print(
                         "Early stopping: validation loss did not improve for "
                         f"{early_stopping_patience} checks. Stopped after "
                         f"epoch {epoch}."
+                    )
+                break
+            if training_plateau_stopped:
+                stopping_reason = "training_loss_plateau"
+                if not quiet:
+                    print(
+                        "Early stopping: median training loss improved by less "
+                        f"than {training_plateau_min_relative_improvement:.3%} "
+                        f"across {training_plateau_patience} consecutive "
+                        f"{training_plateau_window}-epoch blocks. Stopped "
+                        f"after epoch {epoch + 1}."
                     )
                 break
 
@@ -463,5 +549,23 @@ class SupervisedNeuralNetwork:
             "early_checks_without_improvement": (
                 early_checks_without_improvement
             ),
+            "training_plateau_enabled": training_plateau_window is not None,
+            "training_plateau_window": training_plateau_window,
+            "training_plateau_patience": training_plateau_patience,
+            "training_plateau_min_epochs": training_plateau_min_epochs,
+            "training_plateau_min_relative_improvement": (
+                training_plateau_min_relative_improvement
+            ),
+            "training_plateau_checks_without_improvement": (
+                training_plateau_checks_without_improvement
+            ),
+            "training_plateau_last_relative_improvement": (
+                training_plateau_last_relative_improvement
+            ),
+            "training_plateau_loss_start_epoch": (
+                None if plateau_loss_start is None else plateau_loss_start + 1
+            ),
+            "training_plateau_stopped": training_plateau_stopped,
+            "stopping_reason": stopping_reason,
         }
         return loss_history

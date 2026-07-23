@@ -4,13 +4,12 @@
 # every point in a full grid search over the three main hyperparameters
 # (learning_rate x gamma x games_per_iteration, 3x4x3 = 36 combinations),
 # then diagnose it against the random agent. The full grid runs for both
-# policies -- critic off (direct REINFORCE) and critic on (actor-critic) at
-# the baseline value_coef -- with every base combination identical between
-# the two, so the two policies can be compared directly.
+# policies -- critic off (PPO) and critic on (legacy actor-critic/REINFORCE) at
+# the baseline value_coef. The algorithm difference is recorded explicitly.
 #
 # value_coef only affects the actor-critic value head -- it enters the
 # gradient exclusively inside PolicyNetwork.backward_policy_gradient's
-# use_value_head branch and has no effect on direct REINFORCE -- so it is
+# use_value_head branch and has no effect on policy-only PPO -- so it is
 # swept with the critic ON only. Its sweep: VC_SAMPLE_COUNT base combinations
 # are drawn at random (seeded with --seed, so reproducible) from the grid,
 # and each sampled combination is trained once per value_coef value. The
@@ -26,11 +25,9 @@
 # Baselines and the learning-rate/gamma sweep values mirror
 # diagnostics/hyperparameter_sweep.py: BASELINE_LEARNING_RATE, BASELINE_GAMMA,
 # BASELINE_VALUE_COEF, DEFAULT_LR_VALUES, DEFAULT_GAMMA_VALUES,
-# DEFAULT_RL_GAMES_PER_ITERATION. That module only exposes
-# DEFAULT_RL_GAMES_PER_ITERATION as a single baseline value, not a sweep
-# tuple, so this script supplies its candidate range from the historical
-# sweep table in references/explicacoes/relatorios/teste_1/plano_correcao.tex
-# (Section 2): games-per-iteration in {40, 80, 160}.
+# DEFAULT_RL_GAMES_PER_ITERATION. That module exposes only one baseline rather
+# than a sweep tuple, so this script preserves the established
+# games-per-iteration comparison {40, 80, 160}.
 #
 # Every sweep point is one training run (per the baseline
 # training-opponent/reward-schema/etc. defaults in training/self_play.py)
@@ -75,13 +72,10 @@ DIAG_PLOTS=1
 # exactly (CuPy when installed, else NumPy); "cpu"/"gpu" force one backend.
 DEVICE="auto"
 # Sweep points run sequentially. Parallelism belongs inside self_play's
-# CPU-only rollout pool, where game ids, memory fallback, and retained worker
+# CPU-only rollout pool, where game ids, memory fallback, and isolated worker
 # autotuning are already controlled centrally.
 RL_WORKERS=auto
 
-# The outer sweep is deliberately fixed to one job. The legacy --jobs flag is
-# accepted only as --jobs 1 so old sequential commands remain valid.
-JOBS=1
 RAM_LIMIT_MB=""
 VRAM_LIMIT_MB=""
 
@@ -100,8 +94,8 @@ BASELINE_VALUE_COEF=0.5
 
 # Grid-search values (3x4x3 = 36 combinations): DEFAULT_LR_VALUES /
 # DEFAULT_GAMMA_VALUES from diagnostics/hyperparameter_sweep.py.
-# games-per-iteration is not a tuple there (see header comment above) -- its
-# range comes from the historical report instead.
+# Games-per-iteration is not a tuple there, so this driver owns the established
+# 40/80/160 comparison.
 LR_VALUES=(0.0005 0.001 0.005)
 GAMMA_VALUES=(1.0 0.97 0.95 0.92)
 GAMES_PER_ITERATION_VALUES=(40 80 160)
@@ -152,7 +146,7 @@ Options:
   --skip-report           Skip the final comparative-table stage
 
 Sequential execution and memory limits:
-  --jobs 1                Compatibility flag; outer sweep parallelism is disabled
+  Outer sweep parallelism is disabled; points run one at a time.
   --ram-limit-mb N        Active subprocess physical-memory cap in MiB, enforced via a systemd-run --scope cgroup if available (default: 80% of detected system RAM)
   --vram-limit-mb N       Active subprocess CuPy memory-pool cap in MiB, hard-enforced by CuPy (default: 80% of detected GPU memory when device isn't cpu)
 
@@ -175,7 +169,6 @@ while [[ $# -gt 0 ]]; do
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --report-output-dir) REPORT_OUTPUT_DIR="$2"; shift 2 ;;
         --skip-report) SKIP_REPORT=1; shift ;;
-        --jobs) JOBS="$2"; shift 2 ;;
         --ram-limit-mb) RAM_LIMIT_MB="$2"; shift 2 ;;
         --vram-limit-mb) VRAM_LIMIT_MB="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -186,11 +179,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-if [[ "$JOBS" != "1" ]]; then
-    echo "--jobs is fixed at 1; use --rl-workers auto for internal rollout parallelism." >&2
-    exit 1
-fi
 
 if ! [[ "$VC_SAMPLE_COUNT" =~ ^[0-9]+$ ]]; then
     echo "--vc-sample-count must be a non-negative integer, got: $VC_SAMPLE_COUNT" >&2
@@ -249,23 +237,12 @@ fi
 # mechanism, so it doesn't share RLIMIT_AS's incompatibility with CUDA.
 export DOMINO_VRAM_LIMIT_MB="$VRAM_LIMIT_MB"
 
-# Prefer a repo-local .venv for portability; fall back to the pre-provisioned
-# environment at amb_virtual (has cupy/pygame already installed), then to
-# whatever's already on PATH.
-DEFAULT_VIRTUAL_ENV="/home/diego/CCO/amb_virtual"
-if [[ -f "$REPO_ROOT/.venv/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.venv/bin/activate"
-    echo "Activated virtual environment at .venv"
-elif [[ -f "$DEFAULT_VIRTUAL_ENV/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$DEFAULT_VIRTUAL_ENV/bin/activate"
-    echo "Activated virtual environment at $DEFAULT_VIRTUAL_ENV"
-else
-    echo "No .venv at repository root and no environment found at $DEFAULT_VIRTUAL_ENV; using the interpreter already on PATH."
-fi
-
-if command -v python >/dev/null 2>&1; then
+# Prefer the repository interpreter without depending on a user's shell or
+# machine-specific virtual-environment location.
+if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+    echo "Using virtual environment at .venv"
+elif command -v python >/dev/null 2>&1; then
     PYTHON_BIN="python"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"
@@ -322,38 +299,63 @@ format_duration() {
 
 # validate_resume_pair WEIGHTS STATE GPI LR GAMMA VC CRITIC
 validate_resume_pair() {
-    "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$SEED" "$DEVICE" <<'PY'
-import inspect
+    "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$SEED" "$DEVICE" "$RL_ITERATIONS" "$SL_WEIGHTS_PATH" <<'PY'
 import sys
 
 from training.self_play import (
+    DEFAULT_CLIP_EPSILON,
+    DEFAULT_GAMES_PER_MINIBATCH_SCALE,
+    DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
+    DEFAULT_MAX_EPOCHS,
+    DEFAULT_MAX_MINIBATCHES,
+    DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
+    DEFAULT_MIN_MINIBATCHES,
+    DEFAULT_STOP_KL,
+    DEFAULT_TARGET_KL,
+    LEGACY_TRAINING_ALGORITHM,
+    PPO_TRAINING_ALGORITHM,
+    _file_sha256,
     _resume_configuration,
     _validate_resume_configuration,
     load_resume_state,
-    train,
 )
 from utils.resource_limits import choose_safe_rl_device
 
 try:
-    weights_path, state_path, gpi, learning_rate, gamma, value_coef, critic, seed, requested_device = sys.argv[1:]
+    (weights_path, state_path, gpi, learning_rate, gamma, value_coef,
+     critic, seed, requested_device, iterations, sl_weights_path) = sys.argv[1:]
     metadata, _pool = load_resume_state(weights_path, state_path)
-    parameters = inspect.signature(train).parameters
-    default = lambda name: parameters[name].default
+    critic_enabled = bool(int(critic))
+    ppo_enabled = not critic_enabled
     expected = _resume_configuration(
-        games_per_iteration=int(gpi),
-        training_opponent=default("training_opponent"),
+        total_training_games=int(iterations) * int(gpi),
+        selected_gpi=int(gpi),
+        selected_workers=int(metadata["configuration"]["selected_workers"]),
+        rl_training_algorithm=(PPO_TRAINING_ALGORITHM if ppo_enabled else LEGACY_TRAINING_ALGORITHM),
+        training_opponent="self_play",
         learning_rate=float(learning_rate),
-        entropy_coef=default("entropy_coef"),
-        pool_interval=default("pool_interval"),
-        max_pool_size=default("max_pool_size"),
-        use_value_head=bool(int(critic)),
+        entropy_coef=0.01,
+        pool_refresh_games=400,
+        max_pool_size=50,
+        use_value_head=critic_enabled,
         value_coef=float(value_coef),
         gamma=float(gamma),
-        reward_schema=default("reward_schema"),
-        clip_grad_norm=default("clip_grad_norm"),
-        normalize_advantages=default("normalize_advantages"),
+        reward_schema="default",
+        clip_grad_norm=5.0,
+        normalize_advantages=ppo_enabled,
         effective_seed=int(seed),
         device=choose_safe_rl_device(requested_device)[0],
+        sl_weights_sha256=_file_sha256(sl_weights_path),
+        ppo_clip_epsilon=DEFAULT_CLIP_EPSILON,
+        ppo_target_kl=DEFAULT_TARGET_KL,
+        ppo_stop_kl=DEFAULT_STOP_KL,
+        ppo_max_epochs=DEFAULT_MAX_EPOCHS,
+        ppo_min_minibatches=DEFAULT_MIN_MINIBATCHES,
+        ppo_max_minibatches=DEFAULT_MAX_MINIBATCHES,
+        ppo_games_per_minibatch_scale=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
+        ppo_min_decisions_per_minibatch=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
+        prefer_gpu_buffer=True,
+        gpu_buffer_safety_fraction=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
     )
     _validate_resume_configuration(metadata, expected)
 except Exception as exc:
@@ -532,7 +534,9 @@ run_point() {
         section "[$name] training already complete at iteration $RL_ITERATIONS (--resume: $model_path)"
     else
         RESUME_ARGS=(--numbered-checkpoints)
+        FRESH_START_ARGS=(--fresh-from-sl)
         if [[ "$LAST_RESUME_ITERATION" -gt 0 ]]; then
+            FRESH_START_ARGS=()
             RESUME_ARGS+=(
                 --start-iteration "$LAST_RESUME_ITERATION"
                 --resume-weights-path "$LAST_RESUME_WEIGHTS"
@@ -543,8 +547,10 @@ run_point() {
             section "[$name] RL training: $RL_ITERATIONS iterations, lr=$lr gamma=$gamma games/iter=$gpi value_coef=$vc critic=$critic_label"
         fi
         VALUE_HEAD_FLAG=()
+        PPO_FLAG=(--ppo)
         if [[ "$critic" -eq 1 ]]; then
             VALUE_HEAD_FLAG=(--value-head)
+            PPO_FLAG=(--no-ppo)
         fi
         RUN_PREFIX=()
         if [[ "$USE_CGROUP_RAM_LIMIT" -eq 1 ]]; then
@@ -558,10 +564,13 @@ run_point() {
             --value-coef "$vc" \
             --sl-weights-path "$SL_WEIGHTS_PATH" \
             --rl-weights-path "$model_base_path" \
+            --adaptive-tuning-path "${model_base_path%.npz}_adaptive_tuning.json" \
             --seed "$SEED" \
             --device "$DEVICE" \
             --rl-workers "$RL_WORKERS" \
+            "${PPO_FLAG[@]}" \
             --compact \
+            "${FRESH_START_ARGS[@]}" \
             "${RESUME_ARGS[@]}" \
             "${VALUE_HEAD_FLAG[@]}"
         model_path="$final_model_path"

@@ -29,9 +29,8 @@ from agents.rl_agent import RLAgent, TrajectoryStep
 from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import (
     CANONICAL_AGENTS,
-    LEGACY_ARTIFACT_NAMES,
+    _atomic_replace_directory,
     create_agent,
-    remove_legacy_artifacts,
     save_csv,
 )
 from diagnostics.evaluate import diagnostic_plan
@@ -56,7 +55,6 @@ from training.self_play import (
     OPPONENT_PASS_REWARD,
     EventStats,
     TrainingSample,
-    _choice_multiplier,
     _event_reward_for_action,
     _finish_episode_with_rewards,
     _reward_signal_summary,
@@ -64,7 +62,11 @@ from training.self_play import (
 )
 from training.training_loop import (
     DEFAULT_EARLY_STOPPING_PATIENCE,
-    DEFAULT_LR_DECAY_FACTOR,
+    DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
+    DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
+    DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
+    DEFAULT_TRAINING_PLATEAU_PATIENCE,
+    DEFAULT_TRAINING_PLATEAU_WINDOW,
     DEFAULT_WEIGHT_DECAY,
     MAX_SUPERVISED_CHECKPOINTS,
     _prune_supervised_checkpoints,
@@ -451,8 +453,22 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     defaults = parse_supervised_args([])
     assert defaults.weight_decay == 0.0
     assert defaults.early_stopping is None
-    assert defaults.lr_decay == DEFAULT_LR_DECAY_FACTOR
+    assert defaults.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
     assert defaults.lr_decay_patience == 5
+    assert not defaults.disable_training_plateau
+    assert defaults.sl_training_plateau_window == DEFAULT_TRAINING_PLATEAU_WINDOW
+    assert (
+        defaults.sl_training_plateau_patience
+        == DEFAULT_TRAINING_PLATEAU_PATIENCE
+    )
+    assert (
+        defaults.sl_training_plateau_min_epochs
+        == DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS
+    )
+    assert (
+        defaults.sl_training_plateau_min_relative_improvement
+        == DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT
+    )
     assert defaults.sl_device == "auto"
 
     enabled = parse_supervised_args([
@@ -462,7 +478,7 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     ])
     assert enabled.weight_decay == DEFAULT_WEIGHT_DECAY
     assert enabled.early_stopping == DEFAULT_EARLY_STOPPING_PATIENCE
-    assert enabled.lr_decay == DEFAULT_LR_DECAY_FACTOR
+    assert enabled.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
 
     custom = parse_supervised_args([
         "--weight-decay",
@@ -476,8 +492,14 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     assert custom.early_stopping == 8
     assert custom.lr_decay == 0.8
 
-    disabled = parse_supervised_args(["--no-lr-decay", "--device", "cpu"])
+    disabled = parse_supervised_args([
+        "--no-lr-decay",
+        "--sl-no-training-plateau-stop",
+        "--device",
+        "cpu",
+    ])
     assert disabled.lr_decay is None
+    assert disabled.disable_training_plateau
     assert disabled.sl_device == "cpu"
 
     pipeline = parse_pipeline_args([
@@ -873,8 +895,8 @@ def test_rl_agent_saves_legal_mask_for_real_decision():
     assert legal_mask.shape == (encoder.ACTION_SIZE, 1)
     assert legal_mask.sum() == 2.0
     assert legal_mask[step.action_index, 0] == 1.0
+    assert host_np.isclose(step.old_log_prob, host_np.log(0.5))
     assert step.decision_turn == state["turn"]
-    assert step.option_count == 2
     assert step.local_reward == 0.0
 
 
@@ -971,7 +993,7 @@ def test_decayed_event_reward_exponents():
     for event_turn, expected in cases:
         agent = RLAgent(UniformPolicyNetwork(), mode="training")
         agent.trajectory = [
-            TrajectoryStep(None, 0, None, decision_turn=10, option_count=2),
+            TrajectoryStep(None, 0, None, decision_turn=10),
         ]
 
         agent.add_decayed_event_reward(event_turn, 0.10, EVENT_REWARD_DECAY)
@@ -996,8 +1018,8 @@ def test_event_reward_signs_and_counts():
 def test_multiple_events_and_all_previous_decisions_receive_rewards():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=10, option_count=2),
-        TrajectoryStep(None, 0, None, decision_turn=12, option_count=2),
+        TrajectoryStep(None, 0, None, decision_turn=10),
+        TrajectoryStep(None, 0, None, decision_turn=12),
     ]
 
     agent.add_decayed_event_reward(13, 0.10, EVENT_REWARD_DECAY)
@@ -1018,8 +1040,8 @@ def test_event_reward_without_decisions_is_noop():
 def test_terminal_reward_is_uniform_before_local_shaping():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=2, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=3, option_count=2, local_reward=-0.05),
+        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=3, local_reward=-0.05),
     ]
 
     steps = agent.finish_episode(0.50)
@@ -1030,24 +1052,18 @@ def test_terminal_reward_is_uniform_before_local_shaping():
     assert abs(steps[1].raw_reward - 0.45) < 1e-12
 
 
-def test_option_multipliers_apply_after_terminal_and_local_rewards():
+def test_choice_count_does_not_weight_terminal_or_local_rewards():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=2, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=3, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=4, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=5, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, option_count=6, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
     ]
 
     samples = _finish_episode_with_rewards(agent, 0.50)
 
-    assert _choice_multiplier(2) == 1.0
-    assert _choice_multiplier(3) == 2.0
-    assert _choice_multiplier(4) == 5.0
-    assert _choice_multiplier(5) == 10.0
-    assert _choice_multiplier(6) == 10.0
-    assert [sample.policy_reward for sample in samples] == [0.60, 1.20, 3.00, 6.00, 6.00]
+    assert [sample.policy_reward for sample in samples] == [0.60, 0.60]
+    assert all(not hasattr(sample, "multiplier") for sample in samples)
+    assert all(not hasattr(sample, "option_count") for sample in samples)
 
 
 def test_positive_reward_increases_chosen_masked_probability():
@@ -1131,8 +1147,12 @@ def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "policy.npz"
         network.save(path)
-        saved = host_np.load(path)
-        assert set(saved.files) == {"W1", "b1", "W2", "b2", "W3", "b3"}
+        with host_np.load(path) as saved:
+            assert set(saved.files) == {
+                "W1", "b1", "W2", "b2", "W3", "b3",
+                "optimizer_step_count",
+            }
+            assert int(saved["optimizer_step_count"]) == 0
 
         legacy_path = Path(folder) / "legacy.npz"
         host_np.savez(
@@ -1156,10 +1176,11 @@ def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
         value_network.bv[:] = -0.10
         value_path = Path(folder) / "value_policy.npz"
         value_network.save(value_path)
-        value_saved = host_np.load(value_path)
-        assert set(value_saved.files) == {
-            "W1", "b1", "W2", "b2", "W3", "b3", "Wv", "bv"
-        }
+        with host_np.load(value_path) as value_saved:
+            assert set(value_saved.files) == {
+                "W1", "b1", "W2", "b2", "W3", "b3", "Wv", "bv",
+                "optimizer_step_count",
+            }
 
         value_loaded = PolicyNetwork.load(value_path, use_value_head=True)
         policy_only_loaded = PolicyNetwork.load(value_path)
@@ -1178,11 +1199,37 @@ def test_value_head_cli_is_disabled_by_default():
     assert parse_self_play_args(["--value-head"]).value_head
 
 
+def test_rl_initialization_cli_defaults_are_context_specific():
+    assert not parse_self_play_args([]).fresh_from_sl
+    assert parse_self_play_args(["--fresh-from-sl"]).fresh_from_sl
+    assert parse_pipeline_args([]).fresh_from_sl
+    assert not parse_pipeline_args(["--continue-existing-rl"]).fresh_from_sl
+
+
+def test_rl_workload_and_pool_defaults_use_games():
+    standalone = parse_self_play_args([])
+    pipeline = _build_config("default")
+
+    # ``None`` preserves whether a value was explicitly supplied; the CLI
+    # translation resolves standalone self-play independently; the canonical
+    # default pipeline owns a 500,000-game RL budget.
+    assert standalone.iterations is None
+    assert standalone.total_training_games is None
+    assert standalone.games_per_iteration is None
+    assert standalone.adaptive_gpi is None
+    assert standalone.ppo_enabled
+    assert standalone.pool_refresh_games == 400
+    assert not hasattr(standalone, "evaluation_games")
+    assert not hasattr(standalone, "pool_interval")
+    assert pipeline.total_rl_games == 500_000
+    assert pipeline.rl_iterations * pipeline.rl_games_per_iteration == 500_000
+
+
 def test_reward_signal_summary_classifies_rewards():
     samples = [
-        TrainingSample(None, 0, None, 1.0, 1.0, 0.20, 0.80, 1.0, 2),
-        TrainingSample(None, 0, None, 0.0, 0.0, 0.00, 0.00, 1.0, 2),
-        TrainingSample(None, 0, None, -1.0, -1.0, -0.10, -0.90, 1.0, 2),
+        TrainingSample(None, 0, None, 1.0, 1.0, 0.20, 0.80),
+        TrainingSample(None, 0, None, 0.0, 0.0, 0.00, 0.00),
+        TrainingSample(None, 0, None, -1.0, -1.0, -0.10, -0.90),
     ]
 
     summary = _reward_signal_summary(samples)
@@ -1325,39 +1372,55 @@ def test_random_neural_agent_has_reproducible_untrained_weights():
         )
 
     assert "random_nn" in CANONICAL_AGENTS
-    assert isinstance(create_agent("random nn"), RandomNeuralAgent)
+    assert isinstance(create_agent("random_nn"), RandomNeuralAgent)
+
+    for removed_alias in ("sl", "random nn", "random-neural"):
+        try:
+            create_agent(removed_alias)
+        except ValueError as exc:
+            assert "Unknown agent" in str(exc)
+        else:
+            raise AssertionError(f"Removed agent alias was accepted: {removed_alias}")
 
 
-def test_diagnostics_remove_legacy_plot_artifacts():
+def test_diagnostics_atomic_directory_replacement_drops_stale_files():
     with tempfile.TemporaryDirectory() as folder:
-        output_dir = Path(folder)
-        for filename in LEGACY_ARTIFACT_NAMES:
-            (output_dir / filename).touch()
+        base_dir = Path(folder)
+        output_dir = base_dir / "pair"
+        staging_dir = base_dir / ".pair.tmp"
+        output_dir.mkdir()
+        staging_dir.mkdir()
+        (output_dir / "stale.png").write_text("old", encoding="utf-8")
+        (staging_dir / "summary.json").write_text("{}", encoding="utf-8")
 
-        remove_legacy_artifacts(output_dir)
+        _atomic_replace_directory(staging_dir, output_dir)
 
-        assert all(not (output_dir / filename).exists() for filename in LEGACY_ARTIFACT_NAMES)
+        assert not (output_dir / "stale.png").exists()
+        assert (output_dir / "summary.json").read_text(encoding="utf-8") == "{}"
+        assert not staging_dir.exists()
 
 
-def test_diagnostic_modes_select_expected_matchups():
-    default_agents, default_matchups = diagnostic_plan("default")
-    fast_agents, fast_matchups = diagnostic_plan("fast")
-    complete_agents, complete_matchups = diagnostic_plan("complete")
-
+def test_diagnostic_plan_selects_canonical_random_matchups():
+    agents, matchups = diagnostic_plan()
     expected_matchups = tuple((agent, "random") for agent in CANONICAL_AGENTS)
-    assert default_agents == CANONICAL_AGENTS
-    assert fast_agents == CANONICAL_AGENTS
-    assert complete_agents == CANONICAL_AGENTS
-    assert default_matchups == expected_matchups
-    assert fast_matchups == expected_matchups
-    assert complete_matchups == expected_matchups
+    assert agents == CANONICAL_AGENTS
+    assert matchups == expected_matchups
 
 
-def test_pipeline_scales_select_expected_diagnostic_modes():
-    assert _build_config("small").diagnostic_mode == "fast"
-    assert _build_config("default").diagnostic_mode == "default"
-    assert _build_config("big").diagnostic_mode == "complete"
-    assert _build_config("huge").diagnostic_mode == "complete"
+def test_pipeline_scales_set_explicit_diagnostic_game_counts():
+    assert all(
+        _build_config(level).dataset_games == 100_000
+        for level in ("small", "default", "big", "huge", "forever")
+    )
+    assert all(
+        _build_config(level).supervised_epochs == 5_000
+        for level in ("small", "default", "big", "huge", "forever")
+    )
+    assert _build_config("small").diagnostic_games == 10000
+    assert _build_config("default").diagnostic_games == 10000
+    assert _build_config("big").diagnostic_games == 1_000_000
+    assert _build_config("huge").diagnostic_games == 1_000_000
+    assert _build_config("forever").diagnostic_games == 0
 
 
 def test_pipeline_compute_report_names_backends_and_memory():
@@ -1466,7 +1529,7 @@ def main():
         ),
         ("event reward no decisions", test_event_reward_without_decisions_is_noop),
         ("uniform terminal reward", test_terminal_reward_is_uniform_before_local_shaping),
-        ("option reward multipliers", test_option_multipliers_apply_after_terminal_and_local_rewards),
+        ("uniform choice reward", test_choice_count_does_not_weight_terminal_or_local_rewards),
         (
             "positive reward gradient",
             test_positive_reward_increases_chosen_masked_probability,
@@ -1478,6 +1541,11 @@ def main():
         ("optional value baseline", test_optional_value_head_learns_reward_baseline),
         ("policy checkpoint keys", test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys),
         ("value head CLI", test_value_head_cli_is_disabled_by_default),
+        (
+            "RL initialization CLI defaults",
+            test_rl_initialization_cli_defaults_are_context_specific,
+        ),
+        ("RL workload defaults", test_rl_workload_and_pool_defaults_use_games),
         ("reward signal summary", test_reward_signal_summary_classifies_rewards),
         (
             "hybrid one-way threshold switch",
@@ -1497,11 +1565,17 @@ def main():
         ),
         ("pairwise CSV initial hands", test_pairwise_csv_writes_initial_hands_as_json_arrays),
         ("random neural baseline", test_random_neural_agent_has_reproducible_untrained_weights),
-        ("legacy diagnostic cleanup", test_diagnostics_remove_legacy_plot_artifacts),
-        ("diagnostic mode matchups", test_diagnostic_modes_select_expected_matchups),
         (
-            "pipeline diagnostic modes",
-            test_pipeline_scales_select_expected_diagnostic_modes,
+            "atomic diagnostic replacement",
+            test_diagnostics_atomic_directory_replacement_drops_stale_files,
+        ),
+        (
+            "diagnostic plan matchups",
+            test_diagnostic_plan_selects_canonical_random_matchups,
+        ),
+        (
+            "pipeline diagnostic game counts",
+            test_pipeline_scales_set_explicit_diagnostic_game_counts,
         ),
         (
             "pipeline compute resource report",

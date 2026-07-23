@@ -2,8 +2,6 @@
 
 Diagnostics compare every supported agent with the same random baseline over
 many two-player domino games and write compact metrics, CSV data, and plots.
-Historical mode names remain accepted, but they no longer change the matchup
-set.
 
 ## Supported Agents
 
@@ -15,26 +13,17 @@ set.
 | `heuristic` | `StrategicAgent`, the handcrafted rule-based agent. |
 | `random` | Uniform random legal move. |
 
-The old `greedy` baseline is no longer available in diagnostics. The pairwise
-helper still accepts the legacy alias `sl` for `neural`, but new commands and
-reports use `neural`.
-
-## Diagnostic Modes
-
-The mode is an optional positional argument:
+## Diagnostic Workload
 
 | Command | Matchups |
 |---|---:|
 | `python -m diagnostics.evaluate` | 5: every supported agent vs `random`. |
-| `python -m diagnostics.evaluate fast` | 5: every supported agent vs `random`. |
-| `python -m diagnostics.evaluate complete` | 5: every supported agent vs `random`. |
 
-Every mode uses 10,000 games per matchup by default. Change that count with
-`-n`:
+The command uses 10,000 games per matchup by default. Set the explicit count
+with `-n`/`--games`:
 
 ```bash
-python -m diagnostics.evaluate fast -n 5000
-python -m diagnostics.evaluate complete -n 5000
+python -m diagnostics.evaluate --games 5000
 ```
 
 Diagnostics use CPU-only multiprocessing by default. Immediately before each
@@ -54,7 +43,7 @@ Useful options:
 ```bash
 python -m diagnostics.evaluate --help
 python -m diagnostics.evaluate --seed 123
-python -m diagnostics.evaluate complete --seed 123
+python -m diagnostics.evaluate --games 5000 --seed 123
 python -m diagnostics.evaluate --no-pair-plots
 python -m diagnostics.evaluate --output /tmp/domino_all_pairs
 python -m diagnostics.evaluate --neural-weights models/domino_sl_weights.npz
@@ -62,6 +51,15 @@ python -m diagnostics.evaluate --rl-weights models/domino_rl_weights.npz
 python -m diagnostics.evaluate --workers 4
 python -m diagnostics.evaluate --workers auto --autotune-fraction 0.01
 python -m diagnostics.evaluate --memory-reserve-mb 1024
+```
+
+When comparing a canonical run manually, pass both checkpoints from the same
+lineage instead of relying on the legacy default filenames:
+
+```bash
+python -m diagnostics.evaluate \
+  --rl-weights models/rl/domino_rl_forever_seed42/latest_weights.npz \
+  --neural-weights models/domino_sl_standard_seed42.npz
 ```
 
 Worker subprocesses cannot see the GPU, use a bounded dynamic job queue, and
@@ -80,7 +78,7 @@ payloads.
 
 The output folder defaults to `diagnostics/results/all_pairs/`.
 Reusing that folder replaces the aggregate report and removes pair folders that
-do not belong to the selected mode, keeping its contents internally consistent.
+do not belong to the selected plan, keeping its contents internally consistent.
 
 | File or folder | Contents |
 |---|---|
@@ -91,10 +89,11 @@ do not belong to the selected mode, keeping its contents internally consistent.
 | `all_pairs_summary.json` | Full aggregate report with `selected_workers_by_matchup`, per-matchup retained autotuning reports, accumulated choice-opportunity stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
 
-The aggregate PNG/PDF header records mode, games per matchup, total games,
+The aggregate PNG/PDF header records games per matchup, total games,
 elapsed evaluation time, seed, selected workers, checkpoint names, neural
-architectures, parameter counts, and whether the RL checkpoint contains a
-value head. It also reports the 95% worst-case percentage margin of error as
+architectures, parameter counts, checkpoint SHA-256 prefixes, and whether the
+RL checkpoint contains a value head. It also reports the 95% worst-case
+percentage margin of error as
 `sqrt(0.9604 / n)`, rounded to two significant digits, where `n` is the games
 per matchup.
 
@@ -102,6 +101,42 @@ Win-rate cells use red-to-blue intensity bands at five-percentage-point
 intervals: `<30%`, `30–35%`, ..., `65–70%`, and `≥70%`. This makes both weak
 and strong deviations from 50% visible without changing the underlying
 numeric percentages.
+
+## Canonical RL Progress Monitor
+
+The `big`, `huge`, and `forever` pipelines evaluate only RL versus `random` at
+0, 100,000, 200,000, ... cumulative RL games. Point zero is the canonical
+supervised checkpoint. Every point uses the same seed namespace and the same
+100,000 game identities, so checkpoints are compared on a paired monitor set.
+The final five-matchup evaluation uses a separate holdout namespace.
+
+Each milestone is saved before evaluation. Diagnostics use separate RNG state
+and cannot change policy weights, optimizer, opponent pool, counters, GPI, or
+rollout workers. The RL run directory receives:
+
+| File | Contents |
+|---|---|
+| `periodic_diagnostics.jsonl` | Append-safe source of truth; one deduplicated monitor point per checkpoint identity. |
+| `rl_vs_random_progress.csv` | Derived tabular learning curve. |
+| `rl_vs_random_progress.png` | Linear game-count curve with point zero and 95% intervals. |
+| `rl_vs_random_progress_logx.png` | Optional separate symlog rendering. |
+| `best_checkpoint.json` | Highest periodic win rate; never used implicitly for resume. |
+| `periodic_diagnostic_tuning.json` | Forever's one-time diagnostic-worker selection, reused after resume. |
+
+In `forever`, automatic diagnostic-worker selection runs once and is reused at
+all later monitor points. Existing runs without the tuning file recover the
+most recent compatible selection from the JSONL history. The progress plot
+footer records the exact point-zero checkpoint name and SHA-256 prefix.
+
+A killed final JSONL append is tolerated and repaired before the next append.
+Rebuild CSV and plots without starting training:
+
+```bash
+python -m diagnostics.plot_rl_progress \
+  --run-dir models/rl/domino_rl_big_seed42
+python -m diagnostics.plot_rl_progress \
+  --run-dir models/rl/domino_rl_forever_seed42 --log-x
+```
 
 ## Pairwise Helper
 
@@ -130,10 +165,6 @@ By default, pairwise files are written under
 | `game_lengths.png` | Turn-count histogram. |
 | `choice_opportunities.png` | Histogram of draw/pass/choice opportunities for the evaluated agent. |
 
-Older `compact_to_enumerated_counts.png`, `first_stock_draw_turns.png`, and
-`first_stock_draw_final_state_counts.png` files are obsolete. A new diagnostic
-run removes those names from its output folders.
-
 ## Interpretation
 
 Small samples are noisy. Prefer at least several hundred games when comparing
@@ -157,6 +188,10 @@ against `random` and in self-play:
 python -m diagnostics.hyperparameter_sweep
 python -m diagnostics.hyperparameter_sweep --rl-iterations 300 --diagnostic-games 1000
 ```
+
+Every point loads the same supervised checkpoint and explicitly ignores any
+older RL file at its target path, keeping the comparison centered on the
+tested hyperparameters rather than prior RL history.
 
 Every record — the exact RL hyperparameters used plus every matchup's
 win/draw/loss rates — is appended to a single JSON array on disk

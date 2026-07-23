@@ -9,8 +9,8 @@ gradient updates, checkpoints, logging, and GPU use.
 
 Per-game seeds depend only on the run seed and absolute game id. Scheduling,
 worker count, autotuning, and memory fallback therefore do not change rollout
-contents. Autotuning benchmarks complete training iterations, and every tested
-game remains part of the training run.
+contents. Adaptive tuning uses separate labeled seed streams and discards all
+benchmark trajectories before the real training-game counter starts.
 """
 
 from __future__ import annotations
@@ -104,6 +104,8 @@ class SharedPolicyBank:
 
         self.max_pool_size = int(max_pool_size)
         self.pool_slots = []
+        self._pool_metadata = {}
+        self._next_snapshot_id = 0
         self._next_pool_slot = 0
         self.write_current(network)
 
@@ -143,7 +145,7 @@ class SharedPolicyBank:
         """Publish the learner policy after the previous gradient update."""
         self._write_slot(0, network)
 
-    def append_pool_snapshot(self, network):
+    def append_pool_snapshot(self, network, metadata=None):
         """Append a frozen opponent snapshot, overwriting the oldest ring slot."""
         if self.max_pool_size == 0:
             return
@@ -152,6 +154,15 @@ class SharedPolicyBank:
         if slot in self.pool_slots:
             self.pool_slots.remove(slot)
         self.pool_slots.append(slot)
+        metadata = dict(metadata or {})
+        snapshot_id = int(metadata.get("snapshot_id", self._next_snapshot_id))
+        metadata.update({
+            "snapshot_id": snapshot_id,
+            "logical_order": len(self.pool_slots) - 1,
+            "sampling_rule": "uniform_random",
+        })
+        self._pool_metadata[slot] = metadata
+        self._next_snapshot_id = max(self._next_snapshot_id, snapshot_id + 1)
         self._next_pool_slot = (slot + 1) % self.max_pool_size
 
     def export_pool_snapshots(self):
@@ -172,24 +183,45 @@ class SharedPolicyBank:
             snapshots.append(weights)
         return tuple(snapshots)
 
-    def restore_pool_snapshots(self, snapshots):
+    def export_pool_metadata(self):
+        """Return JSON-safe metadata in the same logical order as snapshots."""
+        values = []
+        for logical_order, slot in enumerate(self.pool_slots):
+            metadata = dict(self._pool_metadata.get(slot, {}))
+            metadata["logical_order"] = logical_order
+            metadata.setdefault("sampling_rule", "uniform_random")
+            values.append(metadata)
+        return tuple(values)
+
+    def restore_pool_snapshots(self, snapshots, metadata=None):
         """Replace the ring with serialized snapshots from a resume state."""
         snapshots = tuple(snapshots)
+        if metadata is None:
+            metadata = tuple({} for _snapshot in snapshots)
+        else:
+            metadata = tuple(metadata)
+        if len(metadata) != len(snapshots):
+            raise ValueError("Opponent-pool metadata count does not match snapshots.")
         if len(snapshots) > self.max_pool_size:
             raise ValueError(
                 f"Resume state contains {len(snapshots)} opponent snapshots, "
                 f"but max_pool_size is {self.max_pool_size}."
             )
         self.pool_slots = []
+        self._pool_metadata = {}
+        self._next_snapshot_id = 0
         self._next_pool_slot = 0
-        for weights in snapshots:
+        for weights, snapshot_metadata in zip(snapshots, metadata):
             missing = [name for name in POLICY_WEIGHT_NAMES if name not in weights]
             if missing:
                 raise ValueError(
                     "Resume opponent snapshot is missing policy weights: "
                     + ", ".join(missing)
                 )
-            self.append_pool_snapshot(_CPUInferencePolicy(weights))
+            self.append_pool_snapshot(
+                _CPUInferencePolicy(weights),
+                metadata=snapshot_metadata,
+            )
 
     def close(self):
         """Release every shared segment, even after a failed training run."""
@@ -331,29 +363,6 @@ def _worker_collect_rollouts(job):
     return results
 
 
-def _worker_evaluate_against_heuristic(game_specs):
-    """Play deterministic checkpoint evaluation games on the shared policy."""
-    from agents.heuristic_agent import StrategicAgent
-    from agents.rl_agent import RLAgent
-    from training.self_play import _play_game
-
-    results = []
-    for game_index, seed in game_specs:
-        random.seed(seed)
-        np.random.seed(seed & 0xFFFFFFFF)
-        learner_position = game_index % 2
-        agents = [None, None]
-        agents[learner_position] = RLAgent(_WORKER_CURRENT_POLICY, mode="evaluation")
-        agents[1 - learner_position] = StrategicAgent()
-        results.append({
-            "game_index": int(game_index),
-            "game_seed": int(seed),
-            "winner": int(_play_game(agents)),
-            "learner_position": int(learner_position),
-        })
-    return results
-
-
 def _worker_ready():
     """Confirm that a spawned worker initialized without GPU visibility."""
     return {
@@ -393,7 +402,10 @@ class RLRolloutRunner:
         self.gamma = float(gamma)
         self.bank = SharedPolicyBank(network, max_pool_size)
         if training_opponent == "self_play":
-            self.bank.append_pool_snapshot(network)
+            self.bank.append_pool_snapshot(network, metadata={
+                "origin": "initial_policy",
+                "introduced_at_rl_games": 0,
+            })
         self.executor = None
         self.requested_workers = 1
         self.worker_count = 1
@@ -409,18 +421,22 @@ class RLRolloutRunner:
         """Publish weights only while no worker task is in flight."""
         self.bank.write_current(network)
 
-    def append_pool_snapshot(self, network):
+    def append_pool_snapshot(self, network, metadata=None):
         """Publish a new frozen opponent after the iteration update."""
-        self.bank.append_pool_snapshot(network)
+        self.bank.append_pool_snapshot(network, metadata=metadata)
 
     def export_pool_snapshots(self):
         """Return copies suitable for an atomic parent-side resume file."""
         return self.bank.export_pool_snapshots()
 
-    def restore_pool_snapshots(self, snapshots):
+    def export_pool_metadata(self):
+        """Return persisted provenance for exported opponent snapshots."""
+        return self.bank.export_pool_metadata()
+
+    def restore_pool_snapshots(self, snapshots, metadata=None):
         """Restore the exact opponent pool before starting resumed rollouts."""
         self._shutdown_executor()
-        self.bank.restore_pool_snapshots(snapshots)
+        self.bank.restore_pool_snapshots(snapshots, metadata=metadata)
 
     def _shutdown_executor(self, terminate=False):
         if self.executor is None:
@@ -651,15 +667,18 @@ class RLRolloutRunner:
 
         return [results_by_index[index] for index, _seed in specs], run_info
 
-    def collect_training_iteration(self, iteration_index, game_count, base_seed):
-        """Return one ordered, deterministic rollout batch for an iteration."""
-        first_absolute_game = int(iteration_index) * int(game_count)
+    def collect_games(self, first_absolute_game, game_count, base_seed):
+        """Collect an exact absolute game-id range, including partial batches."""
+        first_absolute_game = int(first_absolute_game)
+        game_count = int(game_count)
+        if first_absolute_game < 0 or game_count < 1:
+            raise ValueError("RL absolute game offset must be non-negative and count positive")
         specs = [
             (
-                game_index,
-                game_seed(base_seed, first_absolute_game + game_index),
+                first_absolute_game + local_index,
+                game_seed(base_seed, first_absolute_game + local_index),
             )
-            for game_index in range(game_count)
+            for local_index in range(game_count)
         ]
         pool_slots = tuple(self.bank.pool_slots)
         return self._execute_specs(
@@ -668,16 +687,12 @@ class RLRolloutRunner:
             lambda chunks: [(chunk, pool_slots) for chunk in chunks],
         )
 
-    def evaluate_current_against_heuristic(self, game_count, base_seed):
-        """Evaluate the current shared policy using the same safe worker pool."""
-        specs = [
-            (game_index, game_seed(base_seed, game_index))
-            for game_index in range(game_count)
-        ]
-        return self._execute_specs(
-            specs,
-            _worker_evaluate_against_heuristic,
-            lambda chunks: chunks,
+    def collect_training_iteration(self, iteration_index, game_count, base_seed):
+        """Backward-compatible fixed-size wrapper around :meth:`collect_games`."""
+        return self.collect_games(
+            int(iteration_index) * int(game_count),
+            game_count,
+            base_seed,
         )
 
     def close(self):

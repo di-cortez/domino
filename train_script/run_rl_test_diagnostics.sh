@@ -120,23 +120,12 @@ fi
 
 RUN_LOG_DIR="$RESULTS_DIR/_diag_logs"
 
-# Prefer a repo-local .venv for portability; fall back to the pre-provisioned
-# environment at amb_virtual (has cupy/pygame already installed), then to
-# whatever's already on PATH.
-DEFAULT_VIRTUAL_ENV="/home/diego/CCO/amb_virtual"
-if [[ -f "$REPO_ROOT/.venv/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO_ROOT/.venv/bin/activate"
-    echo "Activated virtual environment at .venv"
-elif [[ -f "$DEFAULT_VIRTUAL_ENV/bin/activate" ]]; then
-    # shellcheck disable=SC1091
-    source "$DEFAULT_VIRTUAL_ENV/bin/activate"
-    echo "Activated virtual environment at $DEFAULT_VIRTUAL_ENV"
-else
-    echo "No .venv at repository root and no environment found at $DEFAULT_VIRTUAL_ENV; using the interpreter already on PATH."
-fi
-
-if command -v python >/dev/null 2>&1; then
+# Prefer the repository interpreter without depending on a user's shell or
+# machine-specific virtual-environment location.
+if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+    PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+    echo "Using virtual environment at .venv"
+elif command -v python >/dev/null 2>&1; then
     PYTHON_BIN="python"
 elif command -v python3 >/dev/null 2>&1; then
     PYTHON_BIN="python3"

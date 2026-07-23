@@ -22,6 +22,7 @@ from diagnostics.parallel_runner import (
 from training.rl_parallel import RLRolloutRunner, worker_count
 from training.self_play import (
     REWARD_SCHEMAS,
+    _load_initial_network,
     load_resume_state,
     numbered_checkpoint_path,
     parse_args as parse_self_play_args,
@@ -46,8 +47,7 @@ def _rollout_fingerprint(results):
                 sample.raw_reward,
                 sample.local_reward,
                 sample.terminal_reward,
-                sample.multiplier,
-                sample.option_count,
+                sample.old_log_prob,
             ))
         rows.append((
             result["game_index"],
@@ -117,6 +117,10 @@ class ParallelRLTests(unittest.TestCase):
         )
         self.assertTrue(one_info.workers_cpu_only)
         self.assertTrue(two_info.workers_cpu_only)
+        saved_steps = [sample for result in one_worker for sample in result["samples"]]
+        self.assertTrue(saved_steps)
+        self.assertTrue(all(np.isfinite(sample.old_log_prob) for sample in saved_steps))
+        self.assertTrue(all(sample.old_log_prob <= 0.0 for sample in saved_steps))
 
     def test_seeded_training_checkpoints_are_bit_identical(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -127,8 +131,7 @@ class ParallelRLTests(unittest.TestCase):
                     iterations=3,
                     games_per_iteration=6,
                     checkpoint_interval=100,
-                    evaluation_games=4,
-                    pool_interval=1,
+                    pool_refresh_games=6,
                     max_pool_size=3,
                     seed=987,
                     device="cpu",
@@ -145,6 +148,98 @@ class ParallelRLTests(unittest.TestCase):
             self.assertEqual(summaries[0]["effective_seed"], 987)
             self.assertEqual(summaries[1]["effective_seed"], 987)
 
+    def test_pool_refresh_uses_cumulative_training_games(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rows = []
+            first = train(
+                iterations=6,
+                games_per_iteration=2,
+                checkpoint_interval=2,
+                pool_refresh_games=4,
+                max_pool_size=10,
+                seed=321,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                rl_weights_path=str(root / "gpi2.npz"),
+                metrics_callback=rows.append,
+                quiet=True,
+            )
+            second = train(
+                iterations=4,
+                games_per_iteration=3,
+                checkpoint_interval=2,
+                pool_refresh_games=4,
+                max_pool_size=10,
+                seed=321,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                rl_weights_path=str(root / "gpi3.npz"),
+                quiet=True,
+            )
+
+        self.assertEqual(first["total_training_games"], 12)
+        self.assertEqual(second["total_training_games"], 12)
+        self.assertEqual(first["pool_snapshot_count"], 4)
+        self.assertEqual(second["pool_snapshot_count"], 4)
+        self.assertEqual(first["pool_refresh_games"], 4)
+        self.assertEqual(first["parallel"]["rollout_batches"], 6)
+        self.assertNotIn("evaluation_batches", first["parallel"])
+        self.assertTrue(all("checkpoint_eval_games" not in row for row in rows))
+        self.assertFalse(hasattr(RLRolloutRunner, "evaluate_current_against_heuristic"))
+
+    def test_fresh_from_sl_ignores_existing_rl_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sl_path = root / "sl.npz"
+            rl_path = root / "rl.npz"
+            with np.load(
+                ROOT / "models" / "domino_sl_weights.npz",
+                allow_pickle=False,
+            ) as source:
+                np.savez(sl_path, **{name: source[name] for name in source.files})
+
+            existing_rl = PolicyNetwork.load_from_sl(sl_path, device="cpu")
+            existing_rl.W1 += 1.0
+            existing_rl.save(rl_path)
+
+            fresh = _load_initial_network(
+                0.001,
+                sl_path,
+                rl_path,
+                quiet=True,
+                device="cpu",
+                fresh_from_sl=True,
+            )
+            continued = _load_initial_network(
+                0.001,
+                sl_path,
+                rl_path,
+                quiet=True,
+                device="cpu",
+                fresh_from_sl=False,
+            )
+
+            with self.assertRaisesRegex(ValueError, "predates algorithm metadata"):
+                train(
+                    iterations=1,
+                    games_per_iteration=2,
+                    sl_weights_path=str(sl_path),
+                    rl_weights_path=str(rl_path),
+                    seed=7,
+                    device="cpu",
+                    workers=1,
+                    safety_config=self.safety,
+                    quiet=True,
+                )
+
+            with np.load(sl_path, allow_pickle=False) as supervised:
+                np.testing.assert_array_equal(fresh.W1, supervised["W1"])
+            np.testing.assert_array_equal(continued.W1, existing_rl.W1)
+            self.assertFalse(np.array_equal(fresh.W1, continued.W1))
+
     def test_numbered_checkpoint_resume_matches_uninterrupted_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -153,8 +248,7 @@ class ParallelRLTests(unittest.TestCase):
             common = {
                 "games_per_iteration": 4,
                 "checkpoint_interval": 2,
-                "evaluation_games": 2,
-                "pool_interval": 1,
+                "pool_refresh_games": 4,
                 "max_pool_size": 3,
                 "seed": 987,
                 "device": "cpu",
@@ -178,6 +272,19 @@ class ParallelRLTests(unittest.TestCase):
             partial_state = resume_state_path(partial_weights)
             metadata, pool = load_resume_state(partial_weights, partial_state)
             self.assertEqual(metadata["completed_iteration"], 2)
+            self.assertEqual(metadata["completed_training_games"], 8)
+            self.assertEqual(
+                metadata["configuration"]["rl_training_algorithm"],
+                "ppo_v1",
+            )
+            self.assertEqual(
+                metadata["optimizer_state"]["step_count"],
+                sum(
+                    row["optimizer_steps"]
+                    for row in metadata["training_state"]["ppo_window"]
+                ),
+            )
+            self.assertTrue(metadata["adaptive_tuning"]["isolation_verified"])
             self.assertEqual(len(pool), 3)
             with self.assertRaisesRegex(ValueError, "inconsistent"):
                 load_resume_state(full["rl_weights_path"], partial_state)
@@ -190,6 +297,17 @@ class ParallelRLTests(unittest.TestCase):
                     resume_weights_path=str(partial_weights),
                     resume_state_file=str(partial_state),
                     gamma=0.97,
+                    **common,
+                )
+
+            with self.assertRaisesRegex(ValueError, "rl_training_algorithm"):
+                train(
+                    iterations=4,
+                    rl_weights_path=str(resumed_base),
+                    start_iteration=2,
+                    resume_weights_path=str(partial_weights),
+                    resume_state_file=str(partial_state),
+                    ppo_enabled=False,
                     **common,
                 )
 
@@ -211,6 +329,36 @@ class ParallelRLTests(unittest.TestCase):
             self.assertEqual(resumed["rl_weights_path"], str(final_weights))
             self.assertFalse(partial_state.exists())
             self.assertTrue(resume_state_path(final_weights).exists())
+            self.assertEqual(full["games_per_iteration"], resumed["games_per_iteration"])
+            self.assertEqual(full["selected_workers"], resumed["selected_workers"])
+            self.assertEqual(full["optimizer_step_count"], resumed["optimizer_step_count"])
+
+    def test_exact_game_budget_uses_a_partial_final_iteration(self):
+        rows = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = train(
+                total_training_games=5,
+                games_per_iteration=2,
+                adaptive_gpi=False,
+                checkpoint_interval=10,
+                pool_refresh_games=2,
+                max_pool_size=2,
+                seed=123,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                rl_weights_path=str(Path(temp_dir) / "partial.npz"),
+                metrics_callback=rows.append,
+                quiet=True,
+            )
+            with np.load(summary["rl_weights_path"], allow_pickle=False) as checkpoint:
+                saved_algorithm = str(checkpoint["rl_training_algorithm"])
+
+        self.assertEqual([row["games"] for row in rows], [2, 2, 1])
+        self.assertEqual([row["cumulative_games"] for row in rows], [2, 4, 5])
+        self.assertEqual(summary["completed_training_games"], 5)
+        self.assertEqual(summary["completed_iterations_this_run"], 3)
+        self.assertEqual(saved_algorithm, "ppo_v1")
 
     def test_numbered_resume_restores_value_head_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -218,10 +366,10 @@ class ParallelRLTests(unittest.TestCase):
             common = {
                 "games_per_iteration": 4,
                 "checkpoint_interval": 1,
-                "evaluation_games": 2,
-                "pool_interval": 1,
+                "pool_refresh_games": 4,
                 "max_pool_size": 2,
                 "use_value_head": True,
+                "ppo_enabled": False,
                 "seed": 654,
                 "device": "cpu",
                 "workers": 1,
@@ -250,14 +398,13 @@ class ParallelRLTests(unittest.TestCase):
                     for name in left.files:
                         np.testing.assert_array_equal(left[name], right[name])
 
-    def test_autotuning_retains_complete_training_iterations(self):
+    def test_autotuning_discards_benchmark_games(self):
         messages = []
         with tempfile.TemporaryDirectory() as temp_dir:
             summary = train(
                 iterations=4,
                 games_per_iteration=4,
                 checkpoint_interval=100,
-                evaluation_games=4,
                 max_pool_size=2,
                 seed=44,
                 device="cpu",
@@ -271,13 +418,16 @@ class ParallelRLTests(unittest.TestCase):
                 quiet=True,
             )
         tuning = summary["autotune"]
-        self.assertEqual(tuning["iterations_per_test"], 1)
+        self.assertIsNone(tuning["iterations_per_test"])
         self.assertEqual(tuning["games_per_test"], 4)
-        self.assertEqual(tuning["reused_iteration_count"], 2)
-        self.assertEqual(tuning["reused_game_count"], 8)
+        self.assertEqual(tuning["reused_iteration_count"], 0)
+        self.assertEqual(tuning["reused_game_count"], 0)
+        self.assertEqual(tuning["discarded_game_count"], 8)
         self.assertEqual(len(tuning["attempts"]), 2)
-        self.assertTrue(all(attempt["passed"] for attempt in tuning["attempts"]))
-        self.assertTrue(any("games retained" in message for message in messages))
+        self.assertTrue(all(attempt["success"] for attempt in tuning["attempts"]))
+        self.assertEqual(summary["completed_training_games"], 16)
+        self.assertTrue(summary["adaptive_tuning"]["isolation_verified"])
+        self.assertTrue(any("Selecting worker count" in message for message in messages))
 
     def test_low_ram_stops_autotuning_before_unsafe_candidate(self):
         constrained_memory = {
@@ -295,7 +445,6 @@ class ParallelRLTests(unittest.TestCase):
                     iterations=4,
                     games_per_iteration=4,
                     checkpoint_interval=100,
-                    evaluation_games=4,
                     max_pool_size=2,
                     seed=55,
                     device="cpu",
@@ -310,8 +459,8 @@ class ParallelRLTests(unittest.TestCase):
                 )
         self.assertEqual(summary["selected_workers"], 1)
         self.assertEqual(len(summary["autotune"]["attempts"]), 2)
-        self.assertTrue(summary["autotune"]["attempts"][0]["passed"])
-        self.assertFalse(summary["autotune"]["attempts"][1]["passed"])
+        self.assertTrue(summary["autotune"]["attempts"][0]["success"])
+        self.assertFalse(summary["autotune"]["attempts"][1]["success"])
         self.assertEqual(
             summary["autotune"]["attempts"][1]["completed_games"],
             0,
@@ -404,7 +553,6 @@ class ParallelRLTests(unittest.TestCase):
                     iterations=1,
                     games_per_iteration=2,
                     checkpoint_interval=100,
-                    evaluation_games=2,
                     max_pool_size=1,
                     seed=99,
                     device="auto",
@@ -427,7 +575,6 @@ class ParallelRLTests(unittest.TestCase):
                         iterations=1,
                         games_per_iteration=40,
                         checkpoint_interval=100,
-                        evaluation_games=2,
                         max_pool_size=50,
                         seed=99,
                         device="cpu",

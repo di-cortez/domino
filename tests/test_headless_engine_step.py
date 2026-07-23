@@ -339,8 +339,7 @@ class HeadlessEngineStepTests(unittest.TestCase):
                     baseline_sample.raw_reward,
                     baseline_sample.local_reward,
                     baseline_sample.terminal_reward,
-                    baseline_sample.multiplier,
-                    baseline_sample.option_count,
+                    baseline_sample.old_log_prob,
                 ),
                 (
                     optimized_sample.action_index,
@@ -348,8 +347,7 @@ class HeadlessEngineStepTests(unittest.TestCase):
                     optimized_sample.raw_reward,
                     optimized_sample.local_reward,
                     optimized_sample.terminal_reward,
-                    optimized_sample.multiplier,
-                    optimized_sample.option_count,
+                    optimized_sample.old_log_prob,
                 ),
             )
 

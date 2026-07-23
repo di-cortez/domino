@@ -359,6 +359,8 @@ def _network_header_text(label, metadata):
     parameters = f"{int(metadata['total_parameters']):,} params"
     if metadata.get("checkpoint_name"):
         source = metadata["checkpoint_name"]
+        if metadata.get("checkpoint_sha256"):
+            source += f" (sha256 {metadata['checkpoint_sha256'][:12]}...)"
     else:
         source = metadata.get("initialization", "no checkpoint")
     value_head = "value head on" if metadata.get("value_head") else "value head off"
@@ -376,7 +378,6 @@ def diagnostic_table_header_lines(summaries, agents, report_metadata=None):
     )
     matchup_count = int(metadata.get("evaluated_matchups", len(summaries)))
     total_games = game_count * matchup_count
-    mode = metadata.get("diagnostic_mode", "ad hoc")
     margin = (
         100 * worst_case_margin_of_error(game_count)
         if game_count
@@ -386,7 +387,7 @@ def diagnostic_table_header_lines(summaries, agents, report_metadata=None):
     lines = [
         (
             f"Scope: {matchup_count} agents vs random | {game_count:,} games per "
-            f"matchup | {total_games:,} games total | mode: {mode}"
+            f"matchup | {total_games:,} games total"
         ),
         (
             "95% worst-case margin of error for each win rate: "

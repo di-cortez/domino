@@ -3,7 +3,9 @@
 The encoded dataset stays in host RAM when that is safe, falls back to a
 disk-backed ``.npy`` cache when it is not, and may be kept fully or partially
 resident on a selected GPU. Every completed autotuning epoch updates the live
-network and counts toward the requested epoch total.
+network and counts toward the requested maximum epoch total. Once tuning is
+complete, repeated low-improvement training-loss blocks can stop a saturated
+run early.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from utils.resource_limits import (
     gpu_memory_info,
     host_allocation_status,
 )
+from utils.artifacts import atomic_savez
 from utils.runtime_status import format_duration, memory_report
 
 
@@ -48,9 +51,11 @@ DEFAULT_WEIGHT_DECAY = 0.0001
 DEFAULT_EARLY_STOPPING_PATIENCE = 5
 DEFAULT_SUPERVISED_LR_DECAY_PATIENCE = 5
 DEFAULT_SUPERVISED_LR_DECAY_FACTOR = 0.5
-# Compatibility name retained for existing imports.
-DEFAULT_LR_DECAY_FACTOR = DEFAULT_SUPERVISED_LR_DECAY_FACTOR
 SUPERVISED_VALIDATION_INTERVAL_EPOCHS = 10
+DEFAULT_TRAINING_PLATEAU_WINDOW = 25
+DEFAULT_TRAINING_PLATEAU_PATIENCE = 4
+DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS = 100
+DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT = 0.001
 
 CHECKPOINT_EVERY = SUPERVISED_VALIDATION_INTERVAL_EPOCHS
 CHECKPOINT_DIR = "models/supervised_checkpoints"
@@ -66,6 +71,116 @@ def _format_optional_mib(byte_count):
     if byte_count is None:
         return "unavailable"
     return f"{byte_count / MIB:.1f} MiB"
+
+
+def supervised_loss_plot_path(weights_file):
+    """Return the loss-plot path beside one supervised checkpoint."""
+    weights_path = Path(weights_file)
+    stem = weights_path.stem
+    if stem.endswith("_weights"):
+        stem = stem.removesuffix("_weights")
+    return weights_path.with_name(f"{stem}_loss.png")
+
+
+def _supervised_loss_axis_limits(loss_history, validation_points):
+    """Frame the visible loss range around the observed supervised curves."""
+    training_losses = [
+        float(loss) for loss in loss_history if np.isfinite(float(loss))
+    ]
+    validation_losses = [
+        float(loss)
+        for _epoch, loss in validation_points
+        if np.isfinite(float(loss))
+    ]
+    if not training_losses:
+        raise ValueError("Cannot scale a graph without finite training losses.")
+
+    final_training_loss = training_losses[-1]
+    maximum_loss = max(training_losses + validation_losses)
+    observed_drop = max(0.0, maximum_loss - final_training_loss)
+    scale = max(abs(maximum_loss), abs(final_training_loss), 1e-6)
+    lower_padding = max(observed_drop * 0.10, scale * 0.005, 1e-6)
+    lower_limit = final_training_loss - lower_padding
+    if maximum_loss <= lower_limit:
+        lower_limit = maximum_loss - max(scale * 0.01, 1e-6)
+    return lower_limit, maximum_loss
+
+
+def _save_supervised_loss_plot(loss_history, epoch_metrics, weights_file):
+    """Atomically plot current-run training and validation cross-entropy loss."""
+    if not loss_history:
+        raise ValueError("Cannot plot an empty supervised loss history.")
+
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    output_path = supervised_loss_plot_path(weights_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = output_path.with_name(
+        f".{output_path.stem}.tmp-{os.getpid()}-{time.time_ns()}.png"
+    )
+
+    figure = Figure(figsize=(9.0, 5.25), facecolor="#263b34")
+    FigureCanvasAgg(figure)
+    axis = figure.add_subplot(1, 1, 1)
+    axis.set_facecolor("#263b34")
+
+    epochs = list(range(1, len(loss_history) + 1))
+    axis.plot(
+        epochs,
+        [float(loss) for loss in loss_history],
+        color="#f1d36b",
+        linewidth=2.2,
+        label="Training loss",
+    )
+    validation_points = [
+        (int(metrics["epoch"]) + 1, float(metrics["validation_loss"]))
+        for metrics in epoch_metrics
+        if metrics.get("validation_loss") is not None
+        and np.isfinite(float(metrics["validation_loss"]))
+    ]
+    if validation_points:
+        validation_epochs, validation_losses = zip(*validation_points)
+        axis.plot(
+            validation_epochs,
+            validation_losses,
+            color="#d7eee4",
+            linewidth=1.8,
+            marker="o",
+            markersize=3.5,
+            label="Validation loss",
+        )
+
+    axis.set_title("Supervised Training Loss", color="#f4f0df", pad=12)
+    axis.set_xlabel("Epoch", color="#f4f0df")
+    axis.set_ylabel("Cross-entropy loss", color="#f4f0df")
+    lower_limit, upper_limit = _supervised_loss_axis_limits(
+        loss_history,
+        validation_points,
+    )
+    axis.set_ylim(lower_limit, upper_limit)
+    axis.grid(color="#81978d", alpha=0.25, linewidth=0.8)
+    axis.tick_params(colors="#f4f0df")
+    for spine in axis.spines.values():
+        spine.set_color("#b7c5bd")
+    legend = axis.legend(frameon=False)
+    if legend is not None:
+        for text in legend.get_texts():
+            text.set_color("#f4f0df")
+    figure.tight_layout()
+
+    try:
+        figure.savefig(
+            temporary_path,
+            format="png",
+            dpi=150,
+            facecolor=figure.get_facecolor(),
+        )
+        os.replace(temporary_path, output_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+        figure.clear()
+    return output_path
 
 
 @dataclass
@@ -507,11 +622,19 @@ def train_supervised(
     early_stopping_patience=None,
     lr_decay_factor=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
     lr_decay_patience=DEFAULT_SUPERVISED_LR_DECAY_PATIENCE,
+    training_plateau_enabled=True,
+    training_plateau_window=DEFAULT_TRAINING_PLATEAU_WINDOW,
+    training_plateau_patience=DEFAULT_TRAINING_PLATEAU_PATIENCE,
+    training_plateau_min_epochs=DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
+    training_plateau_min_relative_improvement=(
+        DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT
+    ),
     device="auto",
     autotune_batch_size=True,
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
     gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
     seed=None,
+    resume_existing_weights=True,
 ):
     """Train the policy and return scheduler, storage, tuning, and memory data."""
     if epochs < 1:
@@ -657,7 +780,7 @@ def train_supervised(
             f"{validation_count} validation"
         )
 
-    if os.path.exists(weights_file):
+    if resume_existing_weights and os.path.exists(weights_file):
         _load_existing_weights(network, weights_file)
         if not quiet:
             print(f"Existing supervised model found at {weights_file}. Resuming training.")
@@ -695,7 +818,11 @@ def train_supervised(
     )
 
     tracker = SupervisedResourceTracker(selected_device)
-    best_state = {"validation_loss": float("inf"), "weights": None}
+    best_state = {
+        "validation_loss": float("inf"),
+        "epoch": None,
+        "weights": None,
+    }
     last_checkpoint_time = {"value": started}
 
     def save_checkpoint(current_network, epoch, validation_loss):
@@ -707,8 +834,8 @@ def train_supervised(
             f"domino_sl_epoch_{epoch:04d}_val_{validation_loss:.4f}.npz"
         )
         payload = _network_weight_payload(current_network)
-        np.savez(checkpoint_file, **payload)
-        np.savez(weights_path, **payload)
+        atomic_savez(checkpoint_file, **payload)
+        atomic_savez(weights_path, **payload)
         removed = _prune_supervised_checkpoints(checkpoint_dir)
         now = time.time()
         checkpoint_elapsed = now - last_checkpoint_time["value"]
@@ -732,6 +859,7 @@ def train_supervised(
             save_checkpoint(current_network, epoch, validation_loss)
         if validation_loss < best_state["validation_loss"]:
             best_state["validation_loss"] = validation_loss
+            best_state["epoch"] = int(epoch) + 1
             best_state["weights"] = {
                 name: getattr(current_network, name).copy()
                 for name in current_network.weight_names
@@ -774,10 +902,18 @@ def train_supervised(
             validation_runner=data_plan.validation_loss,
             batch_controller=autotuner,
             epoch_metrics_callback=record_epoch_metrics,
+            training_plateau_window=(
+                training_plateau_window if training_plateau_enabled else None
+            ),
+            training_plateau_patience=training_plateau_patience,
+            training_plateau_min_epochs=training_plateau_min_epochs,
+            training_plateau_min_relative_improvement=(
+                training_plateau_min_relative_improvement
+            ),
         )
         weights_path = Path(weights_file)
         weights_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
+        atomic_savez(
             weights_path,
             **_network_weight_payload(network, best_state["weights"]),
         )
@@ -785,9 +921,23 @@ def train_supervised(
         tracker.observe()
         data_plan.close()
 
+    loss_plot_path = _save_supervised_loss_plot(
+        loss_history,
+        epoch_metrics,
+        weights_file,
+    )
+
     elapsed = time.time() - started
     tuning_summary = autotuner.to_dict()
     training_summary = network.last_training_summary
+    final_validation_loss = next(
+        (
+            float(metrics["validation_loss"])
+            for metrics in reversed(epoch_metrics)
+            if metrics.get("validation_loss") is not None
+        ),
+        None,
+    )
     resource_summary = tracker.to_dict()
     if data_plan.peak_gpu_pool_used_bytes:
         resource_summary["peak_gpu_pool_used_bytes"] = max(
@@ -809,6 +959,7 @@ def train_supervised(
             else f"{best_state['validation_loss']:.4f}"
         )
         print(f"Model saved to {weights_file} (best validation loss: {best_text}).")
+        print(f"Loss graph saved to {loss_plot_path}.")
         if data_plan.storage_mode == "gpu_windowed":
             rotations = [
                 metrics["window_rotations"] for metrics in epoch_metrics
@@ -834,6 +985,12 @@ def train_supervised(
     return {
         "epochs": len(loss_history),
         "requested_epochs": epochs,
+        "best_epoch": best_state["epoch"],
+        "early_stopping_triggered": (
+            training_summary["stopping_reason"] != "epoch_limit"
+        ),
+        "final_training_loss": float(loss_history[-1]),
+        "final_validation_loss": final_validation_loss,
         "batch_size": tuning_summary["selected_batch_size"],
         "selected_batch_size": tuning_summary["selected_batch_size"],
         "total_examples": total_examples,
@@ -842,6 +999,34 @@ def train_supervised(
         "best_validation_loss": best_state["validation_loss"],
         "weight_decay": weight_decay,
         "early_stopping_patience": early_stopping_patience,
+        "training_plateau_enabled": training_summary[
+            "training_plateau_enabled"
+        ],
+        "training_plateau_window": training_summary[
+            "training_plateau_window"
+        ],
+        "training_plateau_patience": training_summary[
+            "training_plateau_patience"
+        ],
+        "training_plateau_min_epochs": training_summary[
+            "training_plateau_min_epochs"
+        ],
+        "training_plateau_min_relative_improvement": training_summary[
+            "training_plateau_min_relative_improvement"
+        ],
+        "training_plateau_checks_without_improvement": training_summary[
+            "training_plateau_checks_without_improvement"
+        ],
+        "training_plateau_last_relative_improvement": training_summary[
+            "training_plateau_last_relative_improvement"
+        ],
+        "training_plateau_loss_start_epoch": training_summary[
+            "training_plateau_loss_start_epoch"
+        ],
+        "training_plateau_stopped": training_summary[
+            "training_plateau_stopped"
+        ],
+        "stopping_reason": training_summary["stopping_reason"],
         "requested_device": requested_device,
         "selected_device": selected_device,
         "device_fallback_reason": fallback_reason,
@@ -874,6 +1059,7 @@ def train_supervised(
         ),
         "epoch_metrics": epoch_metrics,
         "weights_file": weights_file,
+        "loss_plot_file": str(loss_plot_path),
         "duration_s": elapsed,
     }
 
@@ -951,6 +1137,41 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
         help="Failed validation checks required before each LR reduction.",
     )
     group.add_argument(
+        "--sl-no-training-plateau-stop",
+        dest="disable_training_plateau",
+        action="store_true",
+        default=False,
+        help="Disable automatic stopping when median training loss saturates.",
+    )
+    group.add_argument(
+        "--sl-training-plateau-window",
+        type=_positive_int,
+        default=DEFAULT_TRAINING_PLATEAU_WINDOW,
+        metavar="EPOCHS",
+        help="Non-overlapping epoch-block size for training-loss plateau checks.",
+    )
+    group.add_argument(
+        "--sl-training-plateau-patience",
+        type=_positive_int,
+        default=DEFAULT_TRAINING_PLATEAU_PATIENCE,
+        metavar="BLOCKS",
+        help="Consecutive low-improvement blocks required before stopping.",
+    )
+    group.add_argument(
+        "--sl-training-plateau-min-epochs",
+        type=_positive_int,
+        default=DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
+        metavar="EPOCHS",
+        help="Minimum total epochs before training-loss stopping is allowed.",
+    )
+    group.add_argument(
+        "--sl-training-plateau-min-relative-improvement",
+        type=_nonnegative_float,
+        default=DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
+        metavar="FRACTION",
+        help="Minimum median-loss improvement that resets plateau patience.",
+    )
+    group.add_argument(
         "--sl-device",
         choices=("auto", "cpu", "gpu"),
         default="auto",
@@ -1012,6 +1233,13 @@ def main(argv=None):
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,
         lr_decay_patience=args.lr_decay_patience,
+        training_plateau_enabled=not args.disable_training_plateau,
+        training_plateau_window=args.sl_training_plateau_window,
+        training_plateau_patience=args.sl_training_plateau_patience,
+        training_plateau_min_epochs=args.sl_training_plateau_min_epochs,
+        training_plateau_min_relative_improvement=(
+            args.sl_training_plateau_min_relative_improvement
+        ),
         device=args.sl_device,
         autotune_batch_size=not args.sl_no_batch_autotune,
         memory_reserve_mb=args.sl_memory_reserve_mb,

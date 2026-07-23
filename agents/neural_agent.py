@@ -4,9 +4,9 @@ import random
 
 import numpy as np
 
-from agents.agent import Agent
 from agents.encoder import DominoEncoder
 from agents.nn import SupervisedNeuralNetwork
+from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
 
 

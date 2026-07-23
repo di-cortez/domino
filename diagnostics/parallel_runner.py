@@ -235,10 +235,6 @@ def cap_parallel_workers(
     return max(1, capped), was_capped, "; ".join(reasons) or None
 
 
-# Compatibility alias retained for existing diagnostics imports.
-safety_cap_workers = cap_parallel_workers
-
-
 def executor_memory_snapshot(
     executor: ProcessPoolExecutor,
 ) -> tuple[float, float, float | None]:

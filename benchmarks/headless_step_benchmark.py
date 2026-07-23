@@ -178,8 +178,7 @@ def _sample_fingerprint(digest, samples, events, winner, learner_position):
                 sample.raw_reward,
                 sample.local_reward,
                 sample.terminal_reward,
-                sample.multiplier,
-                sample.option_count,
+                sample.old_log_prob,
             )).encode("utf-8")
         )
 

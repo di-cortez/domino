@@ -1,6 +1,6 @@
 """Rule-based teacher agent used for supervised data generation."""
 
-from agents.agent import Agent
+from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
 
 

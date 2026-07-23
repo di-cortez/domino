@@ -14,6 +14,7 @@ axis of 10 values) and the same critic-off-then-on structure, but as a
 single persistent process: the SL checkpoint is read from disk exactly once
 into memory (``_load_sl_weights_once``) and reused for every one of the 72
 default sweep points via ``training.self_play.train(..., sl_weights_data=...)``,
+explicitly starts every non-resumed point from those supervised weights,
 and every point calls ``training.self_play.train()`` and
 ``diagnostics.pairwise.run_pairwise()`` directly instead of spawning a
 subprocess. The final comparative-table stage
@@ -64,10 +65,9 @@ DEFAULT_REPORT_OUTPUT_DIR = DEFAULT_RESULTS_DIR / "rl_sweep_table"
 DEFAULT_DEVICE = "cpu"
 DEFAULT_RL_WORKERS = "auto"
 
-# Baselines and sweep values mirror train_script/run_rl_parameter_sweep.sh
-# exactly -- see that script's header comment for where each range comes
-# from (diagnostics/hyperparameter_sweep.py and the historical sweep table
-# in references/explicacoes/relatorios/teste_1/plano_correcao.tex).
+# Baselines and sweep values mirror train_script/run_rl_parameter_sweep.sh.
+# Learning-rate/gamma values follow diagnostics.hyperparameter_sweep; the
+# games-per-iteration values preserve the established 40/80/160 comparison.
 BASELINE_LEARNING_RATE = 0.001
 BASELINE_GAMMA = 1.0
 BASELINE_GAMES_PER_ITERATION = 40
@@ -173,10 +173,15 @@ def run_sweep_point(
             sl_weights_path=str(sl_weights_path),
             sl_weights_data=sl_weights_data,
             rl_weights_path=str(model_path),
+            adaptive_tuning_path=str(
+                model_path.with_name(f"{model_path.stem}_adaptive_tuning.json")
+            ),
+            fresh_from_sl=True,
             seed=seed,
             device=device,
             workers=rl_workers,
             use_value_head=critic_enabled,
+            ppo_enabled=not critic_enabled,
             quiet=quiet_training,
         )
         print(f"[{name}] training complete in {format_duration(time.time() - start_time)}")

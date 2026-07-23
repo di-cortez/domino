@@ -28,10 +28,10 @@ except ImportError:
     tqdm = None
 
 ROOT = Path(__file__).resolve().parent
-BASE_DATASET_GAMES = 10000
-BASE_SUPERVISED_EPOCHS = 1000
+BASE_DATASET_GAMES = 100000
+BASE_SUPERVISED_EPOCHS = 5000
 BASE_RL_ITERATIONS = 1000
-BASE_RL_GAMES_PER_ITERATION = 40
+BASE_RL_GAMES_PER_ITERATION = 100
 BASE_DIAGNOSTIC_GAMES = 10000
 EXACT_UPDATE_TIMING_REPORT = ROOT.parent / "exact_opponent_model_timing.json"
 
@@ -41,14 +41,6 @@ SCALE_FACTORS = {
     "big": 5.0,
     "huge": 20.0,
 }
-
-DIAGNOSTIC_MODE_BY_SCALE = {
-    "small": "fast",
-    "default": "default",
-    "big": "complete",
-    "huge": "complete",
-}
-
 
 @dataclass(frozen=True)
 class PipelineConfig:
@@ -61,7 +53,6 @@ class PipelineConfig:
     rl_iterations: int
     rl_games_per_iteration: int
     diagnostic_games: int
-    diagnostic_mode: str
 
 
 def _scaled_count(base_count, scale_factor):
@@ -80,7 +71,6 @@ def _build_config(scale_name):
         rl_iterations=_scaled_count(BASE_RL_ITERATIONS, scale_factor),
         rl_games_per_iteration=BASE_RL_GAMES_PER_ITERATION,
         diagnostic_games=_scaled_count(BASE_DIAGNOSTIC_GAMES, scale_factor),
-        diagnostic_mode=DIAGNOSTIC_MODE_BY_SCALE[scale_name],
     )
 
 
@@ -104,7 +94,10 @@ def _progress(label, total, unit):
 
     with tqdm(total=total, desc=label, unit=unit, leave=True) as bar:
 
-        def callback(done, _total):
+        def callback(done, reported_total):
+            if reported_total != bar.total:
+                bar.total = reported_total
+                bar.refresh()
             if done > bar.n:
                 bar.update(done - bar.n)
 
@@ -215,6 +208,13 @@ def _run_supervised_training(config, args):
             early_stopping_patience=args.early_stopping,
             lr_decay_factor=args.lr_decay,
             lr_decay_patience=args.lr_decay_patience,
+            training_plateau_enabled=not args.disable_training_plateau,
+            training_plateau_window=args.sl_training_plateau_window,
+            training_plateau_patience=args.sl_training_plateau_patience,
+            training_plateau_min_epochs=args.sl_training_plateau_min_epochs,
+            training_plateau_min_relative_improvement=(
+                args.sl_training_plateau_min_relative_improvement
+            ),
             device=args.sl_device,
             autotune_batch_size=not args.sl_no_batch_autotune,
             memory_reserve_mb=args.sl_memory_reserve_mb,
@@ -224,7 +224,8 @@ def _run_supervised_training(config, args):
         lambda summary: (
             f"{summary['epochs']}/{summary['requested_epochs']} epochs, "
             f"best validation loss {summary['best_validation_loss']:.4f}, "
-            f"{summary['total_examples']} examples"
+            f"{summary['total_examples']} examples, "
+            f"stop={summary.get('stopping_reason', 'epoch_limit').replace('_', ' ')}"
         ),
         timing_stage="supervised_training",
     )
@@ -240,23 +241,57 @@ def _run_rl_training(config, args):
         else:
             print(message, flush=True)
 
+    manual_gpi = (
+        config.rl_games_per_iteration
+        if args.games_per_iteration is None
+        else args.games_per_iteration
+    )
+    explicit_iterations = args.iterations
+    total_training_games = (
+        explicit_iterations * manual_gpi
+        if explicit_iterations is not None
+        else (
+            args.total_training_games
+            if args.total_training_games is not None
+            else config.rl_iterations * config.rl_games_per_iteration
+        )
+    )
+    adaptive_gpi = (
+        (args.games_per_iteration is None and explicit_iterations is None)
+        if args.adaptive_gpi is None
+        else bool(args.adaptive_gpi)
+    )
+
     return _run_stage(
         "RL self-play",
         config.rl_iterations,
         "iter",
         lambda progress: self_play.train(
-            iterations=config.rl_iterations,
-            games_per_iteration=config.rl_games_per_iteration,
+            iterations=explicit_iterations,
+            total_training_games=(
+                args.total_training_games
+                if explicit_iterations is not None
+                else total_training_games
+            ),
+            games_per_iteration=manual_gpi,
+            adaptive_gpi=adaptive_gpi,
+            gpi_candidates=tuple(args.gpi_candidates),
+            gpi_benchmark_games_target=args.gpi_benchmark_games_target,
+            retune_gpi=args.retune_gpi,
+            retune_workers=args.retune_workers,
+            retune_all=args.retune_all,
             training_opponent=args.training_opponent,
             learning_rate=args.learning_rate,
             entropy_coef=args.entropy_coef,
             log_interval=args.log_interval,
             checkpoint_interval=args.checkpoint_interval,
-            pool_interval=args.pool_interval,
+            pool_refresh_games=args.pool_refresh_games,
             max_pool_size=args.max_pool_size,
-            evaluation_games=args.evaluation_games,
             sl_weights_path=args.sl_weights_path,
             rl_weights_path=args.rl_weights_path,
+            adaptive_tuning_path=args.adaptive_tuning_path,
+            metrics_output_path=args.metrics_output_path,
+            fresh_from_sl=args.fresh_from_sl,
             quiet=True,
             progress_callback=progress,
             use_value_head=args.value_head,
@@ -276,13 +311,27 @@ def _run_rl_training(config, args):
             ),
             autotune_fraction=args.rl_autotune_fraction,
             autotune_minimum_gain=args.rl_autotune_min_gain,
+            ppo_enabled=args.ppo_enabled,
+            ppo_clip_epsilon=args.ppo_clip_epsilon,
+            ppo_target_kl=args.ppo_target_kl,
+            ppo_stop_kl=args.ppo_stop_kl,
+            ppo_max_epochs=args.ppo_max_epochs,
+            ppo_min_minibatches=args.ppo_min_minibatches,
+            ppo_max_minibatches=args.ppo_max_minibatches,
+            ppo_games_per_minibatch_scale=args.ppo_games_per_minibatch_scale,
+            ppo_min_decisions_per_minibatch=(
+                args.ppo_min_decisions_per_minibatch
+            ),
+            prefer_gpu_buffer=args.prefer_gpu_buffer,
+            gpu_buffer_safety_fraction=args.gpu_buffer_safety_fraction,
             status_callback=rl_status,
         ),
         lambda summary: (
-            f"{summary['iterations']} iterations x "
-            f"{summary['games_per_iteration']} games, "
+            f"{summary['total_training_games']} exact games in "
+            f"{summary['completed_iterations_this_run']} iteration(s), "
+            f"selected GPI {summary['games_per_iteration']}, "
             f"{summary['selected_workers']} rollout worker(s), "
-            f"value head {'on' if summary['use_value_head'] else 'off'}, "
+            f"algorithm {summary['rl_training_algorithm']}, "
             f"weights {summary['rl_weights_path']}"
         ),
         timing_stage="rl_self_play",
@@ -292,7 +341,7 @@ def _run_rl_training(config, args):
 def _diagnostic_workload(config):
     """Return the diagnostics module, matchup count, and aggregate game count."""
     evaluate = importlib.import_module("diagnostics.evaluate")
-    _agents, matchups = evaluate.diagnostic_plan(config.diagnostic_mode)
+    _agents, matchups = evaluate.diagnostic_plan()
     matchup_count = len(matchups)
     return evaluate, matchup_count, matchup_count * config.diagnostic_games
 
@@ -316,7 +365,6 @@ def _run_diagnostics(config, args, rl_weights, neural_weights):
             output_dir=evaluate.DEFAULT_OUTPUT_DIR,
             quiet=True,
             progress_callback=progress,
-            diagnostic_mode=config.diagnostic_mode,
             workers=args.diagnostic_workers,
             safety_config=evaluate.ParallelSafetyConfig(
                 memory_reserve_mb=args.diagnostic_memory_reserve_mb,
@@ -382,7 +430,7 @@ def parse_args(argv=None):
     training_loop = _silent_import("training.training_loop")
     training_loop.add_optional_training_arguments(parser)
     self_play = importlib.import_module("training.self_play")
-    self_play.add_optional_rl_arguments(parser)
+    self_play.add_optional_rl_arguments(parser, fresh_from_sl_default=True)
     evaluate = _silent_import("diagnostics.evaluate")
     diagnostics = parser.add_argument_group("diagnostic multiprocessing controls")
     diagnostics.add_argument(
@@ -418,6 +466,16 @@ def main():
         sys.path.insert(0, str(ROOT))
 
     config = _build_config(args.scale)
+    requested_rl_games = (
+        args.iterations
+        * (args.games_per_iteration or config.rl_games_per_iteration)
+        if args.iterations is not None
+        else (
+            args.total_training_games
+            if args.total_training_games is not None
+            else config.rl_iterations * config.rl_games_per_iteration
+        )
+    )
     _evaluate, diagnostic_matchups, diagnostic_total_games = (
         _diagnostic_workload(config)
     )
@@ -425,13 +483,21 @@ def main():
         "Pipeline scale "
         f"{config.scale_name} ({config.scale_factor:g}x): "
         f"{config.dataset_games} dataset games, "
-        f"{config.supervised_epochs} supervised epochs, "
-        f"{config.rl_iterations} RL iterations, "
-        f"{config.diagnostic_mode} diagnostics with "
-        f"{config.diagnostic_games} games per matchup "
+        f"up to {config.supervised_epochs} supervised epochs, "
+        f"{requested_rl_games} exact RL games with "
+        f"{'adaptive' if args.adaptive_gpi is not False and args.games_per_iteration is None and args.iterations is None else 'manual'} GPI, "
+        f"diagnostics with {config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )
     print(pipeline_compute_report(args.device, args.sl_device))
+    if args.fresh_from_sl:
+        print(
+            "RL initialization: fresh from the supervised checkpoint produced "
+            "by this pipeline run; an existing RL output is ignored until the "
+            "new model atomically replaces it."
+        )
+    else:
+        print("RL initialization: continue from the existing RL checkpoint when present.")
     if args.sl_batch_size is not None:
         print(f"Supervised batch size: fixed at {args.sl_batch_size:,}.")
     elif args.sl_no_batch_autotune:
@@ -450,6 +516,17 @@ def main():
             "Every supervised batch test updates the live model and counts "
             "toward the requested epoch total."
         )
+    if not args.disable_training_plateau:
+        print(
+            "Supervised training-loss plateau stop: enabled after batch "
+            f"tuning and at least {args.sl_training_plateau_min_epochs} "
+            f"epochs; {args.sl_training_plateau_patience} consecutive "
+            f"{args.sl_training_plateau_window}-epoch median blocks below "
+            f"{args.sl_training_plateau_min_relative_improvement:.3%} "
+            "relative improvement."
+        )
+    else:
+        print("Supervised training-loss plateau stop: disabled.")
     if args.dataset_workers == "auto":
         print(
             "Dataset workers: automatic retained benchmark "
@@ -459,12 +536,12 @@ def main():
         print(f"Dataset workers: fixed at {args.dataset_workers}.")
     if args.rl_workers == "auto":
         print(
-            "RL rollout workers: automatic retained benchmark "
-            "(1, 2, 4, 6, ... up to 20; stops below 10% marginal gain)."
+            "RL rollout workers: isolated discarded throughput benchmark "
+            "(1, 2, 4, 6, ... up to 20; 1% of the real budget per candidate)."
         )
         print(
-            "Each RL worker test uses complete early iterations, and every "
-            "benchmark game contributes to a policy update."
+            "Worker-tuning games use separate seeds and do not change weights, "
+            "the pool, RNG state, or the real training-game counter."
         )
     else:
         print(f"RL rollout workers: fixed at {args.rl_workers}.")
@@ -491,7 +568,6 @@ def main():
             "rl_games_per_iteration": config.rl_games_per_iteration,
             "diagnostic_games_per_matchup": config.diagnostic_games,
             "diagnostic_matchups": diagnostic_matchups,
-            "diagnostic_mode": config.diagnostic_mode,
         },
     )
     start_time = time.time()
@@ -515,6 +591,8 @@ def main():
         print(f"Total elapsed time: {format_duration(elapsed_time)}")
         print(f"Dataset: {dataset_summary['output_file']}")
         print(f"Supervised weights: {supervised_summary['weights_file']}")
+        if supervised_summary.get("loss_plot_file"):
+            print(f"Supervised loss graph: {supervised_summary['loss_plot_file']}")
         print(f"RL weights: {rl_summary['rl_weights_path']}")
         worker_text = ", ".join(
             f"{matchup}={worker_count}"
@@ -524,7 +602,6 @@ def main():
         )
         print(
             "Diagnostics: "
-            f"{diagnostics_summary['diagnostic_mode']} mode, "
             f"{diagnostics_summary['evaluated_matchups']} matchups x "
             f"{diagnostics_summary['game_count_per_matchup']} games in "
             f"diagnostics/results/all_pairs/ | workers: {worker_text}"
@@ -538,6 +615,19 @@ def main():
         raise
     else:
         finish_pipeline_timing(status="completed")
+
+
+# Keep the historical stage helpers importable for focused tests and tooling,
+# while making both public entry points execute the canonical game-budgeted
+# pipeline. ``python run_pipeline.py`` and ``python -m training.pipeline`` are
+# therefore equivalent.
+from training import pipeline as _canonical_pipeline
+
+PipelineConfig = _canonical_pipeline.PipelineConfig
+SCALE_FACTORS = _canonical_pipeline.SCALE_FACTORS
+_build_config = _canonical_pipeline._build_config
+parse_args = _canonical_pipeline.parse_args
+main = _canonical_pipeline.main
 
 
 if __name__ == "__main__":

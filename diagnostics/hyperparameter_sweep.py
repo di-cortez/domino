@@ -14,8 +14,8 @@ overwriting it.
 
 The sweep isolates one hyperparameter axis at a time (learning rate, reward
 schema, gamma discount), holding the other two at their baseline value, and
-runs the full three-axis sweep twice: once with the actor-critic value head
-on, once with it off (direct REINFORCE) — see ``training/self_play.py``.
+runs the full three-axis sweep twice: once with the legacy actor-critic value
+head on, once with policy-only PPO — see ``training/self_play.py``.
 
 Usage:
     python -m diagnostics.hyperparameter_sweep
@@ -52,7 +52,7 @@ DEFAULT_GAMMA_VALUES = (1.0, 0.97, 0.9)
 DEFAULT_REWARD_SCHEMAS = tuple(self_play.REWARD_SCHEMAS)
 
 DEFAULT_RL_ITERATIONS = 150
-DEFAULT_RL_GAMES_PER_ITERATION = 40
+DEFAULT_RL_GAMES_PER_ITERATION = self_play.DEFAULT_GAMES_PER_ITERATION
 DEFAULT_DIAGNOSTIC_GAMES = 10000
 
 
@@ -120,7 +120,14 @@ def _train_rl_checkpoint(
         learning_rate=learning_rate,
         sl_weights_path=str(sl_weights_path),
         rl_weights_path=str(rl_weights_path),
+        adaptive_tuning_path=str(
+            Path(rl_weights_path).with_name(
+                f"{Path(rl_weights_path).stem}_adaptive_tuning.json"
+            )
+        ),
+        fresh_from_sl=True,
         use_value_head=use_value_head,
+        ppo_enabled=not use_value_head,
         value_coef=value_coef,
         gamma=gamma,
         reward_schema=reward_schema,

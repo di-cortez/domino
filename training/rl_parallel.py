@@ -347,7 +347,7 @@ def _worker_collect_rollouts(job):
     """Play one dynamic block of seeded training games."""
     profile_started = time.perf_counter()
     game_specs, pool_slots = job
-    from training.self_play import (
+    from training.rl_rollout import (
         _collect_self_play_steps,
         _collect_steps_vs_heuristic,
     )

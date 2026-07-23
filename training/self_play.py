@@ -14,7 +14,6 @@ the parent process assembles batches, updates weights, writes checkpoints, or
 uses the GPU.
 """
 
-import argparse
 import json
 import math
 import os
@@ -25,11 +24,28 @@ import time
 
 import numpy as np
 
-from agents.rl_nn import DEVICES
-from diagnostics.parallel_runner import (
-    MAX_PARALLEL_WORKERS,
-    ParallelSafetyConfig,
-    cap_parallel_workers,
+from training.rl_cli import (
+    _training_kwargs_from_args,
+    add_optional_rl_arguments,
+    parse_args,
+    parse_rl_worker_count,
+)
+from training.rl_config import (
+    DEFAULT_ADAPTIVE_GPI,
+    DEFAULT_CLIP_GRAD_NORM,
+    DEFAULT_DEVICE,
+    DEFAULT_GAMES_PER_ITERATION,
+    DEFAULT_ITERATIONS,
+    DEFAULT_MOVING_AVERAGE_WINDOW,
+    DEFAULT_NORMALIZE_ADVANTAGES,
+    DEFAULT_POOL_REFRESH_GAMES,
+    DEFAULT_PPO_ENABLED,
+    DEFAULT_TOTAL_TRAINING_GAMES,
+    RL_WEIGHTS,
+    SL_WEIGHTS,
+    TRAINING_OPPONENT,
+    VALUE_COEF,
+    resolve_training_options,
 )
 from training.rl_rollout import (
     DEFAULT_GAMMA,
@@ -84,16 +100,13 @@ from training.rl_resume import (
     resume_state_path,
 )
 from training.rl_parallel import (
-    DEFAULT_RL_AUTOTUNE_FRACTION,
     DEFAULT_RL_MINIMUM_GAIN,
     DEFAULT_RL_WORKER_CANDIDATES,
     DEFAULT_RL_WORKERS,
     RLRolloutRunner,
-    worker_count as parse_rl_worker_count,
 )
 from training.adaptive_tuning import (
     DEFAULT_GPI_BENCHMARK_GAMES_TARGET,
-    DEFAULT_GPI_BENCHMARK_WORKERS,
     DEFAULT_GPI_CANDIDATES,
     DEFAULT_WORKER_BENCHMARK_FRACTION,
     atomic_write_json as atomic_write_tuning_json,
@@ -116,34 +129,10 @@ from training.ppo import (
 )
 from utils.resource_limits import (
     MIB,
-    MemorySafetyError,
     choose_safe_rl_device,
-    effective_gpu_available_bytes,
     ensure_ram_available,
 )
 from utils.runtime_status import format_duration, print_memory_report
-
-# The array backend for a given run is resolved once, inside train(), from
-# the network's resolved `device` parameter -- it always
-# matches whatever PolicyNetwork itself is using, rather than being fixed at
-# import time.
-DEFAULT_DEVICE = "auto"
-DEFAULT_ITERATIONS = 1000
-DEFAULT_GAMES_PER_ITERATION = 100
-DEFAULT_TOTAL_TRAINING_GAMES = 100_000
-DEFAULT_POOL_REFRESH_GAMES = 400
-DEFAULT_ADAPTIVE_GPI = True
-DEFAULT_PPO_ENABLED = True
-
-SL_WEIGHTS = "models/domino_sl_weights.npz"
-RL_WEIGHTS = "models/domino_rl_weights.npz"
-TRAINING_OPPONENT = "self_play"
-VALUE_COEF = 0.5
-DEFAULT_CLIP_GRAD_NORM = 5.0
-DEFAULT_MOVING_AVERAGE_WINDOW = 10
-# ``None`` resolves to on for PPO and off for the legacy one-update regression
-# path. Explicit CLI flags always win.
-DEFAULT_NORMALIZE_ADVANTAGES = None
 
 def _reward_signal_summary(samples, xp=None):
     """Return compact diagnostics for finalized decision rewards.
@@ -444,96 +433,50 @@ def train(
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
                 target[key] = target.get(key, 0) + value
 
-    retune_gpi = bool(retune_gpi or retune_all)
-    retune_workers = bool(retune_workers or retune_all)
-    manual_gpi_explicit = games_per_iteration is not None
-    games_per_iteration = (
-        DEFAULT_GAMES_PER_ITERATION
-        if games_per_iteration is None
-        else int(games_per_iteration)
+    resolved_options = resolve_training_options(
+        iterations=iterations,
+        total_training_games=total_training_games,
+        games_per_iteration=games_per_iteration,
+        adaptive_gpi=adaptive_gpi,
+        adaptive_tuning_training_games=adaptive_tuning_training_games,
+        retune_gpi=retune_gpi,
+        retune_workers=retune_workers,
+        retune_all=retune_all,
+        checkpoint_interval=checkpoint_interval,
+        log_interval=log_interval,
+        pool_refresh_games=pool_refresh_games,
+        max_pool_size=max_pool_size,
+        moving_average_window=moving_average_window,
+        autotune_fraction=autotune_fraction,
+        autotune_minimum_gain=autotune_minimum_gain,
+        training_opponent=training_opponent,
+        reward_schema=reward_schema,
+        ppo_enabled=ppo_enabled,
+        use_value_head=use_value_head,
+        ppo_clip_epsilon=ppo_clip_epsilon,
+        ppo_target_kl=ppo_target_kl,
+        ppo_stop_kl=ppo_stop_kl,
+        ppo_max_epochs=ppo_max_epochs,
+        ppo_min_minibatches=ppo_min_minibatches,
+        ppo_max_minibatches=ppo_max_minibatches,
+        ppo_games_per_minibatch_scale=ppo_games_per_minibatch_scale,
+        ppo_min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
+        gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
+        normalize_advantages=normalize_advantages,
+        workers=workers,
+        safety_config=safety_config,
     )
-    if games_per_iteration < 1:
-        raise ValueError("games_per_iteration must be positive")
-    if iterations is not None:
-        if iterations < 1:
-            raise ValueError("iterations must be positive")
-        implied_total = int(iterations) * int(games_per_iteration)
-        if total_training_games is not None and int(total_training_games) != implied_total:
-            raise ValueError(
-                "iterations * games_per_iteration conflicts with total_training_games"
-            )
-        total_training_games = implied_total
-        if adaptive_gpi is None:
-            adaptive_gpi = False
-    else:
-        total_training_games = (
-            DEFAULT_TOTAL_TRAINING_GAMES
-            if total_training_games is None
-            else int(total_training_games)
-        )
-        if adaptive_gpi is None:
-            adaptive_gpi = DEFAULT_ADAPTIVE_GPI and not manual_gpi_explicit
-    if total_training_games < 1:
-        raise ValueError("total_training_games must be positive")
-    tuning_training_games = (
-        int(total_training_games)
-        if adaptive_tuning_training_games is None
-        else int(adaptive_tuning_training_games)
-    )
-    if tuning_training_games < 1:
-        raise ValueError("adaptive_tuning_training_games must be positive")
-    if checkpoint_interval < 1 or log_interval < 1:
-        raise ValueError("checkpoint_interval and log_interval must be positive")
-    if pool_refresh_games < 1:
-        raise ValueError("pool_refresh_games must be positive")
-    if max_pool_size < 0:
-        raise ValueError("max_pool_size must be non-negative")
-    if moving_average_window < 1:
-        raise ValueError("moving_average_window must be positive")
-    if not 0 < float(autotune_fraction) <= 1:
-        raise ValueError("autotune_fraction must be in (0, 1]")
-    if float(autotune_minimum_gain) < 0:
-        raise ValueError("autotune_minimum_gain must be non-negative")
-    if training_opponent not in ("self_play", "heuristic"):
-        raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
-    if reward_schema not in REWARD_SCHEMAS:
-        raise ValueError(f"Unknown reward_schema {reward_schema!r}.")
-    if ppo_enabled and use_value_head:
-        raise ValueError(
-            "PPO v1 keeps the critic disabled; use --no-ppo for value-head regression."
-        )
-    if ppo_enabled:
-        if not 0 < float(ppo_clip_epsilon) < 1:
-            raise ValueError("ppo_clip_epsilon must be in (0, 1)")
-        if not 0 < float(ppo_target_kl) <= float(ppo_stop_kl):
-            raise ValueError("PPO KL thresholds require 0 < target_kl <= stop_kl")
-        if not 1 <= int(ppo_max_epochs) <= 4:
-            raise ValueError("ppo_max_epochs must be between 1 and 4")
-        if int(ppo_min_minibatches) < 1 or int(ppo_max_minibatches) < int(
-            ppo_min_minibatches
-        ):
-            raise ValueError("Invalid PPO minibatch bounds")
-        if int(ppo_games_per_minibatch_scale) < 1:
-            raise ValueError("ppo_games_per_minibatch_scale must be positive")
-        if int(ppo_min_decisions_per_minibatch) < 1:
-            raise ValueError("ppo_min_decisions_per_minibatch must be positive")
-        if not 0 < float(gpu_buffer_safety_fraction) <= 1:
-            raise ValueError("gpu_buffer_safety_fraction must be in (0, 1]")
-    algorithm = PPO_TRAINING_ALGORITHM if ppo_enabled else LEGACY_TRAINING_ALGORITHM
-    normalize_advantages = (
-        bool(ppo_enabled)
-        if normalize_advantages is None
-        else bool(normalize_advantages)
-    )
-    if workers != "auto":
-        workers = int(workers)
-        if not 1 <= workers <= MAX_PARALLEL_WORKERS:
-            raise ValueError(
-                f"workers must be 'auto' or between 1 and {MAX_PARALLEL_WORKERS}"
-            )
-    safety_config = safety_config or ParallelSafetyConfig()
-    schema = REWARD_SCHEMAS[reward_schema]
-
+    retune_gpi = resolved_options.retune_gpi
+    retune_workers = resolved_options.retune_workers
+    games_per_iteration = resolved_options.games_per_iteration
+    total_training_games = resolved_options.total_training_games
+    tuning_training_games = resolved_options.tuning_training_games
+    adaptive_gpi = resolved_options.adaptive_gpi
+    algorithm = resolved_options.algorithm
+    normalize_advantages = resolved_options.normalize_advantages
+    workers = resolved_options.workers
+    safety_config = resolved_options.safety_config
+    schema = resolved_options.schema
     has_resume_weights = resume_weights_path is not None
     has_resume_state = resume_state_file is not None
     if has_resume_weights != has_resume_state:
@@ -1402,392 +1345,6 @@ def train(
         },
         "runtime_profile_delta": runtime_profile_delta,
         "duration_s": elapsed_time,
-    }
-
-
-def add_optional_rl_arguments(parser, *, fresh_from_sl_default=False):
-    """Add self-play hyperparameter and rollout-resource flags to ``parser``."""
-    group = parser.add_argument_group("optional reinforcement-learning controls")
-    group.add_argument(
-        "--iterations",
-        type=int,
-        default=None,
-        help=(
-            "Legacy/manual iteration budget. When supplied, total games are "
-            "iterations x games-per-iteration and adaptive GPI is off unless "
-            "explicitly re-enabled."
-        ),
-    )
-    group.add_argument(
-        "--total-training-games",
-        type=int,
-        default=None,
-        help=(
-            f"Exact number of real training games; benchmark games are excluded "
-            f"(normal default: {DEFAULT_TOTAL_TRAINING_GAMES})."
-        ),
-    )
-    group.add_argument(
-        "--games-per-iteration",
-        type=int,
-        default=None,
-        help=(
-            f"Manual GPI (default fallback: {DEFAULT_GAMES_PER_ITERATION}); "
-            "specifying it disables GPI autotuning unless --adaptive-gpi is also set."
-        ),
-    )
-    adaptive = group.add_mutually_exclusive_group()
-    adaptive.add_argument(
-        "--adaptive-gpi",
-        dest="adaptive_gpi",
-        action="store_true",
-        default=None,
-        help="Benchmark the fixed GPI candidate list before real training (default).",
-    )
-    adaptive.add_argument(
-        "--no-adaptive-gpi",
-        dest="adaptive_gpi",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Use the manual/default games-per-iteration directly.",
-    )
-    group.add_argument(
-        "--gpi-candidates",
-        nargs="+",
-        type=int,
-        default=list(DEFAULT_GPI_CANDIDATES),
-        metavar="N",
-        help=(
-            "GPI values tested with "
-            f"{DEFAULT_GPI_BENCHMARK_WORKERS} frozen-policy workers."
-        ),
-    )
-    group.add_argument(
-        "--gpi-benchmark-games-target",
-        type=int,
-        default=DEFAULT_GPI_BENCHMARK_GAMES_TARGET,
-        help="Candidate budget used as floor(target / GPI) complete batches.",
-    )
-    group.add_argument("--retune-gpi", action="store_true")
-    group.add_argument("--retune-workers", action="store_true")
-    group.add_argument("--retune-all", action="store_true")
-    group.add_argument(
-        "--training-opponent",
-        choices=("self_play", "heuristic"),
-        default=TRAINING_OPPONENT,
-        help="Play against a pool of frozen snapshots or the fixed heuristic agent.",
-    )
-    group.add_argument("--learning-rate", type=float, default=0.001)
-    group.add_argument("--entropy-coef", type=float, default=0.01)
-    group.add_argument("--log-interval", type=int, default=10)
-    group.add_argument("--checkpoint-interval", type=int, default=50)
-    group.add_argument(
-        "--pool-refresh-games",
-        type=int,
-        default=DEFAULT_POOL_REFRESH_GAMES,
-        help=(
-            "Cumulative training-game interval between opponent-pool snapshots; "
-            "a threshold crossed inside a batch refreshes once after that batch."
-        ),
-    )
-    group.add_argument("--max-pool-size", type=int, default=50)
-    group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
-    group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
-    group.add_argument(
-        "--adaptive-tuning-path",
-        default=None,
-        help="Adaptive-tuning JSON path (default: next to RL weights).",
-    )
-    group.add_argument(
-        "--metrics-output-path",
-        default=None,
-        help="Per-iteration JSONL path (default: next to RL weights).",
-    )
-    initialization = group.add_mutually_exclusive_group()
-    initialization.add_argument(
-        "--fresh-from-sl",
-        dest="fresh_from_sl",
-        action="store_true",
-        default=fresh_from_sl_default,
-        help=(
-            "Initialize the policy from --sl-weights-path even when the RL "
-            "output already exists; replace that output only after success."
-        ),
-    )
-    initialization.add_argument(
-        "--continue-existing-rl",
-        dest="fresh_from_sl",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Continue from --rl-weights-path when it exists.",
-    )
-    group.add_argument(
-        "--numbered-checkpoints",
-        action="store_true",
-        help=(
-            "Write iteration-suffixed weights and an atomic opponent-pool state "
-            "for safe interruption recovery."
-        ),
-    )
-    group.add_argument(
-        "--start-iteration",
-        type=int,
-        default=0,
-        help="Absolute completed iteration when continuing a numbered checkpoint.",
-    )
-    group.add_argument(
-        "--resume-weights-path",
-        default=None,
-        help="Iteration-suffixed weights file from a complete resume pair.",
-    )
-    group.add_argument(
-        "--resume-state-file",
-        default=None,
-        help="Auxiliary .resume.npz file paired with --resume-weights-path.",
-    )
-    group.add_argument(
-        "--value-head",
-        action="store_true",
-        help=(
-            "Train a linear V(s) baseline (the critic) and use reward-minus-value "
-            "policy advantages in the legacy path; combine with --no-ppo."
-        ),
-    )
-    group.add_argument("--value-coef", type=float, default=VALUE_COEF)
-    group.add_argument(
-        "--gamma",
-        type=float,
-        default=DEFAULT_GAMMA,
-        help="Terminal-reward discount per remaining real decision (1.0 = no discount).",
-    )
-    group.add_argument(
-        "--reward-schema",
-        choices=tuple(REWARD_SCHEMAS),
-        default=DEFAULT_REWARD_SCHEMA,
-        help="Named preset for the terminal/event reward constants.",
-    )
-    group.add_argument(
-        "--clip-grad-norm",
-        type=float,
-        default=DEFAULT_CLIP_GRAD_NORM,
-        help="Gradient-norm clipping threshold for the policy-gradient update.",
-    )
-    group.add_argument(
-        "--normalize-advantages",
-        dest="normalize_advantages",
-        action="store_true",
-        default=DEFAULT_NORMALIZE_ADVANTAGES,
-        help="Normalize advantages once over the complete iteration buffer.",
-    )
-    group.add_argument(
-        "--no-normalize-advantages",
-        dest="normalize_advantages",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Disable whole-buffer advantage normalization.",
-    )
-    group.add_argument(
-        "--moving-average-window",
-        type=int,
-        default=DEFAULT_MOVING_AVERAGE_WINDOW,
-        help="Trailing-iteration window for the value-loss/win-rate moving averages "
-        "in the log (point values are noisy; use this for judging a plateau).",
-    )
-    group.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Fix random/numpy state for reproducible comparisons between configurations.",
-    )
-    group.add_argument(
-        "--device",
-        choices=DEVICES,
-        default=DEFAULT_DEVICE,
-        help="Array backend: 'auto' matches GPU_ENABLED (CuPy when installed, "
-        "else NumPy) -- unchanged from prior behavior. 'cpu'/'gpu' force one "
-        "backend regardless of what's installed/enabled globally.",
-    )
-    group.add_argument(
-        "--rl-workers",
-        type=parse_rl_worker_count,
-        default=DEFAULT_RL_WORKERS,
-        help=(
-            f"CPU-only rollout workers or 'auto' for isolated discarded tuning "
-            f"(maximum {MAX_PARALLEL_WORKERS})."
-        ),
-    )
-    group.add_argument(
-        "--rl-autotune-fraction",
-        type=float,
-        default=DEFAULT_RL_AUTOTUNE_FRACTION,
-        help="Fraction of the real game budget discarded by each worker candidate.",
-    )
-    group.add_argument(
-        "--rl-autotune-min-gain",
-        type=float,
-        default=DEFAULT_RL_MINIMUM_GAIN,
-        help=(
-            "Stop worker tuning when marginal rollout-throughput gain over the "
-            "previous accepted candidate is below this value."
-        ),
-    )
-    group.add_argument("--rl-memory-reserve-mb", type=int, default=512)
-    group.add_argument("--rl-estimated-worker-mb", type=int, default=256)
-    group.add_argument("--rl-max-worker-rss-mb", type=int, default=1024)
-    ppo = parser.add_argument_group("PPO v1 controls")
-    ppo_toggle = ppo.add_mutually_exclusive_group()
-    ppo_toggle.add_argument(
-        "--ppo",
-        dest="ppo_enabled",
-        action="store_true",
-        default=DEFAULT_PPO_ENABLED,
-        help="Use masked PPO with minibatches (default).",
-    )
-    ppo_toggle.add_argument(
-        "--no-ppo",
-        dest="ppo_enabled",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Use the historical one-update REINFORCE path for regression.",
-    )
-    ppo.add_argument("--ppo-clip-epsilon", type=float, default=DEFAULT_CLIP_EPSILON)
-    ppo.add_argument("--ppo-target-kl", type=float, default=DEFAULT_TARGET_KL)
-    ppo.add_argument("--ppo-stop-kl", type=float, default=DEFAULT_STOP_KL)
-    ppo.add_argument("--ppo-max-epochs", type=int, default=DEFAULT_MAX_EPOCHS)
-    ppo.add_argument(
-        "--ppo-min-minibatches",
-        type=int,
-        default=DEFAULT_MIN_MINIBATCHES,
-    )
-    ppo.add_argument(
-        "--ppo-max-minibatches",
-        type=int,
-        default=DEFAULT_MAX_MINIBATCHES,
-    )
-    ppo.add_argument(
-        "--ppo-games-per-minibatch-scale",
-        type=int,
-        default=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    )
-    ppo.add_argument(
-        "--ppo-min-decisions-per-minibatch",
-        type=int,
-        default=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    )
-    buffer_group = ppo.add_mutually_exclusive_group()
-    buffer_group.add_argument(
-        "--prefer-gpu-buffer",
-        dest="prefer_gpu_buffer",
-        action="store_true",
-        default=True,
-    )
-    buffer_group.add_argument(
-        "--no-prefer-gpu-buffer",
-        dest="prefer_gpu_buffer",
-        action="store_false",
-        default=argparse.SUPPRESS,
-    )
-    ppo.add_argument(
-        "--gpu-buffer-safety-fraction",
-        type=float,
-        default=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
-    )
-    return parser
-
-
-def parse_args(argv=None):
-    """Parse optional self-play training controls."""
-    parser = argparse.ArgumentParser(
-        description="Train the domino policy with reinforcement learning.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    add_optional_rl_arguments(parser)
-    parser.add_argument(
-        "--compact",
-        action="store_true",
-        help=(
-            "Show isolated adaptive tuning, one game progress bar, and one "
-            "final summary instead of per-iteration/checkpoint logs."
-        ),
-    )
-    return parser.parse_args(argv)
-
-
-def _training_kwargs_from_args(args):
-    """Translate CLI arguments into the public ``train`` keyword interface."""
-    manual_gpi_supplied = args.games_per_iteration is not None
-    games_per_iteration = (
-        DEFAULT_GAMES_PER_ITERATION
-        if args.games_per_iteration is None
-        else args.games_per_iteration
-    )
-    adaptive_gpi = (
-        (not manual_gpi_supplied and args.iterations is None)
-        if args.adaptive_gpi is None
-        else bool(args.adaptive_gpi)
-    )
-    return {
-        "iterations": args.iterations,
-        "total_training_games": (
-            args.total_training_games
-            if args.iterations is not None
-            else (
-                DEFAULT_TOTAL_TRAINING_GAMES
-                if args.total_training_games is None
-                else args.total_training_games
-            )
-        ),
-        "games_per_iteration": games_per_iteration,
-        "adaptive_gpi": adaptive_gpi,
-        "gpi_candidates": tuple(args.gpi_candidates),
-        "gpi_benchmark_games_target": args.gpi_benchmark_games_target,
-        "retune_gpi": args.retune_gpi,
-        "retune_workers": args.retune_workers,
-        "retune_all": args.retune_all,
-        "training_opponent": args.training_opponent,
-        "learning_rate": args.learning_rate,
-        "entropy_coef": args.entropy_coef,
-        "log_interval": args.log_interval,
-        "checkpoint_interval": args.checkpoint_interval,
-        "pool_refresh_games": args.pool_refresh_games,
-        "max_pool_size": args.max_pool_size,
-        "sl_weights_path": args.sl_weights_path,
-        "rl_weights_path": args.rl_weights_path,
-        "adaptive_tuning_path": args.adaptive_tuning_path,
-        "metrics_output_path": args.metrics_output_path,
-        "fresh_from_sl": args.fresh_from_sl,
-        "use_value_head": args.value_head,
-        "value_coef": args.value_coef,
-        "gamma": args.gamma,
-        "reward_schema": args.reward_schema,
-        "clip_grad_norm": args.clip_grad_norm,
-        "normalize_advantages": args.normalize_advantages,
-        "moving_average_window": args.moving_average_window,
-        "seed": args.seed,
-        "device": args.device,
-        "workers": args.rl_workers,
-        "safety_config": ParallelSafetyConfig(
-            memory_reserve_mb=args.rl_memory_reserve_mb,
-            estimated_worker_mb=args.rl_estimated_worker_mb,
-            max_worker_rss_mb=args.rl_max_worker_rss_mb,
-        ),
-        "autotune_fraction": args.rl_autotune_fraction,
-        "autotune_minimum_gain": args.rl_autotune_min_gain,
-        "start_iteration": args.start_iteration,
-        "resume_weights_path": args.resume_weights_path,
-        "resume_state_file": args.resume_state_file,
-        "numbered_checkpoints": args.numbered_checkpoints,
-        "ppo_enabled": args.ppo_enabled,
-        "ppo_clip_epsilon": args.ppo_clip_epsilon,
-        "ppo_target_kl": args.ppo_target_kl,
-        "ppo_stop_kl": args.ppo_stop_kl,
-        "ppo_max_epochs": args.ppo_max_epochs,
-        "ppo_min_minibatches": args.ppo_min_minibatches,
-        "ppo_max_minibatches": args.ppo_max_minibatches,
-        "ppo_games_per_minibatch_scale": args.ppo_games_per_minibatch_scale,
-        "ppo_min_decisions_per_minibatch": args.ppo_min_decisions_per_minibatch,
-        "prefer_gpu_buffer": args.prefer_gpu_buffer,
-        "gpu_buffer_safety_fraction": args.gpu_buffer_safety_fraction,
     }
 
 

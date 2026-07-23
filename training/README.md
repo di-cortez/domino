@@ -86,6 +86,7 @@ never exceeded.
 | `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
 | `supervised_runtime.py` | Implements CPU/GPU batch candidates, synchronized retained timing, GPU residency probes/windows, and supervised memory telemetry. |
 | `self_play.py` | Orchestrates exact-budget on-policy collection, PPO, logs, pool refresh, checkpoints, and resume. |
+| `rl_config.py` / `rl_cli.py` | Validate side-effect-free RL options and own the standalone/canonical shared argument definitions. |
 | `rl_rollout.py` | Finalizes rewards and trajectories and plays one CPU-only self-play or heuristic-opponent training game. |
 | `rl_resume.py` | Loads compatible policies and atomically saves, validates, and restores exact numbered RL resume pairs. |
 | `ppo.py` | Builds immutable decision buffers, selects minibatches, manages GPU/RAM storage, and performs KL-limited PPO epochs. |
@@ -584,7 +585,7 @@ parameter updates, and metric transfers.
 `--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
 `--checkpoint-interval`, `--pool-refresh-games`, `--max-pool-size`,
 `--sl-weights-path`, and `--rl-weights-path`; see
-`training/self_play.py:add_optional_rl_arguments` for the authoritative
+`training/rl_cli.py:add_optional_rl_arguments` for the authoritative
 definitions, or run `python -m training.self_play --help`.
 
 The former iteration-based `--pool-interval` and auxiliary

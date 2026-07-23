@@ -462,6 +462,31 @@ requested/effective minibatches, optimizer steps, epochs, KL stops, clipping,
 entropy, gradient norms, buffer location/bytes, rollout time, and update time.
 Every iteration is also appended to `<weights>_training_metrics.jsonl`.
 
+Canonical runs additionally maintain
+`models/rl/<run>/diagnostics/runtime_profile.json`. The report is written
+atomically after every RL segment and periodic RL-vs-random diagnostic. It
+contains one session per pipeline process plus cumulative totals. RL timing is
+split into initialization/resume, adaptive tuning, runner setup, policy sync,
+rollout execution and parent aggregation, reward and buffer preparation, PPO,
+pool refresh, checkpoint I/O, metrics, callbacks, and shutdown. PPO is split
+again into storage preparation, minibatch materialization, optimizer work,
+synchronization, whole-buffer evaluation, KL control, and cleanup. The worker
+side of rollouts is split into rules/state generation, learner and opponent
+decisions, reward shaping, engine transitions, and episode finalization. Each
+RL policy decision is split again into exact-opponent-model update, encoding,
+network inference, legal-action selection, and trajectory recording. Worker
+totals are exact summed CPU-seconds, so they are intentionally distinct from
+(and can exceed) parent wall time when several workers overlap. Per-turn
+subphases use a deterministic 1-in-32 game sample; the JSON records both its
+coverage and sampled CPU denominator. This avoids making per-turn profiling a
+measurable bottleneck while still retaining thousands of sampled games in a
+normal checkpoint window. Optimizer steps and
+whole-buffer evaluation are also split at their existing GPU synchronization
+boundaries; the profiler does not add extra synchronizations merely to improve
+attribution. Existing long runs start their fine-grained coverage at the game
+counter where the profiler was introduced; earlier games are recorded as
+unprofiled instead of being estimated.
+
 Pass `--compact` to suppress iteration and checkpoint lines while retaining
 worker-autotuning messages, one absolute iteration progress bar, and one final
 summary. The parameter-sweep shell enables this presentation automatically.
@@ -546,13 +571,11 @@ project. `--device cpu` or `--device gpu` force one backend for that run
 regardless of what's installed, independently of the parent
 `SupervisedNeuralNetwork` class used by supervised training (which is
 unaffected and still always follows `GPU_ENABLED`). `--device gpu` raises a
-clear error if CuPy isn't installed. This is useful because, empirically, RL
-self-play is dominated by the exact opponent-hand inference in
-`middleware/opponent_model.py` (>80% of iteration time, profiled) rather than
-the policy network's forward/backward passes, so CuPy's per-decision
-transfer/kernel-launch overhead during rollout can make GPU measurably
-*slower* than CPU for this stage specifically -- `--device cpu` is worth
-trying if RL training feels slow.
+clear error if CuPy isn't installed. Rollout workers remain CPU-only, while
+PPO updates may use the GPU. Consult the run's cumulative runtime profile
+before changing devices: it records CPU/GPU optimizer-call counts and separates
+rollout rules, exact-model work, inference, buffer transfer, backpropagation,
+parameter updates, and metric transfers.
 
 `training.self_play` also accepts `--iterations`, `--total-training-games`,
 `--games-per-iteration`, `--adaptive-gpi`, `--gpi-candidates`,

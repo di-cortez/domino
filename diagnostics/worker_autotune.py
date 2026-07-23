@@ -73,6 +73,14 @@ def _first_missing_indices(completed, game_count, count):
     return indices
 
 
+def _merge_numeric_tree(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict):
+            _merge_numeric_tree(target.setdefault(key, {}), value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            target[key] = target.get(key, 0) + value
+
+
 def autotune_diagnostic_workers(
     *,
     matchups: tuple[MatchupSpec, ...],
@@ -110,6 +118,7 @@ def autotune_diagnostic_workers(
     precomputed = {matchup.key: [] for matchup in matchups}
     completed_ids = {matchup.key: set() for matchup in matchups}
     durations_by_matchup = {matchup.key: 0.0 for matchup in matchups}
+    runtime_profiles_by_matchup = {matchup.key: {} for matchup in matchups}
     pair_seeds = {
         matchup.key: (
             int(pair_seed_overrides[matchup.key])
@@ -218,6 +227,10 @@ def autotune_diagnostic_workers(
                 failure_reason = str(exc)
             pair_elapsed = time.perf_counter() - pair_start
             durations_by_matchup[matchup.key] += pair_elapsed
+            _merge_numeric_tree(
+                runtime_profiles_by_matchup[matchup.key],
+                run_info.runtime_profile,
+            )
             attempt_infos.append(run_info.to_dict())
 
             existing = completed_ids[matchup.key]
@@ -314,5 +327,6 @@ def autotune_diagnostic_workers(
         "attempts": attempts,
         "precomputed_games": precomputed,
         "durations_by_matchup": durations_by_matchup,
+        "runtime_profiles_by_matchup": runtime_profiles_by_matchup,
         "pair_seeds": pair_seeds,
     }

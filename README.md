@@ -217,7 +217,7 @@ python benchmarks/headless_step_benchmark.py --games 100
 | `diagnostics/` | Evaluation, metrics, reports, plots, and experiment analysis. |
 | `ui/` | Visual simulator, controls, layout, rendering, and controller tests. |
 | `train_script/` | Reproducible pipeline and sweep entry points. |
-| `utils/` | Resource reporting and exact-update timing helpers. |
+| `utils/` | Resource limits, runtime status, and atomic artifact helpers. |
 | `tests/` | Core, parallelism, sweep, and regression tests. |
 
 ## Documentation

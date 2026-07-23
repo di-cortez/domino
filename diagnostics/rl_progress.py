@@ -322,6 +322,14 @@ def run_periodic_diagnostic(
     status_callback=None,
 ):
     """Evaluate one checkpoint on the fixed monitor set and persist one point."""
+    runtime_profile_started = time.perf_counter()
+    runtime_sections = {}
+
+    def add_runtime(section, started):
+        runtime_sections[section] = runtime_sections.get(section, 0.0) + (
+            time.perf_counter() - started
+        )
+
     run_dir = Path(run_dir)
     checkpoint_path = Path(checkpoint_path)
     diagnostic_seed = periodic_diagnostic_seed(seed)
@@ -336,18 +344,50 @@ def run_periodic_diagnostic(
     history_path = run_dir / "periodic_diagnostics.jsonl"
     existing_history = read_periodic_history(history_path)
     _repair_final_partial_line(history_path, existing_history)
+    runtime_sections["identity_hash_and_history_read"] = (
+        time.perf_counter() - runtime_profile_started
+    )
     for existing in existing_history:
         if _point_key(existing) == _point_key(identity):
-            rebuild_progress_reports(run_dir)
+            section_started = time.perf_counter()
+            rebuild_progress_csv(run_dir)
+            add_runtime("progress_csv_rebuild", section_started)
+            section_started = time.perf_counter()
+            rebuild_progress_plot(run_dir)
+            add_runtime("progress_plot_rebuild", section_started)
+            section_started = time.perf_counter()
+            rebuild_best_checkpoint(run_dir)
             _update_best(run_dir, existing)
+            add_runtime("best_checkpoint_update", section_started)
+            runtime_total_seconds = time.perf_counter() - runtime_profile_started
+            runtime_sections["unaccounted"] = max(
+                0.0,
+                runtime_total_seconds - sum(runtime_sections.values()),
+            )
+            existing = dict(existing)
+            existing["runtime_profile_delta"] = {
+                "execution_count": 1,
+                "reused_execution_count": 1,
+                "games": 0,
+                "execution_seconds": float(runtime_total_seconds),
+                "sections_seconds": {
+                    name: float(seconds)
+                    for name, seconds in runtime_sections.items()
+                },
+                "pairwise_sections_seconds": {},
+                "game_worker": {},
+            }
             return existing, False
 
     safety_config = safety_config or ParallelSafetyConfig()
     output_dir = run_dir / "diagnostics" / f"games_{int(rl_games):010d}"
+    section_started = time.perf_counter()
     python_state = random.getstate()
     numpy_state = np.random.get_state()
+    add_runtime("rng_snapshot", section_started)
     started = time.time()
     try:
+        section_started = time.perf_counter()
         if workers == "auto":
             matchup = MatchupSpec(
                 agent="rl",
@@ -367,12 +407,21 @@ def run_periodic_diagnostic(
             selected_workers = int(tuning["optimal_workers"])
             precomputed = tuning["precomputed_games"][matchup.key]
             precomputed_duration = tuning["durations_by_matchup"][matchup.key]
+            precomputed_runtime_profile = tuning[
+                "runtime_profiles_by_matchup"
+            ][matchup.key]
         else:
             selected_workers, _capped, _reason = cap_parallel_workers(
                 int(workers), safety_config
             )
             precomputed = ()
             precomputed_duration = 0.0
+            precomputed_runtime_profile = {}
+        add_runtime(
+            "worker_autotune" if workers == "auto" else "worker_selection",
+            section_started,
+        )
+        section_started = time.perf_counter()
         result = run_pairwise(
             "rl",
             "random",
@@ -388,11 +437,16 @@ def run_periodic_diagnostic(
             safety_config=safety_config,
             precomputed_games=precomputed,
             precomputed_duration_s=precomputed_duration,
+            precomputed_runtime_profile=precomputed_runtime_profile,
         )
+        add_runtime("pairwise_evaluation", section_started)
     finally:
+        section_started = time.perf_counter()
         random.setstate(python_state)
         np.random.set_state(numpy_state)
+        add_runtime("rng_restore", section_started)
     diagnostic_seconds = time.time() - started
+    section_started = time.perf_counter()
     summary = result["summary"]
     wins = int(summary["counts"]["win"])
     draws = int(summary["counts"]["draw"])
@@ -426,9 +480,37 @@ def run_periodic_diagnostic(
         "selected_workers": selected_workers,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    add_runtime("diagnostic_summary_payload", section_started)
+    section_started = time.perf_counter()
     row, appended = append_periodic_point(history_path, row)
-    rebuild_progress_reports(run_dir)
+    add_runtime("history_jsonl_append_and_fsync", section_started)
+    section_started = time.perf_counter()
+    rebuild_progress_csv(run_dir)
+    add_runtime("progress_csv_rebuild", section_started)
+    section_started = time.perf_counter()
+    rebuild_progress_plot(run_dir)
+    add_runtime("progress_plot_rebuild", section_started)
+    section_started = time.perf_counter()
+    rebuild_best_checkpoint(run_dir)
     _update_best(run_dir, row)
+    add_runtime("best_checkpoint_update", section_started)
+    runtime_total_seconds = time.perf_counter() - runtime_profile_started
+    runtime_sections["unaccounted"] = max(
+        0.0,
+        runtime_total_seconds - sum(runtime_sections.values()),
+    )
+    pairwise_profile = result["runtime_profile_delta"]
+    row["runtime_profile_delta"] = {
+        "execution_count": 1,
+        "reused_execution_count": 0,
+        "games": int(diagnostic_games),
+        "execution_seconds": float(runtime_total_seconds),
+        "sections_seconds": {
+            name: float(seconds) for name, seconds in runtime_sections.items()
+        },
+        "pairwise_sections_seconds": dict(pairwise_profile["sections_seconds"]),
+        "game_worker": dict(pairwise_profile.get("game_worker", {})),
+    }
     return row, appended
 
 

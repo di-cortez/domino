@@ -167,35 +167,151 @@ def update_choice_stats(stats, legal_actions):
         stats["agent_forced_tile_turns"] += 1
 
 
-def play_game(agent, opponent, agent_position, suppress_agent_output=True):
-    """Play one game and return the outcome from the evaluated agent's view."""
+def _add_game_runtime(runtime_profile, section, started):
+    if runtime_profile is None or started is None:
+        return
+    sections = runtime_profile.setdefault("sections_seconds", {})
+    sections[section] = sections.get(section, 0.0) + (
+        time.perf_counter() - started
+    )
+
+
+def _game_runtime_start(runtime_profile):
+    return time.perf_counter() if runtime_profile is not None else None
+
+
+def _merge_numeric_runtime(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict):
+            _merge_numeric_runtime(target.setdefault(key, {}), value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            target[key] = target.get(key, 0) + value
+
+
+def _play_game_unprofiled(agent, opponent, agent_position, suppress_agent_output):
+    """Profiler-free diagnostic hot path for non-sampled games."""
     agents = [None, None]
     agents[agent_position] = agent
     agents[1 - agent_position] = opponent
-
     engine = DominoEngine(player_count=2)
     choice_stats = empty_choice_stats()
-
     while not engine.game_over:
         state = engine._get_state()
         current_player = state["current_player"]
         legal_actions = engine.valid_actions(current_player)
-
         if current_player == agent_position:
             update_choice_stats(choice_stats, legal_actions)
-
         if suppress_agent_output:
             with contextlib.redirect_stdout(io.StringIO()):
                 action = agents[current_player].choose_move(state, legal_actions)
         else:
             action = agents[current_player].choose_move(state, legal_actions)
-
         engine.step(
             action,
             return_state=False,
             legal_actions=legal_actions,
         )
 
+    final_state = engine.to_dict()
+    winner = final_state["winner"]
+    if winner == -1:
+        result = "draw"
+    elif winner == agent_position:
+        result = "win"
+    else:
+        result = "loss"
+    pips = [sum(tile[0] + tile[1] for tile in hand) for hand in final_state["hands"]]
+    initial_hands = final_state["initial_hands"]
+    return {
+        "game": None,
+        "agent_position": agent_position,
+        "result": result,
+        "turns": final_state["turn"],
+        "agent_initial_hand": initial_hands[agent_position],
+        "opponent_initial_hand": initial_hands[1 - agent_position],
+        "agent_remaining_pips": pips[agent_position],
+        "opponent_remaining_pips": pips[1 - agent_position],
+        **choice_stats,
+    }
+
+
+def play_game(
+    agent,
+    opponent,
+    agent_position,
+    suppress_agent_output=True,
+    runtime_profile=None,
+):
+    """Play one game and return the outcome from the evaluated agent's view."""
+    if runtime_profile is None:
+        return _play_game_unprofiled(
+            agent,
+            opponent,
+            agent_position,
+            suppress_agent_output,
+        )
+    section_started = _game_runtime_start(runtime_profile)
+    agents = [None, None]
+    agents[agent_position] = agent
+    agents[1 - agent_position] = opponent
+
+    engine = DominoEngine(player_count=2)
+    choice_stats = empty_choice_stats()
+    _add_game_runtime(
+        runtime_profile,
+        "agent_pair_and_engine_initialization",
+        section_started,
+    )
+
+    while not engine.game_over:
+        section_started = _game_runtime_start(runtime_profile)
+        state = engine._get_state()
+        current_player = state["current_player"]
+        legal_actions = engine.valid_actions(current_player)
+        _add_game_runtime(
+            runtime_profile,
+            "state_and_legal_action_generation",
+            section_started,
+        )
+
+        if current_player == agent_position:
+            section_started = _game_runtime_start(runtime_profile)
+            update_choice_stats(choice_stats, legal_actions)
+            _add_game_runtime(
+                runtime_profile,
+                "evaluated_agent_choice_statistics",
+                section_started,
+            )
+
+        section_started = _game_runtime_start(runtime_profile)
+        if suppress_agent_output:
+            with contextlib.redirect_stdout(io.StringIO()):
+                action = agents[current_player].choose_move(state, legal_actions)
+        else:
+            action = agents[current_player].choose_move(state, legal_actions)
+        _add_game_runtime(
+            runtime_profile,
+            (
+                "evaluated_agent_decisions"
+                if current_player == agent_position
+                else "opponent_agent_decisions"
+            ),
+            section_started,
+        )
+
+        section_started = _game_runtime_start(runtime_profile)
+        engine.step(
+            action,
+            return_state=False,
+            legal_actions=legal_actions,
+        )
+        _add_game_runtime(
+            runtime_profile,
+            "engine_state_transition",
+            section_started,
+        )
+
+    section_started = _game_runtime_start(runtime_profile)
     final_state = engine.to_dict()
     winner = final_state["winner"]
 
@@ -209,7 +325,7 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
     pips = [sum(tile[0] + tile[1] for tile in hand) for hand in final_state["hands"]]
     initial_hands = final_state["initial_hands"]
 
-    return {
+    result = {
         "game": None,
         "agent_position": agent_position,
         "result": result,
@@ -220,6 +336,12 @@ def play_game(agent, opponent, agent_position, suppress_agent_output=True):
         "opponent_remaining_pips": pips[1 - agent_position],
         **choice_stats,
     }
+    _add_game_runtime(
+        runtime_profile,
+        "final_state_and_outcome_serialization",
+        section_started,
+    )
+    return result
 
 
 def _effective_seed(seed):
@@ -423,10 +545,19 @@ def run_pairwise(
     safety_config=None,
     precomputed_games=None,
     precomputed_duration_s=0.0,
+    precomputed_runtime_profile=None,
     effective_seed=None,
     display_output_dir=None,
 ):
     """Run one matchup and atomically write its standard artifacts."""
+    runtime_profile_started = time.perf_counter()
+    runtime_sections = {}
+
+    def add_runtime(section, started):
+        runtime_sections[section] = runtime_sections.get(section, 0.0) + (
+            time.perf_counter() - started
+        )
+
     agent_name = normalize_agent_name(agent_name)
     opponent_name = normalize_agent_name(opponent_name)
     if game_count < 1:
@@ -472,7 +603,11 @@ def run_pairwise(
         f"retaining {game_count} diagnostic game records for "
         f"{agent_name} vs {opponent_name}",
     )
+    runtime_sections["validation_setup_and_memory_preflight"] = (
+        time.perf_counter() - runtime_profile_started
+    )
 
+    section_started = time.perf_counter()
     if print_console_summary:
         print(
             f"Evaluating {agent_name} vs {opponent_name} over {game_count} games "
@@ -491,6 +626,7 @@ def run_pairwise(
             leave=True,
             initial=len(precomputed_games),
         )
+    add_runtime("console_and_progress_setup", section_started)
 
     def progress(_done, _total):
         if progress_bar is not None:
@@ -499,6 +635,7 @@ def run_pairwise(
             progress_callback(_done, _total)
 
     start_time = time.time()
+    section_started = time.perf_counter()
     try:
         if missing_indices:
             new_games, execution_metadata = evaluate_pair(
@@ -531,7 +668,9 @@ def run_pairwise(
     finally:
         if progress_bar is not None:
             progress_bar.close()
+    add_runtime("new_game_execution", section_started)
 
+    section_started = time.perf_counter()
     games_by_index = dict(precomputed_by_index)
     games_by_index.update({int(record["game"]) - 1: record for record in new_games})
     if len(games_by_index) != game_count:
@@ -540,7 +679,9 @@ def run_pairwise(
         )
     games = [games_by_index[index] for index in range(game_count)]
     duration = float(precomputed_duration_s) + (time.time() - start_time)
+    add_runtime("parent_result_ordering", section_started)
 
+    section_started = time.perf_counter()
     summary = summarize(
         games,
         agent_name,
@@ -553,6 +694,8 @@ def run_pairwise(
     summary["precomputed_games"] = len(precomputed_games)
     summary = add_choice_summary(summary, games)
     summary["duration_s"] = duration
+    add_runtime("summary_statistics", section_started)
+    section_started = time.perf_counter()
     if print_console_summary:
         print_summary(summary, duration)
         parallel = summary["parallel"]
@@ -568,22 +711,34 @@ def run_pairwise(
             f"{parallel['peak_worker_rss_mb']:.1f} MiB each, "
             f"{parallel['peak_total_children_rss_mb']:.1f} MiB total"
         )
+    add_runtime("console_summary", section_started)
 
+    section_started = time.perf_counter()
     staging_dir = Path(tempfile.mkdtemp(
         prefix=f".{output_dir.name}.tmp-",
         dir=output_dir.parent,
     ))
+    add_runtime("output_staging_setup", section_started)
     try:
+        section_started = time.perf_counter()
         save_csv(games, staging_dir / "games.csv")
+        add_runtime("games_csv_write", section_started)
+        section_started = time.perf_counter()
         with open(staging_dir / "summary.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
+        add_runtime("summary_json_write", section_started)
+        section_started = time.perf_counter()
         if generate_plots:
             write_diagnostic_plots(games, summary, staging_dir)
+        add_runtime("diagnostic_plot_generation", section_started)
+        section_started = time.perf_counter()
         _atomic_replace_directory(staging_dir, output_dir)
+        add_runtime("atomic_output_commit", section_started)
     except BaseException:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
 
+    section_started = time.perf_counter()
     if print_console_summary:
         shown_output_dir = Path(display_output_dir) if display_output_dir else output_dir
         print(f"\nResults saved in {shown_output_dir}/")
@@ -593,12 +748,38 @@ def run_pairwise(
                 "game_lengths.png, choice_opportunities.png"
             )
         print("  games.csv, summary.json")
+    add_runtime("final_console_output", section_started)
+
+    runtime_total_seconds = time.perf_counter() - runtime_profile_started
+    runtime_sections["unaccounted"] = max(
+        0.0,
+        runtime_total_seconds - sum(runtime_sections.values()),
+    )
+    game_worker_profile = {}
+    _merge_numeric_runtime(
+        game_worker_profile,
+        dict(precomputed_runtime_profile or {}),
+    )
+    _merge_numeric_runtime(
+        game_worker_profile,
+        execution_metadata["parallel"].get("runtime_profile", {}),
+    )
 
     return {
         "summary": summary,
         "games": games,
         "output_dir": str(output_dir),
         "duration_s": duration,
+        "runtime_profile_delta": {
+            "execution_seconds": float(runtime_total_seconds),
+            "games": int(game_count),
+            "new_games": int(len(new_games)),
+            "precomputed_games": int(len(precomputed_games)),
+            "sections_seconds": {
+                name: float(seconds) for name, seconds in runtime_sections.items()
+            },
+            "game_worker": game_worker_profile,
+        },
     }
 
 

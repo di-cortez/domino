@@ -381,6 +381,9 @@ def run_all_pairs(
                 selected_workers = tuning["optimal_workers"]
                 retained_games = tuning["precomputed_games"].pop(matchup.key)
                 retained_duration = tuning["durations_by_matchup"].pop(matchup.key)
+                retained_runtime_profile = tuning[
+                    "runtime_profiles_by_matchup"
+                ].pop(matchup.key)
                 total_reused_games += tuning["reused_game_count"]
                 autotune_by_matchup[matchup_report_key] = {
                     "optimal_workers": tuning["optimal_workers"],
@@ -393,6 +396,7 @@ def run_all_pairs(
                 selected_workers = fixed_workers
                 retained_games = []
                 retained_duration = 0.0
+                retained_runtime_profile = {}
 
             selected_workers_by_matchup[matchup_report_key] = selected_workers
             result = run_pairwise(
@@ -411,6 +415,7 @@ def run_all_pairs(
                 safety_config=safety_config,
                 precomputed_games=retained_games,
                 precomputed_duration_s=retained_duration,
+                precomputed_runtime_profile=retained_runtime_profile,
                 effective_seed=pair_seed,
                 display_output_dir=(
                     final_output_dir / "pairs" / f"{agent}_vs_{opponent}"

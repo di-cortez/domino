@@ -136,6 +136,10 @@ budget is cumulative games, with shortened final and milestone iterations.
 Canonical `big`, `huge`, and `forever` state uses immutable payload generations
 and an atomic `training_state.json` marker so resume restores weights,
 optimizer, RNGs, pool order/provenance, adaptive choices, and counters.
+Each canonical RL process also appends a session to
+`diagnostics/runtime_profile.json` inside the run directory. That atomic report
+keeps fine-grained RL/PPO and periodic RL-vs-random timing cumulative across
+`forever` resumes without placing timers inside opponent-model inference.
 
 ## Parallelism and device policy
 

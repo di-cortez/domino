@@ -1,6 +1,7 @@
 """Masked policy network with an optional training-only value head."""
 
 import os
+import time
 
 import numpy as np
 
@@ -289,15 +290,32 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         entropy_coef=0.01,
         clip_grad_norm=5.0,
     ):
-        """Apply one masked PPO clipped-surrogate SGD step."""
+        """Apply one masked PPO clipped-surrogate SGD step.
+
+        The returned timing detail uses only synchronization points that the
+        optimizer already needed.  It therefore attributes asynchronous GPU
+        work to the phase ending at the next existing scalar transfer without
+        inserting profiler-only device synchronizations.
+        """
+        profile_started = time.perf_counter()
+        timing = {}
+
+        def finish_phase(name, started):
+            timing[name] = timing.get(name, 0.0) + (
+                time.perf_counter() - started
+            )
+
         if getattr(self, "use_value_head", False):
             raise ValueError("PPO v1 requires the critic/value head to be disabled.")
         xp = self.xp
+        phase_started = time.perf_counter()
         new_log_probs, entropy, masked_policy = self.evaluate_actions(
             x,
             legal_masks,
             action_indices,
         )
+        finish_phase("policy_forward_and_action_mask_validation", phase_started)
+        phase_started = time.perf_counter()
         sample_count = int(new_log_probs.shape[0])
         action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
         old_log_probs = xp.asarray(
@@ -310,7 +328,9 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         ).reshape(-1)
         if old_log_probs.shape[0] != sample_count or advantages.shape[0] != sample_count:
             raise ValueError("PPO old_log_probs and advantages must match the batch size.")
+        finish_phase("batch_conversion_and_shape_validation", phase_started)
 
+        phase_started = time.perf_counter()
         log_ratio = new_log_probs - old_log_probs
         ratio = xp.exp(log_ratio)
         lower = 1.0 - float(clip_epsilon)
@@ -361,6 +381,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         grad_norm = self._as_float(
             xp.sqrt(sum(xp.sum(gradient ** 2) for gradient in gradients.values()))
         )
+        finish_phase(
+            "clipped_surrogate_backpropagation_and_gradient_norm",
+            phase_started,
+        )
+        phase_started = time.perf_counter()
         grad_clipped = False
         applied_grad_norm = grad_norm
         if clip_grad_norm is not None and grad_norm > clip_grad_norm:
@@ -375,7 +400,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
 
         clip_fraction = xp.mean((ratio < lower) | (ratio > upper))
         approx_kl = xp.mean((ratio - 1.0) - log_ratio)
-        return {
+        result = {
             "policy_loss": self._as_float(policy_loss),
             "entropy": self._as_float(xp.mean(entropy)),
             "approx_kl": self._as_float(approx_kl),
@@ -389,6 +414,23 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             "optimizer_steps": 1,
             "value_loss": None,
         }
+        finish_phase(
+            "gradient_clipping_parameter_update_and_metric_transfers",
+            phase_started,
+        )
+        total_seconds = time.perf_counter() - profile_started
+        timing["unaccounted"] = max(0.0, total_seconds - sum(timing.values()))
+        result["runtime_profile_detail"] = {
+            "calls": 1,
+            "execution_seconds": float(total_seconds),
+            "gpu_calls": int(self.device == "gpu"),
+            "cpu_calls": int(self.device == "cpu"),
+            "sections_seconds": {
+                name: float(seconds) for name, seconds in timing.items()
+            },
+            "device": self.device,
+        }
+        return result
 
     def backward_policy_gradient(
         self,

@@ -315,22 +315,38 @@ def _gradient_log_text(metrics):
     return f"{metrics['grad_norm']:.2f}{suffix}"
 
 
-def _play_training_game(agents, learner_position, learner_agent, schema):
-    """Play one RL training game and attach decayed local event rewards."""
+def _profile_worker_section(runtime_profile, section, started):
+    """Accumulate one mutually exclusive worker-game phase."""
+    if runtime_profile is None or started is None:
+        return
+    sections = runtime_profile.setdefault("sections_seconds", {})
+    sections[section] = sections.get(section, 0.0) + (
+        time.perf_counter() - started
+    )
+
+
+def _profile_worker_start(runtime_profile):
+    return time.perf_counter() if runtime_profile is not None else None
+
+
+def _play_training_game_unprofiled(
+    agents,
+    learner_position,
+    learner_agent,
+    schema,
+):
+    """Profiler-free rollout hot path for non-sampled games."""
     engine = DominoEngine(player_count=len(agents))
     event_stats = EventStats()
-
     while not engine.game_over:
         state = engine._get_state()
         current_player = state["current_player"]
         legal_actions = engine.valid_actions(current_player)
         tile_actions = _tile_play_actions(legal_actions)
-
         if current_player == learner_position and len(tile_actions) == 1:
             action = tile_actions[0]
         else:
             action = agents[current_player].choose_move(state, legal_actions)
-
         event_reward = _event_reward_for_action(
             current_player,
             learner_position,
@@ -344,44 +360,186 @@ def _play_training_game(agents, learner_position, learner_agent, schema):
                 base_reward=event_reward,
                 decay_lambda=schema["event_decay"],
             )
-
         engine.step(
             action,
             return_state=False,
             legal_actions=legal_actions,
         )
+    return engine, event_stats
+
+
+def _play_training_game(
+    agents,
+    learner_position,
+    learner_agent,
+    schema,
+    runtime_profile=None,
+):
+    """Play one RL training game and attach decayed local event rewards."""
+    if runtime_profile is None:
+        return _play_training_game_unprofiled(
+            agents,
+            learner_position,
+            learner_agent,
+            schema,
+        )
+    section_started = _profile_worker_start(runtime_profile)
+    engine = DominoEngine(player_count=len(agents))
+    event_stats = EventStats()
+    _profile_worker_section(
+        runtime_profile,
+        "engine_initialization",
+        section_started,
+    )
+
+    while not engine.game_over:
+        section_started = _profile_worker_start(runtime_profile)
+        state = engine._get_state()
+        current_player = state["current_player"]
+        legal_actions = engine.valid_actions(current_player)
+        tile_actions = _tile_play_actions(legal_actions)
+        _profile_worker_section(
+            runtime_profile,
+            "state_and_legal_action_generation",
+            section_started,
+        )
+
+        if current_player == learner_position and len(tile_actions) == 1:
+            section_started = _profile_worker_start(runtime_profile)
+            action = tile_actions[0]
+            _profile_worker_section(
+                runtime_profile,
+                "forced_learner_action_selection",
+                section_started,
+            )
+        else:
+            section_started = _profile_worker_start(runtime_profile)
+            action = agents[current_player].choose_move(state, legal_actions)
+            _profile_worker_section(
+                runtime_profile,
+                (
+                    "learner_agent_decisions"
+                    if current_player == learner_position
+                    else "opponent_agent_decisions"
+                ),
+                section_started,
+            )
+
+        section_started = _profile_worker_start(runtime_profile)
+        event_reward = _event_reward_for_action(
+            current_player,
+            learner_position,
+            action,
+            event_stats,
+            schema,
+        )
+        if event_reward is not None:
+            learner_agent.add_decayed_event_reward(
+                event_turn=state["turn"],
+                base_reward=event_reward,
+                decay_lambda=schema["event_decay"],
+            )
+        _profile_worker_section(
+            runtime_profile,
+            "reward_shaping",
+            section_started,
+        )
+
+        section_started = _profile_worker_start(runtime_profile)
+        engine.step(
+            action,
+            return_state=False,
+            legal_actions=legal_actions,
+        )
+        _profile_worker_section(
+            runtime_profile,
+            "engine_state_transition",
+            section_started,
+        )
 
     return engine, event_stats
 
 
-def _collect_self_play_steps(network, pool, schema, gamma):
+def _collect_self_play_steps(network, pool, schema, gamma, runtime_profile=None):
     """Play one game against a frozen policy snapshot and collect learner samples."""
+    section_started = _profile_worker_start(runtime_profile)
     learner_position = random.randint(0, 1)
     opponent_network = random.choice(pool) if pool else network
 
-    learner = RLAgent(network, mode="training")
-    opponent = RLAgent(opponent_network, mode="stochastic_evaluation")
+    learner_policy_profile = (
+        runtime_profile.setdefault("learner_policy", {})
+        if runtime_profile is not None else None
+    )
+    opponent_policy_profile = (
+        runtime_profile.setdefault("opponent_policy", {})
+        if runtime_profile is not None else None
+    )
+    learner = RLAgent(
+        network,
+        mode="training",
+        runtime_profile=learner_policy_profile,
+    )
+    opponent = RLAgent(
+        opponent_network,
+        mode="stochastic_evaluation",
+        runtime_profile=opponent_policy_profile,
+    )
     agents = [None, None]
     agents[learner_position] = learner
     agents[1 - learner_position] = opponent
+    _profile_worker_section(runtime_profile, "agent_setup", section_started)
 
-    engine, event_stats = _play_training_game(agents, learner_position, learner, schema)
+    engine, event_stats = _play_training_game(
+        agents,
+        learner_position,
+        learner,
+        schema,
+        runtime_profile=runtime_profile,
+    )
+    section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
     samples = _finish_episode_with_rewards(learner, reward, gamma)
+    _profile_worker_section(
+        runtime_profile,
+        "terminal_reward_and_trajectory_finalization",
+        section_started,
+    )
     return samples, event_stats, engine.winner, learner_position
 
 
-def _collect_steps_vs_heuristic(network, schema, gamma):
+def _collect_steps_vs_heuristic(network, schema, gamma, runtime_profile=None):
     """Play one training game against the fixed heuristic agent."""
+    section_started = _profile_worker_start(runtime_profile)
     learner_position = random.randint(0, 1)
-    learner = RLAgent(network, mode="training")
+    learner_policy_profile = (
+        runtime_profile.setdefault("learner_policy", {})
+        if runtime_profile is not None else None
+    )
+    learner = RLAgent(
+        network,
+        mode="training",
+        runtime_profile=learner_policy_profile,
+    )
     agents = [None, None]
     agents[learner_position] = learner
     agents[1 - learner_position] = StrategicAgent()
+    _profile_worker_section(runtime_profile, "agent_setup", section_started)
 
-    engine, event_stats = _play_training_game(agents, learner_position, learner, schema)
+    engine, event_stats = _play_training_game(
+        agents,
+        learner_position,
+        learner,
+        schema,
+        runtime_profile=runtime_profile,
+    )
+    section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
     samples = _finish_episode_with_rewards(learner, reward, gamma)
+    _profile_worker_section(
+        runtime_profile,
+        "terminal_reward_and_trajectory_finalization",
+        section_started,
+    )
     return samples, event_stats, engine.winner, learner_position
 
 
@@ -1041,6 +1199,23 @@ def train(
     pipeline runs use ``total_training_games`` directly, allowing the final
     iteration to be partial. Benchmark games are always discarded.
     """
+    runtime_profile_started = time.perf_counter()
+    runtime_sections = {}
+    runtime_ppo_sections = {}
+    runtime_rollout_worker = {}
+    runtime_ppo_optimizer_detail = {}
+    runtime_ppo_full_buffer_detail = {}
+
+    def add_runtime(section, seconds):
+        runtime_sections[section] = runtime_sections.get(section, 0.0) + float(seconds)
+
+    def merge_numeric_tree(target, source):
+        for key, value in source.items():
+            if isinstance(value, dict):
+                merge_numeric_tree(target.setdefault(key, {}), value)
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                target[key] = target.get(key, 0) + value
+
     retune_gpi = bool(retune_gpi or retune_all)
     retune_workers = bool(retune_workers or retune_all)
     manual_gpi_explicit = games_per_iteration is not None
@@ -1241,6 +1416,11 @@ def train(
     emit_status("-" * 70)
     emit_status("Adaptive RL tuning")
     emit_status("-" * 70)
+    add_runtime(
+        "validation_model_load_and_resume",
+        time.perf_counter() - runtime_profile_started,
+    )
+    adaptive_tuning_started = time.perf_counter()
     adaptive_tuning = run_adaptive_tuning(
         network,
         total_training_games=tuning_training_games,
@@ -1265,6 +1445,11 @@ def train(
         output_path=tuning_path,
         status_callback=emit_status,
     )
+    add_runtime(
+        "adaptive_tuning",
+        time.perf_counter() - adaptive_tuning_started,
+    )
+    runner_setup_started = time.perf_counter()
     selected_gpi = int(adaptive_tuning["selected_gpi"])
     selected_workers = int(adaptive_tuning["selected_workers"])
     emit_status("PPO configuration:")
@@ -1416,6 +1601,10 @@ def train(
     metrics_stream = open(metrics_path, "a", encoding="utf-8")
     start_time = time.time()
     training_perf_started = time.perf_counter()
+    add_runtime(
+        "resource_preflight_runner_setup_and_metrics_open",
+        training_perf_started - runner_setup_started,
+    )
     last_checkpoint_time = start_time
     last_saved_iteration = int(start_iteration)
     final_weights_path = (
@@ -1426,6 +1615,8 @@ def train(
     completed_this_invocation = 0
     completed_iterations_this_invocation = 0
     stopped_by_shutdown = False
+    decision_samples_at_invocation_start = int(total_decision_samples)
+    optimizer_steps_at_invocation_start = int(network.optimizer_step_count)
     try:
         for local_iteration in range(1, iterations_to_run + 1):
             if shutdown_requested is not None and shutdown_requested():
@@ -1438,7 +1629,10 @@ def train(
                 invocation_target_games - completed_training_games,
             )
             previous_training_games = completed_training_games
+            iteration_accounted_before = sum(runtime_sections.values())
+            section_started = time.perf_counter()
             runner.sync_current(network)
+            add_runtime("policy_snapshot_synchronization", time.perf_counter() - section_started)
             rollout_started = time.perf_counter()
             rollout_results, rollout_info = runner.collect_games(
                 previous_training_games,
@@ -1446,7 +1640,13 @@ def train(
                 effective_seed,
             )
             rollout_elapsed = time.perf_counter() - rollout_started
+            add_runtime("rollout_game_execution", rollout_elapsed)
+            merge_numeric_tree(
+                runtime_rollout_worker,
+                runner.last_runtime_profile,
+            )
             total_rollout_duration_s += rollout_elapsed
+            section_started = time.perf_counter()
             _merge_parallel_summary(
                 parallel_summary,
                 rollout_info,
@@ -1467,11 +1667,18 @@ def train(
                 wins += int(result["winner"] == result["learner_position"])
             win_rate_window.append(wins / games_this_iteration)
             moving_win_rate = sum(win_rate_window) / len(win_rate_window)
+            add_runtime(
+                "rollout_parent_aggregation",
+                time.perf_counter() - section_started,
+            )
+            section_started = time.perf_counter()
             reward_summary = _reward_signal_summary(batch, network.xp) if batch else None
+            add_runtime("reward_statistics", time.perf_counter() - section_started)
             gradient_metrics = None
             ppo_metrics = None
             update_elapsed = 0.0
             if batch:
+                section_started = time.perf_counter()
                 sample_bytes = sum(
                     int(getattr(sample.x, "nbytes", 0))
                     + int(getattr(sample.legal_mask, "nbytes", 0))
@@ -1482,12 +1689,22 @@ def train(
                     safety_config.memory_reserve_mb,
                     f"RL iteration {iteration} decision-buffer assembly",
                 )
+                add_runtime(
+                    "decision_buffer_memory_preflight",
+                    time.perf_counter() - section_started,
+                )
                 update_started = time.perf_counter()
                 if ppo_enabled:
+                    buffer_started = time.perf_counter()
                     decision_buffer = PPOBuffer.from_samples(
                         batch,
                         normalize=normalize_advantages,
                     )
+                    add_runtime(
+                        "ppo_buffer_assembly_and_advantage_normalization",
+                        time.perf_counter() - buffer_started,
+                    )
+                    ppo_started = time.perf_counter()
                     ppo_metrics = ppo_update(
                         network,
                         decision_buffer,
@@ -1507,8 +1724,27 @@ def train(
                         prefer_gpu_buffer=prefer_gpu_buffer,
                         gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
                     )
+                    network.synchronize()
+                    add_runtime("ppo_update", time.perf_counter() - ppo_started)
+                    for name, seconds in ppo_metrics[
+                        "runtime_timing_seconds"
+                    ].items():
+                        if name != "total":
+                            runtime_ppo_sections[name] = (
+                                runtime_ppo_sections.get(name, 0.0) + float(seconds)
+                            )
+                    runtime_detail = ppo_metrics.get("runtime_profile_detail", {})
+                    merge_numeric_tree(
+                        runtime_ppo_optimizer_detail,
+                        runtime_detail.get("optimizer_step", {}),
+                    )
+                    merge_numeric_tree(
+                        runtime_ppo_full_buffer_detail,
+                        runtime_detail.get("full_buffer_evaluation", {}),
+                    )
                     gradient_metrics = ppo_metrics
                 else:
+                    legacy_started = time.perf_counter()
                     gradient_metrics = _legacy_policy_update(
                         network,
                         batch,
@@ -1518,7 +1754,11 @@ def train(
                         use_value_head=use_value_head,
                         value_coef=value_coef,
                     )
-                network.synchronize()
+                    network.synchronize()
+                    add_runtime(
+                        "legacy_policy_update",
+                        time.perf_counter() - legacy_started,
+                    )
                 update_elapsed = time.perf_counter() - update_started
                 total_update_duration_s += update_elapsed
                 total_decision_samples += len(batch)
@@ -1535,16 +1775,25 @@ def train(
                 previous_training_games // pool_refresh_games
                 < completed_training_games // pool_refresh_games
             )
+            section_started = time.perf_counter()
             if batch and training_opponent == "self_play" and crossed_pool_refresh:
                 runner.append_pool_snapshot(network, metadata={
                     "origin": "training_update",
                     "introduced_at_rl_games": int(completed_training_games),
                 })
+            add_runtime("opponent_pool_refresh", time.perf_counter() - section_started)
 
             ppo_log_row = None
             if ppo_metrics is not None:
                 ppo_log_row = {
-                    **ppo_metrics,
+                    **{
+                        name: value
+                        for name, value in ppo_metrics.items()
+                        if name not in {
+                            "runtime_timing_seconds",
+                            "runtime_profile_detail",
+                        }
+                    },
                     "games": int(games_this_iteration),
                     "decisions": int(len(batch)),
                     "ppo_seconds": float(update_elapsed),
@@ -1555,6 +1804,7 @@ def train(
             checkpoint_written = False
             checkpoint_path = None
             checkpoint_resume_path = None
+            section_started = time.perf_counter()
             if iteration % checkpoint_interval == 0:
                 training_state = _training_state_payload(
                     win_rate_window=win_rate_window,
@@ -1602,7 +1852,9 @@ def train(
                         f"time since previous checkpoint: "
                         f"{format_duration(checkpoint_elapsed)}"
                     )
+            add_runtime("checkpoint_serialization", time.perf_counter() - section_started)
 
+            section_started = time.perf_counter()
             if iteration % log_interval == 0 and not quiet:
                 if reward_summary is None:
                     print(
@@ -1639,7 +1891,9 @@ def train(
                     )
                     if ppo_enabled:
                         _print_ppo_window(ppo_window)
+            add_runtime("console_logging", time.perf_counter() - section_started)
 
+            section_started = time.perf_counter()
             moving_value_loss = (
                 float(sum(value_loss_window) / len(value_loss_window))
                 if value_loss_window else None
@@ -1700,9 +1954,13 @@ def train(
                 "elapsed_training_s": float(time.perf_counter() - training_perf_started),
                 "rl_training_algorithm": algorithm,
             }
+            add_runtime("metrics_payload_construction", time.perf_counter() - section_started)
+            section_started = time.perf_counter()
             metrics_stream.write(json.dumps(row, sort_keys=True) + "\n")
             metrics_stream.flush()
             os.fsync(metrics_stream.fileno())
+            add_runtime("metrics_jsonl_write_and_fsync", time.perf_counter() - section_started)
+            section_started = time.perf_counter()
             if (
                 checkpoint_callback is not None
                 and checkpoint_written
@@ -1720,11 +1978,23 @@ def train(
                 metrics_callback(dict(row))
             if progress_callback is not None:
                 progress_callback(completed_training_games, total_training_games)
+            add_runtime("pipeline_and_progress_callbacks", time.perf_counter() - section_started)
+            accounted_this_iteration = (
+                sum(runtime_sections.values()) - iteration_accounted_before
+            )
+            add_runtime(
+                "iteration_control_overhead",
+                max(
+                    0.0,
+                    time.perf_counter() - iteration_started - accounted_this_iteration,
+                ),
+            )
 
             if shutdown_requested is not None and shutdown_requested():
                 stopped_by_shutdown = True
                 break
 
+        finalization_started = time.perf_counter()
         if completed_training_games != invocation_target_games and not stopped_by_shutdown:
             raise AssertionError(
                 f"RL completed {completed_training_games} games, expected "
@@ -1799,6 +2069,32 @@ def train(
         "attempts": worker_results,
     }
     completed_iterations = completed_iterations_this_invocation
+    add_runtime("final_checkpoint_shutdown_and_summary", time.perf_counter() - finalization_started)
+    runtime_total_seconds = time.perf_counter() - runtime_profile_started
+    runtime_accounted_seconds = sum(runtime_sections.values())
+    runtime_sections["unaccounted"] = max(
+        0.0,
+        runtime_total_seconds - runtime_accounted_seconds,
+    )
+    runtime_profile_delta = {
+        "execution_count": 1,
+        "games": int(completed_this_invocation),
+        "iterations": int(completed_iterations_this_invocation),
+        "decisions": int(total_decision_samples - decision_samples_at_invocation_start),
+        "optimizer_steps": int(
+            network.optimizer_step_count - optimizer_steps_at_invocation_start
+        ),
+        "execution_seconds": float(runtime_total_seconds),
+        "sections_seconds": {
+            name: float(seconds) for name, seconds in runtime_sections.items()
+        },
+        "ppo_sections_seconds": {
+            name: float(seconds) for name, seconds in runtime_ppo_sections.items()
+        },
+        "rollout_worker": runtime_rollout_worker,
+        "ppo_optimizer_step": runtime_ppo_optimizer_detail,
+        "ppo_full_buffer_evaluation": runtime_ppo_full_buffer_detail,
+    }
     return {
         "iterations": int(actual_final_iteration),
         "rl_iterations_completed": int(actual_final_iteration),
@@ -1876,6 +2172,7 @@ def train(
             "prefer_gpu_buffer": bool(prefer_gpu_buffer),
             "gpu_buffer_safety_fraction": float(gpu_buffer_safety_fraction),
         },
+        "runtime_profile_delta": runtime_profile_delta,
         "duration_s": elapsed_time,
     }
 

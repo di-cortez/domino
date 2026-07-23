@@ -21,6 +21,7 @@ from diagnostics.rl_progress import (
     rebuild_progress_reports,
     run_periodic_diagnostic,
 )
+from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import MAX_DIAGNOSTIC_WORKERS, ParallelSafetyConfig
 from training import dataset_generator, self_play, training_loop
 from training.canonical_assets import (
@@ -589,7 +590,9 @@ def _run_periodic_point(
     optimizer_steps,
     elapsed_rl_seconds,
     pipeline_started,
+    runtime_profiler=None,
 ):
+    wrapper_started = time.perf_counter()
     diagnostic_workers, worker_source = _resolve_periodic_diagnostic_workers(
         run_dir,
         level,
@@ -653,6 +656,15 @@ def _run_periodic_point(
     print(f"History: {Path(run_dir) / 'periodic_diagnostics.jsonl'}")
     print(f"Graph: {Path(run_dir) / 'rl_vs_random_progress.png'}")
     print("-" * 70)
+    if runtime_profiler is not None:
+        profile = row["runtime_profile_delta"]
+        wrapper_seconds = time.perf_counter() - wrapper_started
+        inner_seconds = float(profile["execution_seconds"])
+        profile["sections_seconds"][
+            "pipeline_worker_resolution_tuning_persistence_and_console"
+        ] = max(0.0, wrapper_seconds - inner_seconds)
+        profile["execution_seconds"] = float(wrapper_seconds)
+        runtime_profiler.record_diagnostic(profile, end_rl_games=games)
     return row
 
 
@@ -752,6 +764,12 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
     elapsed_rl = 0.0 if resume_point is None else float(
         resume_point.training_state["elapsed_rl_seconds"]
     )
+    runtime_profiler = RuntimeProfileRecorder(
+        run_dir,
+        pipeline_level=config.scale_name,
+        seed=seed,
+        start_rl_games=completed,
+    )
     history = read_periodic_history(run_dir / "periodic_diagnostics.jsonl")
     last_periodic = max((int(row["rl_games"]) for row in history), default=0)
     next_boundary = next_training_stop(
@@ -769,6 +787,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
     print(f"Supervised checkpoint: {supervised_path}")
     print(f"Resume: {'yes' if resuming else 'no'}")
     print(f"Games already completed: {completed:,}")
+    print(f"Runtime profile: {runtime_profiler.path}")
     if target is not None:
         print(f"Games remaining: {max(0, target - completed):,}")
     if config.periodic_diagnostics:
@@ -792,6 +811,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             optimizer_steps=0,
             elapsed_rl_seconds=0.0,
             pipeline_started=pipeline_started,
+            runtime_profiler=runtime_profiler,
         )
 
     if (
@@ -819,6 +839,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             optimizer_steps=optimizer_steps,
             elapsed_rl_seconds=elapsed_rl,
             pipeline_started=pipeline_started,
+            runtime_profiler=runtime_profiler,
         )
         last_periodic = completed
     if (
@@ -971,6 +992,10 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             iterations = int(last_summary["rl_iterations_completed"])
             optimizer_steps = int(last_summary["optimizer_step_count"])
             elapsed_rl = float(last_summary["elapsed_rl_seconds"])
+            runtime_profiler.record_rl(
+                last_summary["runtime_profile_delta"],
+                end_rl_games=completed,
+            )
             milestone = (
                 completed % int(args.periodic_diagnostic_every_games) == 0
             )
@@ -981,6 +1006,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             )
             if target is not None and next_periodic is not None and next_periodic > target:
                 next_periodic = None
+            pipeline_checkpoint_started = time.perf_counter()
             state = publish_checkpoint(
                 run_dir,
                 root=root,
@@ -1007,6 +1033,20 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
                 force_incompatible=args.force_resume_incompatible,
             )
             latest_weights = resume_point.weights_path
+            pipeline_checkpoint_seconds = (
+                time.perf_counter() - pipeline_checkpoint_started
+            )
+            runtime_profiler.record_rl(
+                {
+                    "execution_seconds": float(pipeline_checkpoint_seconds),
+                    "sections_seconds": {
+                        "pipeline_checkpoint_publication_and_resume_validation": float(
+                            pipeline_checkpoint_seconds
+                        )
+                    },
+                },
+                end_rl_games=completed,
+            )
             if last_summary["shutdown_requested"] or shutdown():
                 break
             if (
@@ -1025,6 +1065,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
                     optimizer_steps=optimizer_steps,
                     elapsed_rl_seconds=elapsed_rl,
                     pipeline_started=pipeline_started,
+                    runtime_profiler=runtime_profiler,
                 )
                 last_periodic = completed
                 update_diagnostic_markers(
@@ -1039,6 +1080,10 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
 
         shutdown_seen = shutdown()
 
+    runtime_profiler.finish(
+        status="interrupted" if shutdown_seen else "completed",
+        end_rl_games=completed,
+    )
     return {
         "run_dir": str(run_dir),
         "rl_weights_path": str(latest_weights),
@@ -1052,6 +1097,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
         ),
         "target_rl_games": target,
         "summary": last_summary,
+        "runtime_profile_path": str(runtime_profiler.path),
     }
 
 

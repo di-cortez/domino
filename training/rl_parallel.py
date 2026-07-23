@@ -27,6 +27,7 @@ from multiprocessing import shared_memory
 import numpy as np
 
 from diagnostics.parallel_runner import (
+    DEEP_PROFILE_SAMPLE_INTERVAL,
     MAX_PARALLEL_WORKERS,
     DiagnosticMemoryPressure,
     ParallelRunInfo,
@@ -326,8 +327,25 @@ def _event_stats_dict(event_stats):
     }
 
 
+def _add_numeric_tree(target, source):
+    """Recursively sum a compact worker timing payload."""
+    for key, value in source.items():
+        if isinstance(value, dict):
+            _add_numeric_tree(target.setdefault(key, {}), value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            target[key] = target.get(key, 0) + value
+
+
+def _add_worker_section(profile, section, started):
+    sections = profile.setdefault("sections_seconds", {})
+    sections[section] = sections.get(section, 0.0) + (
+        time.perf_counter() - started
+    )
+
+
 def _worker_collect_rollouts(job):
     """Play one dynamic block of seeded training games."""
+    profile_started = time.perf_counter()
     game_specs, pool_slots = job
     from training.self_play import (
         _collect_self_play_steps,
@@ -335,23 +353,41 @@ def _worker_collect_rollouts(job):
     )
 
     results = []
+    runtime_profile = {
+        "games": 0,
+        "profiled_games": 0,
+        "profiled_game_cpu_seconds": 0.0,
+        "worker_cpu_seconds": 0.0,
+        "sections_seconds": {},
+        "learner_policy": {},
+        "opponent_policy": {},
+    }
     pool = [_WORKER_POOL_POLICIES[index] for index in pool_slots]
     for game_index, seed in game_specs:
+        profile_game = game_index % DEEP_PROFILE_SAMPLE_INTERVAL == 0
+        game_profile = runtime_profile if profile_game else None
+        sampled_game_started = time.perf_counter() if profile_game else None
+        section_started = time.perf_counter() if profile_game else None
         random.seed(seed)
         np.random.seed(seed & 0xFFFFFFFF)
+        if profile_game:
+            _add_worker_section(runtime_profile, "per_game_rng_setup", section_started)
         if _WORKER_TRAINING_OPPONENT == "self_play":
             samples, events, winner, learner_position = _collect_self_play_steps(
                 _WORKER_CURRENT_POLICY,
                 pool,
                 _WORKER_SCHEMA,
                 _WORKER_GAMMA,
+                runtime_profile=game_profile,
             )
         else:
             samples, events, winner, learner_position = _collect_steps_vs_heuristic(
                 _WORKER_CURRENT_POLICY,
                 _WORKER_SCHEMA,
                 _WORKER_GAMMA,
+                runtime_profile=game_profile,
             )
+        section_started = time.perf_counter() if profile_game else None
         results.append({
             "game_index": int(game_index),
             "game_seed": int(seed),
@@ -360,7 +396,36 @@ def _worker_collect_rollouts(job):
             "winner": int(winner),
             "learner_position": int(learner_position),
         })
-    return results
+        runtime_profile["games"] += 1
+        if profile_game:
+            _add_worker_section(
+                runtime_profile,
+                "result_payload_construction",
+                section_started,
+            )
+            runtime_profile["profiled_games"] += 1
+            runtime_profile["profiled_game_cpu_seconds"] += (
+                time.perf_counter() - sampled_game_started
+            )
+    worker_seconds = time.perf_counter() - profile_started
+    runtime_profile["worker_cpu_seconds"] = float(worker_seconds)
+    sections = runtime_profile["sections_seconds"]
+    sections["unaccounted"] = max(
+        0.0,
+        runtime_profile["profiled_game_cpu_seconds"] - sum(sections.values()),
+    )
+    for policy_key in ("learner_policy", "opponent_policy"):
+        policy_profile = runtime_profile[policy_key]
+        policy_sections = policy_profile.setdefault("sections_seconds", {})
+        policy_sections["unaccounted"] = max(
+            0.0,
+            float(policy_profile.get("total_seconds", 0.0))
+            - sum(policy_sections.values()),
+        )
+    return {
+        "records": results,
+        "runtime_profile": runtime_profile,
+    }
 
 
 def _worker_ready():
@@ -412,6 +477,7 @@ class RLRolloutRunner:
         self._cap_reason = None
         self._safety_capped = False
         self._closed = False
+        self.last_runtime_profile = {}
 
     @property
     def allocated_shared_bytes(self):
@@ -507,7 +573,13 @@ class RLRolloutRunner:
             self._shutdown_executor(terminate=True)
             raise
 
-    def _run_jobs(self, jobs, worker_function, on_result, run_info):
+    def _run_jobs(
+        self,
+        jobs,
+        worker_function,
+        on_result,
+        run_info,
+    ):
         """Run a bounded queue on the persistent executor and monitor memory."""
         if not jobs:
             return
@@ -544,11 +616,25 @@ class RLRolloutRunner:
                 for future in done:
                     in_flight.pop(future, None)
                     try:
-                        results = future.result()
+                        payload = future.result()
                     except Exception as exc:
                         if first_error is None:
                             first_error = exc
                         continue
+                    if (
+                        isinstance(payload, dict)
+                        and "records" in payload
+                        and "runtime_profile" in payload
+                    ):
+                        results = payload["records"]
+                        _add_numeric_tree(
+                            run_info.runtime_profile,
+                            payload["runtime_profile"],
+                        )
+                    else:
+                        # Preserve compatibility with custom/test worker
+                        # functions returning the original bare record list.
+                        results = payload
                     for result in results:
                         on_result(result)
                     completed_jobs += 1
@@ -617,7 +703,6 @@ class RLRolloutRunner:
             })
 
         results_by_index = {}
-
         def store(result):
             index = int(result["game_index"])
             results_by_index.setdefault(index, result)
@@ -633,7 +718,12 @@ class RLRolloutRunner:
             run_info.attempted_worker_counts.append(self.worker_count)
             jobs = job_builder(_chunk_specs(pending, self.worker_count, self.safety))
             try:
-                self._run_jobs(jobs, worker_function, store, run_info)
+                self._run_jobs(
+                    jobs,
+                    worker_function,
+                    store,
+                    run_info,
+                )
             except recoverable as exc:
                 if not self.safety.fallback_on_error or self.worker_count <= 1:
                     results = [results_by_index[index] for index in sorted(results_by_index)]
@@ -665,6 +755,7 @@ class RLRolloutRunner:
                     exc,
                 ) from exc
 
+        self.last_runtime_profile = dict(run_info.runtime_profile)
         return [results_by_index[index] for index, _seed in specs], run_info
 
     def collect_games(self, first_absolute_game, game_count, base_seed):

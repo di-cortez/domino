@@ -122,11 +122,28 @@ rollout workers. The RL run directory receives:
 | `rl_vs_random_progress_logx.png` | Optional separate symlog rendering. |
 | `best_checkpoint.json` | Highest periodic win rate; never used implicitly for resume. |
 | `periodic_diagnostic_tuning.json` | Forever's one-time diagnostic-worker selection, reused after resume. |
+| `diagnostics/runtime_profile.json` | Atomic per-session and cumulative timing profile for RL plus periodic RL-vs-random monitoring. |
 
 In `forever`, automatic diagnostic-worker selection runs once and is reused at
 all later monitor points. Existing runs without the tuning file recover the
 most recent compatible selection from the JSONL history. The progress plot
 footer records the exact point-zero checkpoint name and SHA-256 prefix.
+
+The runtime profile goes deeper than the monitor's single `diagnostic_seconds`
+field. It separates checkpoint identity/history work, optional worker tuning,
+pairwise evaluation, RNG restoration, JSONL append/fsync, CSV and graph
+rebuilds, and best-checkpoint maintenance. Pairwise evaluation is split again
+into game execution, parent ordering, statistics, CSV/JSON output, plots, and
+the atomic directory commit. Game execution inside the CPU workers is split
+into engine setup, rule/state generation, evaluated-agent statistics,
+evaluated-agent and opponent decisions, engine transitions, and final result
+serialization. Neural-agent decisions additionally expose exact-opponent-model,
+encoding, inference, and action-selection time. These inner worker values are
+measured on a deterministic 1-in-32 game sample, while whole-worker CPU totals
+remain exact. The report records the sample coverage and its own CPU
+denominator; this keeps profiling overhead negligible while preserving useful
+work accounting when workers execute concurrently. Reused diagnostic points are
+timed but add zero games to the profiled diagnostic-game counter.
 
 A killed final JSONL append is tolerated and repaired before the next append.
 Rebuild CSV and plots without starting training:

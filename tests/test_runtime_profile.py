@@ -118,6 +118,24 @@ def test_pairwise_profile_accounts_for_game_and_artifact_phases(tmp_path):
     )
 
 
+def test_pairwise_can_omit_persisted_game_records(tmp_path):
+    output = tmp_path / "compact_pair"
+    run_pairwise(
+        "random",
+        "random",
+        game_count=4,
+        output_dir=output,
+        generate_plots=False,
+        print_console_summary=False,
+        workers=1,
+        safety_config=ParallelSafetyConfig(memory_reserve_mb=0),
+        seed=8,
+        save_game_records=False,
+    )
+    assert (output / "summary.json").is_file()
+    assert not (output / "games.csv").exists()
+
+
 def test_self_play_profile_contains_rollout_and_nested_ppo_phases(tmp_path):
     supervised = tmp_path / "supervised.npz"
     PolicyNetwork(
@@ -187,8 +205,10 @@ def test_self_play_profile_contains_rollout_and_nested_ppo_phases(tmp_path):
 def test_periodic_profile_separates_reports_from_pairwise_work(tmp_path, monkeypatch):
     checkpoint = tmp_path / "checkpoint.npz"
     checkpoint.write_bytes(b"profile-test-checkpoint")
+    pairwise_options = {}
 
-    def fake_pairwise(*_args, **_kwargs):
+    def fake_pairwise(*_args, **kwargs):
+        pairwise_options.update(kwargs)
         return {
             "summary": {
                 "counts": {"win": 2, "draw": 1, "loss": 1},
@@ -230,5 +250,6 @@ def test_periodic_profile_separates_reports_from_pairwise_work(tmp_path, monkeyp
     assert profile["sections_seconds"]["history_jsonl_append_and_fsync"] > 0.0
     assert profile["sections_seconds"]["progress_csv_rebuild"] > 0.0
     assert profile["pairwise_sections_seconds"] == {"new_game_execution": 0.008}
+    assert pairwise_options["save_game_records"] is False
     persisted = read_periodic_history(tmp_path / "periodic_diagnostics.jsonl")
     assert "runtime_profile_delta" not in persisted[-1]

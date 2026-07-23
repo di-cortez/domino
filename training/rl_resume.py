@@ -19,6 +19,7 @@ SUPPORTED_RESUME_STATE_VERSIONS = (2, RESUME_STATE_VERSION)
 RESUME_POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 PPO_TRAINING_ALGORITHM = "ppo_v1"
 LEGACY_TRAINING_ALGORITHM = "reinforce_v1"
+NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
 
 def _checkpoint_matches_encoder(network):
@@ -122,6 +123,45 @@ def resume_state_path(weights_path):
     suffix = path.suffix or ".npz"
     stem = path.name[:-len(path.suffix)] if path.suffix else path.name
     return path.with_name(f"{stem}.resume{suffix}")
+
+
+def _prune_numbered_checkpoint_weights(
+    base_path,
+    current_weights_path,
+    *,
+    keep=NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
+):
+    """Retain a small rolling window of policy-only numbered checkpoints."""
+    keep = int(keep)
+    if keep < 1:
+        raise ValueError("keep must be positive")
+    base = Path(base_path)
+    suffix = base.suffix or ".npz"
+    stem = base.name[:-len(base.suffix)] if base.suffix else base.name
+    prefix = f"{stem}_iter"
+    candidates = []
+    for path in base.parent.glob(f"{prefix}*{suffix}"):
+        iteration_text = path.name[len(prefix):-len(suffix)]
+        if iteration_text.isdigit() and path.is_file():
+            candidates.append((int(iteration_text), path))
+
+    current = Path(current_weights_path).resolve()
+    retained = {current}
+    for _iteration, path in sorted(candidates, reverse=True):
+        if len(retained) >= keep:
+            break
+        retained.add(path.resolve())
+
+    removed = []
+    for _iteration, path in candidates:
+        if path.resolve() not in retained:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            else:
+                removed.append(path)
+    return removed
 
 
 def _file_sha256(path):
@@ -383,6 +423,7 @@ def _save_numbered_resume_checkpoint(
     for older_state in base.parent.glob(f"{base_stem}_iter*.resume.npz"):
         if older_state != state_path:
             older_state.unlink(missing_ok=True)
+    _prune_numbered_checkpoint_weights(base, weights_path)
     return weights_path, state_path
 
 

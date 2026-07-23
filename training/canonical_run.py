@@ -22,6 +22,7 @@ from utils.artifacts import (
 
 
 RUN_FORMAT_VERSION = 1
+MILESTONE_RESUME_RETENTION = 5
 NETWORK_ARCHITECTURE = [
     DominoEncoder.VECTOR_SIZE,
     256,
@@ -143,6 +144,40 @@ def _prune_superseded_latest_payloads(
                 path.unlink()
             except OSError:
                 pass
+
+
+def _prune_milestone_resume_states(
+    run_dir,
+    *,
+    keep=MILESTONE_RESUME_RETENTION,
+    protected_games=(),
+):
+    """Retain only recent full milestone states and their metadata files."""
+    keep = int(keep)
+    if keep < 1:
+        raise ValueError("keep must be positive")
+    state_dir = Path(run_dir) / "checkpoint_states"
+    generations = {}
+    for suffix in ("_state.npz", "_state.json"):
+        for path in state_dir.glob(f"games_*{suffix}"):
+            game_text = path.name[len("games_"):-len(suffix)]
+            if game_text.isdigit() and path.is_file():
+                generations.setdefault(int(game_text), []).append(path)
+
+    retained_games = set(sorted(generations)[-keep:])
+    retained_games.update(int(value) for value in protected_games)
+    removed = []
+    for games, paths in generations.items():
+        if games in retained_games:
+            continue
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            else:
+                removed.append(path)
+    return removed
 
 
 def create_run_config(
@@ -626,6 +661,10 @@ def publish_checkpoint(
             _resolve(run_dir, entry["path"]) for entry in manifest_entries
         ),
         current_manifest_path=pool_manifest_path,
+    )
+    _prune_milestone_resume_states(
+        run_dir,
+        protected_games=((completed_games,) if milestone else ()),
     )
     return state
 

@@ -53,8 +53,10 @@ selection, PPO windows, and cumulative counters. Examples:
 
 The marker advances at the normal numbered-checkpoint interval, not only at a
 100,000-game diagnostic boundary. Superseded non-milestone latest payloads are
-pruned only after the replacement marker is durable; full milestone resume
-pairs remain available for recovery and diagnostic replay.
+pruned only after the replacement marker is durable. Numbered policy-only
+checkpoints and full milestone resume states each retain a rolling window of
+the five newest generations; milestone policy weights remain available for
+the complete diagnostic history and best-checkpoint pointer.
 
 ```bash
 python -m training.pipeline big --resume

@@ -10,9 +10,12 @@ import pytest
 
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from diagnostics.rl_progress import (
+    PERIODIC_SUMMARY_RETENTION,
+    _rl_elapsed_hours,
     append_periodic_point,
     final_diagnostic_seed,
     periodic_diagnostic_seed,
+    prune_periodic_diagnostic_artifacts,
     read_periodic_history,
     rebuild_progress_reports,
 )
@@ -29,10 +32,16 @@ from training.canonical_assets import (
     write_weights_metadata,
 )
 from training.canonical_run import (
+    MILESTONE_RESUME_RETENTION,
+    _prune_milestone_resume_states,
     canonical_run_dir,
     create_run_config,
     load_resume_point,
     publish_checkpoint,
+)
+from training.rl_resume import (
+    NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
+    _prune_numbered_checkpoint_weights,
 )
 from training.pipeline import (
     PERIODIC_DIAGNOSTIC_TUNING_FILE,
@@ -89,7 +98,7 @@ def _periodic_row(games, checkpoint_hash="a", diagnostic_seed=7):
         "ci95_win_rate_high": 0.69,
         "diagnostic_seed": diagnostic_seed,
         "diagnostic_seconds": 1.25,
-        "rl_elapsed_seconds": 2.5,
+        "rl_elapsed_seconds": games / 100.0,
         "wall_clock_seconds": 3.5,
         "selected_workers": 1,
         "created_at": "2026-01-01T00:00:00+00:00",
@@ -373,6 +382,65 @@ def test_jsonl_repairs_partial_tail_deduplicates_and_rebuilds_reports(tmp_path):
     assert csv_path.is_file()
     assert plot_path.is_file()
     assert len(csv_path.read_text(encoding="utf-8").splitlines()) == 3
+    assert "rl_elapsed_hours" in csv_path.read_text(encoding="utf-8").splitlines()[0]
+    assert _rl_elapsed_hours(second) == pytest.approx(1000.0 / 3600.0)
+
+
+def test_periodic_artifact_retention_drops_games_and_keeps_ten_summaries(tmp_path):
+    diagnostics_dir = tmp_path / "diagnostics"
+    for index in range(PERIODIC_SUMMARY_RETENTION + 3):
+        point = diagnostics_dir / f"games_{index * 100_000:010d}"
+        point.mkdir(parents=True)
+        (point / "games.csv").write_text("game,result\n", encoding="utf-8")
+        (point / "summary.json").write_text("{}\n", encoding="utf-8")
+
+    removed = prune_periodic_diagnostic_artifacts(tmp_path)
+    remaining = sorted(path.name for path in diagnostics_dir.iterdir())
+    assert removed == {
+        "games_csv_removed": PERIODIC_SUMMARY_RETENTION + 3,
+        "summary_json_removed": 3,
+        "directories_removed": 3,
+    }
+    assert len(remaining) == PERIODIC_SUMMARY_RETENTION
+    assert not list(diagnostics_dir.rglob("games.csv"))
+    assert len(list(diagnostics_dir.rglob("summary.json"))) == 10
+
+
+def test_checkpoint_history_retention_keeps_only_five_recent_states(tmp_path):
+    state_dir = tmp_path / "checkpoint_states"
+    state_dir.mkdir()
+    for index in range(MILESTONE_RESUME_RETENTION + 3):
+        games = (index + 1) * 100_000
+        (state_dir / f"games_{games:010d}_state.npz").write_bytes(b"state")
+        (state_dir / f"games_{games:010d}_state.json").write_text(
+            "{}\n",
+            encoding="utf-8",
+        )
+    latest_generation = state_dir / "games_0000800000_latest_hash_state.npz"
+    latest_generation.write_bytes(b"latest")
+
+    _prune_milestone_resume_states(tmp_path)
+    milestone_states = sorted(
+        path
+        for path in state_dir.glob("games_*_state.npz")
+        if "_latest_" not in path.name
+    )
+    milestone_metadata = sorted(state_dir.glob("games_*_state.json"))
+    assert len(milestone_states) == MILESTONE_RESUME_RETENTION
+    assert len(milestone_metadata) == MILESTONE_RESUME_RETENTION
+    assert latest_generation.is_file()
+
+
+def test_numbered_policy_checkpoint_retention_keeps_only_five(tmp_path):
+    base = tmp_path / "training.npz"
+    checkpoints = []
+    for iteration in range(1, NUMBERED_CHECKPOINT_WEIGHT_RETENTION + 4):
+        path = tmp_path / f"training_iter{iteration:06d}.npz"
+        path.write_bytes(b"weights")
+        checkpoints.append(path)
+
+    _prune_numbered_checkpoint_weights(base, checkpoints[-1])
+    assert sorted(tmp_path.glob("training_iter*.npz")) == checkpoints[-5:]
 
 
 @pytest.mark.skipif(

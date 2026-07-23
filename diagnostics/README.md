@@ -117,9 +117,9 @@ rollout workers. The RL run directory receives:
 | File | Contents |
 |---|---|
 | `periodic_diagnostics.jsonl` | Append-safe source of truth; one deduplicated monitor point per checkpoint identity. |
-| `rl_vs_random_progress.csv` | Derived tabular learning curve. |
-| `rl_vs_random_progress.png` | Linear game-count curve with point zero and 95% intervals. |
-| `rl_vs_random_progress_logx.png` | Optional separate symlog rendering. |
+| `rl_vs_random_progress.csv` | Derived tabular learning curve, including cumulative RL training hours. |
+| `rl_vs_random_progress.png` | Linear cumulative-training-hours curve with point zero and 95% intervals. |
+| `rl_vs_random_progress_logx.png` | Optional separate symlog time rendering. |
 | `best_checkpoint.json` | Highest periodic win rate; never used implicitly for resume. |
 | `periodic_diagnostic_tuning.json` | Forever's one-time diagnostic-worker selection, reused after resume. |
 | `diagnostics/runtime_profile.json` | Atomic per-session and cumulative timing profile for RL plus periodic RL-vs-random monitoring. |
@@ -127,7 +127,15 @@ rollout workers. The RL run directory receives:
 In `forever`, automatic diagnostic-worker selection runs once and is reused at
 all later monitor points. Existing runs without the tuning file recover the
 most recent compatible selection from the JSONL history. The progress plot
-footer records the exact point-zero checkpoint name and SHA-256 prefix.
+footer records the exact point-zero checkpoint name and SHA-256 prefix. Its
+horizontal axis uses cumulative RL training time and therefore remains
+monotonic across resume sessions while excluding periodic-diagnostic time.
+
+Periodic monitoring does not persist per-game CSV records. The complete,
+compact JSONL learning history is retained, while only the 10 newest
+per-checkpoint `summary.json` directories are kept. This bounds recurring
+diagnostic storage without losing any point used by the CSV, graph, or best
+checkpoint selector.
 
 The runtime profile goes deeper than the monitor's single `diagnostic_seconds`
 field. It separates checkpoint identity/history work, optional worker tuning,

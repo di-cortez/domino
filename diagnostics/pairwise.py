@@ -548,8 +548,15 @@ def run_pairwise(
     precomputed_runtime_profile=None,
     effective_seed=None,
     display_output_dir=None,
+    save_game_records=True,
 ):
-    """Run one matchup and atomically write its standard artifacts."""
+    """Run one matchup and atomically write its requested artifacts.
+
+    ``save_game_records=False`` keeps the complete records in memory for the
+    normal summary calculation but omits the potentially large ``games.csv``.
+    This is useful for recurring monitors whose compact history is persisted
+    elsewhere.
+    """
     runtime_profile_started = time.perf_counter()
     runtime_sections = {}
 
@@ -721,7 +728,8 @@ def run_pairwise(
     add_runtime("output_staging_setup", section_started)
     try:
         section_started = time.perf_counter()
-        save_csv(games, staging_dir / "games.csv")
+        if save_game_records:
+            save_csv(games, staging_dir / "games.csv")
         add_runtime("games_csv_write", section_started)
         section_started = time.perf_counter()
         with open(staging_dir / "summary.json", "w", encoding="utf-8") as f:
@@ -747,7 +755,10 @@ def run_pairwise(
                 "  cumulative_rates.png, result_distribution.png, wins_by_position.png, "
                 "game_lengths.png, choice_opportunities.png"
             )
-        print("  games.csv, summary.json")
+        artifacts = ["summary.json"]
+        if save_game_records:
+            artifacts.insert(0, "games.csv")
+        print("  " + ", ".join(artifacts))
     add_runtime("final_console_output", section_started)
 
     runtime_total_seconds = time.perf_counter() - runtime_profile_started

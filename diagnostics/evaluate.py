@@ -63,7 +63,6 @@ RANDOM_BASELINE_MATCHUPS = tuple(
 DEFAULT_DIAGNOSTIC_WORKERS = "auto"
 POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 VALUE_WEIGHT_NAMES = ("Wv", "bv")
-RANDOM_NN_ARCHITECTURE = (168, 256, 128, 56)
 
 
 def _weights_for(agent_name, rl_weights=None, neural_weights=None):
@@ -81,6 +80,7 @@ def _matrix_rows(summaries):
     for summary in summaries:
         counts = summary["counts"]
         rates = summary["rates"]
+        values = summary.get("value_head_predictions", {})
         rows.append({
             "agent": summary["agent"],
             "opponent": summary["opponent"],
@@ -92,6 +92,12 @@ def _matrix_rows(summaries):
             "draw_rate": rates["draw"],
             "loss_rate": rates["loss"],
             "mean_turns": summary["mean_turns"],
+            "value_sample_count": values.get("sample_count"),
+            "value_mean": values.get("mean"),
+            "value_std": values.get("std"),
+            "value_min": values.get("min"),
+            "value_max": values.get("max"),
+            "value_nonfinite_count": values.get("nonfinite_count"),
         })
     return rows
 
@@ -109,6 +115,12 @@ def _save_matrix_csv(rows, path):
         "draw_rate",
         "loss_rate",
         "mean_turns",
+        "value_sample_count",
+        "value_mean",
+        "value_std",
+        "value_min",
+        "value_max",
+        "value_nonfinite_count",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -122,7 +134,7 @@ def _selected_pairs(agents):
 
 
 def diagnostic_plan():
-    """Return the fixed five-agent random-baseline plan."""
+    """Return the fixed four-agent random-baseline plan."""
     return CANONICAL_AGENTS, RANDOM_BASELINE_MATCHUPS
 
 
@@ -176,24 +188,6 @@ def _network_metadata(agents, matchup_specs):
                 checkpoint_paths[agent],
             )
 
-    if "random_nn" in agents:
-        architecture = list(RANDOM_NN_ARCHITECTURE)
-        policy_parameters = (
-            architecture[1] * architecture[0] + architecture[1]
-            + architecture[2] * architecture[1] + architecture[2]
-            + architecture[3] * architecture[2] + architecture[3]
-        )
-        metadata["random_nn"] = {
-            "agent": "random_nn",
-            "architecture": architecture,
-            "policy_parameters": policy_parameters,
-            "value_head": False,
-            "value_parameters": 0,
-            "total_parameters": policy_parameters,
-            "checkpoint": None,
-            "checkpoint_name": None,
-            "initialization": "untrained fixed seed 0",
-        }
     return metadata
 
 
@@ -261,7 +255,7 @@ def run_all_pairs(
 
     Passing ``agents`` retains support for a custom subset, but every selected
     agent is still evaluated only against the random baseline. When omitted,
-    all five canonical agents are evaluated.
+    all four canonical agents are evaluated.
     """
     if game_count < 1:
         raise ValueError("game_count must be positive")

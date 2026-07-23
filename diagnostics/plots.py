@@ -367,6 +367,22 @@ def _network_header_text(label, metadata):
     return f"{label}: {architecture}; {parameters}; {value_head}; {source}"
 
 
+def _value_head_header_text(label, summary):
+    """Format aggregate value predictions for an evaluated checkpoint."""
+    values = summary.get("value_head_predictions")
+    if not values or not values.get("finite_count"):
+        return None
+    text = (
+        f"{label} V(s) over {int(values['sample_count']):,} real decisions; "
+        "mean/std/min/max "
+        f"{values['mean']:+.3f}/{values['std']:.3f}/"
+        f"{values['min']:+.3f}/{values['max']:+.3f}"
+    )
+    if values.get("nonfinite_count"):
+        text += f"; non-finite {int(values['nonfinite_count']):,}"
+    return text
+
+
 def diagnostic_table_header_lines(summaries, agents, report_metadata=None):
     """Build descriptive lines shown above the one-row diagnostic result."""
     metadata = report_metadata or {}
@@ -412,10 +428,20 @@ def diagnostic_table_header_lines(summaries, agents, report_metadata=None):
     networks = metadata.get("network_metadata", {})
     if "rl" in networks:
         lines.append(_network_header_text("RL", networks["rl"]))
+        rl_summary = next(
+            (
+                summary
+                for summary in summaries
+                if summary.get("agent") == "rl"
+                and summary.get("opponent") == "random"
+            ),
+            {},
+        )
+        value_line = _value_head_header_text("RL value head", rl_summary)
+        if value_line is not None:
+            lines.append(value_line)
     if "neural" in networks:
         lines.append(_network_header_text("Neural", networks["neural"]))
-    if "random_nn" in networks:
-        lines.append(_network_header_text("Random NN", networks["random_nn"]))
     return lines
 
 

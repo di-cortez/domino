@@ -44,7 +44,7 @@ from utils.resource_limits import (
     MemorySafetyError,
     choose_safe_supervised_device,
 )
-import run_pipeline
+from train_script import run_pipeline
 
 
 def _safe_preflight(batch_size):

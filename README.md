@@ -18,6 +18,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install numpy pygame PyOpenGL PyOpenGL-accelerate \
   matplotlib tqdm openpyxl pytest
+python -m pip install -r requirements-dev.txt
 ```
 
 The project runs on CPU without CuPy. For NVIDIA GPU training, follow
@@ -31,8 +32,8 @@ source .venv/bin/activate
 python -m ui.visual_main
 ```
 
-The menu (`M`) can assign `Neural`, `Random NN`, `Heuristic`, `Random`,
-`Human`, or `RL (self-play)` to either player. Neural and RL selections need
+The menu (`M`) can assign `Neural`, `Heuristic`, `Random`, `Human`, or
+`RL (self-play)` to either player. Neural and RL selections need
 the corresponding files in `models/`. See [`ui/README.md`](ui/README.md) for
 all controls and interaction rules.
 
@@ -43,30 +44,39 @@ Run the canonical dataset -> supervised learning -> RL -> diagnostics pipeline:
 ```bash
 python -m training.pipeline default
 # Equivalent compatibility entry point:
-python run_pipeline.py default
+python -m train_script.run_pipeline default
 ```
 
-Every level shares the seed-addressed standard dataset and supervised model.
-The canonical dataset uses 100,000 games and supervised training allows up to
-5,000 epochs, while retaining the existing conservative early-stop rules.
-Compatible artifacts are reused by metadata and SHA-256; incompatible files
-are refused unless `--rebuild-dataset`, `--retrain-supervised`, or
-`--rebuild-supervised-assets` is explicit. The default seed is 42.
+`small` and `default` are isolated quick-run profiles. Without `--seed`, each
+invocation chooses a fresh seed; their dataset and supervised checkpoint live
+inside a unique RL run directory and are never reused. An explicit `--seed`
+still enables a reproducible experiment, but the artifact namespace remains
+new. Supervised training keeps the same maximum of 5,000 epochs and the
+existing conservative early-stop rules.
+
+`big`, `huge`, and `forever` are the reusable long-run profiles. They default
+to seed 42 and share the compatible 100,000-game seed-addressed standard
+dataset and supervised checkpoint. Metadata and SHA-256 control reuse;
+incompatible files are refused unless `--rebuild-dataset`,
+`--retrain-supervised`, or `--rebuild-supervised-assets` is explicit.
 
 Pipeline levels differ primarily in exact cumulative RL games:
 
-| Level | RL games | Final games/matchup | Periodic RL-vs-random |
-|---|---:|---:|---|
-| `small` | 100,000 | 10,000 | No |
-| `default` | 500,000 | 10,000 | No |
-| `big` | 2,000,000 | 1,000,000 | Every 100,000 games |
-| `huge` | 10,000,000 | 1,000,000 | Every 100,000 games |
-| `forever` | No limit | None automatically | Every 100,000 games |
+| Level | Dataset games | Default seed/assets | RL games | Final games/matchup | Periodic RL-vs-random |
+|---|---:|---|---:|---:|---|
+| `small` | 10,000 | Random, run-local | 100,000 | 10,000 | No |
+| `default` | 50,000 | Random, run-local | 500,000 | 10,000 | No |
+| `big` | 100,000 | 42, reusable | 2,000,000 | 1,000,000 | Every 100,000 games |
+| `huge` | 100,000 | 42, reusable | 10,000,000 | 1,000,000 | Every 100,000 games |
+| `forever` | 100,000 | 42, reusable | No limit | None automatically | Every 100,000 games |
 
 Before real RL games begin, the existing isolated benchmark selects GPI from
 `100, 200, 400, 600, 800, 1000, 2000`, then selects the rollout-worker count;
 benchmark games are discarded. Training uses masked PPO with adaptive
-minibatches and up to four epochs. Opponent snapshots refresh every 400
+minibatches and up to four epochs by default. Pass `--no-ppo` to use one
+full-buffer REINFORCE update per iteration instead; that path does not build a
+PPO buffer or calculate ratios, clipping, KL control, minibatches, or the
+post-update full-buffer PPO evaluation. Opponent snapshots refresh every 400
 cumulative real games, and checkpoint saves do not run an extra evaluation
 matchup.
 
@@ -82,6 +92,18 @@ python -m training.pipeline forever --resume
 python -m training.pipeline forever \
   --resume models/rl/domino_rl_forever_seed42
 ```
+
+Start and later resume an unbounded policy-only REINFORCE run with:
+
+```bash
+python -m training.pipeline forever --no-ppo
+python -m training.pipeline forever --no-ppo --resume
+```
+
+The algorithm is part of the exact resume identity. Repeat `--no-ppo` on every
+resume command; a `reinforce_v1` run cannot be resumed as `ppo_v1`, or vice
+versa. Canonical runs remain policy-only in both modes, so `--value-head` stays
+limited to direct self-play experiments.
 
 `--resume` without a value uses the level/seed default directory. For
 convenience, `--resume RUN_DIR` is also accepted and is equivalent to
@@ -157,8 +179,8 @@ python -m diagnostics.pairwise \
   --agent heuristic --opponent random --games 1000 --seed 123
 ```
 
-Canonical diagnostic agent names are `rl`, `neural`, `random_nn`, `heuristic`,
-and `random`. Detailed output schemas and interpretation guidance live in
+Canonical diagnostic agent names are `rl`, `neural`, `heuristic`, and
+`random`. Detailed output schemas and interpretation guidance live in
 [`diagnostics/README.md`](diagnostics/README.md).
 
 ## Generated artifacts
@@ -173,6 +195,7 @@ locations are:
 | `models/domino_sl_standard_seed42.npz` | Canonical supervised policy. |
 | `models/domino_sl_standard_seed42.meta.json` | Supervised origin, configuration, convergence, and SHA-256. |
 | `models/domino_sl_standard_seed42_loss.png` | Canonical training and validation loss curves. |
+| `models/rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Non-reused dataset, cache, supervised checkpoint, metadata, and loss plot for one quick run. |
 | `models/rl/domino_rl_<level>_seed42/` | Complete RL state, milestones, diagnostics, and progress curve. |
 | `models/rl_test/` | Numbered parameter-sweep checkpoints and resume state. |
 | `models/rl_gpi_sweep/` | Games-per-iteration sweep checkpoints and manifests. |
@@ -198,8 +221,12 @@ python tests/test_parallel_diagnostics.py
 python tests/test_parallel_rl.py
 python ui/test_ui_controller.py
 python -m compileall -q agents diagnostics middleware training ui utils \
-  train_script run_pipeline.py
+  train_script
 ```
+
+Pylint is required after every modification and currently reports without
+blocking. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the staged
+[`Pylint roadmap`](docs/PYLINT_ROADMAP.md).
 
 The headless benchmark verifies both fixed-seed equivalence and throughput:
 
@@ -229,6 +256,8 @@ setup, contribution rules, and every module README. In particular:
   flow;
 - [`docs/GPU_SETUP.md`](docs/GPU_SETUP.md) covers CUDA/CuPy installation and
   troubleshooting;
+- [`docs/PYLINT_ROADMAP.md`](docs/PYLINT_ROADMAP.md) records the permissive
+  baseline and staged quality ratchet;
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) defines compatibility, determinism,
   testing, generated-file, and documentation requirements;
 - [`AGENTS.md`](AGENTS.md) gives short instructions for coding agents.

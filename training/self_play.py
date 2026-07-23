@@ -143,6 +143,19 @@ from utils.resource_limits import (
 from utils.runtime_status import format_duration, print_memory_report
 
 
+def _value_prediction_summary(values):
+    """Summarize one batch of pre-update value-head predictions on the host."""
+    host_values = values.get() if hasattr(values, "get") else values
+    flattened = np.asarray(host_values, dtype=np.float64).reshape(-1)
+    return {
+        "sample_count": int(flattened.size),
+        "mean": float(np.mean(flattened)),
+        "std": float(np.std(flattened)),
+        "min": float(np.min(flattened)),
+        "max": float(np.max(flattened)),
+    }
+
+
 def _legacy_policy_update(
     network,
     batch,
@@ -152,6 +165,7 @@ def _legacy_policy_update(
     normalize_advantages,
     use_value_head,
     value_coef,
+    collect_value_predictions=False,
 ):
     """Apply the historical one-full-buffer update for ``--no-ppo``."""
     xp = network.xp
@@ -166,9 +180,12 @@ def _legacy_policy_update(
         dtype=xp.float32,
     ).reshape(1, -1)
     value_returns = None
+    value_predictions = None
     policy_signal = rewards
     if use_value_head:
         values = network.predict_values(x_batch)
+        if collect_value_predictions:
+            value_predictions = _value_prediction_summary(values)
         policy_signal = rewards - values
         value_returns = rewards
     else:
@@ -180,7 +197,7 @@ def _legacy_policy_update(
             policy_signal = (policy_signal - mean) / (std + REWARD_ZERO_EPSILON)
         else:
             policy_signal = policy_signal - mean
-    return network.backward_policy_gradient(
+    metrics = network.backward_policy_gradient(
         actions,
         policy_signal,
         legal_masks=legal_masks,
@@ -189,6 +206,9 @@ def _legacy_policy_update(
         value_coef=value_coef,
         clip_grad_norm=clip_grad_norm,
     )
+    if value_predictions is not None:
+        metrics["value_predictions_before_update"] = value_predictions
+    return metrics
 
 
 def train(
@@ -254,7 +274,7 @@ def train(
     force_resume_incompatible=False,
     checkpoint_callback=None,
 ):
-    """Train an exact game budget with isolated adaptive tuning and PPO v1.
+    """Train an exact game budget with the selected on-policy update rule.
 
     Passing ``iterations`` keeps the old programmatic workload contract and
     implies ``iterations * games_per_iteration`` real games. Normal CLI and
@@ -453,16 +473,26 @@ def train(
     runner_setup_started = time.perf_counter()
     selected_gpi = int(adaptive_tuning["selected_gpi"])
     selected_workers = int(adaptive_tuning["selected_workers"])
-    emit_status("PPO configuration:")
-    emit_status(
-        f"  enabled: {bool(ppo_enabled)} | clip epsilon: {ppo_clip_epsilon:.2f} | "
-        f"target KL: {ppo_target_kl:.3f} | stop KL: {ppo_stop_kl:.3f}"
-    )
-    emit_status(
-        f"  max epochs: {ppo_max_epochs} | minibatches: adaptive, "
-        f"{ppo_min_minibatches} to {ppo_max_minibatches} | preferred buffer: GPU | "
-        "fallback: RAM"
-    )
+    emit_status("RL update configuration:")
+    if ppo_enabled:
+        emit_status(
+            f"  algorithm: {algorithm} | clip epsilon: {ppo_clip_epsilon:.2f} | "
+            f"target KL: {ppo_target_kl:.3f} | stop KL: {ppo_stop_kl:.3f}"
+        )
+        emit_status(
+            f"  max epochs: {ppo_max_epochs} | minibatches: adaptive, "
+            f"{ppo_min_minibatches} to {ppo_max_minibatches} | preferred "
+            "buffer: GPU | fallback: RAM"
+        )
+    else:
+        emit_status(
+            f"  algorithm: {algorithm} | one full-buffer policy-gradient "
+            "update per iteration"
+        )
+        emit_status(
+            "  PPO minibatches, ratios, clipping, KL control, and post-update "
+            "full-buffer evaluation: disabled"
+        )
     emit_status("-" * 70)
 
     resume_configuration = _resume_configuration(
@@ -534,7 +564,7 @@ def train(
     ensure_ram_available(
         estimated_shared_bytes + estimated_batch_bytes,
         safety_config.memory_reserve_mb,
-        "RL self-play, PPO buffer, and shared-policy preflight",
+        "RL self-play decision buffer and shared-policy preflight",
     )
     if not quiet:
         print_memory_report("RL self-play startup memory")
@@ -745,6 +775,11 @@ def train(
                         normalize_advantages=normalize_advantages,
                         use_value_head=use_value_head,
                         value_coef=value_coef,
+                        collect_value_predictions=(
+                            use_value_head
+                            and not quiet
+                            and iteration % log_interval == 0
+                        ),
                     )
                     network.synchronize()
                     runtime_profile.add(
@@ -865,13 +900,6 @@ def train(
                         f" | pool: {len(runner.bank.pool_slots)}"
                         if training_opponent == "self_play" else ""
                     )
-                    value_suffix = ""
-                    if use_value_head and value_loss_window:
-                        value_suffix = (
-                            f" | value loss: {gradient_metrics['value_loss']:.3f} "
-                            f"(avg/{len(value_loss_window)}: "
-                            f"{sum(value_loss_window) / len(value_loss_window):.3f})"
-                        )
                     print(
                         f"Iteration {iteration} | games {games_this_iteration} | cumulative "
                         f"{completed_training_games}/{total_training_games} | reward "
@@ -885,8 +913,22 @@ def train(
                         f"{wins}/{games_this_iteration} "
                         f"(avg/{len(win_rate_window)}: {moving_win_rate:.1%})"
                         f"{pool_suffix} | grad: {_gradient_log_text(gradient_metrics)}"
-                        f"{value_suffix}"
                     )
+                    value_predictions = gradient_metrics.get(
+                        "value_predictions_before_update"
+                    )
+                    if use_value_head and value_predictions is not None:
+                        print(
+                            "  Value head: pre-update V(s) mean/std/min/max "
+                            f"{value_predictions['mean']:+.3f}/"
+                            f"{value_predictions['std']:.3f}/"
+                            f"{value_predictions['min']:+.3f}/"
+                            f"{value_predictions['max']:+.3f} over "
+                            f"{value_predictions['sample_count']} decisions | "
+                            f"value loss {gradient_metrics['value_loss']:.3f} "
+                            f"(avg/{len(value_loss_window)}: "
+                            f"{sum(value_loss_window) / len(value_loss_window):.3f})"
+                        )
                     if ppo_enabled:
                         _print_ppo_window(ppo_window)
             runtime_profile.add(

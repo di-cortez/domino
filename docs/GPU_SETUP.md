@@ -119,7 +119,7 @@ Then run only a help or intentionally small workload first:
 ```bash
 python -m training.training_loop --help
 python -m training.self_play --help
-python run_pipeline.py --help
+python -m train_script.run_pipeline --help
 ```
 
 Use `watch -n 1 nvidia-smi` in another terminal during real training to observe
@@ -140,7 +140,7 @@ Relevant commands include:
 python -m training.training_loop --sl-device auto
 python -m training.training_loop --device gpu
 python -m training.self_play --device gpu
-python run_pipeline.py --sl-device gpu --device gpu
+python -m train_script.run_pipeline --sl-device gpu --device gpu
 ```
 
 The standalone supervised command preserves `--device` as an alias; the

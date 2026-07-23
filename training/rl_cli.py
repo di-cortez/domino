@@ -274,7 +274,7 @@ def add_optional_rl_arguments(parser, *, fresh_from_sl_default=False):
     group.add_argument("--rl-memory-reserve-mb", type=int, default=512)
     group.add_argument("--rl-estimated-worker-mb", type=int, default=256)
     group.add_argument("--rl-max-worker-rss-mb", type=int, default=1024)
-    ppo = parser.add_argument_group("PPO v1 controls")
+    ppo = parser.add_argument_group("RL update algorithm and PPO v1 controls")
     ppo_toggle = ppo.add_mutually_exclusive_group()
     ppo_toggle.add_argument(
         "--ppo",
@@ -288,7 +288,11 @@ def add_optional_rl_arguments(parser, *, fresh_from_sl_default=False):
         dest="ppo_enabled",
         action="store_false",
         default=argparse.SUPPRESS,
-        help="Use the historical one-update REINFORCE path for regression.",
+        help=(
+            "Use one full-buffer REINFORCE update per iteration, without PPO "
+            "minibatches, ratios, clipping, KL control, or post-update "
+            "full-buffer evaluation."
+        ),
     )
     ppo.add_argument("--ppo-clip-epsilon", type=float, default=DEFAULT_CLIP_EPSILON)
     ppo.add_argument("--ppo-target-kl", type=float, default=DEFAULT_TARGET_KL)
@@ -429,6 +433,5 @@ def _training_kwargs_from_args(args):
         "prefer_gpu_buffer": args.prefer_gpu_buffer,
         "gpu_buffer_safety_fraction": args.gpu_buffer_safety_fraction,
     }
-
 
 

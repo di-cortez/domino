@@ -1,4 +1,4 @@
-"""Canonical seed-addressed supervised and game-budgeted RL pipeline."""
+"""Game-budgeted pipeline with ephemeral quick and reusable long-run levels."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import signal
 import sys
@@ -31,6 +32,7 @@ from training.canonical_assets import (
     canonical_training_config,
     inspect_canonical_dataset,
     inspect_canonical_weights,
+    run_scoped_asset_paths,
     write_dataset_metadata,
     write_weights_metadata,
 )
@@ -40,6 +42,10 @@ from training.canonical_run import (
     load_resume_point,
     publish_checkpoint,
     update_diagnostic_markers,
+)
+from training.rl_resume import (
+    LEGACY_TRAINING_ALGORITHM,
+    PPO_TRAINING_ALGORITHM,
 )
 from utils.artifacts import atomic_copy, atomic_write_json, file_sha256
 from utils.runtime_status import format_duration, pipeline_compute_report
@@ -72,6 +78,8 @@ class PipelineConfig:
     periodic_diagnostics: bool
     resume_supported: bool
     final_all_pairs: bool
+    default_seed: int | None
+    reuse_supervised_assets: bool
     dataset_games: int = CANONICAL_DATASET_GAMES
     supervised_epochs: int = CANONICAL_SUPERVISED_MAX_EPOCHS
     rl_games_per_iteration: int = self_play.DEFAULT_GAMES_PER_ITERATION
@@ -94,12 +102,65 @@ class PipelineConfig:
         return 0.0 if self.total_rl_games is None else self.total_rl_games / baseline
 
 
+EPHEMERAL_PIPELINE_LEVELS = {
+    "small": PipelineConfig(
+        scale_name="small",
+        total_rl_games=100_000,
+        diagnostic_games=10_000,
+        periodic_diagnostics=False,
+        resume_supported=False,
+        final_all_pairs=True,
+        default_seed=None,
+        reuse_supervised_assets=False,
+        dataset_games=10_000,
+    ),
+    "default": PipelineConfig(
+        scale_name="default",
+        total_rl_games=500_000,
+        diagnostic_games=10_000,
+        periodic_diagnostics=False,
+        resume_supported=False,
+        final_all_pairs=True,
+        default_seed=None,
+        reuse_supervised_assets=False,
+        dataset_games=50_000,
+    ),
+}
+CANONICAL_PIPELINE_LEVELS = {
+    "big": PipelineConfig(
+        scale_name="big",
+        total_rl_games=2_000_000,
+        diagnostic_games=1_000_000,
+        periodic_diagnostics=True,
+        resume_supported=True,
+        final_all_pairs=True,
+        default_seed=DEFAULT_SEED,
+        reuse_supervised_assets=True,
+    ),
+    "huge": PipelineConfig(
+        scale_name="huge",
+        total_rl_games=10_000_000,
+        diagnostic_games=1_000_000,
+        periodic_diagnostics=True,
+        resume_supported=True,
+        final_all_pairs=True,
+        default_seed=DEFAULT_SEED,
+        reuse_supervised_assets=True,
+    ),
+    "forever": PipelineConfig(
+        scale_name="forever",
+        total_rl_games=None,
+        diagnostic_games=0,
+        periodic_diagnostics=True,
+        resume_supported=True,
+        final_all_pairs=False,
+        default_seed=DEFAULT_SEED,
+        reuse_supervised_assets=True,
+    ),
+}
 PIPELINE_LEVELS = {
-    "small": PipelineConfig("small", 100_000, 10_000, False, False, True),
-    "default": PipelineConfig("default", 500_000, 10_000, False, False, True),
-    "big": PipelineConfig("big", 2_000_000, 1_000_000, True, True, True),
-    "huge": PipelineConfig("huge", 10_000_000, 1_000_000, True, True, True),
-    "forever": PipelineConfig("forever", None, 0, True, True, False),
+    **EPHEMERAL_PIPELINE_LEVELS,
+    **CANONICAL_PIPELINE_LEVELS,
 }
 SCALE_FACTORS = {
     name: config.scale_factor for name, config in PIPELINE_LEVELS.items()
@@ -108,6 +169,35 @@ SCALE_FACTORS = {
 
 def _build_config(scale_name):
     return PIPELINE_LEVELS[scale_name]
+
+
+def _new_execution_id():
+    timestamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    return f"{timestamp}-{secrets.token_hex(4)}"
+
+
+def _resolve_execution_identity(args):
+    """Assign the level's default seed and optional unique artifact namespace."""
+    config = _build_config(args.scale)
+    if args.seed is None:
+        args.seed = (
+            int(config.default_seed)
+            if config.default_seed is not None
+            else secrets.randbits(32)
+        )
+    args.execution_id = (
+        None if config.reuse_supervised_assets else _new_execution_id()
+    )
+    return args
+
+
+def _pipeline_run_dir(root, config, args):
+    return canonical_run_dir(
+        root,
+        config.scale_name,
+        args.seed,
+        execution_id=args.execution_id,
+    )
 
 
 def _diagnostic_summary_text(summary):
@@ -201,17 +291,24 @@ def _progress_callback(label, total, unit):
 
 
 def ensure_canonical_supervised_assets(root, config, args):
-    """Reuse or explicitly rebuild the canonical dataset and SL checkpoint."""
+    """Build run-local quick assets or reuse compatible long-run assets."""
     seed = int(args.seed)
     dataset_games = int(args.dataset_games or config.dataset_games)
     max_epochs = int(args.supervised_max_epochs or config.supervised_epochs)
-    paths = canonical_asset_paths(root, seed)
+    if config.reuse_supervised_assets:
+        paths = canonical_asset_paths(root, seed)
+    else:
+        paths = run_scoped_asset_paths(_pipeline_run_dir(root, config, args))
     generation_config = _dataset_generation_identity(args, dataset_games)
     rebuild_dataset = bool(
-        args.rebuild_dataset or args.rebuild_supervised_assets
+        not config.reuse_supervised_assets
+        or args.rebuild_dataset
+        or args.rebuild_supervised_assets
     )
     retrain_weights = bool(
-        args.retrain_supervised or args.rebuild_supervised_assets
+        not config.reuse_supervised_assets
+        or args.retrain_supervised
+        or args.rebuild_supervised_assets
     )
 
     dataset_check = inspect_canonical_dataset(
@@ -229,8 +326,9 @@ def ensure_canonical_supervised_assets(root, config, args):
         dataset_metadata = dataset_check.metadata
         dataset_status = "reused"
     else:
-        print("\nCanonical dataset generation")
-        with _progress_callback("Canonical dataset", dataset_games, "game") as progress:
+        scope = "Canonical" if config.reuse_supervised_assets else "Run-scoped"
+        print(f"\n{scope} dataset generation")
+        with _progress_callback(f"{scope} dataset", dataset_games, "game") as progress:
             dataset_summary = dataset_generator.generate_dataset(
                 game_count=dataset_games,
                 output_file=paths.dataset,
@@ -270,7 +368,8 @@ def ensure_canonical_supervised_assets(root, config, args):
         weights_metadata = weights_check.metadata
         weights_status = "reused"
     else:
-        print("\nCanonical supervised training")
+        scope = "Canonical" if config.reuse_supervised_assets else "Run-scoped"
+        print(f"\n{scope} supervised training")
         with _progress_callback("Supervised training", max_epochs, "epoch") as progress:
             supervised_summary = training_loop.train_supervised(
                 epochs=max_epochs,
@@ -310,7 +409,11 @@ def ensure_canonical_supervised_assets(root, config, args):
         weights_status = "trained"
 
     print("\n" + "-" * 70)
-    print("Canonical supervised assets")
+    print(
+        "Reusable canonical supervised assets"
+        if config.reuse_supervised_assets
+        else "Run-scoped supervised assets (never reused)"
+    )
     print("-" * 70)
     print(f"Seed: {seed}")
     print(f"Dataset: {paths.dataset}")
@@ -353,6 +456,13 @@ def _ppo_config(args):
         "prefer_gpu_buffer": bool(args.prefer_gpu_buffer),
         "gpu_buffer_safety_fraction": float(args.gpu_buffer_safety_fraction),
     }
+
+
+def _rl_algorithm(args):
+    return (
+        PPO_TRAINING_ALGORITHM
+        if args.ppo_enabled else LEGACY_TRAINING_ALGORITHM
+    )
 
 
 def _rl_config(args):
@@ -676,11 +786,12 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
         if args.total_training_games is not None and not config.unbounded
         else config.total_rl_games
     )
-    run_dir = canonical_run_dir(root, config.scale_name, seed)
+    run_dir = _pipeline_run_dir(root, config, args)
     if args.restart_rl:
         archive = _archive_run_dir(run_dir)
         if archive is not None:
             print(f"Archived previous RL run at {archive}.")
+    algorithm = _rl_algorithm(args)
     ppo_config = _ppo_config(args)
     supervised_path = assets["paths"].weights
     supervised_hash = assets["weights_metadata"]["weights_sha256"]
@@ -701,6 +812,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             seed=seed,
             supervised_weights_sha256=supervised_hash,
             ppo_config=ppo_config,
+            algorithm=algorithm,
             force_incompatible=args.force_resume_incompatible,
         )
         if args.resume_from and source_run_dir.resolve() != run_dir.resolve():
@@ -738,6 +850,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
         supervised_weights_sha256=supervised_hash,
         ppo_config=ppo_config,
         rl_config=_rl_config(args),
+        algorithm=algorithm,
         diagnostic_config={
             "periodic_seed": int(periodic_diagnostic_seed(seed)),
             "periodic_seed_namespace": "periodic_rl_vs_random",
@@ -784,6 +897,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
     print(f"Pipeline level: {config.scale_name}")
     print(f"Target RL games: {'forever' if target is None else f'{target:,}'}")
     print(f"Seed: {seed}")
+    print(f"RL algorithm: {algorithm}")
     print(f"Supervised checkpoint: {supervised_path}")
     print(f"Resume: {'yes' if resuming else 'no'}")
     print(f"Games already completed: {completed:,}")
@@ -867,6 +981,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             seed=seed,
             supervised_weights_sha256=supervised_hash,
             ppo_config=ppo_config,
+            algorithm=algorithm,
             force_incompatible=args.force_resume_incompatible,
         )
 
@@ -972,6 +1087,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
                     supervised_weights_sha256=supervised_hash,
                     summary={
                         **event,
+                        "rl_training_algorithm": algorithm,
                         "ppo_configuration": ppo_config,
                     },
                     last_periodic_diagnostic_game=last_periodic,
@@ -1030,6 +1146,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
                 seed=seed,
                 supervised_weights_sha256=supervised_hash,
                 ppo_config=ppo_config,
+                algorithm=algorithm,
                 force_incompatible=args.force_resume_incompatible,
             )
             latest_weights = resume_point.weights_path
@@ -1107,9 +1224,11 @@ def run_final_diagnostics(root, config, args, assets, rl_result):
     game_count = int(args.final_diagnostic_games or config.diagnostic_games)
     run_dir = Path(rl_result["run_dir"])
     output = run_dir / "final_diagnostics"
+    _agents, matchups = evaluate.diagnostic_plan()
+    matchup_count = len(matchups)
     print(
-        f"\nFinal holdout diagnostics: 5 matchups x {game_count:,} games "
-        f"({5 * game_count:,} total)."
+        f"\nFinal holdout diagnostics: {matchup_count} matchups x "
+        f"{game_count:,} games ({matchup_count * game_count:,} total)."
     )
     summary = evaluate.run_all_pairs(
         game_count=game_count,
@@ -1135,8 +1254,10 @@ def run_final_diagnostics(root, config, args, assets, rl_result):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Run canonical seed-addressed supervised assets, exact-game RL, "
-            "resume, and level-specific diagnostics."
+            "Run isolated quick or reusable seed-addressed supervised assets, "
+            "exact-game RL, resume, and level-specific diagnostics. Small and "
+            "default choose a fresh seed and artifact namespace unless --seed "
+            "is explicit; big, huge, and forever default to reusable seed 42."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -1145,9 +1266,12 @@ def parse_args(argv=None):
         nargs="?",
         default="default",
         choices=tuple(PIPELINE_LEVELS),
-        help="Canonical pipeline level.",
+        help=(
+            "Quick isolated level (small/default) or reusable long-run level "
+            "(big/huge/forever)."
+        ),
     )
-    dataset = parser.add_argument_group("canonical dataset controls")
+    dataset = parser.add_argument_group("pipeline dataset controls")
     dataset.add_argument(
         "--dataset-workers",
         type=dataset_generator._worker_count,
@@ -1222,14 +1346,14 @@ def parse_args(argv=None):
     canonical.add_argument("--final-diagnostic-games", type=int)
     canonical.add_argument("--supervised-max-epochs", type=int, help=argparse.SUPPRESS)
     canonical.add_argument("--artifact-root", type=Path, default=ROOT)
-    parser.set_defaults(seed=DEFAULT_SEED)
+    parser.set_defaults(seed=None)
     args = parser.parse_args(argv)
     if isinstance(args.resume, Path):
         if args.resume_from is not None:
             parser.error("--resume RUN_DIR cannot be combined with --resume-from")
         args.resume_from = args.resume
         args.resume = False
-    return args
+    return _resolve_execution_identity(args)
 
 
 def validate_args(args, config):
@@ -1273,10 +1397,11 @@ def validate_args(args, config):
     ):
         if int(getattr(args, name)) < 1:
             raise ValueError(f"{name} must be positive.")
-    if not args.ppo_enabled:
-        raise ValueError("Canonical RL runs require the current PPO algorithm.")
     if args.value_head:
-        raise ValueError("Canonical PPO runs do not use the legacy value head.")
+        raise ValueError(
+            "Canonical pipelines remain policy-only; the value head is "
+            "available only in direct self-play experiments."
+        )
 
 
 def main(argv=None):
@@ -1308,8 +1433,16 @@ def main(argv=None):
     print(
         f"Canonical pipeline: level={config.scale_name}, seed={args.seed}, "
         f"dataset={effective_dataset_games:,} games, supervised max="
-        f"{effective_supervised_epochs:,} epochs, RL target={target_text} games."
+        f"{effective_supervised_epochs:,} epochs, RL target={target_text} games, "
+        f"algorithm={_rl_algorithm(args)}."
     )
+    if config.reuse_supervised_assets:
+        print("Supervised asset policy: compatible seed-addressed assets are reusable.")
+    else:
+        print(
+            "Supervised asset policy: this quick run has a unique namespace; "
+            "its dataset and supervised checkpoint are never reused."
+        )
     print(pipeline_compute_report(args.device, args.sl_device))
     assets = ensure_canonical_supervised_assets(root, config, args)
     rl_result = run_rl_pipeline(

@@ -16,7 +16,7 @@ Batch-training drivers for the full pipeline described in
    cumulative RL games. This
    stage is fully parameterized from the command line so the script can drive
    repeated batch runs that only vary RL hyperparameters;
-4. run the **five agent-vs-random diagnostics** (`diagnostics.evaluate`) —
+4. run the **four agent-vs-random diagnostics** (`diagnostics.evaluate`) —
    evaluating the exact
    RL/SL checkpoints this run used, with the wrapper's historical 50,000
    games/matchup. Canonical `big`/`huge` use 1,000,000 per matchup.
@@ -40,6 +40,23 @@ artifacts across batch runs that only sweep RL hyperparameters.
 Use `python -m training.pipeline <level>` for canonical seed-addressed assets,
 game-budget levels, periodic monitoring, complete resume, and `forever`. This
 shell wrapper remains an independent hyperparameter-experiment driver.
+
+The compatibility Python entry point formerly stored at the repository root
+now lives here. Run it as `python -m train_script.run_pipeline <level>`; it
+delegates to `training.pipeline` while keeping the historical focused helpers
+available to tests and tooling.
+
+The canonical compatibility entry point accepts the same update selection and
+resume contract. For example:
+
+```bash
+python -m train_script.run_pipeline forever --no-ppo
+python -m train_script.run_pipeline forever --no-ppo --resume
+```
+
+This selects policy-only `reinforce_v1`, which performs one full-buffer update
+per iteration without PPO control calculations. The algorithm is persisted,
+so the resume command must repeat `--no-ppo`.
 
 ## Convergence criteria
 
@@ -263,7 +280,7 @@ When safe, encoded arrays stay in host RAM; otherwise the training module uses
 an atomic disk-backed mmap cache. GPU runs upload the complete dataset once if
 it fits safely, or rotate global-permutation windows through reusable buffers.
 Use `--sl-batch-size N` for a fixed batch, or `--sl-no-batch-autotune` for the
-device default. Detailed standalone logs show all decisions. `run_pipeline.py`
+device default. Detailed standalone logs show all decisions. `train_script/run_pipeline.py`
 keeps per-epoch/checkpoint details suppressed, but prints the concise retained
 batch tests (median time, total time, throughput, gain, decision, and selected
 size) around its normal progress bar and one-line SL summary.
@@ -276,8 +293,8 @@ fixed epoch budget.
 
 ### Diagnostics stage and per-run output directories
 
-Step 4 wraps `python -m diagnostics.evaluate`, the same five agent-vs-random comparisons
-`run_pipeline.py` runs after RL training (`diagnostics/evaluate.py::run_all_pairs`),
+Step 4 wraps `python -m diagnostics.evaluate`, the same four agent-vs-random comparisons
+`train_script/run_pipeline.py` runs after RL training (`diagnostics/evaluate.py::run_all_pairs`),
 passing `--rl-weights`/`--neural-weights` explicitly so it evaluates the exact
 checkpoints this invocation trained or reused, rather than falling back to
 `diagnostics.pairwise`'s hardcoded `models/domino_rl_weights.npz` /
@@ -292,7 +309,7 @@ count for each matchup.
 Every invocation gets its own output directory —
 `diagnostics/results/<rl-weights-basename>/` (the `.npz` suffix stripped from
 `--rl-weights-file`) — instead of the single shared `all_pairs/` directory
-`run_pipeline.py` always writes to. A batch of runs that only vary
+`train_script/run_pipeline.py` always writes to. A batch of runs that only vary
 `--rl-weights-file` per configuration therefore keeps every configuration's
 comparison table, CSV, and plots side by side instead of the next run
 overwriting the last one. Override the computed path directly with
@@ -543,7 +560,7 @@ parameter (also threaded through `agents/rl_nn.py::PolicyNetwork.load_from_sl`'s
 `diagnostics.pairwise.run_pairwise()`, and
 `diagnostics.rl_sweep_table.build_report()` directly instead of spawning a
 subprocess for each. `sl_weights_data` defaults to `None` everywhere it was
-added, so every existing caller (the `.sh` script, `run_pipeline.py`, direct
+added, so every existing caller (the `.sh` script, `train_script/run_pipeline.py`, direct
 CLI use) is unaffected.
 
 Like the shell version, every non-resumed point starts fresh from that shared

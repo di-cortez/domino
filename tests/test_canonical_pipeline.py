@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from agents.rl_nn import PolicyNetwork
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from diagnostics.rl_progress import (
     PERIODIC_SUMMARY_RETENTION,
@@ -28,6 +29,7 @@ from training.canonical_assets import (
     canonical_training_config,
     inspect_canonical_dataset,
     inspect_canonical_weights,
+    run_scoped_asset_paths,
     write_dataset_metadata,
     write_weights_metadata,
 )
@@ -51,11 +53,29 @@ from training.pipeline import (
     _run_periodic_point,
     next_training_stop,
     parse_args,
+    validate_args,
+)
+from training.rl_resume import (
+    LEGACY_TRAINING_ALGORITHM,
+    PPO_TRAINING_ALGORITHM,
 )
 from utils.artifacts import file_sha256
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_test_supervised_checkpoint(path, seed=123):
+    network = PolicyNetwork(random_seed=seed, device="cpu")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        **{
+            name: np.asarray(getattr(network, name))
+            for name in ("W1", "b1", "W2", "b2", "W3", "b3")
+        },
+    )
+    return path
 
 
 def _generation_config(dataset_games=3):
@@ -105,13 +125,38 @@ def _periodic_row(games, checkpoint_hash="a", diagnostic_seed=7):
     }
 
 
-def test_canonical_levels_and_default_seed_are_exact():
-    assert parse_args([]).seed == 42
-    assert PIPELINE_LEVELS["small"].dataset_games == 100_000
-    assert PIPELINE_LEVELS["default"].dataset_games == 100_000
+def test_quick_and_long_run_level_policies_are_distinct(monkeypatch):
+    seeds = iter((101, 202))
+    tokens = iter(("aaaaaaaa", "bbbbbbbb", "cccccccc"))
+    monkeypatch.setattr(
+        "training.pipeline.secrets.randbits",
+        lambda bits: next(seeds) if bits == 32 else None,
+    )
+    monkeypatch.setattr(
+        "training.pipeline.secrets.token_hex",
+        lambda bytes_count: next(tokens) if bytes_count == 4 else None,
+    )
+
+    first_quick = parse_args(["default"])
+    second_quick = parse_args(["default"])
+    explicit_quick = parse_args(["small", "--seed", "7"])
+    long_run = parse_args(["big"])
+
+    assert first_quick.seed == 101
+    assert second_quick.seed == 202
+    assert first_quick.execution_id != second_quick.execution_id
+    assert explicit_quick.seed == 7
+    assert explicit_quick.execution_id is not None
+    assert long_run.seed == 42
+    assert long_run.execution_id is None
+    assert PIPELINE_LEVELS["small"].dataset_games == 10_000
+    assert PIPELINE_LEVELS["default"].dataset_games == 50_000
     assert PIPELINE_LEVELS["big"].dataset_games == 100_000
     assert PIPELINE_LEVELS["huge"].dataset_games == 100_000
     assert PIPELINE_LEVELS["forever"].dataset_games == 100_000
+    assert not PIPELINE_LEVELS["small"].reuse_supervised_assets
+    assert not PIPELINE_LEVELS["default"].reuse_supervised_assets
+    assert PIPELINE_LEVELS["big"].reuse_supervised_assets
     assert PIPELINE_LEVELS["small"].supervised_epochs == 5_000
     assert PIPELINE_LEVELS["default"].supervised_epochs == 5_000
     assert PIPELINE_LEVELS["big"].supervised_epochs == 5_000
@@ -140,6 +185,20 @@ def test_resume_accepts_default_or_explicit_run_directory():
     assert explicit.resume_from == Path(
         "models/rl/domino_rl_forever_seed42"
     )
+
+
+def test_canonical_pipeline_accepts_policy_only_reinforce():
+    ppo = parse_args(["forever"])
+    reinforce = parse_args(["forever", "--no-ppo"])
+
+    validate_args(ppo, PIPELINE_LEVELS["forever"])
+    validate_args(reinforce, PIPELINE_LEVELS["forever"])
+    assert ppo.ppo_enabled is True
+    assert reinforce.ppo_enabled is False
+
+    critic = parse_args(["forever", "--no-ppo", "--value-head"])
+    with pytest.raises(ValueError, match="remain policy-only"):
+        validate_args(critic, PIPELINE_LEVELS["forever"])
 
 
 def test_forever_periodic_workers_are_recovered_once_and_then_persisted(tmp_path):
@@ -244,6 +303,20 @@ def test_canonical_paths_and_run_directory_include_seed(tmp_path):
     assert paths.weights.name == "domino_sl_standard_seed42.npz"
     assert paths.weights_meta.name == "domino_sl_standard_seed42.meta.json"
     assert canonical_run_dir(tmp_path, "big", 42).name == "domino_rl_big_seed42"
+    scoped_run = canonical_run_dir(
+        tmp_path,
+        "small",
+        7,
+        execution_id="20260723T120000-abcd1234",
+    )
+    assert scoped_run.name == (
+        "domino_rl_small_seed7_run20260723T120000-abcd1234"
+    )
+    scoped_assets = run_scoped_asset_paths(scoped_run)
+    assert scoped_assets.dataset == (
+        scoped_run / "supervised" / "supervised_dataset.jsonl"
+    )
+    assert scoped_assets.weights == scoped_run / "supervised" / "domino_sl.npz"
 
 
 def test_canonical_asset_hashes_and_metadata_control_reuse(tmp_path):
@@ -341,6 +414,14 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
     first = create_run_config(run_dir, **values)
     second = create_run_config(run_dir, **values)
     assert second["created_at"] == first["created_at"]
+    assert first["algorithm"] == PPO_TRAINING_ALGORITHM
+
+    with pytest.raises(ValueError, match="algorithm"):
+        create_run_config(
+            run_dir,
+            **values,
+            algorithm=LEGACY_TRAINING_ALGORITHM,
+        )
 
     extended = dict(values)
     extended.update(pipeline_level="huge", target_rl_games=10_000_000)
@@ -355,6 +436,108 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
     assert updated["created_at"] == first["created_at"]
     assert updated["target_rl_games"] == 10_000_000
     assert updated["pipeline_level"] == "huge"
+
+
+def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
+    supervised = _write_test_supervised_checkpoint(tmp_path / "sl.npz")
+    supervised_hash = file_sha256(supervised)
+    safety = ParallelSafetyConfig(
+        memory_reserve_mb=0,
+        estimated_worker_mb=1,
+        max_worker_rss_mb=1024,
+    )
+    common = {
+        "total_training_games": 4,
+        "games_per_iteration": 2,
+        "adaptive_gpi": False,
+        "checkpoint_interval": 1,
+        "pool_refresh_games": 2,
+        "max_pool_size": 2,
+        "sl_weights_path": str(supervised),
+        "seed": 321,
+        "device": "cpu",
+        "workers": 1,
+        "safety_config": safety,
+        "quiet": True,
+        "numbered_checkpoints": True,
+        "ppo_enabled": False,
+        "use_value_head": False,
+    }
+    uninterrupted = self_play.train(
+        rl_weights_path=str(tmp_path / "uninterrupted" / "training.npz"),
+        fresh_from_sl=True,
+        **common,
+    )
+    partial = self_play.train(
+        rl_weights_path=str(tmp_path / "split" / "training.npz"),
+        stop_after_training_games=2,
+        fresh_from_sl=True,
+        **common,
+    )
+
+    profile = partial["runtime_profile_delta"]
+    assert "legacy_policy_update" in profile["sections_seconds"]
+    assert "ppo_update" not in profile["sections_seconds"]
+    assert profile["ppo_sections_seconds"] == {}
+
+    run_dir = canonical_run_dir(tmp_path, "forever", 321)
+    create_run_config(
+        run_dir,
+        root=ROOT,
+        pipeline_level="forever",
+        seed=321,
+        target_rl_games=None,
+        supervised_weights_path=supervised,
+        supervised_weights_sha256=supervised_hash,
+        ppo_config=partial["ppo_configuration"],
+        rl_config={"normalize_advantages": False},
+        algorithm=LEGACY_TRAINING_ALGORITHM,
+    )
+    state = publish_checkpoint(
+        run_dir,
+        root=ROOT,
+        pipeline_level="forever",
+        seed=321,
+        target_rl_games=None,
+        supervised_weights_path=supervised,
+        supervised_weights_sha256=supervised_hash,
+        summary=partial,
+        last_periodic_diagnostic_game=0,
+        next_periodic_diagnostic_game=100_000,
+    )
+    assert state["algorithm"] == LEGACY_TRAINING_ALGORITHM
+    assert state["policy_updates_completed"] == 1
+    assert state["ppo_updates_completed"] == 0
+    assert state["reinforce_updates_completed"] == 1
+
+    point = load_resume_point(
+        run_dir,
+        seed=321,
+        supervised_weights_sha256=supervised_hash,
+        ppo_config=partial["ppo_configuration"],
+        algorithm=LEGACY_TRAINING_ALGORITHM,
+    )
+    with pytest.raises(ValueError, match="algorithm"):
+        load_resume_point(
+            run_dir,
+            seed=321,
+            supervised_weights_sha256=supervised_hash,
+            ppo_config=partial["ppo_configuration"],
+            algorithm=PPO_TRAINING_ALGORITHM,
+        )
+
+    resumed = self_play.train(
+        rl_weights_path=str(tmp_path / "split" / "training.npz"),
+        start_iteration=point.completed_iterations,
+        resume_weights_path=str(point.weights_path),
+        resume_state_file=str(point.resume_state_path),
+        **common,
+    )
+    with np.load(uninterrupted["rl_weights_path"], allow_pickle=False) as left:
+        with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
+            assert left.files == right.files
+            for name in left.files:
+                np.testing.assert_array_equal(left[name], right[name])
 
 
 def test_periodic_and_final_seed_namespaces_are_separate_and_stable():

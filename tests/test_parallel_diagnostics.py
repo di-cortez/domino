@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diagnostics.pairwise import evaluate_pair, run_pairwise
+from diagnostics.pairwise import evaluate_pair, print_summary, run_pairwise
+from agents.rl_nn import PolicyNetwork
 from diagnostics.evaluate import run_all_pairs
 from diagnostics.parallel_runner import (
     MAX_DIAGNOSTIC_WORKERS,
@@ -32,7 +33,10 @@ from diagnostics.plots import (
     win_rate_color_band,
     worst_case_margin_of_error,
 )
-from run_pipeline import _diagnostic_summary_text, parse_args as parse_pipeline_args
+from train_script.run_pipeline import (
+    _diagnostic_summary_text,
+    parse_args as parse_pipeline_args,
+)
 from utils.resource_limits import MemorySafetyError, choose_safe_rl_device
 
 
@@ -85,8 +89,8 @@ class ParallelDiagnosticsTests(unittest.TestCase):
         self.assertEqual(len(WIN_RATE_COLOR_BANDS), 10)
 
     def test_aggregate_table_renders_one_row_to_png_and_pdf(self):
-        agents = ("rl", "neural", "random_nn", "heuristic", "random")
-        rates = (0.28, 0.42, 0.52, 0.63, 0.72)
+        agents = ("rl", "neural", "heuristic", "random")
+        rates = (0.28, 0.42, 0.63, 0.72)
         summaries = [
             {
                 "agent": agent,
@@ -98,7 +102,7 @@ class ParallelDiagnosticsTests(unittest.TestCase):
         ]
         metadata = {
             "game_count_per_matchup": 10000,
-            "evaluated_matchups": 5,
+            "evaluated_matchups": 4,
             "duration_s": 125.0,
             "seed": 42,
             "selected_workers_by_matchup": {
@@ -124,6 +128,7 @@ class ParallelDiagnosticsTests(unittest.TestCase):
         self.assertTrue(any("±0.98 percentage points" in line for line in header))
         self.assertTrue(any("168→256→128→56" in line for line in header))
         self.assertTrue(any("sha256 0123456789ab" in line for line in header))
+        self.assertFalse(any("V(s)" in line for line in header))
 
         with tempfile.TemporaryDirectory() as temp_dir:
             png_path = Path(temp_dir) / "table.png"
@@ -162,6 +167,79 @@ class ParallelDiagnosticsTests(unittest.TestCase):
         self.assertEqual(single_worker, parallel)
         self.assertTrue(metadata["parallel"]["workers_cpu_only"])
         self.assertLessEqual(metadata["parallel"]["initial_workers"], 2)
+
+    def test_value_head_predictions_are_reported_by_pairwise_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            checkpoint = root / "critic.npz"
+            network = PolicyNetwork(
+                random_seed=123,
+                use_value_head=True,
+                device="cpu",
+            )
+            network.Wv.fill(0.0)
+            network.bv.fill(0.25)
+            network.save(checkpoint)
+
+            result = run_pairwise(
+                "rl",
+                "random",
+                game_count=4,
+                weights=checkpoint,
+                seed=456,
+                output_dir=root / "pairwise",
+                generate_plots=False,
+                print_console_summary=False,
+                workers=1,
+                safety_config=ParallelSafetyConfig(
+                    memory_reserve_mb=0,
+                    estimated_worker_mb=1,
+                ),
+                save_game_records=False,
+            )
+
+            summary = result["summary"]
+            values = summary["value_head_predictions"]
+            self.assertGreater(values["sample_count"], 0)
+            self.assertEqual(
+                values["sample_count"],
+                summary["choice_opportunities"]["real_decision_turns"],
+            )
+            self.assertEqual(values["nonfinite_count"], 0)
+            self.assertAlmostEqual(values["mean"], 0.25)
+            self.assertAlmostEqual(values["std"], 0.0)
+            self.assertAlmostEqual(values["min"], 0.25)
+            self.assertAlmostEqual(values["max"], 0.25)
+            saved = (root / "pairwise" / "summary.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn('"value_head_predictions"', saved)
+
+            with mock.patch("builtins.print") as printer:
+                print_summary(summary, duration_s=1.0)
+            self.assertTrue(
+                any(
+                    "Value head V(s)" in str(call.args[0])
+                    for call in printer.call_args_list
+                    if call.args
+                )
+            )
+
+            header = diagnostic_table_header_lines(
+                [summary],
+                ("rl",),
+                report_metadata={
+                    "network_metadata": {
+                        "rl": {
+                            "architecture": [168, 256, 128, 56],
+                            "total_parameters": 83513,
+                            "value_head": True,
+                            "checkpoint_name": checkpoint.name,
+                        },
+                    },
+                },
+            )
+            self.assertTrue(any("RL value head V(s)" in line for line in header))
 
     def test_hard_worker_limit_and_low_ram_cap(self):
         safety = ParallelSafetyConfig(
@@ -290,17 +368,16 @@ class ParallelDiagnosticsTests(unittest.TestCase):
         expected_matchups = {
             "rl_vs_random",
             "neural_vs_random",
-            "random_nn_vs_random",
             "heuristic_vs_random",
             "random_vs_random",
         }
         self.assertEqual(report["autotune"]["scope"], "per_matchup")
         self.assertEqual(set(report["selected_workers_by_matchup"]), expected_matchups)
         self.assertEqual(set(report["autotune"]["matchups"]), expected_matchups)
-        self.assertEqual(report["autotune"]["reused_game_count"], 10)
+        self.assertEqual(report["autotune"]["reused_game_count"], 8)
         self.assertEqual(report["comparison_opponent"], "random")
         self.assertEqual(report["report_layout"], "single_row")
-        self.assertEqual(set(report["network_metadata"]), {"rl", "neural", "random_nn"})
+        self.assertEqual(set(report["network_metadata"]), {"rl", "neural"})
         for tuning in report["autotune"]["matchups"].values():
             self.assertEqual(tuning["games_per_test"], 1)
             self.assertEqual(tuning["reused_game_count"], 2)

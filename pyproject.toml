@@ -1,0 +1,36 @@
+[tool.pylint.main]
+load-plugins = ["pylint.extensions.mccabe"]
+recursive = true
+exit-zero = true  # Report only; do not block CI yet.
+
+[tool.pylint.messages_control]
+disable = ["all"]
+enable = [
+    "undefined-variable",
+    "used-before-assignment",
+    "dangerous-default-value",
+    "duplicate-key",
+    "bare-except",
+    "unreachable",
+    "cyclic-import",
+    "too-many-lines",
+    "too-complex",
+    "too-many-statements",
+    "too-many-branches",
+    "too-many-locals",
+    "too-many-arguments",
+    "too-many-return-statements",
+    "too-many-nested-blocks",
+]
+
+[tool.pylint.design]
+max-args = 25
+max-branches = 50
+max-complexity = 50
+max-locals = 60
+max-returns = 20
+max-statements = 200
+max-nested-blocks = 10
+
+[tool.pylint.format]
+max-module-lines = 2500

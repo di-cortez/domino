@@ -9,7 +9,6 @@ many two-player domino games and write compact metrics, CSV data, and plots.
 |---|---|
 | `rl` | `RLAgent` loaded from the RL self-play checkpoint and used in evaluation mode. |
 | `neural` | `NeuralAgent` loaded from supervised-learning weights. |
-| `random_nn` | `RandomNeuralAgent` using the supervised architecture with fixed, untrained random weights. |
 | `heuristic` | `StrategicAgent`, the handcrafted rule-based agent. |
 | `random` | Uniform random legal move. |
 
@@ -17,7 +16,7 @@ many two-player domino games and write compact metrics, CSV data, and plots.
 
 | Command | Matchups |
 |---|---:|
-| `python -m diagnostics.evaluate` | 5: every supported agent vs `random`. |
+| `python -m diagnostics.evaluate` | 4: every supported agent vs `random`. |
 
 The command uses 10,000 games per matchup by default. Set the explicit count
 with `-n`/`--games`:
@@ -82,18 +81,19 @@ do not belong to the selected plan, keeping its contents internally consistent.
 
 | File or folder | Contents |
 |---|---|
-| `all_pairs_table.png` | Metadata-rich one-row comparison of all five agents against random. |
+| `all_pairs_table.png` | Metadata-rich one-row comparison of all four agents against random. |
 | `all_pairs_table.pdf` | Vector PDF version of the same aggregate comparison. |
 | `choice_opportunities.png` | Aggregate histogram of draw/pass/choice opportunities across all evaluated matchups. |
-| `all_pairs_matrix.csv` | One row per evaluated matchup. |
+| `all_pairs_matrix.csv` | One row per evaluated matchup, including `V(s)` count/mean/std/min/max columns when the evaluated checkpoint has a value head. |
 | `all_pairs_summary.json` | Full aggregate report with `selected_workers_by_matchup`, per-matchup retained autotuning reports, accumulated choice-opportunity stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
 
 The aggregate PNG/PDF header records games per matchup, total games,
 elapsed evaluation time, seed, selected workers, checkpoint names, neural
 architectures, parameter counts, checkpoint SHA-256 prefixes, and whether the
-RL checkpoint contains a value head. It also reports the 95% worst-case
-percentage margin of error as
+RL checkpoint contains a value head. When it does, the table adds the count and
+mean/std/min/max of `V(s)` over RL's real decision states. It also reports the
+95% worst-case percentage margin of error as
 `sqrt(0.9604 / n)`, rounded to two significant digits, where `n` is the games
 per matchup.
 
@@ -108,7 +108,7 @@ The `big`, `huge`, and `forever` pipelines evaluate only RL versus `random` at
 0, 100,000, 200,000, ... cumulative RL games. Point zero is the canonical
 supervised checkpoint. Every point uses the same seed namespace and the same
 100,000 game identities, so checkpoints are compared on a paired monitor set.
-The final five-matchup evaluation uses a separate holdout namespace.
+The final four-matchup evaluation uses a separate holdout namespace.
 
 Each milestone is saved before evaluation. Diagnostics use separate RNG state
 and cannot change policy weights, optimizer, opponent pool, counters, GPI, or
@@ -170,19 +170,28 @@ Use the helper directly when only one matchup is needed:
 ```bash
 python -m diagnostics.pairwise --agent heuristic --opponent random
 python -m diagnostics.pairwise --agent rl --opponent neural
-python -m diagnostics.pairwise --agent neural --opponent random_nn
+python -m diagnostics.pairwise --agent neural --opponent heuristic
 python -m diagnostics.pairwise --agent heuristic --opponent random -j 4
 ```
 
 The evaluated agent alternates between player 0 and player 1 to reduce
 first-player bias.
 
+If the evaluated RL checkpoint contains both `Wv` and `bv`, diagnostics load
+the critic and report `value_head_predictions`: sample/finite/non-finite counts
+plus mean, population standard deviation, minimum, and maximum `V(s)`. Only
+real policy decisions are included. The value is calculated from the hidden
+activation already produced for the policy choice, so diagnostics do not run a
+second network forward. Policy-only checkpoints retain the previous schema and
+console/table presentation without an empty value summary; the aggregate CSV's
+fixed value columns remain blank.
+
 By default, pairwise files are written under
 `diagnostics/results/pairwise/<agent>_vs_<opponent>/`:
 
 | File | Contents |
 |---|---|
-| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, and `duration_s`. |
+| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, optional value-head prediction statistics, and `duration_s`. |
 | `games.csv` | Compact one-row-per-game data with position, result, turns, initial hands as JSON arrays, and final pip counts. |
 | `cumulative_rates.png` | Win/draw/loss rates over time. |
 | `result_distribution.png` | Final result counts. |

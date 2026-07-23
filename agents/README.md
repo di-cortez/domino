@@ -10,7 +10,6 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 | `heuristic_agent.py` | `StrategicAgent`, the exact-probability rule-based teacher used for supervised labels and benchmarks. |
 | `nn.py` | Per-network NumPy/CuPy float32 MLP backend with explicit `auto`/`cpu`/`gpu` selection. |
 | `neural_agent.py` | Loads `models/domino_sl_weights.npz` and plays the supervised policy. |
-| `random_neural_agent.py` | Uses the same supervised architecture with fixed random initialization and no checkpoint. |
 | `rl_nn.py` | Masked PPO/REINFORCE network with entropy regularization and an optional legacy value head. |
 | `rl_agent.py` | Wraps `PolicyNetwork` for training trajectories or deterministic evaluation play. |
 
@@ -49,12 +48,8 @@ still uses the GPU, or vice versa. `PolicyNetwork.load_from_sl` also accepts
 a pre-loaded `data` mapping of SL weight arrays, to warm-start many networks
 from the same checkpoint without re-reading it from disk each time.
 
-`RandomNeuralAgent` is an untrained control for diagnostics. Seed `0` is local
-to its network initialization, so every matchup uses the same random policy and
-does not perturb the random sequence used to shuffle and play games.
-`NeuralAgent.load(..., device=...)` and `RandomNeuralAgent.create(...,
-device=...)` preserve that backend choice. CPU-only workers set
-`DOMINO_FORCE_CPU=1`, so they never initialize a CUDA context.
+`NeuralAgent.load(..., device=...)` preserves that backend choice. CPU-only
+workers set `DOMINO_FORCE_CPU=1`, so they never initialize a CUDA context.
 
 ## State Encoding
 
@@ -87,8 +82,8 @@ once to integer `mu(H)` hand weights when `comb(|U|, h) <= 500`. It never uses a
 particle fallback. `StrategicAgent` filters moves by the exact joint probability
 that the opponent can answer the resulting ends, then by near-best normalized
 mobility, then by highest pip sum, with deterministic legal-action order as the
-final tie-breaker. `StrategicAgent`, `NeuralAgent`, `RandomNeuralAgent`, and
-`RLAgent` use persistent exact models with intermediate trace recording disabled
+final tie-breaker. `StrategicAgent`, `NeuralAgent`, and `RLAgent` use persistent
+exact models with intermediate trace recording disabled
 because they consume only the current seven-vector. Direct opponent-model callers
 still receive traces by default.
 
@@ -100,7 +95,7 @@ The neural output space now has 56 actions:
 - 28 tile actions on the right end.
 
 Draw, pass, and single-option tile plays are forced by the current rules
-engine. `NeuralAgent`, `RandomNeuralAgent`, and `RLAgent` return them directly
+engine. `NeuralAgent` and `RLAgent` return them directly
 without calling the network. `StrategicAgent` also returns a single tile-play
 option before running exact inference. These are not learned RL decisions, and
 `RLAgent` does not save a trajectory step for them.
@@ -126,6 +121,9 @@ gradient. A decision's reward is not weighted by its number of legal choices.
 `PolicyNetwork` is policy-only by default and self-play updates it with PPO.
 Optional value-head training is retained only for explicit `--no-ppo`
 regression runs; it adds `Wv`/`bv` next to the six policy arrays.
+Diagnostics detect those two arrays, load the optional head without changing
+the policy decision, and obtain `V(s)` from the hidden activation already
+computed for each real decision.
 
 Because the input/output shapes changed from the old 86/58 encoder to the new
 168/56 encoder, old `domino_sl_weights.npz` and `domino_rl_weights.npz`

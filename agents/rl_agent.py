@@ -73,8 +73,17 @@ class RLAgent(Agent):
         )
 
     @classmethod
-    def load(cls, weights_path="models/domino_rl_weights.npz", mode="evaluation"):
-        network = PolicyNetwork.load(weights_path)
+    def load(
+        cls,
+        weights_path="models/domino_rl_weights.npz",
+        mode="evaluation",
+        use_value_head=False,
+    ):
+        """Load an RL policy and optionally restore its persisted value head."""
+        network = PolicyNetwork.load(
+            weights_path,
+            use_value_head=use_value_head,
+        )
         return cls(network, mode=mode)
 
     def choose_move(self, state, legal_actions):

@@ -18,12 +18,15 @@ import contextlib
 import csv
 import io
 import json
+import math
 import secrets
 import shutil
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -57,12 +60,13 @@ DEFAULT_OUTPUT_DIR = None
 DEFAULT_GENERATE_PLOTS = True
 DEFAULT_WORKERS = 1
 
-CANONICAL_AGENTS = ("rl", "neural", "random_nn", "heuristic", "random")
+CANONICAL_AGENTS = ("rl", "neural", "heuristic", "random")
 
 DEFAULT_WEIGHTS = {
     "rl": ROOT / "models" / "domino_rl_weights.npz",
     "neural": ROOT / "models" / "domino_sl_weights.npz",
 }
+VALUE_WEIGHT_NAMES = ("Wv", "bv")
 
 
 def normalize_agent_name(agent_name):
@@ -88,6 +92,12 @@ def resolve_weights_path(agent_name, weights_path=None):
     return path
 
 
+def _checkpoint_has_value_head(path):
+    """Return whether an RL checkpoint contains the complete value head."""
+    with np.load(path, allow_pickle=False) as weights:
+        return all(name in weights.files for name in VALUE_WEIGHT_NAMES)
+
+
 def create_agent(agent_name, weights_path=None):
     """Create an agent by name, importing checkpoint-backed classes only when used."""
     agent_name = normalize_agent_name(agent_name)
@@ -95,15 +105,16 @@ def create_agent(agent_name, weights_path=None):
     if agent_name == "rl":
         from agents.rl_agent import RLAgent
 
-        return RLAgent.load(str(resolve_weights_path("rl", weights_path)), mode="evaluation")
+        path = resolve_weights_path("rl", weights_path)
+        return RLAgent.load(
+            str(path),
+            mode="evaluation",
+            use_value_head=_checkpoint_has_value_head(path),
+        )
     if agent_name == "neural":
         from agents.neural_agent import NeuralAgent
 
         return NeuralAgent.load(str(resolve_weights_path("neural", weights_path)))
-    if agent_name == "random_nn":
-        from agents.random_neural_agent import RandomNeuralAgent
-
-        return RandomNeuralAgent.create()
     if agent_name == "heuristic":
         from agents.heuristic_agent import StrategicAgent
 
@@ -147,14 +158,14 @@ def empty_choice_stats():
 
 
 def update_choice_stats(stats, legal_actions):
-    """Update choice counters from the evaluated agent's legal actions."""
+    """Update choice counters and return whether this was a real decision."""
     if is_forced_draw(legal_actions):
         stats["agent_forced_draws"] += 1
-        return
+        return False
 
     if is_forced_pass(legal_actions):
         stats["agent_forced_passes"] += 1
-        return
+        return False
 
     option_count = count_tile_play_options(legal_actions)
     stats["agent_choice_histogram"][str(option_count)] = (
@@ -163,8 +174,49 @@ def update_choice_stats(stats, legal_actions):
 
     if option_count >= 2:
         stats["agent_real_decision_turns"] += 1
+        return True
     else:
         stats["agent_forced_tile_turns"] += 1
+        return False
+
+
+def _new_value_head_stats(agent):
+    """Create sufficient statistics when the evaluated agent has a critic."""
+    network = getattr(agent, "network", None)
+    if network is None or not getattr(network, "use_value_head", False):
+        return None
+    return {
+        "sample_count": 0,
+        "finite_count": 0,
+        "nonfinite_count": 0,
+        "sum": 0.0,
+        "sum_squares": 0.0,
+        "min": None,
+        "max": None,
+    }
+
+
+def _record_value_head_prediction(agent, stats):
+    """Record V(s) from the policy forward cache without another forward pass."""
+    if stats is None:
+        return
+    network = agent.network
+    hidden = network.cache.get("A2")
+    if hidden is None:
+        raise RuntimeError("RL value diagnostics require a completed policy forward pass.")
+    value = network.xp.dot(network.Wv, hidden) + network.bv
+    if hasattr(value, "get"):
+        value = value.get()
+    scalar = float(np.asarray(value).reshape(-1)[0])
+    stats["sample_count"] += 1
+    if not math.isfinite(scalar):
+        stats["nonfinite_count"] += 1
+        return
+    stats["finite_count"] += 1
+    stats["sum"] += scalar
+    stats["sum_squares"] += scalar * scalar
+    stats["min"] = scalar if stats["min"] is None else min(stats["min"], scalar)
+    stats["max"] = scalar if stats["max"] is None else max(stats["max"], scalar)
 
 
 def _add_game_runtime(runtime_profile, section, started):
@@ -195,17 +247,24 @@ def _play_game_unprofiled(agent, opponent, agent_position, suppress_agent_output
     agents[1 - agent_position] = opponent
     engine = DominoEngine(player_count=2)
     choice_stats = empty_choice_stats()
+    value_head_stats = _new_value_head_stats(agent)
     while not engine.game_over:
         state = engine._get_state()
         current_player = state["current_player"]
         legal_actions = engine.valid_actions(current_player)
+        evaluated_real_decision = False
         if current_player == agent_position:
-            update_choice_stats(choice_stats, legal_actions)
+            evaluated_real_decision = update_choice_stats(
+                choice_stats,
+                legal_actions,
+            )
         if suppress_agent_output:
             with contextlib.redirect_stdout(io.StringIO()):
                 action = agents[current_player].choose_move(state, legal_actions)
         else:
             action = agents[current_player].choose_move(state, legal_actions)
+        if evaluated_real_decision:
+            _record_value_head_prediction(agent, value_head_stats)
         engine.step(
             action,
             return_state=False,
@@ -222,7 +281,7 @@ def _play_game_unprofiled(agent, opponent, agent_position, suppress_agent_output
         result = "loss"
     pips = [sum(tile[0] + tile[1] for tile in hand) for hand in final_state["hands"]]
     initial_hands = final_state["initial_hands"]
-    return {
+    record = {
         "game": None,
         "agent_position": agent_position,
         "result": result,
@@ -233,6 +292,9 @@ def _play_game_unprofiled(agent, opponent, agent_position, suppress_agent_output
         "opponent_remaining_pips": pips[1 - agent_position],
         **choice_stats,
     }
+    if value_head_stats is not None:
+        record["_agent_value_head_stats"] = value_head_stats
+    return record
 
 
 def play_game(
@@ -257,6 +319,7 @@ def play_game(
 
     engine = DominoEngine(player_count=2)
     choice_stats = empty_choice_stats()
+    value_head_stats = _new_value_head_stats(agent)
     _add_game_runtime(
         runtime_profile,
         "agent_pair_and_engine_initialization",
@@ -274,9 +337,13 @@ def play_game(
             section_started,
         )
 
+        evaluated_real_decision = False
         if current_player == agent_position:
             section_started = _game_runtime_start(runtime_profile)
-            update_choice_stats(choice_stats, legal_actions)
+            evaluated_real_decision = update_choice_stats(
+                choice_stats,
+                legal_actions,
+            )
             _add_game_runtime(
                 runtime_profile,
                 "evaluated_agent_choice_statistics",
@@ -298,6 +365,14 @@ def play_game(
             ),
             section_started,
         )
+        if evaluated_real_decision:
+            section_started = _game_runtime_start(runtime_profile)
+            _record_value_head_prediction(agent, value_head_stats)
+            _add_game_runtime(
+                runtime_profile,
+                "evaluated_agent_value_head_statistics",
+                section_started,
+            )
 
         section_started = _game_runtime_start(runtime_profile)
         engine.step(
@@ -336,6 +411,8 @@ def play_game(
         "opponent_remaining_pips": pips[1 - agent_position],
         **choice_stats,
     }
+    if value_head_stats is not None:
+        result["_agent_value_head_stats"] = value_head_stats
     _add_game_runtime(
         runtime_profile,
         "final_state_and_outcome_serialization",
@@ -464,6 +541,48 @@ def add_choice_summary(summary, games):
     return summary
 
 
+def add_value_head_summary(summary, games):
+    """Attach aggregate V(s) statistics when the evaluated agent has a critic."""
+    game_stats = [
+        game["_agent_value_head_stats"]
+        for game in games
+        if "_agent_value_head_stats" in game
+    ]
+    if not game_stats:
+        return summary
+
+    sample_count = sum(stats["sample_count"] for stats in game_stats)
+    finite_count = sum(stats["finite_count"] for stats in game_stats)
+    nonfinite_count = sum(stats["nonfinite_count"] for stats in game_stats)
+    total = sum(stats["sum"] for stats in game_stats)
+    total_squares = sum(stats["sum_squares"] for stats in game_stats)
+    if finite_count:
+        mean = total / finite_count
+        variance = max(0.0, total_squares / finite_count - mean * mean)
+        minimum = min(
+            stats["min"] for stats in game_stats if stats["min"] is not None
+        )
+        maximum = max(
+            stats["max"] for stats in game_stats if stats["max"] is not None
+        )
+        std = math.sqrt(variance)
+    else:
+        mean = std = minimum = maximum = None
+
+    summary["value_head_predictions"] = {
+        "semantics": "V(s) on the evaluated agent's real decision states",
+        "games_with_value_head": len(game_stats),
+        "sample_count": sample_count,
+        "finite_count": finite_count,
+        "nonfinite_count": nonfinite_count,
+        "mean": mean,
+        "std": std,
+        "min": minimum,
+        "max": maximum,
+    }
+    return summary
+
+
 def print_summary(summary, duration_s):
     """Print the main pairwise metrics in a compact console format."""
     game_count = summary["game_count"]
@@ -505,6 +624,21 @@ def print_summary(summary, duration_s):
             f"pass {choice_info['forced_passes']}"
         )
         print(f"  Choice histogram: {choice_info['choice_histogram']}")
+    value_info = summary.get("value_head_predictions")
+    if value_info:
+        if value_info["finite_count"]:
+            print(
+                "  Value head V(s) mean/std/min/max: "
+                f"{value_info['mean']:+.3f}/{value_info['std']:.3f}/"
+                f"{value_info['min']:+.3f}/{value_info['max']:+.3f} "
+                f"over {value_info['sample_count']} decisions"
+            )
+        if value_info["nonfinite_count"]:
+            print(
+                "  Value head non-finite predictions: "
+                f"{value_info['nonfinite_count']}/"
+                f"{value_info['sample_count']}"
+            )
 
 
 def _atomic_replace_directory(staging_dir, output_dir):
@@ -700,6 +834,7 @@ def run_pairwise(
     summary["parallel"] = execution_metadata["parallel"]
     summary["precomputed_games"] = len(precomputed_games)
     summary = add_choice_summary(summary, games)
+    summary = add_value_head_summary(summary, games)
     summary["duration_s"] = duration
     add_runtime("summary_statistics", section_started)
     section_started = time.perf_counter()

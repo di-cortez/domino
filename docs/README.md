@@ -10,6 +10,7 @@ commands; put deeper material in the owner listed below.
 |---|---|
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Boundaries, data flow, state/action contracts, concurrency, and artifact flow. |
 | [`GPU_SETUP.md`](GPU_SETUP.md) | NVIDIA driver, CUDA/CuPy installation, verification, device policy, and troubleshooting. |
+| [`PYLINT_ROADMAP.md`](PYLINT_ROADMAP.md) | Current baseline and the staged Pylint quality ratchet. |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | Repository policy, compatibility, determinism, test matrix, documentation ownership, and definition of done. |
 | [`../AGENTS.md`](../AGENTS.md) | Short instructions for automated coding agents. |
 

@@ -30,7 +30,7 @@ from training.self_play import (
     resume_state_path,
     train,
 )
-from run_pipeline import parse_args as parse_pipeline_args
+from train_script.run_pipeline import parse_args as parse_pipeline_args
 from utils.resource_limits import MemorySafetyError
 
 

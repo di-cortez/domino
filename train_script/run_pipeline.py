@@ -13,6 +13,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from utils.runtime_status import format_duration, pipeline_compute_report
 
 try:
@@ -20,7 +24,6 @@ try:
 except ImportError:
     tqdm = None
 
-ROOT = Path(__file__).resolve().parent
 BASE_DATASET_GAMES = 100000
 BASE_SUPERVISED_EPOCHS = 5000
 BASE_RL_ITERATIONS = 1000
@@ -325,7 +328,7 @@ def _diagnostic_workload(config):
 
 
 def _run_diagnostics(config, args, rl_weights, neural_weights):
-    """Run the five agent-vs-random diagnostics with one progress bar."""
+    """Run the four agent-vs-random diagnostics with one progress bar."""
     evaluate, matchup_count, total_games = _diagnostic_workload(config)
 
     def diagnostic_status(message):
@@ -573,7 +576,8 @@ def main():
 
 # Keep the historical stage helpers importable for focused tests and tooling,
 # while making both public entry points execute the canonical game-budgeted
-# pipeline. ``python run_pipeline.py`` and ``python -m training.pipeline`` are
+# pipeline. ``python -m train_script.run_pipeline`` and
+# ``python -m training.pipeline`` are
 # therefore equivalent.
 from training import pipeline as _canonical_pipeline
 

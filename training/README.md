@@ -16,22 +16,26 @@ python -m training.pipeline huge
 python -m training.pipeline forever
 ```
 
-`run_pipeline.py` is an equivalent compatibility entry point. All five levels
-use one 100,000-game standard supervised dataset and the same supervised
-training configuration for a given seed; only the RL and diagnostic budgets
-change:
+`python -m train_script.run_pipeline` is an equivalent compatibility entry
+point; the wrapper now lives with the other executable training drivers.
 
-| Level | Cumulative RL games | Final games/matchup | Periodic monitor | Resume |
-|---|---:|---:|---|---|
-| `small` | 100,000 | 10,000 | No | Not exposed |
-| `default` | 500,000 | 10,000 | No | Not exposed |
-| `big` | 2,000,000 | 1,000,000 | 100,000 RL games | Yes |
-| `huge` | 10,000,000 | 1,000,000 | 100,000 RL games | Yes |
-| `forever` | Unbounded | None | 100,000 RL games | Yes |
+The quick profiles (`small` and `default`) deliberately do not reuse
+supervised artifacts. Unless `--seed` is explicit, each invocation gets a new
+seed, unique run directory, and run-local dataset/SL checkpoint. The long-run
+profiles (`big`, `huge`, and `forever`) retain the stable seed-42,
+seed-addressed 100,000-game assets and metadata-validated reuse:
 
-The standard assets are built from 100,000 heuristic games with a maximum
-supervised budget of 5,000 epochs (the convergence/plateau stopping rules can
-finish earlier). They are
+| Level | Dataset games | Default seed/assets | Cumulative RL games | Final games/matchup | Periodic monitor | Resume |
+|---|---:|---|---:|---:|---|---|
+| `small` | 10,000 | Random, run-local | 100,000 | 10,000 | No | Not exposed |
+| `default` | 50,000 | Random, run-local | 500,000 | 10,000 | No | Not exposed |
+| `big` | 100,000 | 42, reusable | 2,000,000 | 1,000,000 | 100,000 RL games | Yes |
+| `huge` | 100,000 | 42, reusable | 10,000,000 | 1,000,000 | 100,000 RL games | Yes |
+| `forever` | 100,000 | 42, reusable | Unbounded | None | 100,000 RL games | Yes |
+
+The reusable standard assets are built from 100,000 heuristic games with a
+maximum supervised budget of 5,000 epochs (the convergence/plateau stopping
+rules can finish earlier). They are
 `dataset/supervised_dataset_standard_seed<seed>.jsonl` and
 `models/domino_sl_standard_seed<seed>.npz`. Their sibling `meta.json` files
 record structural versions, configuration, provenance, convergence fields,
@@ -39,17 +43,23 @@ and SHA-256. Presence alone is never enough for reuse. An incompatible asset
 stops the run unless one of these explicit replacement controls is supplied:
 
 ```bash
-python -m training.pipeline default --rebuild-dataset
-python -m training.pipeline default --retrain-supervised
-python -m training.pipeline default --rebuild-supervised-assets
+python -m training.pipeline big --rebuild-dataset
+python -m training.pipeline big --retrain-supervised
+python -m training.pipeline big --rebuild-supervised-assets
 ```
+
+Quick-run assets are retained for provenance under
+`models/rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/`, but a
+later invocation never selects them as inputs. Both quick and long-run
+profiles retain the 5,000-epoch maximum; their plateau rules normally finish
+earlier.
 
 RL output lives at `models/rl/domino_rl_<level>_seed<seed>/`. `big`, `huge`,
 and `forever` publish immutable exact resume generations plus the convenience
 aliases `latest_weights.npz`, `optimizer_state.npz`, `rng_state.json`, and
 `opponent_pool/pool_manifest.json`. `training_state.json` is the commit marker;
 resume restores policy, optimizer, RNG state, opponent pool/order, adaptive
-selection, PPO windows, and cumulative counters. Examples:
+selection, algorithm-specific update history, and cumulative counters. Examples:
 
 The marker advances at the normal numbered-checkpoint interval, not only at a
 100,000-game diagnostic boundary. Superseded non-milestone latest payloads are
@@ -66,6 +76,22 @@ python -m training.pipeline forever --resume
 python -m training.pipeline forever \
   --resume models/rl/domino_rl_forever_seed42
 ```
+
+PPO remains the default. To run `forever` with the policy-only historical
+REINFORCE update and later resume that exact run:
+
+```bash
+python -m training.pipeline forever --no-ppo
+python -m training.pipeline forever --no-ppo --resume
+```
+
+`reinforce_v1` performs one update over the complete iteration buffer. It does
+not construct a PPO buffer or calculate PPO ratios, clipping, KL control,
+minibatches, or the post-update full-buffer evaluation. The algorithm is an
+immutable resume field, so `--no-ppo` must be repeated when resuming; changing
+between `ppo_v1` and `reinforce_v1` is rejected before training. Both canonical
+modes remain policy-only. The optional value head is still available only to
+direct `training.self_play` experiments.
 
 The optional value accepted by `--resume` is a convenience alias for
 `--resume-from`. In `forever`, diagnostic-worker autotuning is performed once,
@@ -233,7 +259,7 @@ safely to CPU when that reserve cannot be kept; explicit `gpu` fails before a
 training update. Override host and GPU reserves with
 `--sl-memory-reserve-mb` and `--sl-gpu-memory-reserve-mb`. The detailed command
 reports the selected device, residency mode/capacity, one-time full upload,
-batch results, and memory high/low watermarks. `run_pipeline.py` uses
+batch results, and memory high/low watermarks. `train_script/run_pipeline.py` uses
 `quiet=True`, so it continues suppressing per-epoch, checkpoint, scheduler, and
 memory-detail chatter. It does display concise retained-batch benchmark lines
 through `tqdm.write`: candidate size, median epoch time, total test time,
@@ -251,7 +277,7 @@ CuPy import alone is not treated as proof of a working GPU. At startup,
 hidden device, or unusable runtime produces a documented NumPy/CPU fallback
 reason. The root README's **Linux GPU setup and verification** section contains
 the driver checks, CUDA 12.x/13.x installation commands, a real calculation
-test, and troubleshooting steps. `run_pipeline.py` prints the selected
+test, and troubleshooting steps. `train_script/run_pipeline.py` prints the selected
 supervised and RL-parent backends plus free/total RAM and VRAM before dataset
 generation starts.
 
@@ -505,9 +531,17 @@ same masked policy distribution.
 
 `PolicyNetwork` uses masked PPO by default with the critic disabled. At the
 start of an iteration, one policy is frozen for all rollouts. Every real
-decision stores its legal mask and `old_log_prob`; draw, pass, and single-choice
-plays never enter the buffer. Advantages use the existing finalized reward and
-are normalized once over the complete iteration.
+decision stores its legal mask and collection-time probability metadata; draw,
+pass, and single-choice plays never enter the buffer. PPO uses `old_log_prob`
+to compare the updated policy with the rollout policy. Advantages use the
+existing finalized reward and are normalized once over the complete iteration.
+
+With `--no-ppo`, the same fresh on-policy decisions go directly to the legacy
+full-buffer policy-gradient update. Exactly one optimizer step is attempted per
+non-empty iteration, and none of `training/ppo.py`'s buffer, ratio, clipped
+surrogate, KL, minibatch, or whole-buffer evaluation paths run. Checkpoint,
+optimizer, RNG, adaptive-tuning, opponent-pool, and canonical resume behavior
+remain unchanged apart from recording `reinforce_v1` instead of `ppo_v1`.
 
 The canonical contiguous buffer stays in RAM. If it fits within 70% of reported
 free VRAM and a dry first-minibatch workspace probe succeeds, a complete GPU
@@ -531,9 +565,9 @@ finalized policy reward is the value target, and the masked policy update uses
 `reward - V(s)` as its advantage. The value-loss coefficient defaults to `0.5`
 (`--value-coef`). In this mode checkpoints also contain `Wv` and `bv`.
 
-The canonical pipeline intentionally fixes the current policy-only PPO
-algorithm. Value-head regression remains available only to direct self-play
-and experiment wrappers.
+The canonical pipeline supports both policy-only `ppo_v1` and policy-only
+`reinforce_v1`. Value-head regression remains available only to direct
+self-play and experiment wrappers.
 
 Policy-only loading ignores `Wv`/`bv`, while value-head loading initializes
 them to zero when they are absent. This permits mode changes without changing
@@ -567,7 +601,11 @@ python -m training.self_play --gamma 0.97 --reward-schema shaped --seed 42
 A point-in-time value loss or win rate is dominated by batch noise; the
 iteration log always reports `reward mean/std/min/max` and a trailing moving
 average of value loss and win rate next to the raw values, so a plateau can be
-judged from the average rather than a single noisy line.
+judged from the average rather than a single noisy line. In detailed
+`training.self_play` output, a value-head run also prints the count and
+mean/std/min/max of the pre-update `V(s)` predictions for every displayed
+iteration. These are the same predictions used in `reward - V(s)`; the report
+reuses that forward pass rather than evaluating the buffer again.
 
 ### Device selection (`--device`)
 

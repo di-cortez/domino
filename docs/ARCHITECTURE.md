@@ -72,7 +72,6 @@ All concrete agents inherit `middleware.middleware.Agent`:
 | `RandomAgent` | Uniform legal action. |
 | `StrategicAgent` | Deterministic exact-belief heuristic and supervised teacher. |
 | `NeuralAgent` | Supervised MLP checkpoint with legal-action masking. |
-| `RandomNeuralAgent` | Reproducible untrained copy of the supervised architecture. |
 | `RLAgent` | Supervised-initialized policy refined by on-policy self-play. |
 
 `DominoEncoder` is shared by supervised and RL paths. It produces 168
@@ -93,14 +92,16 @@ float64 arrays by casting them to float32.
 StrategicAgent vs StrategicAgent games
           |
           v
-standard_seed<seed> dataset + metadata/hash
+quick run-local or standard_seed<seed> dataset + metadata/hash
           |
           v
-encoded float32 cache -> supervised MLP -> standard_seed<seed> SL + metadata
+encoded float32 cache -> supervised MLP -> run-local or standard SL + metadata
                               |                              |
                               v                              v
                          loss PNG                  adaptive on-policy RL
-                                                    frozen rollouts -> PPO
+                                             frozen rollouts -> selected update
+                                                    /                 \
+                                             masked PPO       full-buffer REINFORCE
                                                                |
                                                                v
                                                level/seed RL run directory
@@ -121,20 +122,26 @@ budget: after batch-size tuning is complete, repeated low-improvement blocks
 of training loss can stop a saturated run early.
 
 RL uses fresh on-policy trajectories: all games in an iteration observe the
-same frozen policy and save their masked collection-time log-probabilities.
-The parent normalizes advantages once over the complete decision buffer, then
-runs masked PPO in deterministic minibatches for up to four epochs. There is no
-replay buffer or cross-iteration reuse. Decision returns are not rescaled by
-the number of legal choices. Opponent-pool snapshots refresh by cumulative
-training-game thresholds, and a checksummed `.resume.npz` preserves policy,
-optimizer, RNG, adaptive selections, counters, and pool.
+same frozen policy. The default update stores masked collection-time
+log-probabilities, normalizes advantages once over the complete decision
+buffer, and runs masked PPO in deterministic minibatches for up to four
+epochs. The optional policy-only `reinforce_v1` update instead applies one
+full-buffer policy-gradient step and skips PPO buffer construction, ratios,
+clipping, KL control, minibatches, and post-update full-buffer evaluation.
+There is no replay buffer or cross-iteration reuse in either mode. Decision
+returns are not rescaled by the number of legal choices. Opponent-pool
+snapshots refresh by cumulative training-game thresholds, and a checksummed
+`.resume.npz` preserves the selected algorithm, policy, optimizer, RNG,
+adaptive selections, counters, and pool.
 
-`training.pipeline` owns canonical orchestration. Dataset and supervised
-configuration are invariant across `small`, `default`, `big`, `huge`, and
-`forever`; seed-addressed metadata and hashes determine safe reuse. The RL
-budget is cumulative games, with shortened final and milestone iterations.
-Canonical `big`, `huge`, and `forever` state uses immutable payload generations
-and an atomic `training_state.json` marker so resume restores weights,
+`training.pipeline` owns canonical orchestration. `small` and `default` are
+ephemeral profiles: they choose a random seed by default, build 10,000- and
+50,000-game datasets respectively, and place non-reused supervised assets in a
+unique run namespace. `big`, `huge`, and `forever` default to seed 42 and reuse
+the same compatible 100,000-game standard dataset and supervised checkpoint.
+The RL budget is cumulative games, with shortened final and milestone
+iterations. Canonical `big`, `huge`, and `forever` state uses immutable payload
+generations and an atomic `training_state.json` marker so resume restores weights,
 optimizer, RNGs, pool order/provenance, adaptive choices, and counters.
 Each canonical RL process also appends a session to
 `diagnostics/runtime_profile.json` inside the run directory. That atomic report
@@ -158,9 +165,12 @@ See `GPU_SETUP.md` for the installation and runtime selection policy.
 
 `diagnostics.pairwise` alternates the evaluated agent between player positions,
 writes one record per game, summarizes win/draw/loss and choice opportunities,
-and can generate plots. `diagnostics.evaluate` runs the five canonical agents
+and can generate plots. `diagnostics.evaluate` runs the four canonical agents
 against `random` and atomically replaces the aggregate output directory only
-after all requested artifacts are complete.
+after all requested artifacts are complete. For an RL checkpoint with `Wv` and
+`bv`, evaluation also aggregates `V(s)` over real decision states from the
+policy forward cache; it does not add a second network forward or affect the
+chosen action.
 
 `diagnostics.rl_progress` owns the canonical RL learning curve. It evaluates
 RL versus random on a fixed periodic seed namespace, appends deduplicated JSONL

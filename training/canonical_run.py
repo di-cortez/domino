@@ -12,7 +12,11 @@ import subprocess
 import numpy as np
 
 from agents.encoder import DominoEncoder
-from training.rl_resume import load_resume_state
+from training.rl_resume import (
+    LEGACY_TRAINING_ALGORITHM,
+    PPO_TRAINING_ALGORITHM,
+    load_resume_state,
+)
 from utils.artifacts import (
     atomic_copy,
     atomic_savez,
@@ -29,6 +33,10 @@ NETWORK_ARCHITECTURE = [
     128,
     DominoEncoder.ACTION_SIZE,
 ]
+SUPPORTED_TRAINING_ALGORITHMS = frozenset((
+    PPO_TRAINING_ALGORITHM,
+    LEGACY_TRAINING_ALGORITHM,
+))
 
 
 @dataclass(frozen=True)
@@ -47,13 +55,20 @@ class ResumePoint:
         return int(self.training_state["rl_iterations_completed"])
 
 
-def canonical_run_dir(root, level, seed):
-    return (
-        Path(root)
-        / "models"
-        / "rl"
-        / f"domino_rl_{level}_seed{int(seed)}"
-    )
+def canonical_run_dir(root, level, seed, execution_id=None):
+    """Return a stable canonical path or a unique run-scoped path."""
+    name = f"domino_rl_{level}_seed{int(seed)}"
+    if execution_id is not None:
+        execution_id = str(execution_id)
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        if not execution_id or any(
+            character not in allowed for character in execution_id
+        ):
+            raise ValueError(
+                "execution_id must contain only letters, digits, '-' or '_'."
+            )
+        name = f"{name}_run{execution_id}"
+    return Path(root) / "models" / "rl" / name
 
 
 def _utc_now():
@@ -87,6 +102,13 @@ def _relative(run_dir, path):
 def _resolve(run_dir, value):
     path = Path(value)
     return path if path.is_absolute() else Path(run_dir) / path
+
+
+def _validated_algorithm(algorithm):
+    algorithm = str(algorithm)
+    if algorithm not in SUPPORTED_TRAINING_ALGORITHMS:
+        raise ValueError(f"Unsupported canonical RL algorithm: {algorithm!r}.")
+    return algorithm
 
 
 def _snapshot_digest(snapshot):
@@ -191,11 +213,13 @@ def create_run_config(
     supervised_weights_sha256,
     ppo_config,
     rl_config,
+    algorithm=PPO_TRAINING_ALGORITHM,
     diagnostic_config=None,
     lineage=None,
     allow_target_extension=False,
 ):
     """Atomically publish the immutable identity and requested target of a run."""
+    algorithm = _validated_algorithm(algorithm)
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     for child in ("checkpoints", "checkpoint_states", "opponent_pool", "diagnostics"):
@@ -211,7 +235,7 @@ def create_run_config(
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
         "network_architecture": NETWORK_ARCHITECTURE,
-        "algorithm": "ppo_v1",
+        "algorithm": algorithm,
         "supervised_weights_path": str(supervised_weights_path),
         "supervised_weights_sha256": supervised_weights_sha256,
         "ppo_config": dict(ppo_config),
@@ -281,9 +305,11 @@ def load_resume_point(
     seed,
     supervised_weights_sha256,
     ppo_config,
+    algorithm=PPO_TRAINING_ALGORITHM,
     force_incompatible=False,
 ):
     """Validate the latest marker and exact weights/resume pair."""
+    algorithm = _validated_algorithm(algorithm)
     run_dir = Path(run_dir)
     state_path = run_dir / "training_state.json"
     try:
@@ -303,7 +329,7 @@ def load_resume_point(
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
         "network_architecture": NETWORK_ARCHITECTURE,
-        "algorithm": "ppo_v1",
+        "algorithm": algorithm,
         "supervised_weights_sha256": supervised_weights_sha256,
         "ppo_config": dict(ppo_config),
     }
@@ -343,7 +369,7 @@ def load_resume_point(
     pair_config = metadata.get("configuration", {})
     pair_expected = {
         "effective_seed": int(seed),
-        "rl_training_algorithm": "ppo_v1",
+        "rl_training_algorithm": algorithm,
         "sl_weights_sha256": supervised_weights_sha256,
         "ppo_clip_epsilon": float(ppo_config["clip_epsilon"]),
         "ppo_target_kl": float(ppo_config["target_kl"]),
@@ -448,6 +474,15 @@ def publish_checkpoint(
         source_weights,
         source_resume,
     )
+    algorithm = _validated_algorithm(
+        resume_metadata.get("configuration", {}).get("rl_training_algorithm")
+    )
+    reported_algorithm = summary.get("rl_training_algorithm", algorithm)
+    if reported_algorithm != algorithm:
+        raise ValueError(
+            "Canonical checkpoint summary and exact resume state disagree on "
+            f"the RL algorithm: {reported_algorithm!r} != {algorithm!r}."
+        )
     completed_games = int(resume_metadata["completed_training_games"])
     completed_iterations = int(resume_metadata["completed_iteration"])
     training = dict(resume_metadata.get("training_state", {}))
@@ -483,14 +518,18 @@ def publish_checkpoint(
     rng_path = run_dir / "checkpoint_states" / (
         f"{generation_prefix}_rng_{latest_resume_hash[:12]}.json"
     )
+    derived_streams = {
+        "rollout": "stable_seed(base_seed, iteration/game id)",
+        "opponent_selection": "per-game seeded Python random",
+        "cupy_mutable_rng_used": False,
+    }
+    if algorithm == PPO_TRAINING_ALGORITHM:
+        derived_streams["ppo_shuffle"] = (
+            "stable_seed(base_seed, ppo_shuffle, iteration, epoch)"
+        )
     atomic_write_json(rng_path, {
         **resume_metadata["rng_state"],
-        "derived_streams": {
-            "rollout": "stable_seed(base_seed, iteration/game id)",
-            "ppo_shuffle": "stable_seed(base_seed, ppo_shuffle, iteration, epoch)",
-            "opponent_selection": "per-game seeded Python random",
-            "cupy_mutable_rng_used": False,
-        },
+        "derived_streams": derived_streams,
     })
 
     pool_dir = run_dir / "opponent_pool"
@@ -579,9 +618,12 @@ def publish_checkpoint(
             ).get("latest_milestone_checkpoint")
         except (OSError, json.JSONDecodeError):
             previous_milestone = None
+    policy_updates_completed = int(
+        training.get("ppo_updates_completed", 0)
+    )
     state = {
         "format_version": RUN_FORMAT_VERSION,
-        "algorithm": "ppo_v1",
+        "algorithm": algorithm,
         "pipeline_level": pipeline_level,
         "seed": int(seed),
         "target_rl_games": (
@@ -593,7 +635,15 @@ def publish_checkpoint(
         "network_architecture": NETWORK_ARCHITECTURE,
         "rl_games_completed": completed_games,
         "rl_iterations_completed": completed_iterations,
-        "ppo_updates_completed": int(training.get("ppo_updates_completed", 0)),
+        "policy_updates_completed": policy_updates_completed,
+        "ppo_updates_completed": (
+            policy_updates_completed
+            if algorithm == PPO_TRAINING_ALGORITHM else 0
+        ),
+        "reinforce_updates_completed": (
+            policy_updates_completed
+            if algorithm == LEGACY_TRAINING_ALGORITHM else 0
+        ),
         "optimizer_steps_completed": int(optimizer["step_count"]),
         "trainable_decisions_seen": int(
             training.get("trainable_decisions_seen", 0)

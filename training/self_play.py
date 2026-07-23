@@ -14,9 +14,7 @@ the parent process assembles batches, updates weights, writes checkpoints, or
 uses the GPU.
 """
 
-import json
 import math
-import os
 from pathlib import Path
 import random
 import secrets
@@ -99,6 +97,16 @@ from training.rl_resume import (
     numbered_checkpoint_path,
     resume_state_path,
 )
+from training.rl_reporting import (
+    RLRuntimeProfile,
+    _gradient_log_text,
+    _merge_parallel_summary,
+    _new_parallel_summary,
+    _prepare_metrics_file,
+    _print_ppo_window,
+    _reward_signal_summary,
+    _write_metrics_row,
+)
 from training.rl_parallel import (
     DEFAULT_RL_MINIMUM_GAIN,
     DEFAULT_RL_WORKER_CANDIDATES,
@@ -133,100 +141,6 @@ from utils.resource_limits import (
     ensure_ram_available,
 )
 from utils.runtime_status import format_duration, print_memory_report
-
-def _reward_signal_summary(samples, xp=None):
-    """Return compact diagnostics for finalized decision rewards.
-
-    ``reward_std`` disambiguates a falling value loss from a merely
-    low-variance batch: since a value head that has not learned anything
-    predicts close to the batch mean, its loss is approximately
-    ``0.5 * reward_std ** 2`` — logging the standard deviation next to the
-    loss makes that identity checkable instead of hidden behind a noisy
-    scalar.
-
-    ``xp`` should be the training run's resolved array backend (``train()``
-    passes ``network.xp``); it defaults to NumPy for direct callers, which is
-    fine here since this is small-scale summary math, not the training path.
-    """
-    if xp is None:
-        xp = np
-    rewards = xp.asarray([sample.policy_reward for sample in samples], dtype=float)
-    local_rewards = xp.asarray([sample.local_reward for sample in samples], dtype=float)
-    total = rewards.size
-
-    good = xp.sum(rewards > REWARD_ZERO_EPSILON)
-    neutral = xp.sum(xp.abs(rewards) <= REWARD_ZERO_EPSILON)
-    bad = xp.sum(rewards < -REWARD_ZERO_EPSILON)
-
-    return {
-        "reward_mean": float(xp.mean(rewards)),
-        "reward_std": float(xp.std(rewards)),
-        "reward_min": float(xp.min(rewards)),
-        "reward_max": float(xp.max(rewards)),
-        "local_mean": float(xp.mean(local_rewards)),
-        "good_pct": float(100.0 * good / total),
-        "neutral_pct": float(100.0 * neutral / total),
-        "bad_pct": float(100.0 * bad / total),
-    }
-
-
-def _gradient_log_text(metrics):
-    """Return a compact gradient-norm string for the iteration log."""
-    suffix = " clipped" if metrics.get("grad_clipped") else ""
-    return f"{metrics['grad_norm']:.2f}{suffix}"
-
-
-def _new_parallel_summary(requested_workers):
-    """Return mutable aggregate metadata for all RL worker-pool phases."""
-    return {
-        "requested_workers": requested_workers,
-        "initial_workers": None,
-        "final_workers": None,
-        "peak_worker_rss_mb": 0.0,
-        "peak_total_children_rss_mb": 0.0,
-        "min_available_memory_mb": None,
-        "fallback_count": 0,
-        "fallback_history": [],
-        "attempted_worker_counts": [],
-        "safety_capped": False,
-        "memory_monitoring_available": True,
-        "workers_cpu_only": True,
-        "rollout_batches": 0,
-    }
-
-
-def _merge_parallel_summary(summary, run_info, *, phase, iteration):
-    """Accumulate one rollout/evaluation pool run into the public summary."""
-    if summary["initial_workers"] is None:
-        summary["initial_workers"] = run_info.initial_workers
-    summary["final_workers"] = run_info.final_workers
-    summary["peak_worker_rss_mb"] = max(
-        summary["peak_worker_rss_mb"],
-        run_info.peak_worker_rss_mb,
-    )
-    summary["peak_total_children_rss_mb"] = max(
-        summary["peak_total_children_rss_mb"],
-        run_info.peak_total_children_rss_mb,
-    )
-    available = run_info.min_available_memory_mb
-    if available is not None:
-        current = summary["min_available_memory_mb"]
-        summary["min_available_memory_mb"] = (
-            available if current is None else min(current, available)
-        )
-    summary["fallback_count"] += run_info.fallback_count
-    for item in run_info.fallback_history:
-        tagged = dict(item)
-        tagged["rl_phase"] = phase
-        tagged["iteration"] = int(iteration)
-        summary["fallback_history"].append(tagged)
-    summary["attempted_worker_counts"].extend(run_info.attempted_worker_counts)
-    summary["safety_capped"] = summary["safety_capped"] or run_info.safety_capped
-    summary["memory_monitoring_available"] = (
-        summary["memory_monitoring_available"]
-        and run_info.memory_monitoring_available
-    )
-    summary[f"{phase}_batches"] += 1
 
 
 def _legacy_policy_update(
@@ -275,75 +189,6 @@ def _legacy_policy_update(
         value_coef=value_coef,
         clip_grad_norm=clip_grad_norm,
     )
-
-
-def _print_ppo_window(rows):
-    """Print the requested ten-iteration PPO aggregate without minibatch chatter."""
-    rows = list(rows)
-    if not rows:
-        return
-    count = len(rows)
-    effective = [row["effective_minibatches"] for row in rows]
-    epochs = [row["epochs_completed"] for row in rows]
-    buffer_bytes = [row["buffer_bytes"] for row in rows]
-    print(
-        f"  PPO/{count}: GPI {rows[-1]['games']} | decisions "
-        f"{sum(row['decisions'] for row in rows)} total/"
-        f"{np.mean([row['decisions'] for row in rows]):.1f} avg | "
-        f"minibatches requested {np.mean([row['requested_minibatches'] for row in rows]):.1f} avg, "
-        f"effective {np.mean(effective):.1f}/{min(effective)}/{max(effective)} avg/min/max"
-    )
-    print(
-        f"  PPO/{count}: optimizer steps {sum(row['optimizer_steps'] for row in rows)} total/"
-        f"{np.mean([row['optimizer_steps'] for row in rows]):.1f} avg | epochs "
-        f"{np.mean(epochs):.1f}/{min(epochs)}/{max(epochs)} avg/min/max | "
-        f"KL stops {sum(row['stopped_by_kl'] for row in rows)}/{count} | final KL "
-        f"{np.mean([row['final_approx_kl'] for row in rows]):.5f} avg/"
-        f"{max(row['final_approx_kl'] for row in rows):.5f} max"
-    )
-    print(
-        f"  PPO/{count}: clip fraction {np.mean([row['final_clip_fraction'] for row in rows]):.3f} | "
-        f"policy loss {np.mean([row['final_policy_loss'] for row in rows]):+.4f} | "
-        f"entropy {np.mean([row['final_entropy'] for row in rows]):.4f} | grad norm "
-        f"{np.mean([row['gradient_norm_mean'] for row in rows]):.3f} avg/"
-        f"{max(row['gradient_norm_max'] for row in rows):.3f} max"
-    )
-    gpu_count = sum(row["buffer_location"] == "gpu" for row in rows)
-    print(
-        f"  PPO/{count}: buffer GPU {gpu_count}, RAM {count - gpu_count} | bytes "
-        f"{np.mean(buffer_bytes):.0f} avg/{max(buffer_bytes)} max | PPO update "
-        f"{sum(row['ppo_seconds'] for row in rows):.2f}s total/"
-        f"{np.mean([row['ppo_seconds'] for row in rows]):.3f}s avg | rollout "
-        f"{sum(row['rollout_seconds'] for row in rows):.2f}s total/"
-        f"{np.mean([row['rollout_seconds'] for row in rows]):.3f}s avg"
-    )
-
-
-def _prepare_metrics_file(path, start_iteration):
-    """Create or truncate the built-in JSONL trace to the resumed checkpoint."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    retained = []
-    if start_iteration and path.is_file():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if int(row.get("iteration", 0)) <= int(start_iteration):
-                retained.append(row)
-    temporary = path.with_name(
-        f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
-    )
-    try:
-        with open(temporary, "w", encoding="utf-8") as stream:
-            for row in retained:
-                stream.write(json.dumps(row, sort_keys=True) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return path
 
 
 def train(
@@ -416,22 +261,7 @@ def train(
     pipeline runs use ``total_training_games`` directly, allowing the final
     iteration to be partial. Benchmark games are always discarded.
     """
-    runtime_profile_started = time.perf_counter()
-    runtime_sections = {}
-    runtime_ppo_sections = {}
-    runtime_rollout_worker = {}
-    runtime_ppo_optimizer_detail = {}
-    runtime_ppo_full_buffer_detail = {}
-
-    def add_runtime(section, seconds):
-        runtime_sections[section] = runtime_sections.get(section, 0.0) + float(seconds)
-
-    def merge_numeric_tree(target, source):
-        for key, value in source.items():
-            if isinstance(value, dict):
-                merge_numeric_tree(target.setdefault(key, {}), value)
-            elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                target[key] = target.get(key, 0) + value
+    runtime_profile = RLRuntimeProfile()
 
     resolved_options = resolve_training_options(
         iterations=iterations,
@@ -587,9 +417,9 @@ def train(
     emit_status("-" * 70)
     emit_status("Adaptive RL tuning")
     emit_status("-" * 70)
-    add_runtime(
+    runtime_profile.add(
         "validation_model_load_and_resume",
-        time.perf_counter() - runtime_profile_started,
+        time.perf_counter() - runtime_profile.started,
     )
     adaptive_tuning_started = time.perf_counter()
     adaptive_tuning = run_adaptive_tuning(
@@ -616,7 +446,7 @@ def train(
         output_path=tuning_path,
         status_callback=emit_status,
     )
-    add_runtime(
+    runtime_profile.add(
         "adaptive_tuning",
         time.perf_counter() - adaptive_tuning_started,
     )
@@ -772,7 +602,7 @@ def train(
     metrics_stream = open(metrics_path, "a", encoding="utf-8")
     start_time = time.time()
     training_perf_started = time.perf_counter()
-    add_runtime(
+    runtime_profile.add(
         "resource_preflight_runner_setup_and_metrics_open",
         training_perf_started - runner_setup_started,
     )
@@ -800,10 +630,13 @@ def train(
                 invocation_target_games - completed_training_games,
             )
             previous_training_games = completed_training_games
-            iteration_accounted_before = sum(runtime_sections.values())
+            iteration_accounted_before = runtime_profile.accounted_seconds()
             section_started = time.perf_counter()
             runner.sync_current(network)
-            add_runtime("policy_snapshot_synchronization", time.perf_counter() - section_started)
+            runtime_profile.add(
+                "policy_snapshot_synchronization",
+                time.perf_counter() - section_started,
+            )
             rollout_started = time.perf_counter()
             rollout_results, rollout_info = runner.collect_games(
                 previous_training_games,
@@ -811,11 +644,8 @@ def train(
                 effective_seed,
             )
             rollout_elapsed = time.perf_counter() - rollout_started
-            add_runtime("rollout_game_execution", rollout_elapsed)
-            merge_numeric_tree(
-                runtime_rollout_worker,
-                runner.last_runtime_profile,
-            )
+            runtime_profile.add("rollout_game_execution", rollout_elapsed)
+            runtime_profile.merge_rollout_worker(runner.last_runtime_profile)
             total_rollout_duration_s += rollout_elapsed
             section_started = time.perf_counter()
             _merge_parallel_summary(
@@ -838,13 +668,16 @@ def train(
                 wins += int(result["winner"] == result["learner_position"])
             win_rate_window.append(wins / games_this_iteration)
             moving_win_rate = sum(win_rate_window) / len(win_rate_window)
-            add_runtime(
+            runtime_profile.add(
                 "rollout_parent_aggregation",
                 time.perf_counter() - section_started,
             )
             section_started = time.perf_counter()
             reward_summary = _reward_signal_summary(batch, network.xp) if batch else None
-            add_runtime("reward_statistics", time.perf_counter() - section_started)
+            runtime_profile.add(
+                "reward_statistics",
+                time.perf_counter() - section_started,
+            )
             gradient_metrics = None
             ppo_metrics = None
             update_elapsed = 0.0
@@ -860,7 +693,7 @@ def train(
                     safety_config.memory_reserve_mb,
                     f"RL iteration {iteration} decision-buffer assembly",
                 )
-                add_runtime(
+                runtime_profile.add(
                     "decision_buffer_memory_preflight",
                     time.perf_counter() - section_started,
                 )
@@ -871,7 +704,7 @@ def train(
                         batch,
                         normalize=normalize_advantages,
                     )
-                    add_runtime(
+                    runtime_profile.add(
                         "ppo_buffer_assembly_and_advantage_normalization",
                         time.perf_counter() - buffer_started,
                     )
@@ -896,23 +729,11 @@ def train(
                         gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
                     )
                     network.synchronize()
-                    add_runtime("ppo_update", time.perf_counter() - ppo_started)
-                    for name, seconds in ppo_metrics[
-                        "runtime_timing_seconds"
-                    ].items():
-                        if name != "total":
-                            runtime_ppo_sections[name] = (
-                                runtime_ppo_sections.get(name, 0.0) + float(seconds)
-                            )
-                    runtime_detail = ppo_metrics.get("runtime_profile_detail", {})
-                    merge_numeric_tree(
-                        runtime_ppo_optimizer_detail,
-                        runtime_detail.get("optimizer_step", {}),
+                    runtime_profile.add(
+                        "ppo_update",
+                        time.perf_counter() - ppo_started,
                     )
-                    merge_numeric_tree(
-                        runtime_ppo_full_buffer_detail,
-                        runtime_detail.get("full_buffer_evaluation", {}),
-                    )
+                    runtime_profile.merge_ppo_metrics(ppo_metrics)
                     gradient_metrics = ppo_metrics
                 else:
                     legacy_started = time.perf_counter()
@@ -926,7 +747,7 @@ def train(
                         value_coef=value_coef,
                     )
                     network.synchronize()
-                    add_runtime(
+                    runtime_profile.add(
                         "legacy_policy_update",
                         time.perf_counter() - legacy_started,
                     )
@@ -952,7 +773,10 @@ def train(
                     "origin": "training_update",
                     "introduced_at_rl_games": int(completed_training_games),
                 })
-            add_runtime("opponent_pool_refresh", time.perf_counter() - section_started)
+            runtime_profile.add(
+                "opponent_pool_refresh",
+                time.perf_counter() - section_started,
+            )
 
             ppo_log_row = None
             if ppo_metrics is not None:
@@ -1023,7 +847,10 @@ def train(
                         f"time since previous checkpoint: "
                         f"{format_duration(checkpoint_elapsed)}"
                     )
-            add_runtime("checkpoint_serialization", time.perf_counter() - section_started)
+            runtime_profile.add(
+                "checkpoint_serialization",
+                time.perf_counter() - section_started,
+            )
 
             section_started = time.perf_counter()
             if iteration % log_interval == 0 and not quiet:
@@ -1062,7 +889,10 @@ def train(
                     )
                     if ppo_enabled:
                         _print_ppo_window(ppo_window)
-            add_runtime("console_logging", time.perf_counter() - section_started)
+            runtime_profile.add(
+                "console_logging",
+                time.perf_counter() - section_started,
+            )
 
             section_started = time.perf_counter()
             moving_value_loss = (
@@ -1125,12 +955,16 @@ def train(
                 "elapsed_training_s": float(time.perf_counter() - training_perf_started),
                 "rl_training_algorithm": algorithm,
             }
-            add_runtime("metrics_payload_construction", time.perf_counter() - section_started)
+            runtime_profile.add(
+                "metrics_payload_construction",
+                time.perf_counter() - section_started,
+            )
             section_started = time.perf_counter()
-            metrics_stream.write(json.dumps(row, sort_keys=True) + "\n")
-            metrics_stream.flush()
-            os.fsync(metrics_stream.fileno())
-            add_runtime("metrics_jsonl_write_and_fsync", time.perf_counter() - section_started)
+            _write_metrics_row(metrics_stream, row)
+            runtime_profile.add(
+                "metrics_jsonl_write_and_fsync",
+                time.perf_counter() - section_started,
+            )
             section_started = time.perf_counter()
             if (
                 checkpoint_callback is not None
@@ -1149,11 +983,14 @@ def train(
                 metrics_callback(dict(row))
             if progress_callback is not None:
                 progress_callback(completed_training_games, total_training_games)
-            add_runtime("pipeline_and_progress_callbacks", time.perf_counter() - section_started)
-            accounted_this_iteration = (
-                sum(runtime_sections.values()) - iteration_accounted_before
+            runtime_profile.add(
+                "pipeline_and_progress_callbacks",
+                time.perf_counter() - section_started,
             )
-            add_runtime(
+            accounted_this_iteration = (
+                runtime_profile.accounted_seconds() - iteration_accounted_before
+            )
+            runtime_profile.add(
                 "iteration_control_overhead",
                 max(
                     0.0,
@@ -1240,32 +1077,18 @@ def train(
         "attempts": worker_results,
     }
     completed_iterations = completed_iterations_this_invocation
-    add_runtime("final_checkpoint_shutdown_and_summary", time.perf_counter() - finalization_started)
-    runtime_total_seconds = time.perf_counter() - runtime_profile_started
-    runtime_accounted_seconds = sum(runtime_sections.values())
-    runtime_sections["unaccounted"] = max(
-        0.0,
-        runtime_total_seconds - runtime_accounted_seconds,
+    runtime_profile.add(
+        "final_checkpoint_shutdown_and_summary",
+        time.perf_counter() - finalization_started,
     )
-    runtime_profile_delta = {
-        "execution_count": 1,
-        "games": int(completed_this_invocation),
-        "iterations": int(completed_iterations_this_invocation),
-        "decisions": int(total_decision_samples - decision_samples_at_invocation_start),
-        "optimizer_steps": int(
+    runtime_profile_delta = runtime_profile.finish(
+        games=completed_this_invocation,
+        iterations=completed_iterations_this_invocation,
+        decisions=total_decision_samples - decision_samples_at_invocation_start,
+        optimizer_steps=(
             network.optimizer_step_count - optimizer_steps_at_invocation_start
         ),
-        "execution_seconds": float(runtime_total_seconds),
-        "sections_seconds": {
-            name: float(seconds) for name, seconds in runtime_sections.items()
-        },
-        "ppo_sections_seconds": {
-            name: float(seconds) for name, seconds in runtime_ppo_sections.items()
-        },
-        "rollout_worker": runtime_rollout_worker,
-        "ppo_optimizer_step": runtime_ppo_optimizer_detail,
-        "ppo_full_buffer_evaluation": runtime_ppo_full_buffer_detail,
-    }
+    )
     return {
         "iterations": int(actual_final_iteration),
         "rl_iterations_completed": int(actual_final_iteration),

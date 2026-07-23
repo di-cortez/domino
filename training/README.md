@@ -85,10 +85,11 @@ never exceeded.
 | `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
 | `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
 | `supervised_runtime.py` | Implements CPU/GPU batch candidates, synchronized retained timing, GPU residency probes/windows, and supervised memory telemetry. |
-| `self_play.py` | Orchestrates exact-budget on-policy collection, PPO, logs, pool refresh, checkpoints, and resume. |
+| `self_play.py` | Orchestrates the exact-budget on-policy training lifecycle and delegates its specialized phases. |
 | `rl_config.py` / `rl_cli.py` | Validate side-effect-free RL options and own the standalone/canonical shared argument definitions. |
 | `rl_rollout.py` | Finalizes rewards and trajectories and plays one CPU-only self-play or heuristic-opponent training game. |
 | `rl_resume.py` | Loads compatible policies and atomically saves, validates, and restores exact numbered RL resume pairs. |
+| `rl_reporting.py` | Owns iteration summaries, durable metrics JSONL writes, worker metadata aggregation, and cumulative RL runtime profiles. |
 | `ppo.py` | Builds immutable decision buffers, selects minibatches, manages GPU/RAM storage, and performs KL-limited PPO epochs. |
 | `adaptive_tuning.py` | Selects GPI/workers with isolated seed streams, state restoration, safety checks, and `adaptive_tuning.json`. |
 | `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed real games across memory fallback. |

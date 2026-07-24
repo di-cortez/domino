@@ -558,7 +558,7 @@ run_point() {
         fi
         "${RUN_PREFIX[@]}" "$PYTHON_BIN" -u -m training.self_play \
             --iterations "$RL_ITERATIONS" \
-            --games-per-iteration "$gpi" \
+            --gpi "$gpi" \
             --learning-rate "$lr" \
             --gamma "$gamma" \
             --value-coef "$vc" \

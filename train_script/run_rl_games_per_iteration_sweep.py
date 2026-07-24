@@ -738,8 +738,7 @@ def _run_point(
             try:
                 summary = self_play.train(
                     iterations=point["iterations"],
-                    games_per_iteration=point["games_per_iteration"],
-                    adaptive_gpi=False,
+                    gpi=point["games_per_iteration"],
                     training_opponent=config["training_opponent"],
                     learning_rate=config["learning_rate"],
                     entropy_coef=config["entropy_coef"],

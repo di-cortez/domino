@@ -11,7 +11,7 @@ Batch-training drivers for the full pipeline described in
    training-loss saturation, validation early-stopping, and weight-decay
    controls;
 3. refine that policy with the wrapper's historical **500,000-game experiment
-   profile**, with adaptive GPI, isolated worker tuning, and PPO. This profile
+   profile**, with fixed GPI, isolated worker tuning, and PPO. This profile
    is distinct from the canonical `big` pipeline, which owns 2,000,000
    cumulative RL games. This
    stage is fully parameterized from the command line so the script can drive
@@ -131,7 +131,7 @@ Quick smoke test of the RL stage alone:
 
 ```bash
 train_script/run_training_pipeline.sh --skip-dataset --skip-sl \
-    --rl-iterations 10 --rl-games-per-iteration 4 --rl-checkpoint-interval 5 \
+    --rl-iterations 10 --rl-gpi 4 --rl-checkpoint-interval 5 \
     --rl-weights-file models/smoke_test.npz
 ```
 
@@ -149,8 +149,7 @@ training module.
 | `--rl-sl-weights-path` | RL | Input SL weights used to initialize a fresh RL run | `models/domino_sl_weights.npz` |
 | `--rl-total-training-games` | RL | Exact real-game budget | `500000` |
 | `--rl-iterations` | RL | Legacy fixed iteration budget | unset |
-| `--rl-games-per-iteration` | RL | Explicit manual GPI | adaptive (fallback `100`) |
-| `--rl-adaptive-gpi` / `--rl-no-adaptive-gpi` | RL | Force or disable GPI selection | adaptive |
+| `--rl-gpi` | RL | Fixed positive number of games per iteration | `2000` |
 | `--rl-training-opponent` | RL | `self_play` or `heuristic` | `self_play` |
 | `--rl-learning-rate` | RL | Learning rate | `0.001` |
 | `--rl-entropy-coef` | RL | Entropy bonus coefficient | `0.01` |
@@ -201,7 +200,7 @@ training module.
 | `--skip-diagnostics` | control | Skip the agent-vs-random diagnostics stage | off |
 
 The BIG wrapper trains exactly 500,000 real RL games by default; its final
-iteration may be partial for the selected GPI. The old
+iteration may be partial for the fixed GPI. The old GPI-autotuning flags and
 iteration-based `--rl-pool-interval` and checkpoint-evaluation
 `--rl-evaluation-games` options were removed; checkpoints are saved without an
 auxiliary matchup, and pool refresh uses `--rl-pool-refresh-games`.
@@ -224,7 +223,7 @@ reward per remaining real decision in the trajectory (`gamma ** remaining`);
 `1.0` reproduces the original undiscounted behavior.
 
 This was verified end-to-end with a tiny run (`--rl-iterations 2
---rl-games-per-iteration 2`) exercising the RL stage with `--skip-dataset
+--rl-gpi 2`) exercising the RL stage with `--skip-dataset
 --skip-sl`, both with and without `--rl-value-head`.
 
 ### RL rollout workers
@@ -257,7 +256,7 @@ exact opponent-hand inference in `middleware/opponent_model.py` (>80% of
 iteration time), not the policy network, so CuPy's per-decision transfer
 overhead during rollout can make GPU measurably slower than CPU for this stage
 specifically. Verified end-to-end with a tiny run (`--rl-device cpu`,
-`--rl-iterations 3 --rl-games-per-iteration 4`): the run logged `RL self-play
+`--rl-iterations 3 --rl-gpi 4`): the run logged `RL self-play
 array backend: numpy (device='cpu')` and completed correctly.
 
 For Linux driver installation, the correct CUDA 12.x/13.x CuPy wheel, the
@@ -334,7 +333,7 @@ train_script/run_training_pipeline.sh --skip-dataset \
 ```
 
 This was verified end-to-end with a tiny run
-(`--rl-iterations 6 --rl-games-per-iteration 3 --rl-moving-average-window 3`)
+(`--rl-iterations 6 --rl-gpi 3 --rl-moving-average-window 3`)
 exercising `--rl-value-head --rl-normalize-advantages --rl-clip-grad-norm 2.0
 --rl-seed 7` together, and separately confirmed that the SL flags map to the
 expected `training.training_loop` arguments.
@@ -424,7 +423,7 @@ one progress bar, and one final summary instead of iteration/checkpoint lines.
 Every RL save made by this driver is iteration-numbered, for example
 `domino_rl_default_iter000050.npz`. A paired
 `domino_rl_default_iter000050.resume.npz` stores the configuration, checksum,
-completed games/iteration, optimizer and RNG state, selected GPI/workers, PPO
+completed games/iteration, optimizer and RNG state, fixed GPI/tuned workers, PPO
 configuration, and exact historical opponent pool. Both files are published
 atomically. Only the newest pool-state file is
 retained because it can be much larger; all numbered policy checkpoints remain.

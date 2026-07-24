@@ -52,7 +52,7 @@ DEFAULT_GAMMA_VALUES = (1.0, 0.97, 0.9)
 DEFAULT_REWARD_SCHEMAS = tuple(self_play.REWARD_SCHEMAS)
 
 DEFAULT_RL_ITERATIONS = 150
-DEFAULT_RL_GAMES_PER_ITERATION = self_play.DEFAULT_GAMES_PER_ITERATION
+DEFAULT_RL_GAMES_PER_ITERATION = self_play.DEFAULT_GPI
 DEFAULT_DIAGNOSTIC_GAMES = 10000
 
 
@@ -116,7 +116,7 @@ def _train_rl_checkpoint(
     """Train one sweep-point RL checkpoint from the shared SL weights."""
     return self_play.train(
         iterations=iterations,
-        games_per_iteration=games_per_iteration,
+        gpi=games_per_iteration,
         learning_rate=learning_rate,
         sl_weights_path=str(sl_weights_path),
         rl_weights_path=str(rl_weights_path),
@@ -234,7 +234,7 @@ def run_sweep(
                     sl_weights_path,
                     checkpoint_path,
                     iterations=rl_iterations,
-                    games_per_iteration=rl_games_per_iteration,
+                    gpi=rl_games_per_iteration,
                     learning_rate=hyperparameters["learning_rate"],
                     gamma=hyperparameters["gamma"],
                     reward_schema=hyperparameters["reward_schema"],

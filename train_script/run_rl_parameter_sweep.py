@@ -166,7 +166,7 @@ def run_sweep_point(
         start_time = time.time()
         self_play.train(
             iterations=rl_iterations,
-            games_per_iteration=games_per_iteration,
+            gpi=games_per_iteration,
             learning_rate=learning_rate,
             gamma=gamma,
             value_coef=value_coef,
@@ -206,7 +206,7 @@ def run_sweep_point(
         critic_enabled=critic_enabled,
         learning_rate=learning_rate,
         gamma=gamma,
-        games_per_iteration=games_per_iteration,
+        gpi=games_per_iteration,
         value_coef=value_coef,
         rl_iterations=rl_iterations,
         rl_workers=rl_workers,
@@ -262,7 +262,7 @@ def run_sweep(
                     critic_enabled=critic_enabled,
                     learning_rate=lr,
                     gamma=gamma,
-                    games_per_iteration=gpi,
+                    gpi=gpi,
                     value_coef=vc,
                     rl_iterations=rl_iterations,
                     diagnostic_games=diagnostic_games,

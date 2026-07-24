@@ -1,4 +1,4 @@
-"""Isolated throughput tuning for RL games-per-iteration and rollout workers."""
+"""Isolated throughput tuning for RL rollout workers."""
 
 from __future__ import annotations
 
@@ -29,22 +29,8 @@ from utils.resource_limits import (
 )
 
 
-TUNING_VERSION = 3
-DEFAULT_GPI_CANDIDATES = (100, 200, 400, 600, 800, 1000, 2000)
-DEFAULT_GPI_BENCHMARK_GAMES_TARGET = 2000
-DEFAULT_GPI_BENCHMARK_WORKERS = 10
+TUNING_VERSION = 4
 DEFAULT_WORKER_BENCHMARK_FRACTION = 0.01
-DEFAULT_GPI_TIE_FRACTION = 0.03
-MINIMUM_SAFE_VRAM_MB = 256
-
-
-def gpi_benchmark_iterations(gpi, target=DEFAULT_GPI_BENCHMARK_GAMES_TARGET):
-    """Return the required ``floor(target / gpi)`` benchmark iterations."""
-    gpi = int(gpi)
-    target = int(target)
-    if gpi < 1 or target < 1:
-        raise ValueError("GPI and benchmark target must be positive.")
-    return target // gpi
 
 
 def _policy_arrays(network):
@@ -243,161 +229,10 @@ def _valid_run_infos(run_infos):
     )
 
 
-def benchmark_gpi_candidates(
-    network,
-    *,
-    candidates,
-    benchmark_games_target,
-    base_seed,
-    training_opponent,
-    schema,
-    gamma,
-    max_pool_size,
-    safety,
-    pool_snapshots=(),
-    status_callback=None,
-):
-    """Benchmark all requested GPIs with ten frozen-policy workers."""
-    emit = status_callback or (lambda _message: None)
-    candidates = tuple(int(value) for value in candidates)
-    if not candidates or any(value < 1 for value in candidates):
-        raise ValueError("GPI candidates must be positive and non-empty.")
-    runner = _new_runner(
-        network,
-        training_opponent=training_opponent,
-        schema=schema,
-        gamma=gamma,
-        max_pool_size=max_pool_size,
-        safety=safety,
-        pool_snapshots=pool_snapshots,
-    )
-    results = []
-    try:
-        actual_workers, was_capped, cap_reason = runner.set_workers(
-            DEFAULT_GPI_BENCHMARK_WORKERS
-        )
-        if was_capped or actual_workers != DEFAULT_GPI_BENCHMARK_WORKERS:
-            detail = f" ({cap_reason})" if cap_reason else ""
-            raise RuntimeError(
-                "GPI tuning requires exactly "
-                f"{DEFAULT_GPI_BENCHMARK_WORKERS} workers, but resource safety "
-                f"allowed {actual_workers}{detail}."
-            )
-        # Process creation and one short rollout initialize worker imports and
-        # internal structures without entering any candidate's timer.
-        warmup_seed = stable_seed(base_seed, "gpi_autotune", "warmup")
-        warmup_results, _warmup_info = runner.collect_games(0, 2, warmup_seed)
-        _flatten_samples(warmup_results)
-        for gpi in candidates:
-            benchmark_iterations = gpi_benchmark_iterations(
-                gpi,
-                benchmark_games_target,
-            )
-            actual_games = benchmark_iterations * gpi
-            base = {
-                "gpi": gpi,
-                "benchmark_iterations": benchmark_iterations,
-                "planned_games": actual_games,
-            }
-            if benchmark_iterations < 1:
-                results.append(_failure_result(
-                    base,
-                    ValueError("GPI exceeds the benchmark-games target"),
-                ))
-                continue
-            candidate_seed = stable_seed(base_seed, "gpi_autotune", gpi)
-            run_infos = []
-            decision_count = 0
-            trajectory_bytes = 0
-            resource_samples = []
-            completed_games = 0
-            started = None
-            try:
-                started = time.perf_counter()
-                for local_iteration in range(benchmark_iterations):
-                    batch_results, run_info = runner.collect_games(
-                        local_iteration * gpi,
-                        gpi,
-                        candidate_seed,
-                    )
-                    run_infos.append(run_info)
-                    if len(batch_results) != gpi:
-                        raise RuntimeError(
-                            f"Expected {gpi} benchmark games, got {len(batch_results)}."
-                        )
-                    decisions, buffer_bytes = _flatten_samples(batch_results)
-                    decision_count += decisions
-                    trajectory_bytes = max(trajectory_bytes, buffer_bytes)
-                    completed_games += len(batch_results)
-                    resource_samples.append(_resource_sample(buffer_bytes))
-                network.synchronize()
-                elapsed = time.perf_counter() - started
-                remaining_vram = effective_gpu_available_bytes()
-                if not _valid_run_infos(run_infos):
-                    raise RuntimeError("candidate required worker memory recovery")
-                if (
-                    network.device == "gpu"
-                    and remaining_vram is not None
-                    and remaining_vram < MINIMUM_SAFE_VRAM_MB * MIB
-                ):
-                    raise MemoryError("candidate left unsafe VRAM headroom")
-                result = {
-                    **base,
-                    "actual_games": int(completed_games),
-                    "completed_games": int(completed_games),
-                    "elapsed_seconds": float(elapsed),
-                    "games_per_second": float(actual_games / elapsed),
-                    "decision_count": int(decision_count),
-                    "trajectory_bytes": int(trajectory_bytes),
-                    **_memory_snapshot(run_infos, resource_samples),
-                    "success": True,
-                    "status": "success",
-                    "failure": None,
-                    "worker_runs": [info.to_dict() for info in run_infos],
-                }
-            except Exception as exc:
-                elapsed = 0.0 if started is None else time.perf_counter() - started
-                result = _failure_result(
-                    base,
-                    exc,
-                    run_infos,
-                    completed_games=completed_games,
-                    decision_count=decision_count,
-                    trajectory_bytes=trajectory_bytes,
-                    elapsed_seconds=elapsed,
-                    resource_samples=resource_samples,
-                )
-            results.append(result)
-            if result["success"]:
-                emit(
-                    f"  GPI {gpi:4d}: {actual_games} games, "
-                    f"{benchmark_iterations:2d} iterations, "
-                    f"{result['games_per_second']:.1f} games/s"
-                )
-            else:
-                emit(f"  GPI {gpi:4d}: failed ({result['failure']})")
-    finally:
-        runner.close()
-    return results
-
-
-def select_fastest(results, *, key, tie_fraction):
-    """Select fastest valid candidate, preferring the smaller key within a tie."""
-    valid = [row for row in results if row.get("success")]
-    if not valid:
-        raise RuntimeError("No adaptive RL tuning candidate completed safely.")
-    best_rate = max(float(row["games_per_second"]) for row in valid)
-    tied = [
-        row for row in valid
-        if float(row["games_per_second"]) >= best_rate * (1.0 - float(tie_fraction))
-    ]
-    return min(tied, key=lambda row: int(row[key]))
-
-
 def benchmark_worker_candidates(
     network,
     *,
-    selected_gpi,
+    gpi,
     total_training_games,
     benchmark_fraction,
     minimum_gain=DEFAULT_RL_MINIMUM_GAIN,
@@ -416,7 +251,7 @@ def benchmark_worker_candidates(
     if float(minimum_gain) < 0:
         raise ValueError("minimum_gain must be non-negative.")
     test_games = max(1, int(int(total_training_games) * float(benchmark_fraction)))
-    candidates = _candidate_counts(candidates, safety, max(selected_gpi, test_games))
+    candidates = _candidate_counts(candidates, safety, max(gpi, test_games))
     runner = _new_runner(
         network,
         training_opponent=training_opponent,
@@ -454,7 +289,7 @@ def benchmark_worker_candidates(
                 started = time.perf_counter()
                 block_count = 0
                 while completed < test_games:
-                    block_games = min(int(selected_gpi), test_games - completed)
+                    block_games = min(int(gpi), test_games - completed)
                     batch_results, run_info = runner.collect_games(
                         completed,
                         block_games,
@@ -631,18 +466,14 @@ def atomic_write_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def run_adaptive_tuning(
+def run_worker_tuning(
     network,
     *,
+    gpi,
     total_training_games,
-    manual_gpi,
-    adaptive_gpi,
     workers,
-    retune_gpi,
     retune_workers,
     saved_tuning,
-    gpi_candidates,
-    gpi_benchmark_games_target,
     worker_benchmark_fraction,
     worker_minimum_gain,
     worker_candidates,
@@ -656,51 +487,33 @@ def run_adaptive_tuning(
     output_path=None,
     status_callback=None,
 ):
-    """Select frozen GPI/workers while restoring all parent training state."""
+    """Select rollout workers while restoring all parent training state."""
     emit = status_callback or (lambda _message: None)
     snapshot = capture_isolation_state(network, pool_snapshots)
     current_hardware = hardware_metadata(network.device)
     try:
-        if saved_tuning and not retune_gpi:
-            selected_gpi = int(saved_tuning["selected_gpi"])
-            gpi_results = list(saved_tuning.get("gpi_results", []))
-            gpi_source = "resume"
-        elif adaptive_gpi or retune_gpi:
-            emit(
-                "Selecting GPI for rollout throughput with "
-                f"{DEFAULT_GPI_BENCHMARK_WORKERS} workers..."
+        saved_gpi = None
+        if saved_tuning:
+            saved_gpi = saved_tuning.get(
+                "gpi",
+                saved_tuning.get("selected_gpi"),
             )
-            gpi_results = benchmark_gpi_candidates(
-                network,
-                candidates=gpi_candidates,
-                benchmark_games_target=gpi_benchmark_games_target,
-                base_seed=base_seed,
-                training_opponent=training_opponent,
-                schema=schema,
-                gamma=gamma,
-                max_pool_size=max_pool_size,
-                safety=safety,
-                pool_snapshots=pool_snapshots,
-                status_callback=emit,
-            )
-            selected_gpi = int(select_fastest(
-                gpi_results,
-                key="gpi",
-                tie_fraction=DEFAULT_GPI_TIE_FRACTION,
-            )["gpi"])
-            gpi_source = "autotune"
-        else:
-            selected_gpi = int(manual_gpi)
-            gpi_results = []
-            gpi_source = "manual"
-        emit(f"Selected GPI: {selected_gpi} ({gpi_source}).")
-
-        if saved_tuning and not retune_workers:
+        reuse_saved_workers = (
+            saved_tuning
+            and not retune_workers
+            and (saved_gpi is None or int(saved_gpi) == int(gpi))
+        )
+        if reuse_saved_workers:
             selected_workers = int(saved_tuning["selected_workers"])
             worker_results = list(saved_tuning.get("worker_results", []))
             worker_test_games = int(saved_tuning.get("worker_test_games", 0))
             worker_source = "resume"
         elif workers == "auto" or retune_workers:
+            if saved_tuning and not retune_workers and saved_gpi is not None:
+                emit(
+                    f"Saved worker tuning used GPI {int(saved_gpi)}; "
+                    f"retuning workers for fixed GPI {int(gpi)}."
+                )
             worker_test_games = max(
                 1,
                 int(int(total_training_games) * float(worker_benchmark_fraction)),
@@ -712,7 +525,7 @@ def run_adaptive_tuning(
             )
             worker_test_games, worker_results = benchmark_worker_candidates(
                 network,
-                selected_gpi=selected_gpi,
+                gpi=gpi,
                 total_training_games=total_training_games,
                 benchmark_fraction=worker_benchmark_fraction,
                 minimum_gain=worker_minimum_gain,
@@ -741,12 +554,7 @@ def run_adaptive_tuning(
             "version": TUNING_VERSION,
             "base_seed": int(base_seed),
             "total_training_games": int(total_training_games),
-            "gpi_candidates": [int(value) for value in gpi_candidates],
-            "gpi_benchmark_games_target": int(gpi_benchmark_games_target),
-            "gpi_benchmark_workers": DEFAULT_GPI_BENCHMARK_WORKERS,
-            "gpi_results": gpi_results,
-            "selected_gpi": selected_gpi,
-            "gpi_source": gpi_source,
+            "gpi": int(gpi),
             "worker_test_games": int(worker_test_games),
             "worker_benchmark_fraction": float(worker_benchmark_fraction),
             "worker_minimum_gain": float(worker_minimum_gain),

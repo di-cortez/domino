@@ -125,7 +125,7 @@ class MetricCallbackTests(unittest.TestCase):
             rows = []
             summary = self_play.train(
                 iterations=2,
-                games_per_iteration=2,
+                gpi=2,
                 checkpoint_interval=2,
                 pool_refresh_games=2,
                 max_pool_size=2,
@@ -151,7 +151,7 @@ class MetricCallbackTests(unittest.TestCase):
             rows = []
             common = dict(
                 iterations=2,
-                games_per_iteration=2,
+                gpi=2,
                 checkpoint_interval=2,
                 pool_refresh_games=2,
                 max_pool_size=2,
@@ -205,7 +205,7 @@ class MetricCallbackTests(unittest.TestCase):
             base = Path(temporary) / "model.npz"
             self_play.train(
                 iterations=1,
-                games_per_iteration=2,
+                gpi=2,
                 checkpoint_interval=1,
                 pool_refresh_games=2,
                 max_pool_size=1,

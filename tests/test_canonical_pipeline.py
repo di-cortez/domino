@@ -459,8 +459,7 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
     )
     common = {
         "total_training_games": 4,
-        "games_per_iteration": 2,
-        "adaptive_gpi": False,
+        "gpi": 2,
         "checkpoint_interval": 1,
         "pool_refresh_games": 2,
         "max_pool_size": 2,
@@ -648,8 +647,7 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
     summary = self_play.train(
         total_training_games=3,
         stop_after_training_games=2,
-        games_per_iteration=2,
-        adaptive_gpi=False,
+        gpi=2,
         checkpoint_interval=1,
         pool_refresh_games=2,
         max_pool_size=2,
@@ -725,8 +723,7 @@ def test_shutdown_before_first_iteration_still_creates_a_resumable_pair(tmp_path
     base = tmp_path / "signal" / "training.npz"
     common = {
         "total_training_games": 2,
-        "games_per_iteration": 2,
-        "adaptive_gpi": False,
+        "gpi": 2,
         "checkpoint_interval": 1,
         "pool_refresh_games": 2,
         "max_pool_size": 1,
@@ -782,8 +779,7 @@ def test_numbered_checkpoint_callback_advances_by_committed_games(tmp_path):
 
     summary = self_play.train(
         total_training_games=5,
-        games_per_iteration=1,
-        adaptive_gpi=False,
+        gpi=1,
         checkpoint_interval=2,
         pool_refresh_games=2,
         max_pool_size=1,

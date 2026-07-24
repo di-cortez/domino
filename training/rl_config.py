@@ -12,10 +12,10 @@ from training.rl_rollout import REWARD_SCHEMAS
 # PolicyNetwork backend selected for that run.
 DEFAULT_DEVICE = "auto"
 DEFAULT_ITERATIONS = 1000
-DEFAULT_GAMES_PER_ITERATION = 100
+COMMON_GPI_VALUES = (100, 200, 400, 600, 800, 1000, 2000)
+DEFAULT_GPI = 2000
 DEFAULT_TOTAL_TRAINING_GAMES = 100_000
 DEFAULT_POOL_REFRESH_GAMES = 400
-DEFAULT_ADAPTIVE_GPI = True
 DEFAULT_PPO_ENABLED = True
 
 SL_WEIGHTS = "models/domino_sl_weights.npz"
@@ -34,12 +34,10 @@ DEFAULT_NORMALIZE_ADVANTAGES = None
 class ResolvedTrainingOptions:
     """Validated values needed before model loading or resume side effects."""
 
-    retune_gpi: bool
     retune_workers: bool
-    games_per_iteration: int
+    gpi: int
     total_training_games: int
     tuning_training_games: int
-    adaptive_gpi: bool
     algorithm: str
     normalize_advantages: bool
     workers: int | str
@@ -51,12 +49,9 @@ def resolve_training_options(
     *,
     iterations,
     total_training_games,
-    games_per_iteration,
-    adaptive_gpi,
+    gpi,
     adaptive_tuning_training_games,
-    retune_gpi,
     retune_workers,
-    retune_all,
     checkpoint_interval,
     log_interval,
     pool_refresh_games,
@@ -82,39 +77,28 @@ def resolve_training_options(
     safety_config,
 ):
     """Normalize and validate options that do not require checkpoint I/O."""
-    retune_gpi = bool(retune_gpi or retune_all)
-    retune_workers = bool(retune_workers or retune_all)
-    manual_gpi_explicit = games_per_iteration is not None
-    games_per_iteration = (
-        DEFAULT_GAMES_PER_ITERATION
-        if games_per_iteration is None
-        else int(games_per_iteration)
-    )
-    if games_per_iteration < 1:
-        raise ValueError("games_per_iteration must be positive")
+    retune_workers = bool(retune_workers)
+    gpi = int(gpi)
+    if gpi < 1:
+        raise ValueError("gpi must be positive")
     if iterations is not None:
         if iterations < 1:
             raise ValueError("iterations must be positive")
-        implied_total = int(iterations) * int(games_per_iteration)
+        implied_total = int(iterations) * gpi
         if (
             total_training_games is not None
             and int(total_training_games) != implied_total
         ):
             raise ValueError(
-                "iterations * games_per_iteration conflicts with "
-                "total_training_games"
+                "iterations * gpi conflicts with total_training_games"
             )
         total_training_games = implied_total
-        if adaptive_gpi is None:
-            adaptive_gpi = False
     else:
         total_training_games = (
             DEFAULT_TOTAL_TRAINING_GAMES
             if total_training_games is None
             else int(total_training_games)
         )
-        if adaptive_gpi is None:
-            adaptive_gpi = DEFAULT_ADAPTIVE_GPI and not manual_gpi_explicit
     if total_training_games < 1:
         raise ValueError("total_training_games must be positive")
     tuning_training_games = (
@@ -183,12 +167,10 @@ def resolve_training_options(
             )
     safety_config = safety_config or ParallelSafetyConfig()
     return ResolvedTrainingOptions(
-        retune_gpi=retune_gpi,
         retune_workers=retune_workers,
-        games_per_iteration=games_per_iteration,
+        gpi=gpi,
         total_training_games=total_training_games,
         tuning_training_games=tuning_training_games,
-        adaptive_gpi=adaptive_gpi,
         algorithm=algorithm,
         normalize_advantages=normalize_advantages,
         workers=workers,

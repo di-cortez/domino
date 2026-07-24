@@ -108,10 +108,9 @@ persisted in `periodic_diagnostic_tuning.json`, and reused at subsequent
 
 `forever` has no percentage or target. SIGINT/SIGTERM stops admission of a new
 iteration, lets an in-flight iteration finish, atomically publishes state, and
-exits without an automatic all-pairs evaluation. The current GPI candidates,
-benchmark sizes, ten-worker GPI benchmark, selection criterion, and worker
-autotune are unchanged; only the post-tuning budget is expressed in exact
-games. A boundary iteration is shortened so a periodic or final target is
+exits without an automatic all-pairs evaluation. GPI is fixed at 2,000 by
+default and may be changed explicitly with `--gpi`. Worker autotuning is
+unchanged. A boundary iteration is shortened so a periodic or final target is
 never exceeded.
 
 | File | Purpose |
@@ -126,7 +125,7 @@ never exceeded.
 | `rl_resume.py` | Loads compatible policies and atomically saves, validates, and restores exact numbered RL resume pairs. |
 | `rl_reporting.py` | Owns iteration summaries, durable metrics JSONL writes, worker metadata aggregation, and cumulative RL runtime profiles. |
 | `ppo.py` | Builds immutable decision buffers, selects minibatches, manages GPU/RAM storage, and performs KL-limited PPO epochs. |
-| `adaptive_tuning.py` | Selects GPI/workers with isolated seed streams, state restoration, safety checks, and `adaptive_tuning.json`. |
+| `adaptive_tuning.py` | Selects rollout workers with isolated seed streams, state restoration, safety checks, and `adaptive_tuning.json`. |
 | `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed real games across memory fallback. |
 | `canonical_assets.py` | Names, validates, hashes, and records reusable standard dataset/SL assets. |
 | `canonical_run.py` | Publishes and validates complete atomic RL generations and lineage. |
@@ -385,6 +384,7 @@ python -m training.self_play
 python -m training.self_play --compact
 python -m training.self_play --rl-workers auto --seed 123
 python -m training.self_play --rl-workers 4 --device cpu
+python -m training.self_play --gpi 1000
 python -m training.self_play --fresh-from-sl
 ```
 
@@ -393,7 +393,8 @@ Default behavior:
 - if a compatible `models/domino_rl_weights.npz` exists, resume from it;
 - otherwise warm-start from a compatible `models/domino_sl_weights.npz`;
 - train against a pool of frozen snapshots of the current policy;
-- select GPI and rollout workers with isolated, discarded benchmarks;
+- use a fixed GPI of 2,000 and select rollout workers with isolated,
+  discarded benchmarks;
 - update the policy with masked PPO minibatches for at most four epochs;
 - save `models/domino_rl_weights.npz`.
 
@@ -431,17 +432,18 @@ inside an iteration publishes the newly updated policy after that batch; if a
 single large batch crosses multiple thresholds, it publishes only one snapshot
 instead of storing duplicate copies of the same weights.
 
-Before real training, adaptive GPI mode tests exactly
-`100, 200, 400, 600, 800, 1000, 2000` with ten workers and a target of 2,000
-games per candidate (`floor(2000 / GPI)` complete batches). It chooses the
-highest throughput, preferring the smaller GPI within 3%. Worker tuning then
-tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1% of the real
-game budget per candidate. Starting from the one-worker baseline, each larger
-candidate must improve throughput by at least 10% over the previously accepted
-candidate; the first smaller gain stops tuning and is not selected. Warm-up
-and benchmark games use independent deterministic seed streams and are discarded.
-Weights, optimizer, RNG, opponent pool, and real counters are restored and
-verified before training begins. Results are saved as `adaptive_tuning.json`.
+GPI is never autotuned. It is fixed at `2000` by default. `--gpi` accepts any
+positive integer; common experiment values are
+`100, 200, 400, 600, 800, 1000, 2000`.
+
+Worker tuning tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1%
+of the real game budget per candidate. Starting from the one-worker baseline,
+each larger candidate must improve throughput by at least 10% over the
+previously accepted candidate; the first smaller gain stops tuning and is not
+selected. Benchmark games use independent deterministic seed streams and are
+discarded. Weights, optimizer, RNG, opponent pool, and real counters are
+restored and verified before training begins. Results are saved as
+`adaptive_tuning.json`.
 
 Runtime RAM pressure during real rollout generation terminates the current
 pool, keeps completed game ids, halves the worker count, and retries only
@@ -454,10 +456,11 @@ controls are:
 
 | Flag | Meaning | Default |
 |---|---|---:|
+| `--gpi` | Fixed positive number of games per RL iteration | `2000` |
 | `--rl-workers` | CPU-only rollout workers or `auto` | `auto` |
 | `--rl-autotune-fraction` | Real-budget fraction discarded per worker candidate | `0.01` |
 | `--rl-autotune-min-gain` | Required gain over the previous accepted worker candidate | `0.10` |
-| `--retune-gpi` / `--retune-workers` / `--retune-all` | Explicitly rerun saved tuning on resume | off |
+| `--retune-workers` | Explicitly rerun saved worker tuning on resume | off |
 | `--rl-memory-reserve-mb` | Host RAM that must remain free | `512` |
 | `--rl-estimated-worker-mb` | Conservative worker-memory estimate for preflight | `256` |
 | `--rl-max-worker-rss-mb` | Runtime RSS ceiling for one worker | `1024` |
@@ -470,7 +473,7 @@ sweep always use interruption-safe numbered pairs. Each save adds the absolute c
 to the name, such as `model_iter000050.npz`, and atomically publishes a paired
 `model_iter000050.resume.npz`. The state file contains a SHA-256 checksum,
 every computation-affecting RL/PPO setting, completed real games, optimizer
-state, RNGs, supervised-checkpoint hash, adaptive GPI/workers, rolling logs,
+state, RNGs, supervised-checkpoint hash, fixed GPI, tuned workers, rolling logs,
 and the exact opponent-policy pool. The newest pool state replaces the previous
 one to bound disk use; numbered policy-only files remain available.
 
@@ -486,7 +489,8 @@ python -m training.self_play --iterations 2000 --numbered-checkpoints \
 
 Resume validates the checksum and configuration before loading anything,
 restores optimizer/RNG/pool state, continues at the next absolute game id, and
-reuses saved GPI/workers without rerunning autotune.
+requires the same fixed GPI while reusing saved workers without rerunning their
+autotune.
 This is a true continuation. Loading an ordinary `.npz` through the legacy
 path restores only weights and cannot reconstruct the former in-memory pool.
 
@@ -600,7 +604,7 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 | `--ppo` / `--no-ppo` | Masked PPO or historical one-update REINFORCE regression | PPO |
 | `--normalize-advantages` / `--no-normalize-advantages` | Standardize once over the complete iteration buffer | on for PPO |
 | `--total-training-games` | Exact real-game budget; final iteration may be partial | `100000` |
-| `--games-per-iteration` | Explicit manual GPI; disables only GPI autotune | adaptive (manual fallback `100`) |
+| `--gpi` | Fixed positive number of games per RL iteration | `2000` |
 | `--moving-average-window` | Trailing-iteration window for the value-loss/win-rate moving averages printed in the iteration log | `10` |
 | `--seed` | Fix `random`/NumPy state, for reproducible comparisons between hyperparameter configurations | unset |
 | `--device` | Array backend: `auto` matches `GPU_ENABLED` exactly (CuPy when installed, else NumPy); `cpu`/`gpu` force one backend regardless of what's installed/enabled globally | `auto` |
@@ -633,15 +637,17 @@ rollout rules, exact-model work, inference, buffer transfer, backpropagation,
 parameter updates, and metric transfers.
 
 `training.self_play` also accepts `--iterations`, `--total-training-games`,
-`--games-per-iteration`, `--adaptive-gpi`, `--gpi-candidates`,
-`--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
+`--gpi`, `--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
 `--checkpoint-interval`, `--pool-refresh-games`, `--max-pool-size`,
 `--sl-weights-path`, and `--rl-weights-path`; see
 `training/rl_cli.py:add_optional_rl_arguments` for the authoritative
 definitions, or run `python -m training.self_play --help`.
 
-The former iteration-based `--pool-interval` and auxiliary
-`--evaluation-games` options were removed. Existing numbered resume states
+The former GPI-autotune options (`--games-per-iteration`, `--adaptive-gpi`,
+`--no-adaptive-gpi`, `--gpi-candidates`, `--gpi-benchmark-games-target`,
+`--retune-gpi`, and `--retune-all`) were removed. The former iteration-based
+`--pool-interval` and auxiliary `--evaluation-games` options were also removed.
+Existing numbered resume states
 that contain `pool_interval` are rejected rather than silently reinterpreted
 as a game count; start a new run with `--pool-refresh-games`.
 

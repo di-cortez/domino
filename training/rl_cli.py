@@ -4,11 +4,6 @@ import argparse
 
 from agents.rl_nn import DEVICES
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
-from training.adaptive_tuning import (
-    DEFAULT_GPI_BENCHMARK_GAMES_TARGET,
-    DEFAULT_GPI_BENCHMARK_WORKERS,
-    DEFAULT_GPI_CANDIDATES,
-)
 from training.ppo import (
     DEFAULT_CLIP_EPSILON,
     DEFAULT_GAMES_PER_MINIBATCH_SCALE,
@@ -22,16 +17,16 @@ from training.ppo import (
     MAX_PPO_EPOCHS,
 )
 from training.rl_config import (
-    DEFAULT_ADAPTIVE_GPI,
     DEFAULT_CLIP_GRAD_NORM,
     DEFAULT_DEVICE,
-    DEFAULT_GAMES_PER_ITERATION,
+    DEFAULT_GPI,
     DEFAULT_ITERATIONS,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
     DEFAULT_POOL_REFRESH_GAMES,
     DEFAULT_PPO_ENABLED,
     DEFAULT_TOTAL_TRAINING_GAMES,
+    COMMON_GPI_VALUES,
     RL_WEIGHTS,
     SL_WEIGHTS,
     TRAINING_OPPONENT,
@@ -44,6 +39,13 @@ from training.rl_parallel import (
     worker_count as parse_rl_worker_count,
 )
 from training.rl_rollout import DEFAULT_GAMMA, DEFAULT_REWARD_SCHEMA, REWARD_SCHEMAS
+
+
+def _positive_int(value):
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
 
 
 def add_optional_rl_arguments(
@@ -60,8 +62,7 @@ def add_optional_rl_arguments(
         default=None,
         help=(
             "Legacy/manual iteration budget. When supplied, total games are "
-            "iterations x games-per-iteration and adaptive GPI is off unless "
-            "explicitly re-enabled."
+            "iterations x GPI."
         ),
     )
     group.add_argument(
@@ -74,49 +75,16 @@ def add_optional_rl_arguments(
         ),
     )
     group.add_argument(
-        "--games-per-iteration",
-        type=int,
-        default=None,
+        "--gpi",
+        type=_positive_int,
+        default=DEFAULT_GPI,
         help=(
-            f"Manual GPI (default fallback: {DEFAULT_GAMES_PER_ITERATION}); "
-            "specifying it disables GPI autotuning unless --adaptive-gpi is also set."
+            "Fixed games per RL iteration. "
+            f"Common values: {', '.join(str(value) for value in COMMON_GPI_VALUES)} "
+            f"(default: {DEFAULT_GPI})."
         ),
     )
-    adaptive = group.add_mutually_exclusive_group()
-    adaptive.add_argument(
-        "--adaptive-gpi",
-        dest="adaptive_gpi",
-        action="store_true",
-        default=None,
-        help="Benchmark the fixed GPI candidate list before real training (default).",
-    )
-    adaptive.add_argument(
-        "--no-adaptive-gpi",
-        dest="adaptive_gpi",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Use the manual/default games-per-iteration directly.",
-    )
-    group.add_argument(
-        "--gpi-candidates",
-        nargs="+",
-        type=int,
-        default=list(DEFAULT_GPI_CANDIDATES),
-        metavar="N",
-        help=(
-            "GPI values tested with "
-            f"{DEFAULT_GPI_BENCHMARK_WORKERS} frozen-policy workers."
-        ),
-    )
-    group.add_argument(
-        "--gpi-benchmark-games-target",
-        type=int,
-        default=DEFAULT_GPI_BENCHMARK_GAMES_TARGET,
-        help="Candidate budget used as floor(target / GPI) complete batches.",
-    )
-    group.add_argument("--retune-gpi", action="store_true")
     group.add_argument("--retune-workers", action="store_true")
-    group.add_argument("--retune-all", action="store_true")
     group.add_argument(
         "--training-opponent",
         choices=("self_play", "heuristic"),
@@ -375,17 +343,6 @@ def parse_args(argv=None):
 
 def _training_kwargs_from_args(args):
     """Translate CLI arguments into the public ``train`` keyword interface."""
-    manual_gpi_supplied = args.games_per_iteration is not None
-    games_per_iteration = (
-        DEFAULT_GAMES_PER_ITERATION
-        if args.games_per_iteration is None
-        else args.games_per_iteration
-    )
-    adaptive_gpi = (
-        (not manual_gpi_supplied and args.iterations is None)
-        if args.adaptive_gpi is None
-        else bool(args.adaptive_gpi)
-    )
     return {
         "iterations": args.iterations,
         "total_training_games": (
@@ -397,13 +354,8 @@ def _training_kwargs_from_args(args):
                 else args.total_training_games
             )
         ),
-        "games_per_iteration": games_per_iteration,
-        "adaptive_gpi": adaptive_gpi,
-        "gpi_candidates": tuple(args.gpi_candidates),
-        "gpi_benchmark_games_target": args.gpi_benchmark_games_target,
-        "retune_gpi": args.retune_gpi,
+        "gpi": args.gpi,
         "retune_workers": args.retune_workers,
-        "retune_all": args.retune_all,
         "training_opponent": args.training_opponent,
         "learning_rate": args.learning_rate,
         "entropy_coef": args.entropy_coef,

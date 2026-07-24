@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import math
+import time
 from typing import Iterable
 
 import numpy as np
@@ -22,6 +23,7 @@ DEFAULT_CLIP_EPSILON = 0.2
 DEFAULT_TARGET_KL = 0.01
 DEFAULT_STOP_KL = 0.015
 DEFAULT_MAX_EPOCHS = 4
+MAX_PPO_EPOCHS = 16
 DEFAULT_MIN_MINIBATCHES = 4
 DEFAULT_MAX_MINIBATCHES = 16
 DEFAULT_GAMES_PER_MINIBATCH_SCALE = 125
@@ -404,8 +406,31 @@ def prepare_storage(
     return storage
 
 
-def evaluate_full_buffer(network, storage, partitions, clip_epsilon):
+def _merge_numeric_profile(target, source):
+    """Recursively sum numeric profiler leaves."""
+    for key, value in source.items():
+        if isinstance(value, dict):
+            _merge_numeric_profile(target.setdefault(key, {}), value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            target[key] = target.get(key, 0) + value
+
+
+def evaluate_full_buffer(
+    network,
+    storage,
+    partitions,
+    clip_epsilon,
+    runtime_profile=None,
+):
     """Compute exact whole-buffer PPO metrics, streaming when necessary."""
+    profile_started = time.perf_counter()
+    timing = {}
+
+    def finish_phase(name, started):
+        timing[name] = timing.get(name, 0.0) + (
+            time.perf_counter() - started
+        )
+
     total = 0
     surrogate_sum = 0.0
     entropy_sum = 0.0
@@ -418,15 +443,22 @@ def evaluate_full_buffer(network, storage, partitions, clip_epsilon):
     upper = 1.0 + float(clip_epsilon)
     xp = network.xp
     for indices in partitions:
+        phase_started = time.perf_counter()
         batch = storage.batch(indices)
+        finish_phase("partition_batch_materialization", phase_started)
+        phase_started = time.perf_counter()
         new_log_probs, entropy, _policy = network.evaluate_actions(
             batch["states"], batch["legal_masks"], batch["actions"]
         )
+        finish_phase("policy_forward_and_action_mask_validation", phase_started)
+        phase_started = time.perf_counter()
         log_ratio = new_log_probs - batch["old_log_probs"]
         ratio = xp.exp(log_ratio)
         finite = xp.all(xp.isfinite(ratio)) & xp.all(xp.isfinite(entropy))
         if not bool(network._as_float(finite)):
             raise FloatingPointError("PPO full-buffer metrics produced NaN/Inf.")
+        finish_phase("ratio_construction_and_finite_validation", phase_started)
+        phase_started = time.perf_counter()
         clipped_ratio = xp.clip(ratio, lower, upper)
         surrogate = xp.minimum(
             ratio * batch["advantages"],
@@ -441,10 +473,12 @@ def evaluate_full_buffer(network, storage, partitions, clip_epsilon):
         ratio_sum += network._as_float(xp.sum(ratio))
         ratio_min = min(ratio_min, network._as_float(xp.min(ratio)))
         ratio_max = max(ratio_max, network._as_float(xp.max(ratio)))
+        finish_phase("surrogate_metric_reductions_and_host_transfers", phase_started)
+    phase_started = time.perf_counter()
     network.synchronize()
     if total != storage.buffer.size:
         raise AssertionError("Whole-buffer PPO metrics did not visit every decision.")
-    return {
+    result = {
         "policy_loss": float(-surrogate_sum / total),
         "entropy": float(entropy_sum / total),
         "approx_kl": max(0.0, float(kl_sum / total)),
@@ -453,6 +487,20 @@ def evaluate_full_buffer(network, storage, partitions, clip_epsilon):
         "ratio_min": ratio_min,
         "ratio_max": ratio_max,
     }
+    finish_phase("final_device_synchronization_and_accounting", phase_started)
+    total_seconds = time.perf_counter() - profile_started
+    timing["unaccounted"] = max(0.0, total_seconds - sum(timing.values()))
+    if runtime_profile is not None:
+        _merge_numeric_profile(runtime_profile, {
+            "calls": 1,
+            "execution_seconds": float(total_seconds),
+            "gpu_calls": int(network.device == "gpu"),
+            "cpu_calls": int(network.device == "cpu"),
+            "gpu_buffer_calls": int(storage.location == "gpu"),
+            "ram_buffer_calls": int(storage.location != "gpu"),
+            "sections_seconds": timing,
+        })
+    return result
 
 
 def ppo_update(
@@ -475,13 +523,29 @@ def ppo_update(
     prefer_gpu_buffer=True,
     gpu_buffer_safety_fraction=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
 ):
-    """Run up to four deterministic PPO epochs over one on-policy buffer."""
+    """Run deterministic, KL-limited PPO epochs over one on-policy buffer."""
+    profile_started = time.perf_counter()
+    timing = {
+        "setup_and_first_partition": 0.0,
+        "storage_prepare": 0.0,
+        "later_epoch_partitioning": 0.0,
+        "minibatch_materialization": 0.0,
+        "optimizer_steps": 0.0,
+        "optimizer_synchronization": 0.0,
+        "full_buffer_evaluation": 0.0,
+        "epoch_metrics_and_kl_control": 0.0,
+        "storage_cleanup": 0.0,
+    }
+    optimizer_step_detail = {}
+    full_buffer_detail = {}
     if not 0 < float(clip_epsilon) < 1:
         raise ValueError("PPO clip_epsilon must be in (0, 1).")
     if target_kl <= 0 or stop_kl <= 0 or stop_kl < target_kl:
         raise ValueError("PPO KL thresholds must satisfy 0 < target_kl <= stop_kl.")
-    if not 1 <= int(max_epochs) <= 4:
-        raise ValueError("PPO max_epochs must be between one and four.")
+    if not 1 <= int(max_epochs) <= MAX_PPO_EPOCHS:
+        raise ValueError(
+            f"PPO max_epochs must be between one and {MAX_PPO_EPOCHS}."
+        )
     if not 0 < float(gpu_buffer_safety_fraction) <= 1:
         raise ValueError("GPU buffer safety fraction must be in (0, 1].")
 
@@ -501,6 +565,8 @@ def ppo_update(
         effective,
         stable_seed(base_seed, "ppo_shuffle", iteration, 0),
     )
+    timing["setup_and_first_partition"] = time.perf_counter() - profile_started
+    storage_started = time.perf_counter()
     storage = prepare_storage(
         network,
         buffer,
@@ -508,26 +574,36 @@ def ppo_update(
         prefer_gpu=prefer_gpu_buffer,
         safety_fraction=gpu_buffer_safety_fraction,
     )
+    timing["storage_prepare"] = time.perf_counter() - storage_started
     epoch_rows = []
     stopped_by_kl = False
     optimizer_steps = 0
+    result = None
     try:
         for epoch in range(int(max_epochs)):
-            partitions = (
-                first_partitions
-                if epoch == 0
-                else minibatch_indices(
+            if epoch == 0:
+                partitions = first_partitions
+            else:
+                partition_started = time.perf_counter()
+                partitions = minibatch_indices(
                     buffer.size,
                     effective,
                     stable_seed(base_seed, "ppo_shuffle", iteration, epoch),
                 )
-            )
+                timing["later_epoch_partitioning"] += (
+                    time.perf_counter() - partition_started
+                )
             batch_grad_norms = []
             batch_applied_grad_norms = []
             batch_clipped = 0
             step_before_epoch = int(getattr(network, "optimizer_step_count", 0))
             for indices in partitions:
+                materialization_started = time.perf_counter()
                 batch = storage.batch(indices)
+                timing["minibatch_materialization"] += (
+                    time.perf_counter() - materialization_started
+                )
+                optimizer_started = time.perf_counter()
                 step_metrics = network.backward_ppo(
                     batch["states"],
                     batch["actions"],
@@ -538,12 +614,19 @@ def ppo_update(
                     entropy_coef=entropy_coef,
                     clip_grad_norm=clip_grad_norm,
                 )
+                timing["optimizer_steps"] += time.perf_counter() - optimizer_started
+                step_detail = step_metrics.pop("runtime_profile_detail", {})
+                _merge_numeric_profile(optimizer_step_detail, step_detail)
                 batch_grad_norms.append(float(step_metrics["grad_norm"]))
                 batch_applied_grad_norms.append(
                     float(step_metrics["applied_grad_norm"])
                 )
                 batch_clipped += int(step_metrics["grad_clipped"])
+            synchronization_started = time.perf_counter()
             network.synchronize()
+            timing["optimizer_synchronization"] += (
+                time.perf_counter() - synchronization_started
+            )
             steps_this_epoch = (
                 int(getattr(network, "optimizer_step_count", 0))
                 - step_before_epoch
@@ -551,12 +634,18 @@ def ppo_update(
             if steps_this_epoch != len(partitions):
                 raise AssertionError("PPO optimizer-step count does not match minibatches.")
             optimizer_steps += steps_this_epoch
+            evaluation_started = time.perf_counter()
             whole = evaluate_full_buffer(
                 network,
                 storage,
                 partitions,
                 clip_epsilon,
+                runtime_profile=full_buffer_detail,
             )
+            timing["full_buffer_evaluation"] += (
+                time.perf_counter() - evaluation_started
+            )
+            metrics_started = time.perf_counter()
             row = {
                 "epoch": epoch + 1,
                 **whole,
@@ -574,9 +663,15 @@ def ppo_update(
             epoch_rows.append(row)
             if whole["approx_kl"] > float(stop_kl):
                 stopped_by_kl = True
+                timing["epoch_metrics_and_kl_control"] += (
+                    time.perf_counter() - metrics_started
+                )
                 break
+            timing["epoch_metrics_and_kl_control"] += (
+                time.perf_counter() - metrics_started
+            )
         final = epoch_rows[-1]
-        return {
+        result = {
             "requested_minibatches": int(requested),
             "effective_minibatches": int(effective),
             "minibatch_sizes": list(epoch_rows[0]["minibatch_sizes"]),
@@ -618,4 +713,25 @@ def ppo_update(
             "value_loss": None,
         }
     finally:
+        cleanup_started = time.perf_counter()
         storage.close()
+        timing["storage_cleanup"] += time.perf_counter() - cleanup_started
+
+    total_seconds = time.perf_counter() - profile_started
+    accounted_seconds = sum(timing.values())
+    timing["unaccounted"] = max(0.0, total_seconds - accounted_seconds)
+    result["runtime_timing_seconds"] = {
+        "total": float(total_seconds),
+        **{key: float(value) for key, value in timing.items()},
+    }
+    optimizer_step_detail["gpu_calls"] = int(
+        optimizer_step_detail.get("gpu_calls", 0)
+    )
+    optimizer_step_detail["cpu_calls"] = int(
+        optimizer_step_detail.get("cpu_calls", 0)
+    )
+    result["runtime_profile_detail"] = {
+        "optimizer_step": optimizer_step_detail,
+        "full_buffer_evaluation": full_buffer_detail,
+    }
+    return result

@@ -51,8 +51,8 @@ During a human turn:
 | `D` | Draw from the stock when legal. |
 | `P` | Pass when legal. |
 
-The menu cycles each player through `Neural`, `Random NN`, `Heuristic`,
-`Random`, `Human`, and `RL (self-play)`. Neural and RL selections load the
+The menu cycles each player through `Neural`, `Heuristic`, `Random`, `Human`,
+and `RL (self-play)`. Neural and RL selections load the
 default checkpoints from `models/`.
 
 The HUD also shows two compact opponent-suit probability rows near the bottom
@@ -65,9 +65,6 @@ they incrementally annotate appended history instead of replaying the full
 public history on every rendered frame.
 
 The window title follows the two agent types currently selected in the menu.
-
-The player menu includes `Random NN`, an untrained neural-policy control with a
-fixed random initialization. It needs no model checkpoint.
 
 Run UI tests:
 

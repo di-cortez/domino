@@ -14,13 +14,7 @@ the parent process assembles batches, updates weights, writes checkpoints, or
 uses the GPU.
 """
 
-import argparse
-from collections import deque
-from dataclasses import dataclass
-import hashlib
-import json
 import math
-import os
 from pathlib import Path
 import random
 import secrets
@@ -28,27 +22,99 @@ import time
 
 import numpy as np
 
-from agents.encoder import DominoEncoder
-from agents.heuristic_agent import StrategicAgent
-from agents.rl_agent import RLAgent
-from agents.rl_nn import DEVICES, PolicyNetwork
-from middleware.domino_engine import DominoEngine
-from diagnostics.parallel_runner import (
-    MAX_PARALLEL_WORKERS,
-    ParallelSafetyConfig,
-    cap_parallel_workers,
+from training.rl_cli import (
+    _training_kwargs_from_args,
+    add_optional_rl_arguments,
+    parse_args,
+    parse_rl_worker_count,
+)
+from training.rl_config import (
+    DEFAULT_ADAPTIVE_GPI,
+    DEFAULT_CLIP_GRAD_NORM,
+    DEFAULT_DEVICE,
+    DEFAULT_GAMES_PER_ITERATION,
+    DEFAULT_ITERATIONS,
+    DEFAULT_MOVING_AVERAGE_WINDOW,
+    DEFAULT_NORMALIZE_ADVANTAGES,
+    DEFAULT_POOL_REFRESH_GAMES,
+    DEFAULT_PPO_ENABLED,
+    DEFAULT_TOTAL_TRAINING_GAMES,
+    RL_WEIGHTS,
+    SL_WEIGHTS,
+    TRAINING_OPPONENT,
+    VALUE_COEF,
+    resolve_training_options,
+)
+from training.rl_rollout import (
+    DEFAULT_GAMMA,
+    DEFAULT_REWARD_SCHEMA,
+    EVENT_REWARD_DECAY,
+    FINAL_PIP_PENALTY,
+    LEARNER_DRAW_PENALTY,
+    LEARNER_PASS_PENALTY,
+    OPPONENT_DRAW_REWARD,
+    OPPONENT_PASS_REWARD,
+    REWARD_SCHEMAS,
+    REWARD_ZERO_EPSILON,
+    TERMINAL_LOSS_REWARD,
+    TERMINAL_TIE_REWARD,
+    TERMINAL_WIN_REWARD,
+    EventStats,
+    TrainingSample,
+    _collect_self_play_steps,
+    _collect_steps_vs_heuristic,
+    _event_reward_for_action,
+    _finish_episode_with_rewards,
+    _play_training_game,
+    _play_training_game_unprofiled,
+    _profile_worker_section,
+    _profile_worker_start,
+    _remaining_pips,
+    _terminal_reward,
+    _tile_play_actions,
+)
+from training.rl_resume import (
+    LEGACY_TRAINING_ALGORITHM,
+    PPO_TRAINING_ALGORITHM,
+    RESUME_POLICY_WEIGHT_NAMES,
+    RESUME_STATE_VERSION,
+    SUPPORTED_RESUME_STATE_VERSIONS,
+    _atomic_network_save,
+    _atomic_resume_state_save,
+    _checkpoint_matches_encoder,
+    _file_sha256,
+    _load_initial_network,
+    _nested_tuple,
+    _restore_rng_state,
+    _restore_training_windows,
+    _resume_configuration,
+    _rng_state_metadata,
+    _save_numbered_resume_checkpoint,
+    _sl_checkpoint_sha256,
+    _training_state_payload,
+    _validate_resume_configuration,
+    load_resume_state,
+    numbered_checkpoint_path,
+    resume_state_path,
+)
+from training.rl_reporting import (
+    RLRuntimeProfile,
+    _gradient_log_text,
+    _merge_parallel_summary,
+    _new_parallel_summary,
+    _prepare_metrics_file,
+    _print_ppo_window,
+    _reward_signal_summary,
+    _write_metrics_row,
 )
 from training.rl_parallel import (
-    DEFAULT_RL_AUTOTUNE_FRACTION,
     DEFAULT_RL_MINIMUM_GAIN,
     DEFAULT_RL_WORKER_CANDIDATES,
     DEFAULT_RL_WORKERS,
     RLRolloutRunner,
-    worker_count as parse_rl_worker_count,
 )
 from training.adaptive_tuning import (
     DEFAULT_GPI_BENCHMARK_GAMES_TARGET,
-    DEFAULT_GPI_BENCHMARK_WORKERS,
     DEFAULT_GPI_CANDIDATES,
     DEFAULT_WORKER_BENCHMARK_FRACTION,
     atomic_write_json as atomic_write_tuning_json,
@@ -71,751 +137,23 @@ from training.ppo import (
 )
 from utils.resource_limits import (
     MIB,
-    MemorySafetyError,
     choose_safe_rl_device,
-    effective_gpu_available_bytes,
     ensure_ram_available,
 )
 from utils.runtime_status import format_duration, print_memory_report
 
-# The array backend for a given run is resolved once, inside train(), from
-# the network's resolved `device` parameter -- it always
-# matches whatever PolicyNetwork itself is using, rather than being fixed at
-# import time.
-DEFAULT_DEVICE = "auto"
-DEFAULT_ITERATIONS = 1000
-DEFAULT_GAMES_PER_ITERATION = 100
-DEFAULT_TOTAL_TRAINING_GAMES = 100_000
-DEFAULT_POOL_REFRESH_GAMES = 400
-DEFAULT_ADAPTIVE_GPI = True
-DEFAULT_PPO_ENABLED = True
 
-SL_WEIGHTS = "models/domino_sl_weights.npz"
-RL_WEIGHTS = "models/domino_rl_weights.npz"
-TRAINING_OPPONENT = "self_play"
-RESUME_STATE_VERSION = 3
-SUPPORTED_RESUME_STATE_VERSIONS = (2, RESUME_STATE_VERSION)
-RESUME_POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
-PPO_TRAINING_ALGORITHM = "ppo_v1"
-LEGACY_TRAINING_ALGORITHM = "reinforce_v1"
-
-TERMINAL_WIN_REWARD = 0.50
-TERMINAL_TIE_REWARD = 0.00
-TERMINAL_LOSS_REWARD = -0.50
-FINAL_PIP_PENALTY = 0.001
-
-OPPONENT_DRAW_REWARD = 0.02
-LEARNER_DRAW_PENALTY = -0.02
-OPPONENT_PASS_REWARD = 0.10
-LEARNER_PASS_PENALTY = -0.10
-EVENT_REWARD_DECAY = 0.90
-
-REWARD_ZERO_EPSILON = 1e-8
-VALUE_COEF = 0.5
-DEFAULT_CLIP_GRAD_NORM = 5.0
-DEFAULT_MOVING_AVERAGE_WINDOW = 10
-# ``None`` resolves to on for PPO and off for the legacy one-update regression
-# path. Explicit CLI flags always win.
-DEFAULT_NORMALIZE_ADVANTAGES = None
-
-# Named presets for the terminal/event reward constants above, selectable at
-# training time so hyperparameter sweeps can vary reward shaping without
-# editing source. "default" reproduces the fixed constants exactly.
-REWARD_SCHEMAS = {
-    "default": {
-        "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_tie": TERMINAL_TIE_REWARD,
-        "terminal_loss": TERMINAL_LOSS_REWARD,
-        "final_pip_penalty": FINAL_PIP_PENALTY,
-        "opponent_draw": OPPONENT_DRAW_REWARD,
-        "learner_draw": LEARNER_DRAW_PENALTY,
-        "opponent_pass": OPPONENT_PASS_REWARD,
-        "learner_pass": LEARNER_PASS_PENALTY,
-        "event_decay": EVENT_REWARD_DECAY,
-    },
-    "sparse": {
-        "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_tie": TERMINAL_TIE_REWARD,
-        "terminal_loss": TERMINAL_LOSS_REWARD,
-        "final_pip_penalty": 0.0,
-        "opponent_draw": 0.0,
-        "learner_draw": 0.0,
-        "opponent_pass": 0.0,
-        "learner_pass": 0.0,
-        "event_decay": EVENT_REWARD_DECAY,
-    },
-    "shaped": {
-        "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_tie": TERMINAL_TIE_REWARD,
-        "terminal_loss": TERMINAL_LOSS_REWARD,
-        "final_pip_penalty": FINAL_PIP_PENALTY,
-        "opponent_draw": OPPONENT_DRAW_REWARD * 2.0,
-        "learner_draw": LEARNER_DRAW_PENALTY * 2.0,
-        "opponent_pass": OPPONENT_PASS_REWARD * 2.0,
-        "learner_pass": LEARNER_PASS_PENALTY * 2.0,
-        "event_decay": EVENT_REWARD_DECAY,
-    },
-}
-DEFAULT_REWARD_SCHEMA = "default"
-
-# Terminal-reward discount applied per remaining real decision (1.0 = no
-# discount, i.e. the previous fixed behavior).
-DEFAULT_GAMMA = 1.0
-
-
-@dataclass
-class EventStats:
-    """Raw draw/pass event counts collected during one training game or batch."""
-
-    opponent_draws: int = 0
-    opponent_passes: int = 0
-    learner_draws: int = 0
-    learner_passes: int = 0
-
-    def add(self, other):
-        self.opponent_draws += other.opponent_draws
-        self.opponent_passes += other.opponent_passes
-        self.learner_draws += other.learner_draws
-        self.learner_passes += other.learner_passes
-
-
-@dataclass(frozen=True)
-class TrainingSample:
-    """One finalized real decision used by REINFORCE or PPO."""
-
-    x: object
-    action_index: int
-    legal_mask: object
-    policy_reward: float
-    raw_reward: float
-    local_reward: float
-    terminal_reward: float
-    old_log_prob: float = 0.0
-
-
-def _tile_play_actions(legal_actions):
-    """Return legal tile-play actions, excluding forced draw/pass."""
-    return [
-        action
-        for action in legal_actions
-        if action is not None and action != ("DRAW", None)
-    ]
-
-
-def _event_reward_for_action(
-    current_player, learner_position, action, event_stats, schema=None
-):
-    """Return the local event reward for draw/pass actions and update counts."""
-    if schema is None:
-        schema = REWARD_SCHEMAS[DEFAULT_REWARD_SCHEMA]
-    if current_player != learner_position:
-        if action == ("DRAW", None):
-            event_stats.opponent_draws += 1
-            return schema["opponent_draw"]
-        if action is None:
-            event_stats.opponent_passes += 1
-            return schema["opponent_pass"]
-    else:
-        if action == ("DRAW", None):
-            event_stats.learner_draws += 1
-            return schema["learner_draw"]
-        if action is None:
-            event_stats.learner_passes += 1
-            return schema["learner_pass"]
-    return None
-
-
-def _remaining_pips(hand):
-    return sum(tile[0] + tile[1] for tile in hand)
-
-
-def _terminal_reward(engine, learner_position, schema):
-    """Return terminal outcome reward plus final remaining-pip penalty."""
-    winner = engine.winner
-    if winner == -1:
-        outcome_reward = schema["terminal_tie"]
-    elif winner == learner_position:
-        outcome_reward = schema["terminal_win"]
-    else:
-        outcome_reward = schema["terminal_loss"]
-
-    pip_penalty = schema["final_pip_penalty"] * _remaining_pips(engine.hands[learner_position])
-    return outcome_reward - pip_penalty
-
-
-def _finish_episode_with_rewards(learner_agent, terminal_reward, gamma=DEFAULT_GAMMA):
-    """Finalize one learner trajectory into policy-gradient training samples.
-
-    ``gamma`` discounts the terminal-reward component per remaining real
-    decision, so earlier decisions in the trajectory receive a more heavily
-    discounted share of the final outcome than the last one. Local event
-    rewards already carry their own temporal decay and are not affected.
-    """
-    finished_steps = learner_agent.finish_episode(terminal_reward)
-    step_count = len(finished_steps)
-    samples = []
-    for index, step in enumerate(finished_steps):
-        remaining_after = step_count - 1 - index
-        discounted_terminal = step.terminal_reward * (gamma ** remaining_after)
-        raw_reward = discounted_terminal + step.local_reward
-        samples.append(
-            TrainingSample(
-                x=step.x,
-                action_index=step.action_index,
-                legal_mask=step.legal_mask,
-                old_log_prob=step.old_log_prob,
-                policy_reward=raw_reward,
-                raw_reward=raw_reward,
-                local_reward=step.local_reward,
-                terminal_reward=discounted_terminal,
-            )
-        )
-    return samples
-
-
-def _reward_signal_summary(samples, xp=None):
-    """Return compact diagnostics for finalized decision rewards.
-
-    ``reward_std`` disambiguates a falling value loss from a merely
-    low-variance batch: since a value head that has not learned anything
-    predicts close to the batch mean, its loss is approximately
-    ``0.5 * reward_std ** 2`` — logging the standard deviation next to the
-    loss makes that identity checkable instead of hidden behind a noisy
-    scalar.
-
-    ``xp`` should be the training run's resolved array backend (``train()``
-    passes ``network.xp``); it defaults to NumPy for direct callers, which is
-    fine here since this is small-scale summary math, not the training path.
-    """
-    if xp is None:
-        xp = np
-    rewards = xp.asarray([sample.policy_reward for sample in samples], dtype=float)
-    local_rewards = xp.asarray([sample.local_reward for sample in samples], dtype=float)
-    total = rewards.size
-
-    good = xp.sum(rewards > REWARD_ZERO_EPSILON)
-    neutral = xp.sum(xp.abs(rewards) <= REWARD_ZERO_EPSILON)
-    bad = xp.sum(rewards < -REWARD_ZERO_EPSILON)
-
+def _value_prediction_summary(values):
+    """Summarize one batch of pre-update value-head predictions on the host."""
+    host_values = values.get() if hasattr(values, "get") else values
+    flattened = np.asarray(host_values, dtype=np.float64).reshape(-1)
     return {
-        "reward_mean": float(xp.mean(rewards)),
-        "reward_std": float(xp.std(rewards)),
-        "reward_min": float(xp.min(rewards)),
-        "reward_max": float(xp.max(rewards)),
-        "local_mean": float(xp.mean(local_rewards)),
-        "good_pct": float(100.0 * good / total),
-        "neutral_pct": float(100.0 * neutral / total),
-        "bad_pct": float(100.0 * bad / total),
+        "sample_count": int(flattened.size),
+        "mean": float(np.mean(flattened)),
+        "std": float(np.std(flattened)),
+        "min": float(np.min(flattened)),
+        "max": float(np.max(flattened)),
     }
-
-
-def _gradient_log_text(metrics):
-    """Return a compact gradient-norm string for the iteration log."""
-    suffix = " clipped" if metrics.get("grad_clipped") else ""
-    return f"{metrics['grad_norm']:.2f}{suffix}"
-
-
-def _play_training_game(agents, learner_position, learner_agent, schema):
-    """Play one RL training game and attach decayed local event rewards."""
-    engine = DominoEngine(player_count=len(agents))
-    event_stats = EventStats()
-
-    while not engine.game_over:
-        state = engine._get_state()
-        current_player = state["current_player"]
-        legal_actions = engine.valid_actions(current_player)
-        tile_actions = _tile_play_actions(legal_actions)
-
-        if current_player == learner_position and len(tile_actions) == 1:
-            action = tile_actions[0]
-        else:
-            action = agents[current_player].choose_move(state, legal_actions)
-
-        event_reward = _event_reward_for_action(
-            current_player,
-            learner_position,
-            action,
-            event_stats,
-            schema,
-        )
-        if event_reward is not None:
-            learner_agent.add_decayed_event_reward(
-                event_turn=state["turn"],
-                base_reward=event_reward,
-                decay_lambda=schema["event_decay"],
-            )
-
-        engine.step(
-            action,
-            return_state=False,
-            legal_actions=legal_actions,
-        )
-
-    return engine, event_stats
-
-
-def _collect_self_play_steps(network, pool, schema, gamma):
-    """Play one game against a frozen policy snapshot and collect learner samples."""
-    learner_position = random.randint(0, 1)
-    opponent_network = random.choice(pool) if pool else network
-
-    learner = RLAgent(network, mode="training")
-    opponent = RLAgent(opponent_network, mode="stochastic_evaluation")
-    agents = [None, None]
-    agents[learner_position] = learner
-    agents[1 - learner_position] = opponent
-
-    engine, event_stats = _play_training_game(agents, learner_position, learner, schema)
-    reward = _terminal_reward(engine, learner_position, schema)
-    samples = _finish_episode_with_rewards(learner, reward, gamma)
-    return samples, event_stats, engine.winner, learner_position
-
-
-def _collect_steps_vs_heuristic(network, schema, gamma):
-    """Play one training game against the fixed heuristic agent."""
-    learner_position = random.randint(0, 1)
-    learner = RLAgent(network, mode="training")
-    agents = [None, None]
-    agents[learner_position] = learner
-    agents[1 - learner_position] = StrategicAgent()
-
-    engine, event_stats = _play_training_game(agents, learner_position, learner, schema)
-    reward = _terminal_reward(engine, learner_position, schema)
-    samples = _finish_episode_with_rewards(learner, reward, gamma)
-    return samples, event_stats, engine.winner, learner_position
-
-
-def _checkpoint_matches_encoder(network):
-    """Return True when a loaded checkpoint matches the current encoder shape."""
-    encoder = DominoEncoder()
-    return (
-        network.W1.shape[1] == encoder.VECTOR_SIZE
-        and network.W3.shape[0] == len(encoder.all_actions)
-    )
-
-
-def _load_initial_network(
-    learning_rate,
-    sl_weights_path,
-    rl_weights_path,
-    quiet=False,
-    use_value_head=False,
-    device=DEFAULT_DEVICE,
-    sl_weights_data=None,
-    fresh_from_sl=False,
-    expected_training_algorithm=None,
-):
-    """Load an RL checkpoint or initialize from compatible SL weights.
-
-    ``sl_weights_data`` accepts a pre-loaded mapping of SL weight arrays (see
-    ``PolicyNetwork.load_from_sl``), so a caller warm-starting many runs from
-    the same SL checkpoint (e.g. a hyperparameter sweep) can read it from
-    disk once and reuse it, instead of every run re-reading
-    ``sl_weights_path``. Unused when resuming from an existing RL checkpoint.
-    ``fresh_from_sl=True`` deliberately ignores ``rl_weights_path`` as an
-    initialization source while leaving that file intact until the completed
-    new model atomically replaces it.
-    """
-    if rl_weights_path is not None and not fresh_from_sl:
-        try:
-            network = PolicyNetwork.load(
-                rl_weights_path,
-                learning_rate=learning_rate,
-                use_value_head=use_value_head,
-                device=device,
-            )
-            if not _checkpoint_matches_encoder(network):
-                raise ValueError(
-                    f"RL checkpoint {rl_weights_path} has shape "
-                    f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
-                    "but the current encoder expects input=168, output=56."
-                )
-            saved_algorithm = getattr(network, "rl_training_algorithm", None)
-            if expected_training_algorithm is not None:
-                if saved_algorithm is None:
-                    if expected_training_algorithm != LEGACY_TRAINING_ALGORITHM:
-                        raise ValueError(
-                            f"RL checkpoint {rl_weights_path} predates algorithm "
-                            "metadata and cannot be continued as PPO implicitly. "
-                            "Use --fresh-from-sl for a new PPO run or --no-ppo "
-                            "to continue the historical update rule."
-                        )
-                elif saved_algorithm != expected_training_algorithm:
-                    raise ValueError(
-                        "RL checkpoint rl_training_algorithm is "
-                        f"{saved_algorithm!r}, but "
-                        f"{expected_training_algorithm!r} was requested."
-                    )
-                network.rl_training_algorithm = expected_training_algorithm
-            if not quiet:
-                print(f"Resuming RL training from {rl_weights_path}")
-            return network
-        except FileNotFoundError:
-            pass
-
-    network = PolicyNetwork.load_from_sl(
-        sl_weights_path,
-        learning_rate=learning_rate,
-        use_value_head=use_value_head,
-        device=device,
-        data=sl_weights_data,
-    )
-    if not _checkpoint_matches_encoder(network):
-        raise ValueError(
-            f"SL checkpoint {sl_weights_path} has shape "
-            f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
-            "but the current encoder expects input=168, output=56. "
-            "Regenerate the supervised dataset and retrain SL first."
-        )
-    if expected_training_algorithm is not None:
-        network.rl_training_algorithm = expected_training_algorithm
-    if not quiet:
-        print(f"Initializing RL policy from supervised weights: {sl_weights_path}")
-    return network
-
-
-def numbered_checkpoint_path(base_path, iteration):
-    """Return an iteration-suffixed checkpoint path derived from ``base_path``."""
-    path = Path(base_path)
-    suffix = path.suffix or ".npz"
-    stem = path.name[:-len(path.suffix)] if path.suffix else path.name
-    return path.with_name(f"{stem}_iter{int(iteration):06d}{suffix}")
-
-
-def resume_state_path(weights_path):
-    """Return the auxiliary resume-state path paired with a weights checkpoint."""
-    path = Path(weights_path)
-    suffix = path.suffix or ".npz"
-    stem = path.name[:-len(path.suffix)] if path.suffix else path.name
-    return path.with_name(f"{stem}.resume{suffix}")
-
-
-def _file_sha256(path):
-    """Return a streaming SHA-256 digest without duplicating checkpoint memory."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as checkpoint_file:
-        for block in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _atomic_network_save(network, path):
-    """Publish a complete network file with one same-directory atomic rename."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(
-        f".{path.stem}.tmp-{os.getpid()}-{secrets.token_hex(4)}.npz"
-    )
-    try:
-        network.save(str(temporary))
-        with open(temporary, "rb") as stream:
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _atomic_resume_state_save(path, metadata, pool_snapshots):
-    """Atomically save metadata and the exact self-play opponent pool."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    arrays = {
-        "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True)),
-        "pool_count": np.asarray(len(pool_snapshots), dtype=np.int64),
-    }
-    for snapshot_index, snapshot in enumerate(pool_snapshots):
-        for name in RESUME_POLICY_WEIGHT_NAMES:
-            arrays[f"pool_{snapshot_index:03d}_{name}"] = np.asarray(snapshot[name])
-    temporary = path.with_name(
-        f".{path.stem}.tmp-{os.getpid()}-{secrets.token_hex(4)}.npz"
-    )
-    try:
-        np.savez_compressed(temporary, **arrays)
-        with open(temporary, "rb") as stream:
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def load_resume_state(weights_path, state_path):
-    """Validate and load one complete weights/state checkpoint pair."""
-    weights_path = Path(weights_path)
-    state_path = Path(state_path)
-    with np.load(state_path, allow_pickle=False) as state:
-        metadata = json.loads(str(state["metadata_json"].item()))
-        if metadata.get("version") not in SUPPORTED_RESUME_STATE_VERSIONS:
-            raise ValueError(
-                f"Unsupported RL resume-state version in {state_path}: "
-                f"{metadata.get('version')!r}."
-            )
-        actual_hash = _file_sha256(weights_path)
-        if metadata.get("weights_sha256") != actual_hash:
-            raise ValueError(
-                f"RL checkpoint pair is inconsistent: {weights_path} does not "
-                f"match {state_path}."
-            )
-        pool_count = int(state["pool_count"])
-        snapshots = []
-        for snapshot_index in range(pool_count):
-            weights = {}
-            for name in RESUME_POLICY_WEIGHT_NAMES:
-                key = f"pool_{snapshot_index:03d}_{name}"
-                if key not in state:
-                    raise ValueError(f"RL resume state {state_path} is missing {key}.")
-                weights[name] = np.asarray(state[key]).copy()
-            snapshots.append(weights)
-    return metadata, tuple(snapshots)
-
-
-def _rng_state_metadata():
-    """Return JSON-safe parent RNG state for exact checkpoint continuation."""
-    numpy_state = np.random.get_state()
-    return {
-        "python": random.getstate(),
-        "numpy": {
-            "bit_generator": numpy_state[0],
-            "keys": numpy_state[1].tolist(),
-            "position": int(numpy_state[2]),
-            "has_gauss": int(numpy_state[3]),
-            "cached_gaussian": float(numpy_state[4]),
-        },
-    }
-
-
-def _nested_tuple(value):
-    if isinstance(value, list):
-        return tuple(_nested_tuple(item) for item in value)
-    return value
-
-
-def _restore_rng_state(metadata):
-    """Restore parent RNG state saved by :func:`_rng_state_metadata`."""
-    if not metadata:
-        raise ValueError("RL resume state is missing parent RNG state.")
-    random.setstate(_nested_tuple(metadata["python"]))
-    numpy_state = metadata["numpy"]
-    np.random.set_state((
-        numpy_state["bit_generator"],
-        np.asarray(numpy_state["keys"], dtype=np.uint32),
-        int(numpy_state["position"]),
-        int(numpy_state["has_gauss"]),
-        float(numpy_state["cached_gaussian"]),
-    ))
-
-
-def _resume_configuration(
-    *,
-    total_training_games,
-    selected_gpi,
-    selected_workers,
-    rl_training_algorithm,
-    training_opponent,
-    learning_rate,
-    entropy_coef,
-    pool_refresh_games,
-    max_pool_size,
-    use_value_head,
-    value_coef,
-    gamma,
-    reward_schema,
-    clip_grad_norm,
-    normalize_advantages,
-    effective_seed,
-    device,
-    sl_weights_sha256,
-    ppo_clip_epsilon,
-    ppo_target_kl,
-    ppo_stop_kl,
-    ppo_max_epochs,
-    ppo_min_minibatches,
-    ppo_max_minibatches,
-    ppo_games_per_minibatch_scale,
-    ppo_min_decisions_per_minibatch,
-    prefer_gpu_buffer,
-    gpu_buffer_safety_fraction,
-):
-    """Return every setting that can affect post-checkpoint RL computation."""
-    return {
-        "total_training_games": int(total_training_games),
-        "selected_gpi": int(selected_gpi),
-        "selected_workers": int(selected_workers),
-        "rl_training_algorithm": rl_training_algorithm,
-        "training_opponent": training_opponent,
-        "learning_rate": float(learning_rate),
-        "entropy_coef": float(entropy_coef),
-        "pool_refresh_games": int(pool_refresh_games),
-        "max_pool_size": int(max_pool_size),
-        "use_value_head": bool(use_value_head),
-        "value_coef": float(value_coef),
-        "gamma": float(gamma),
-        "reward_schema": reward_schema,
-        "clip_grad_norm": (
-            None if clip_grad_norm is None else float(clip_grad_norm)
-        ),
-        "normalize_advantages": bool(normalize_advantages),
-        "effective_seed": int(effective_seed),
-        "device": device,
-        "sl_weights_sha256": sl_weights_sha256,
-        "ppo_clip_epsilon": float(ppo_clip_epsilon),
-        "ppo_target_kl": float(ppo_target_kl),
-        "ppo_stop_kl": float(ppo_stop_kl),
-        "ppo_max_epochs": int(ppo_max_epochs),
-        "ppo_min_minibatches": int(ppo_min_minibatches),
-        "ppo_max_minibatches": int(ppo_max_minibatches),
-        "ppo_games_per_minibatch_scale": int(ppo_games_per_minibatch_scale),
-        "ppo_min_decisions_per_minibatch": int(ppo_min_decisions_per_minibatch),
-        "prefer_gpu_buffer": bool(prefer_gpu_buffer),
-        "gpu_buffer_safety_fraction": float(gpu_buffer_safety_fraction),
-    }
-
-
-def _validate_resume_configuration(metadata, expected, *, ignored_keys=()):
-    """Reject a resume that would silently continue a different experiment."""
-    saved = metadata.get("configuration")
-    ignored_keys = set(ignored_keys)
-    comparable_saved = {
-        key: value for key, value in (saved or {}).items()
-        if key not in ignored_keys
-    }
-    comparable_expected = {
-        key: value for key, value in expected.items()
-        if key not in ignored_keys
-    }
-    if comparable_saved != comparable_expected:
-        differences = []
-        saved = saved or {}
-        for key in sorted(set(saved) | set(expected)):
-            if key in ignored_keys:
-                continue
-            if saved.get(key) != expected.get(key):
-                differences.append(
-                    f"{key}: checkpoint={saved.get(key)!r}, requested={expected.get(key)!r}"
-                )
-        raise ValueError(
-            "RL resume configuration does not match the checkpoint: "
-            + "; ".join(differences)
-        )
-
-
-def _save_numbered_resume_checkpoint(
-    network,
-    runner,
-    base_path,
-    iteration,
-    configuration,
-    runtime_workers,
-    completed_training_games,
-    adaptive_tuning,
-    training_state,
-):
-    """Save one atomic resumable checkpoint and retain only its latest state."""
-    weights_path = numbered_checkpoint_path(base_path, iteration)
-    state_path = resume_state_path(weights_path)
-
-    # Invalidate an older same-iteration pair before replacing its weights.
-    # A sudden interruption then leaves either the previous iteration pair or
-    # the newly completed pair, never new weights with stale resume metadata.
-    state_path.unlink(missing_ok=True)
-    _atomic_network_save(network, weights_path)
-    metadata = {
-        "version": RESUME_STATE_VERSION,
-        "completed_iteration": int(iteration),
-        "weights_file": weights_path.name,
-        "weights_sha256": _file_sha256(weights_path),
-        "runtime_workers": int(runtime_workers),
-        "completed_training_games": int(completed_training_games),
-        "configuration": configuration,
-        "optimizer_state": network.optimizer_state_dict(),
-        "rng_state": _rng_state_metadata(),
-        "adaptive_tuning": adaptive_tuning,
-        "training_state": training_state,
-        "opponent_pool_metadata": list(runner.export_pool_metadata()),
-    }
-    _atomic_resume_state_save(
-        state_path,
-        metadata,
-        runner.export_pool_snapshots(),
-    )
-
-    # Pool snapshots are much larger than policy-only checkpoints. The newest
-    # state is sufficient for continuation; older numbered weight files remain
-    # available for analysis while their superseded resume states are removed.
-    base = Path(base_path)
-    base_stem = base.name[:-len(base.suffix)] if base.suffix else base.name
-    for older_state in base.parent.glob(f"{base_stem}_iter*.resume.npz"):
-        if older_state != state_path:
-            older_state.unlink(missing_ok=True)
-    return weights_path, state_path
-
-
-def _new_parallel_summary(requested_workers):
-    """Return mutable aggregate metadata for all RL worker-pool phases."""
-    return {
-        "requested_workers": requested_workers,
-        "initial_workers": None,
-        "final_workers": None,
-        "peak_worker_rss_mb": 0.0,
-        "peak_total_children_rss_mb": 0.0,
-        "min_available_memory_mb": None,
-        "fallback_count": 0,
-        "fallback_history": [],
-        "attempted_worker_counts": [],
-        "safety_capped": False,
-        "memory_monitoring_available": True,
-        "workers_cpu_only": True,
-        "rollout_batches": 0,
-    }
-
-
-def _merge_parallel_summary(summary, run_info, *, phase, iteration):
-    """Accumulate one rollout/evaluation pool run into the public summary."""
-    if summary["initial_workers"] is None:
-        summary["initial_workers"] = run_info.initial_workers
-    summary["final_workers"] = run_info.final_workers
-    summary["peak_worker_rss_mb"] = max(
-        summary["peak_worker_rss_mb"],
-        run_info.peak_worker_rss_mb,
-    )
-    summary["peak_total_children_rss_mb"] = max(
-        summary["peak_total_children_rss_mb"],
-        run_info.peak_total_children_rss_mb,
-    )
-    available = run_info.min_available_memory_mb
-    if available is not None:
-        current = summary["min_available_memory_mb"]
-        summary["min_available_memory_mb"] = (
-            available if current is None else min(current, available)
-        )
-    summary["fallback_count"] += run_info.fallback_count
-    for item in run_info.fallback_history:
-        tagged = dict(item)
-        tagged["rl_phase"] = phase
-        tagged["iteration"] = int(iteration)
-        summary["fallback_history"].append(tagged)
-    summary["attempted_worker_counts"].extend(run_info.attempted_worker_counts)
-    summary["safety_capped"] = summary["safety_capped"] or run_info.safety_capped
-    summary["memory_monitoring_available"] = (
-        summary["memory_monitoring_available"]
-        and run_info.memory_monitoring_available
-    )
-    summary[f"{phase}_batches"] += 1
-
-
-def _sl_checkpoint_sha256(path, data=None):
-    path = Path(path)
-    if path.is_file():
-        return _file_sha256(path)
-    if data is None:
-        return None
-    digest = hashlib.sha256()
-    for name in RESUME_POLICY_WEIGHT_NAMES:
-        value = np.asarray(data[name])
-        digest.update(name.encode("ascii"))
-        digest.update(value.dtype.str.encode("ascii"))
-        digest.update(str(value.shape).encode("ascii"))
-        digest.update(value.tobytes(order="C"))
-    return digest.hexdigest()
 
 
 def _legacy_policy_update(
@@ -827,6 +165,7 @@ def _legacy_policy_update(
     normalize_advantages,
     use_value_head,
     value_coef,
+    collect_value_predictions=False,
 ):
     """Apply the historical one-full-buffer update for ``--no-ppo``."""
     xp = network.xp
@@ -841,9 +180,12 @@ def _legacy_policy_update(
         dtype=xp.float32,
     ).reshape(1, -1)
     value_returns = None
+    value_predictions = None
     policy_signal = rewards
     if use_value_head:
         values = network.predict_values(x_batch)
+        if collect_value_predictions:
+            value_predictions = _value_prediction_summary(values)
         policy_signal = rewards - values
         value_returns = rewards
     else:
@@ -855,7 +197,7 @@ def _legacy_policy_update(
             policy_signal = (policy_signal - mean) / (std + REWARD_ZERO_EPSILON)
         else:
             policy_signal = policy_signal - mean
-    return network.backward_policy_gradient(
+    metrics = network.backward_policy_gradient(
         actions,
         policy_signal,
         legal_masks=legal_masks,
@@ -864,111 +206,9 @@ def _legacy_policy_update(
         value_coef=value_coef,
         clip_grad_norm=clip_grad_norm,
     )
-
-
-def _training_state_payload(
-    *,
-    win_rate_window,
-    value_loss_window,
-    ppo_window,
-    total_decision_samples,
-    ppo_updates_completed,
-    clipped_iteration_count,
-    total_rollout_duration_s,
-    total_update_duration_s,
-    elapsed_rl_seconds,
-):
-    return {
-        "win_rate_window": list(win_rate_window),
-        "value_loss_window": list(value_loss_window),
-        "ppo_window": list(ppo_window),
-        "total_decision_samples": int(total_decision_samples),
-        "trainable_decisions_seen": int(total_decision_samples),
-        "ppo_updates_completed": int(ppo_updates_completed),
-        "clipped_iteration_count": int(clipped_iteration_count),
-        "total_rollout_duration_s": float(total_rollout_duration_s),
-        "total_update_duration_s": float(total_update_duration_s),
-        "elapsed_rl_seconds": float(elapsed_rl_seconds),
-    }
-
-
-def _restore_training_windows(metadata, moving_average_window):
-    state = (metadata or {}).get("training_state", {})
-    return (
-        deque(state.get("win_rate_window", ()), maxlen=moving_average_window),
-        deque(state.get("value_loss_window", ()), maxlen=moving_average_window),
-        deque(state.get("ppo_window", ()), maxlen=10),
-        state,
-    )
-
-
-def _print_ppo_window(rows):
-    """Print the requested ten-iteration PPO aggregate without minibatch chatter."""
-    rows = list(rows)
-    if not rows:
-        return
-    count = len(rows)
-    effective = [row["effective_minibatches"] for row in rows]
-    epochs = [row["epochs_completed"] for row in rows]
-    buffer_bytes = [row["buffer_bytes"] for row in rows]
-    print(
-        f"  PPO/{count}: GPI {rows[-1]['games']} | decisions "
-        f"{sum(row['decisions'] for row in rows)} total/"
-        f"{np.mean([row['decisions'] for row in rows]):.1f} avg | "
-        f"minibatches requested {np.mean([row['requested_minibatches'] for row in rows]):.1f} avg, "
-        f"effective {np.mean(effective):.1f}/{min(effective)}/{max(effective)} avg/min/max"
-    )
-    print(
-        f"  PPO/{count}: optimizer steps {sum(row['optimizer_steps'] for row in rows)} total/"
-        f"{np.mean([row['optimizer_steps'] for row in rows]):.1f} avg | epochs "
-        f"{np.mean(epochs):.1f}/{min(epochs)}/{max(epochs)} avg/min/max | "
-        f"KL stops {sum(row['stopped_by_kl'] for row in rows)}/{count} | final KL "
-        f"{np.mean([row['final_approx_kl'] for row in rows]):.5f} avg/"
-        f"{max(row['final_approx_kl'] for row in rows):.5f} max"
-    )
-    print(
-        f"  PPO/{count}: clip fraction {np.mean([row['final_clip_fraction'] for row in rows]):.3f} | "
-        f"policy loss {np.mean([row['final_policy_loss'] for row in rows]):+.4f} | "
-        f"entropy {np.mean([row['final_entropy'] for row in rows]):.4f} | grad norm "
-        f"{np.mean([row['gradient_norm_mean'] for row in rows]):.3f} avg/"
-        f"{max(row['gradient_norm_max'] for row in rows):.3f} max"
-    )
-    gpu_count = sum(row["buffer_location"] == "gpu" for row in rows)
-    print(
-        f"  PPO/{count}: buffer GPU {gpu_count}, RAM {count - gpu_count} | bytes "
-        f"{np.mean(buffer_bytes):.0f} avg/{max(buffer_bytes)} max | PPO update "
-        f"{sum(row['ppo_seconds'] for row in rows):.2f}s total/"
-        f"{np.mean([row['ppo_seconds'] for row in rows]):.3f}s avg | rollout "
-        f"{sum(row['rollout_seconds'] for row in rows):.2f}s total/"
-        f"{np.mean([row['rollout_seconds'] for row in rows]):.3f}s avg"
-    )
-
-
-def _prepare_metrics_file(path, start_iteration):
-    """Create or truncate the built-in JSONL trace to the resumed checkpoint."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    retained = []
-    if start_iteration and path.is_file():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if int(row.get("iteration", 0)) <= int(start_iteration):
-                retained.append(row)
-    temporary = path.with_name(
-        f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
-    )
-    try:
-        with open(temporary, "w", encoding="utf-8") as stream:
-            for row in retained:
-                stream.write(json.dumps(row, sort_keys=True) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return path
+    if value_predictions is not None:
+        metrics["value_predictions_before_update"] = value_predictions
+    return metrics
 
 
 def train(
@@ -1034,103 +274,59 @@ def train(
     force_resume_incompatible=False,
     checkpoint_callback=None,
 ):
-    """Train an exact game budget with isolated adaptive tuning and PPO v1.
+    """Train an exact game budget with the selected on-policy update rule.
 
     Passing ``iterations`` keeps the old programmatic workload contract and
     implies ``iterations * games_per_iteration`` real games. Normal CLI and
     pipeline runs use ``total_training_games`` directly, allowing the final
     iteration to be partial. Benchmark games are always discarded.
     """
-    retune_gpi = bool(retune_gpi or retune_all)
-    retune_workers = bool(retune_workers or retune_all)
-    manual_gpi_explicit = games_per_iteration is not None
-    games_per_iteration = (
-        DEFAULT_GAMES_PER_ITERATION
-        if games_per_iteration is None
-        else int(games_per_iteration)
-    )
-    if games_per_iteration < 1:
-        raise ValueError("games_per_iteration must be positive")
-    if iterations is not None:
-        if iterations < 1:
-            raise ValueError("iterations must be positive")
-        implied_total = int(iterations) * int(games_per_iteration)
-        if total_training_games is not None and int(total_training_games) != implied_total:
-            raise ValueError(
-                "iterations * games_per_iteration conflicts with total_training_games"
-            )
-        total_training_games = implied_total
-        if adaptive_gpi is None:
-            adaptive_gpi = False
-    else:
-        total_training_games = (
-            DEFAULT_TOTAL_TRAINING_GAMES
-            if total_training_games is None
-            else int(total_training_games)
-        )
-        if adaptive_gpi is None:
-            adaptive_gpi = DEFAULT_ADAPTIVE_GPI and not manual_gpi_explicit
-    if total_training_games < 1:
-        raise ValueError("total_training_games must be positive")
-    tuning_training_games = (
-        int(total_training_games)
-        if adaptive_tuning_training_games is None
-        else int(adaptive_tuning_training_games)
-    )
-    if tuning_training_games < 1:
-        raise ValueError("adaptive_tuning_training_games must be positive")
-    if checkpoint_interval < 1 or log_interval < 1:
-        raise ValueError("checkpoint_interval and log_interval must be positive")
-    if pool_refresh_games < 1:
-        raise ValueError("pool_refresh_games must be positive")
-    if max_pool_size < 0:
-        raise ValueError("max_pool_size must be non-negative")
-    if moving_average_window < 1:
-        raise ValueError("moving_average_window must be positive")
-    if not 0 < float(autotune_fraction) <= 1:
-        raise ValueError("autotune_fraction must be in (0, 1]")
-    if float(autotune_minimum_gain) < 0:
-        raise ValueError("autotune_minimum_gain must be non-negative")
-    if training_opponent not in ("self_play", "heuristic"):
-        raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
-    if reward_schema not in REWARD_SCHEMAS:
-        raise ValueError(f"Unknown reward_schema {reward_schema!r}.")
-    if ppo_enabled and use_value_head:
-        raise ValueError(
-            "PPO v1 keeps the critic disabled; use --no-ppo for value-head regression."
-        )
-    if ppo_enabled:
-        if not 0 < float(ppo_clip_epsilon) < 1:
-            raise ValueError("ppo_clip_epsilon must be in (0, 1)")
-        if not 0 < float(ppo_target_kl) <= float(ppo_stop_kl):
-            raise ValueError("PPO KL thresholds require 0 < target_kl <= stop_kl")
-        if not 1 <= int(ppo_max_epochs) <= 4:
-            raise ValueError("ppo_max_epochs must be between 1 and 4")
-        if int(ppo_min_minibatches) < 1 or int(ppo_max_minibatches) < int(
-            ppo_min_minibatches
-        ):
-            raise ValueError("Invalid PPO minibatch bounds")
-        if int(ppo_games_per_minibatch_scale) < 1:
-            raise ValueError("ppo_games_per_minibatch_scale must be positive")
-        if int(ppo_min_decisions_per_minibatch) < 1:
-            raise ValueError("ppo_min_decisions_per_minibatch must be positive")
-        if not 0 < float(gpu_buffer_safety_fraction) <= 1:
-            raise ValueError("gpu_buffer_safety_fraction must be in (0, 1]")
-    algorithm = PPO_TRAINING_ALGORITHM if ppo_enabled else LEGACY_TRAINING_ALGORITHM
-    normalize_advantages = (
-        bool(ppo_enabled)
-        if normalize_advantages is None
-        else bool(normalize_advantages)
-    )
-    if workers != "auto":
-        workers = int(workers)
-        if not 1 <= workers <= MAX_PARALLEL_WORKERS:
-            raise ValueError(
-                f"workers must be 'auto' or between 1 and {MAX_PARALLEL_WORKERS}"
-            )
-    safety_config = safety_config or ParallelSafetyConfig()
-    schema = REWARD_SCHEMAS[reward_schema]
+    runtime_profile = RLRuntimeProfile()
 
+    resolved_options = resolve_training_options(
+        iterations=iterations,
+        total_training_games=total_training_games,
+        games_per_iteration=games_per_iteration,
+        adaptive_gpi=adaptive_gpi,
+        adaptive_tuning_training_games=adaptive_tuning_training_games,
+        retune_gpi=retune_gpi,
+        retune_workers=retune_workers,
+        retune_all=retune_all,
+        checkpoint_interval=checkpoint_interval,
+        log_interval=log_interval,
+        pool_refresh_games=pool_refresh_games,
+        max_pool_size=max_pool_size,
+        moving_average_window=moving_average_window,
+        autotune_fraction=autotune_fraction,
+        autotune_minimum_gain=autotune_minimum_gain,
+        training_opponent=training_opponent,
+        reward_schema=reward_schema,
+        ppo_enabled=ppo_enabled,
+        use_value_head=use_value_head,
+        ppo_clip_epsilon=ppo_clip_epsilon,
+        ppo_target_kl=ppo_target_kl,
+        ppo_stop_kl=ppo_stop_kl,
+        ppo_max_epochs=ppo_max_epochs,
+        ppo_min_minibatches=ppo_min_minibatches,
+        ppo_max_minibatches=ppo_max_minibatches,
+        ppo_games_per_minibatch_scale=ppo_games_per_minibatch_scale,
+        ppo_min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
+        gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
+        normalize_advantages=normalize_advantages,
+        workers=workers,
+        safety_config=safety_config,
+    )
+    retune_gpi = resolved_options.retune_gpi
+    retune_workers = resolved_options.retune_workers
+    games_per_iteration = resolved_options.games_per_iteration
+    total_training_games = resolved_options.total_training_games
+    tuning_training_games = resolved_options.tuning_training_games
+    adaptive_gpi = resolved_options.adaptive_gpi
+    algorithm = resolved_options.algorithm
+    normalize_advantages = resolved_options.normalize_advantages
+    workers = resolved_options.workers
+    safety_config = resolved_options.safety_config
+    schema = resolved_options.schema
     has_resume_weights = resume_weights_path is not None
     has_resume_state = resume_state_file is not None
     if has_resume_weights != has_resume_state:
@@ -1241,6 +437,11 @@ def train(
     emit_status("-" * 70)
     emit_status("Adaptive RL tuning")
     emit_status("-" * 70)
+    runtime_profile.add(
+        "validation_model_load_and_resume",
+        time.perf_counter() - runtime_profile.started,
+    )
+    adaptive_tuning_started = time.perf_counter()
     adaptive_tuning = run_adaptive_tuning(
         network,
         total_training_games=tuning_training_games,
@@ -1265,18 +466,33 @@ def train(
         output_path=tuning_path,
         status_callback=emit_status,
     )
+    runtime_profile.add(
+        "adaptive_tuning",
+        time.perf_counter() - adaptive_tuning_started,
+    )
+    runner_setup_started = time.perf_counter()
     selected_gpi = int(adaptive_tuning["selected_gpi"])
     selected_workers = int(adaptive_tuning["selected_workers"])
-    emit_status("PPO configuration:")
-    emit_status(
-        f"  enabled: {bool(ppo_enabled)} | clip epsilon: {ppo_clip_epsilon:.2f} | "
-        f"target KL: {ppo_target_kl:.3f} | stop KL: {ppo_stop_kl:.3f}"
-    )
-    emit_status(
-        f"  max epochs: {ppo_max_epochs} | minibatches: adaptive, "
-        f"{ppo_min_minibatches} to {ppo_max_minibatches} | preferred buffer: GPU | "
-        "fallback: RAM"
-    )
+    emit_status("RL update configuration:")
+    if ppo_enabled:
+        emit_status(
+            f"  algorithm: {algorithm} | clip epsilon: {ppo_clip_epsilon:.2f} | "
+            f"target KL: {ppo_target_kl:.3f} | stop KL: {ppo_stop_kl:.3f}"
+        )
+        emit_status(
+            f"  max epochs: {ppo_max_epochs} | minibatches: adaptive, "
+            f"{ppo_min_minibatches} to {ppo_max_minibatches} | preferred "
+            "buffer: GPU | fallback: RAM"
+        )
+    else:
+        emit_status(
+            f"  algorithm: {algorithm} | one full-buffer policy-gradient "
+            "update per iteration"
+        )
+        emit_status(
+            "  PPO minibatches, ratios, clipping, KL control, and post-update "
+            "full-buffer evaluation: disabled"
+        )
     emit_status("-" * 70)
 
     resume_configuration = _resume_configuration(
@@ -1348,7 +564,7 @@ def train(
     ensure_ram_available(
         estimated_shared_bytes + estimated_batch_bytes,
         safety_config.memory_reserve_mb,
-        "RL self-play, PPO buffer, and shared-policy preflight",
+        "RL self-play decision buffer and shared-policy preflight",
     )
     if not quiet:
         print_memory_report("RL self-play startup memory")
@@ -1416,6 +632,10 @@ def train(
     metrics_stream = open(metrics_path, "a", encoding="utf-8")
     start_time = time.time()
     training_perf_started = time.perf_counter()
+    runtime_profile.add(
+        "resource_preflight_runner_setup_and_metrics_open",
+        training_perf_started - runner_setup_started,
+    )
     last_checkpoint_time = start_time
     last_saved_iteration = int(start_iteration)
     final_weights_path = (
@@ -1426,6 +646,8 @@ def train(
     completed_this_invocation = 0
     completed_iterations_this_invocation = 0
     stopped_by_shutdown = False
+    decision_samples_at_invocation_start = int(total_decision_samples)
+    optimizer_steps_at_invocation_start = int(network.optimizer_step_count)
     try:
         for local_iteration in range(1, iterations_to_run + 1):
             if shutdown_requested is not None and shutdown_requested():
@@ -1438,7 +660,13 @@ def train(
                 invocation_target_games - completed_training_games,
             )
             previous_training_games = completed_training_games
+            iteration_accounted_before = runtime_profile.accounted_seconds()
+            section_started = time.perf_counter()
             runner.sync_current(network)
+            runtime_profile.add(
+                "policy_snapshot_synchronization",
+                time.perf_counter() - section_started,
+            )
             rollout_started = time.perf_counter()
             rollout_results, rollout_info = runner.collect_games(
                 previous_training_games,
@@ -1446,7 +674,10 @@ def train(
                 effective_seed,
             )
             rollout_elapsed = time.perf_counter() - rollout_started
+            runtime_profile.add("rollout_game_execution", rollout_elapsed)
+            runtime_profile.merge_rollout_worker(runner.last_runtime_profile)
             total_rollout_duration_s += rollout_elapsed
+            section_started = time.perf_counter()
             _merge_parallel_summary(
                 parallel_summary,
                 rollout_info,
@@ -1467,11 +698,21 @@ def train(
                 wins += int(result["winner"] == result["learner_position"])
             win_rate_window.append(wins / games_this_iteration)
             moving_win_rate = sum(win_rate_window) / len(win_rate_window)
+            runtime_profile.add(
+                "rollout_parent_aggregation",
+                time.perf_counter() - section_started,
+            )
+            section_started = time.perf_counter()
             reward_summary = _reward_signal_summary(batch, network.xp) if batch else None
+            runtime_profile.add(
+                "reward_statistics",
+                time.perf_counter() - section_started,
+            )
             gradient_metrics = None
             ppo_metrics = None
             update_elapsed = 0.0
             if batch:
+                section_started = time.perf_counter()
                 sample_bytes = sum(
                     int(getattr(sample.x, "nbytes", 0))
                     + int(getattr(sample.legal_mask, "nbytes", 0))
@@ -1482,12 +723,22 @@ def train(
                     safety_config.memory_reserve_mb,
                     f"RL iteration {iteration} decision-buffer assembly",
                 )
+                runtime_profile.add(
+                    "decision_buffer_memory_preflight",
+                    time.perf_counter() - section_started,
+                )
                 update_started = time.perf_counter()
                 if ppo_enabled:
+                    buffer_started = time.perf_counter()
                     decision_buffer = PPOBuffer.from_samples(
                         batch,
                         normalize=normalize_advantages,
                     )
+                    runtime_profile.add(
+                        "ppo_buffer_assembly_and_advantage_normalization",
+                        time.perf_counter() - buffer_started,
+                    )
+                    ppo_started = time.perf_counter()
                     ppo_metrics = ppo_update(
                         network,
                         decision_buffer,
@@ -1507,8 +758,15 @@ def train(
                         prefer_gpu_buffer=prefer_gpu_buffer,
                         gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
                     )
+                    network.synchronize()
+                    runtime_profile.add(
+                        "ppo_update",
+                        time.perf_counter() - ppo_started,
+                    )
+                    runtime_profile.merge_ppo_metrics(ppo_metrics)
                     gradient_metrics = ppo_metrics
                 else:
+                    legacy_started = time.perf_counter()
                     gradient_metrics = _legacy_policy_update(
                         network,
                         batch,
@@ -1517,8 +775,17 @@ def train(
                         normalize_advantages=normalize_advantages,
                         use_value_head=use_value_head,
                         value_coef=value_coef,
+                        collect_value_predictions=(
+                            use_value_head
+                            and not quiet
+                            and iteration % log_interval == 0
+                        ),
                     )
-                network.synchronize()
+                    network.synchronize()
+                    runtime_profile.add(
+                        "legacy_policy_update",
+                        time.perf_counter() - legacy_started,
+                    )
                 update_elapsed = time.perf_counter() - update_started
                 total_update_duration_s += update_elapsed
                 total_decision_samples += len(batch)
@@ -1535,16 +802,28 @@ def train(
                 previous_training_games // pool_refresh_games
                 < completed_training_games // pool_refresh_games
             )
+            section_started = time.perf_counter()
             if batch and training_opponent == "self_play" and crossed_pool_refresh:
                 runner.append_pool_snapshot(network, metadata={
                     "origin": "training_update",
                     "introduced_at_rl_games": int(completed_training_games),
                 })
+            runtime_profile.add(
+                "opponent_pool_refresh",
+                time.perf_counter() - section_started,
+            )
 
             ppo_log_row = None
             if ppo_metrics is not None:
                 ppo_log_row = {
-                    **ppo_metrics,
+                    **{
+                        name: value
+                        for name, value in ppo_metrics.items()
+                        if name not in {
+                            "runtime_timing_seconds",
+                            "runtime_profile_detail",
+                        }
+                    },
                     "games": int(games_this_iteration),
                     "decisions": int(len(batch)),
                     "ppo_seconds": float(update_elapsed),
@@ -1555,6 +834,7 @@ def train(
             checkpoint_written = False
             checkpoint_path = None
             checkpoint_resume_path = None
+            section_started = time.perf_counter()
             if iteration % checkpoint_interval == 0:
                 training_state = _training_state_payload(
                     win_rate_window=win_rate_window,
@@ -1602,7 +882,12 @@ def train(
                         f"time since previous checkpoint: "
                         f"{format_duration(checkpoint_elapsed)}"
                     )
+            runtime_profile.add(
+                "checkpoint_serialization",
+                time.perf_counter() - section_started,
+            )
 
+            section_started = time.perf_counter()
             if iteration % log_interval == 0 and not quiet:
                 if reward_summary is None:
                     print(
@@ -1615,13 +900,6 @@ def train(
                         f" | pool: {len(runner.bank.pool_slots)}"
                         if training_opponent == "self_play" else ""
                     )
-                    value_suffix = ""
-                    if use_value_head and value_loss_window:
-                        value_suffix = (
-                            f" | value loss: {gradient_metrics['value_loss']:.3f} "
-                            f"(avg/{len(value_loss_window)}: "
-                            f"{sum(value_loss_window) / len(value_loss_window):.3f})"
-                        )
                     print(
                         f"Iteration {iteration} | games {games_this_iteration} | cumulative "
                         f"{completed_training_games}/{total_training_games} | reward "
@@ -1635,11 +913,30 @@ def train(
                         f"{wins}/{games_this_iteration} "
                         f"(avg/{len(win_rate_window)}: {moving_win_rate:.1%})"
                         f"{pool_suffix} | grad: {_gradient_log_text(gradient_metrics)}"
-                        f"{value_suffix}"
                     )
+                    value_predictions = gradient_metrics.get(
+                        "value_predictions_before_update"
+                    )
+                    if use_value_head and value_predictions is not None:
+                        print(
+                            "  Value head: pre-update V(s) mean/std/min/max "
+                            f"{value_predictions['mean']:+.3f}/"
+                            f"{value_predictions['std']:.3f}/"
+                            f"{value_predictions['min']:+.3f}/"
+                            f"{value_predictions['max']:+.3f} over "
+                            f"{value_predictions['sample_count']} decisions | "
+                            f"value loss {gradient_metrics['value_loss']:.3f} "
+                            f"(avg/{len(value_loss_window)}: "
+                            f"{sum(value_loss_window) / len(value_loss_window):.3f})"
+                        )
                     if ppo_enabled:
                         _print_ppo_window(ppo_window)
+            runtime_profile.add(
+                "console_logging",
+                time.perf_counter() - section_started,
+            )
 
+            section_started = time.perf_counter()
             moving_value_loss = (
                 float(sum(value_loss_window) / len(value_loss_window))
                 if value_loss_window else None
@@ -1700,9 +997,17 @@ def train(
                 "elapsed_training_s": float(time.perf_counter() - training_perf_started),
                 "rl_training_algorithm": algorithm,
             }
-            metrics_stream.write(json.dumps(row, sort_keys=True) + "\n")
-            metrics_stream.flush()
-            os.fsync(metrics_stream.fileno())
+            runtime_profile.add(
+                "metrics_payload_construction",
+                time.perf_counter() - section_started,
+            )
+            section_started = time.perf_counter()
+            _write_metrics_row(metrics_stream, row)
+            runtime_profile.add(
+                "metrics_jsonl_write_and_fsync",
+                time.perf_counter() - section_started,
+            )
+            section_started = time.perf_counter()
             if (
                 checkpoint_callback is not None
                 and checkpoint_written
@@ -1720,11 +1025,26 @@ def train(
                 metrics_callback(dict(row))
             if progress_callback is not None:
                 progress_callback(completed_training_games, total_training_games)
+            runtime_profile.add(
+                "pipeline_and_progress_callbacks",
+                time.perf_counter() - section_started,
+            )
+            accounted_this_iteration = (
+                runtime_profile.accounted_seconds() - iteration_accounted_before
+            )
+            runtime_profile.add(
+                "iteration_control_overhead",
+                max(
+                    0.0,
+                    time.perf_counter() - iteration_started - accounted_this_iteration,
+                ),
+            )
 
             if shutdown_requested is not None and shutdown_requested():
                 stopped_by_shutdown = True
                 break
 
+        finalization_started = time.perf_counter()
         if completed_training_games != invocation_target_games and not stopped_by_shutdown:
             raise AssertionError(
                 f"RL completed {completed_training_games} games, expected "
@@ -1799,6 +1119,18 @@ def train(
         "attempts": worker_results,
     }
     completed_iterations = completed_iterations_this_invocation
+    runtime_profile.add(
+        "final_checkpoint_shutdown_and_summary",
+        time.perf_counter() - finalization_started,
+    )
+    runtime_profile_delta = runtime_profile.finish(
+        games=completed_this_invocation,
+        iterations=completed_iterations_this_invocation,
+        decisions=total_decision_samples - decision_samples_at_invocation_start,
+        optimizer_steps=(
+            network.optimizer_step_count - optimizer_steps_at_invocation_start
+        ),
+    )
     return {
         "iterations": int(actual_final_iteration),
         "rl_iterations_completed": int(actual_final_iteration),
@@ -1876,393 +1208,8 @@ def train(
             "prefer_gpu_buffer": bool(prefer_gpu_buffer),
             "gpu_buffer_safety_fraction": float(gpu_buffer_safety_fraction),
         },
+        "runtime_profile_delta": runtime_profile_delta,
         "duration_s": elapsed_time,
-    }
-
-
-def add_optional_rl_arguments(parser, *, fresh_from_sl_default=False):
-    """Add self-play hyperparameter and rollout-resource flags to ``parser``."""
-    group = parser.add_argument_group("optional reinforcement-learning controls")
-    group.add_argument(
-        "--iterations",
-        type=int,
-        default=None,
-        help=(
-            "Legacy/manual iteration budget. When supplied, total games are "
-            "iterations x games-per-iteration and adaptive GPI is off unless "
-            "explicitly re-enabled."
-        ),
-    )
-    group.add_argument(
-        "--total-training-games",
-        type=int,
-        default=None,
-        help=(
-            f"Exact number of real training games; benchmark games are excluded "
-            f"(normal default: {DEFAULT_TOTAL_TRAINING_GAMES})."
-        ),
-    )
-    group.add_argument(
-        "--games-per-iteration",
-        type=int,
-        default=None,
-        help=(
-            f"Manual GPI (default fallback: {DEFAULT_GAMES_PER_ITERATION}); "
-            "specifying it disables GPI autotuning unless --adaptive-gpi is also set."
-        ),
-    )
-    adaptive = group.add_mutually_exclusive_group()
-    adaptive.add_argument(
-        "--adaptive-gpi",
-        dest="adaptive_gpi",
-        action="store_true",
-        default=None,
-        help="Benchmark the fixed GPI candidate list before real training (default).",
-    )
-    adaptive.add_argument(
-        "--no-adaptive-gpi",
-        dest="adaptive_gpi",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Use the manual/default games-per-iteration directly.",
-    )
-    group.add_argument(
-        "--gpi-candidates",
-        nargs="+",
-        type=int,
-        default=list(DEFAULT_GPI_CANDIDATES),
-        metavar="N",
-        help=(
-            "GPI values tested with "
-            f"{DEFAULT_GPI_BENCHMARK_WORKERS} frozen-policy workers."
-        ),
-    )
-    group.add_argument(
-        "--gpi-benchmark-games-target",
-        type=int,
-        default=DEFAULT_GPI_BENCHMARK_GAMES_TARGET,
-        help="Candidate budget used as floor(target / GPI) complete batches.",
-    )
-    group.add_argument("--retune-gpi", action="store_true")
-    group.add_argument("--retune-workers", action="store_true")
-    group.add_argument("--retune-all", action="store_true")
-    group.add_argument(
-        "--training-opponent",
-        choices=("self_play", "heuristic"),
-        default=TRAINING_OPPONENT,
-        help="Play against a pool of frozen snapshots or the fixed heuristic agent.",
-    )
-    group.add_argument("--learning-rate", type=float, default=0.001)
-    group.add_argument("--entropy-coef", type=float, default=0.01)
-    group.add_argument("--log-interval", type=int, default=10)
-    group.add_argument("--checkpoint-interval", type=int, default=50)
-    group.add_argument(
-        "--pool-refresh-games",
-        type=int,
-        default=DEFAULT_POOL_REFRESH_GAMES,
-        help=(
-            "Cumulative training-game interval between opponent-pool snapshots; "
-            "a threshold crossed inside a batch refreshes once after that batch."
-        ),
-    )
-    group.add_argument("--max-pool-size", type=int, default=50)
-    group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
-    group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
-    group.add_argument(
-        "--adaptive-tuning-path",
-        default=None,
-        help="Adaptive-tuning JSON path (default: next to RL weights).",
-    )
-    group.add_argument(
-        "--metrics-output-path",
-        default=None,
-        help="Per-iteration JSONL path (default: next to RL weights).",
-    )
-    initialization = group.add_mutually_exclusive_group()
-    initialization.add_argument(
-        "--fresh-from-sl",
-        dest="fresh_from_sl",
-        action="store_true",
-        default=fresh_from_sl_default,
-        help=(
-            "Initialize the policy from --sl-weights-path even when the RL "
-            "output already exists; replace that output only after success."
-        ),
-    )
-    initialization.add_argument(
-        "--continue-existing-rl",
-        dest="fresh_from_sl",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Continue from --rl-weights-path when it exists.",
-    )
-    group.add_argument(
-        "--numbered-checkpoints",
-        action="store_true",
-        help=(
-            "Write iteration-suffixed weights and an atomic opponent-pool state "
-            "for safe interruption recovery."
-        ),
-    )
-    group.add_argument(
-        "--start-iteration",
-        type=int,
-        default=0,
-        help="Absolute completed iteration when continuing a numbered checkpoint.",
-    )
-    group.add_argument(
-        "--resume-weights-path",
-        default=None,
-        help="Iteration-suffixed weights file from a complete resume pair.",
-    )
-    group.add_argument(
-        "--resume-state-file",
-        default=None,
-        help="Auxiliary .resume.npz file paired with --resume-weights-path.",
-    )
-    group.add_argument(
-        "--value-head",
-        action="store_true",
-        help=(
-            "Train a linear V(s) baseline (the critic) and use reward-minus-value "
-            "policy advantages in the legacy path; combine with --no-ppo."
-        ),
-    )
-    group.add_argument("--value-coef", type=float, default=VALUE_COEF)
-    group.add_argument(
-        "--gamma",
-        type=float,
-        default=DEFAULT_GAMMA,
-        help="Terminal-reward discount per remaining real decision (1.0 = no discount).",
-    )
-    group.add_argument(
-        "--reward-schema",
-        choices=tuple(REWARD_SCHEMAS),
-        default=DEFAULT_REWARD_SCHEMA,
-        help="Named preset for the terminal/event reward constants.",
-    )
-    group.add_argument(
-        "--clip-grad-norm",
-        type=float,
-        default=DEFAULT_CLIP_GRAD_NORM,
-        help="Gradient-norm clipping threshold for the policy-gradient update.",
-    )
-    group.add_argument(
-        "--normalize-advantages",
-        dest="normalize_advantages",
-        action="store_true",
-        default=DEFAULT_NORMALIZE_ADVANTAGES,
-        help="Normalize advantages once over the complete iteration buffer.",
-    )
-    group.add_argument(
-        "--no-normalize-advantages",
-        dest="normalize_advantages",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Disable whole-buffer advantage normalization.",
-    )
-    group.add_argument(
-        "--moving-average-window",
-        type=int,
-        default=DEFAULT_MOVING_AVERAGE_WINDOW,
-        help="Trailing-iteration window for the value-loss/win-rate moving averages "
-        "in the log (point values are noisy; use this for judging a plateau).",
-    )
-    group.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Fix random/numpy state for reproducible comparisons between configurations.",
-    )
-    group.add_argument(
-        "--device",
-        choices=DEVICES,
-        default=DEFAULT_DEVICE,
-        help="Array backend: 'auto' matches GPU_ENABLED (CuPy when installed, "
-        "else NumPy) -- unchanged from prior behavior. 'cpu'/'gpu' force one "
-        "backend regardless of what's installed/enabled globally.",
-    )
-    group.add_argument(
-        "--rl-workers",
-        type=parse_rl_worker_count,
-        default=DEFAULT_RL_WORKERS,
-        help=(
-            f"CPU-only rollout workers or 'auto' for isolated discarded tuning "
-            f"(maximum {MAX_PARALLEL_WORKERS})."
-        ),
-    )
-    group.add_argument(
-        "--rl-autotune-fraction",
-        type=float,
-        default=DEFAULT_RL_AUTOTUNE_FRACTION,
-        help="Fraction of the real game budget discarded by each worker candidate.",
-    )
-    group.add_argument(
-        "--rl-autotune-min-gain",
-        type=float,
-        default=DEFAULT_RL_MINIMUM_GAIN,
-        help=(
-            "Stop worker tuning when marginal rollout-throughput gain over the "
-            "previous accepted candidate is below this value."
-        ),
-    )
-    group.add_argument("--rl-memory-reserve-mb", type=int, default=512)
-    group.add_argument("--rl-estimated-worker-mb", type=int, default=256)
-    group.add_argument("--rl-max-worker-rss-mb", type=int, default=1024)
-    ppo = parser.add_argument_group("PPO v1 controls")
-    ppo_toggle = ppo.add_mutually_exclusive_group()
-    ppo_toggle.add_argument(
-        "--ppo",
-        dest="ppo_enabled",
-        action="store_true",
-        default=DEFAULT_PPO_ENABLED,
-        help="Use masked PPO with minibatches (default).",
-    )
-    ppo_toggle.add_argument(
-        "--no-ppo",
-        dest="ppo_enabled",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help="Use the historical one-update REINFORCE path for regression.",
-    )
-    ppo.add_argument("--ppo-clip-epsilon", type=float, default=DEFAULT_CLIP_EPSILON)
-    ppo.add_argument("--ppo-target-kl", type=float, default=DEFAULT_TARGET_KL)
-    ppo.add_argument("--ppo-stop-kl", type=float, default=DEFAULT_STOP_KL)
-    ppo.add_argument("--ppo-max-epochs", type=int, default=DEFAULT_MAX_EPOCHS)
-    ppo.add_argument(
-        "--ppo-min-minibatches",
-        type=int,
-        default=DEFAULT_MIN_MINIBATCHES,
-    )
-    ppo.add_argument(
-        "--ppo-max-minibatches",
-        type=int,
-        default=DEFAULT_MAX_MINIBATCHES,
-    )
-    ppo.add_argument(
-        "--ppo-games-per-minibatch-scale",
-        type=int,
-        default=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    )
-    ppo.add_argument(
-        "--ppo-min-decisions-per-minibatch",
-        type=int,
-        default=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    )
-    buffer_group = ppo.add_mutually_exclusive_group()
-    buffer_group.add_argument(
-        "--prefer-gpu-buffer",
-        dest="prefer_gpu_buffer",
-        action="store_true",
-        default=True,
-    )
-    buffer_group.add_argument(
-        "--no-prefer-gpu-buffer",
-        dest="prefer_gpu_buffer",
-        action="store_false",
-        default=argparse.SUPPRESS,
-    )
-    ppo.add_argument(
-        "--gpu-buffer-safety-fraction",
-        type=float,
-        default=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
-    )
-    return parser
-
-
-def parse_args(argv=None):
-    """Parse optional self-play training controls."""
-    parser = argparse.ArgumentParser(
-        description="Train the domino policy with reinforcement learning.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    add_optional_rl_arguments(parser)
-    parser.add_argument(
-        "--compact",
-        action="store_true",
-        help=(
-            "Show isolated adaptive tuning, one game progress bar, and one "
-            "final summary instead of per-iteration/checkpoint logs."
-        ),
-    )
-    return parser.parse_args(argv)
-
-
-def _training_kwargs_from_args(args):
-    """Translate CLI arguments into the public ``train`` keyword interface."""
-    manual_gpi_supplied = args.games_per_iteration is not None
-    games_per_iteration = (
-        DEFAULT_GAMES_PER_ITERATION
-        if args.games_per_iteration is None
-        else args.games_per_iteration
-    )
-    adaptive_gpi = (
-        (not manual_gpi_supplied and args.iterations is None)
-        if args.adaptive_gpi is None
-        else bool(args.adaptive_gpi)
-    )
-    return {
-        "iterations": args.iterations,
-        "total_training_games": (
-            args.total_training_games
-            if args.iterations is not None
-            else (
-                DEFAULT_TOTAL_TRAINING_GAMES
-                if args.total_training_games is None
-                else args.total_training_games
-            )
-        ),
-        "games_per_iteration": games_per_iteration,
-        "adaptive_gpi": adaptive_gpi,
-        "gpi_candidates": tuple(args.gpi_candidates),
-        "gpi_benchmark_games_target": args.gpi_benchmark_games_target,
-        "retune_gpi": args.retune_gpi,
-        "retune_workers": args.retune_workers,
-        "retune_all": args.retune_all,
-        "training_opponent": args.training_opponent,
-        "learning_rate": args.learning_rate,
-        "entropy_coef": args.entropy_coef,
-        "log_interval": args.log_interval,
-        "checkpoint_interval": args.checkpoint_interval,
-        "pool_refresh_games": args.pool_refresh_games,
-        "max_pool_size": args.max_pool_size,
-        "sl_weights_path": args.sl_weights_path,
-        "rl_weights_path": args.rl_weights_path,
-        "adaptive_tuning_path": args.adaptive_tuning_path,
-        "metrics_output_path": args.metrics_output_path,
-        "fresh_from_sl": args.fresh_from_sl,
-        "use_value_head": args.value_head,
-        "value_coef": args.value_coef,
-        "gamma": args.gamma,
-        "reward_schema": args.reward_schema,
-        "clip_grad_norm": args.clip_grad_norm,
-        "normalize_advantages": args.normalize_advantages,
-        "moving_average_window": args.moving_average_window,
-        "seed": args.seed,
-        "device": args.device,
-        "workers": args.rl_workers,
-        "safety_config": ParallelSafetyConfig(
-            memory_reserve_mb=args.rl_memory_reserve_mb,
-            estimated_worker_mb=args.rl_estimated_worker_mb,
-            max_worker_rss_mb=args.rl_max_worker_rss_mb,
-        ),
-        "autotune_fraction": args.rl_autotune_fraction,
-        "autotune_minimum_gain": args.rl_autotune_min_gain,
-        "start_iteration": args.start_iteration,
-        "resume_weights_path": args.resume_weights_path,
-        "resume_state_file": args.resume_state_file,
-        "numbered_checkpoints": args.numbered_checkpoints,
-        "ppo_enabled": args.ppo_enabled,
-        "ppo_clip_epsilon": args.ppo_clip_epsilon,
-        "ppo_target_kl": args.ppo_target_kl,
-        "ppo_stop_kl": args.ppo_stop_kl,
-        "ppo_max_epochs": args.ppo_max_epochs,
-        "ppo_min_minibatches": args.ppo_min_minibatches,
-        "ppo_max_minibatches": args.ppo_max_minibatches,
-        "ppo_games_per_minibatch_scale": args.ppo_games_per_minibatch_scale,
-        "ppo_min_decisions_per_minibatch": args.ppo_min_decisions_per_minibatch,
-        "prefer_gpu_buffer": args.prefer_gpu_buffer,
-        "gpu_buffer_safety_fraction": args.gpu_buffer_safety_fraction,
     }
 
 

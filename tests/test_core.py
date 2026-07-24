@@ -24,13 +24,11 @@ from agents.encoder import DominoEncoder
 from agents.heuristic_agent import StrategicAgent
 from agents.neural_agent import NeuralAgent
 from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON, SupervisedNeuralNetwork
-from agents.random_neural_agent import RandomNeuralAgent
 from agents.rl_agent import RLAgent, TrajectoryStep
 from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import (
     CANONICAL_AGENTS,
     _atomic_replace_directory,
-    create_agent,
     save_csv,
 )
 from diagnostics.evaluate import diagnostic_plan
@@ -57,6 +55,7 @@ from training.self_play import (
     TrainingSample,
     _event_reward_for_action,
     _finish_episode_with_rewards,
+    _legacy_policy_update,
     _reward_signal_summary,
     parse_args as parse_self_play_args,
 )
@@ -72,7 +71,7 @@ from training.training_loop import (
     _prune_supervised_checkpoints,
     parse_args as parse_supervised_args,
 )
-from run_pipeline import _build_config, parse_args as parse_pipeline_args
+from train_script.run_pipeline import _build_config, parse_args as parse_pipeline_args
 from utils.runtime_status import pipeline_compute_report
 
 from math import comb, factorial
@@ -203,15 +202,12 @@ def test_encoder_accepts_list_tiles_from_json():
     assert encoder._action_index(([0, 6], 1)) == encoder._action_index(((0, 6), 1))
 
 
-def test_neural_agents_skip_network_for_single_option_tile_play():
-    """Forced tile plays must bypass inference for trained and random policies."""
+def test_neural_agent_skips_network_for_single_option_tile_play():
+    """Forced tile plays must bypass inference for the supervised policy."""
     only_action = ((6, 6), 0)
 
-    for agent in (
-        NeuralAgent(NetworkThatMustNotRun()),
-        RandomNeuralAgent(NetworkThatMustNotRun()),
-    ):
-        assert agent.choose_move({}, [only_action]) == only_action
+    agent = NeuralAgent(NetworkThatMustNotRun())
+    assert agent.choose_move({}, [only_action]) == only_action
 
 
 def test_supervised_checkpoint_retention_keeps_latest_ten():
@@ -1141,6 +1137,57 @@ def test_optional_value_head_learns_reward_baseline():
     assert host_np.any(_to_numpy(network.Wv) != 0.0)
 
 
+def test_legacy_value_head_update_reports_pre_update_predictions():
+    network = PolicyNetwork(
+        input_size=4,
+        hidden1_size=5,
+        hidden2_size=3,
+        output_size=56,
+        random_seed=123,
+        use_value_head=True,
+        device="cpu",
+    )
+    network.W1.fill(0.0)
+    network.b1.fill(1.0)
+    network.W2.fill(0.0)
+    network.b2.fill(1.0)
+    network.Wv[:] = 0.25
+    network.bv[:] = -0.10
+    legal_mask = host_np.zeros((56, 1), dtype=host_np.bool_)
+    legal_mask[3, 0] = True
+    legal_mask[8, 0] = True
+    samples = [
+        TrainingSample(
+            x=host_np.ones((4, 1), dtype=host_np.float32),
+            action_index=3,
+            legal_mask=legal_mask,
+            policy_reward=reward,
+            raw_reward=reward,
+            local_reward=0.0,
+            terminal_reward=reward,
+        )
+        for reward in (1.0, -1.0)
+    ]
+
+    metrics = _legacy_policy_update(
+        network,
+        samples,
+        entropy_coef=0.0,
+        clip_grad_norm=None,
+        normalize_advantages=False,
+        use_value_head=True,
+        value_coef=0.5,
+        collect_value_predictions=True,
+    )
+
+    values = metrics["value_predictions_before_update"]
+    assert values["sample_count"] == 2
+    assert abs(values["mean"] - 0.65) < 1e-6
+    assert values["std"] == 0.0
+    assert abs(values["min"] - 0.65) < 1e-6
+    assert abs(values["max"] - 0.65) < 1e-6
+
+
 def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
     network = _small_policy_network(learning_rate=0.01)
 
@@ -1361,28 +1408,6 @@ def test_pairwise_csv_writes_initial_hands_as_json_arrays():
     assert "first_stock_draw_final_state_count" not in row
 
 
-def test_random_neural_agent_has_reproducible_untrained_weights():
-    first = RandomNeuralAgent.create()
-    second = RandomNeuralAgent.create()
-
-    for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
-        assert host_np.array_equal(
-            _to_numpy(getattr(first.network, name)),
-            _to_numpy(getattr(second.network, name)),
-        )
-
-    assert "random_nn" in CANONICAL_AGENTS
-    assert isinstance(create_agent("random_nn"), RandomNeuralAgent)
-
-    for removed_alias in ("sl", "random nn", "random-neural"):
-        try:
-            create_agent(removed_alias)
-        except ValueError as exc:
-            assert "Unknown agent" in str(exc)
-        else:
-            raise AssertionError(f"Removed agent alias was accepted: {removed_alias}")
-
-
 def test_diagnostics_atomic_directory_replacement_drops_stale_files():
     with tempfile.TemporaryDirectory() as folder:
         base_dir = Path(folder)
@@ -1403,14 +1428,17 @@ def test_diagnostics_atomic_directory_replacement_drops_stale_files():
 def test_diagnostic_plan_selects_canonical_random_matchups():
     agents, matchups = diagnostic_plan()
     expected_matchups = tuple((agent, "random") for agent in CANONICAL_AGENTS)
+    assert CANONICAL_AGENTS == ("rl", "neural", "heuristic", "random")
     assert agents == CANONICAL_AGENTS
     assert matchups == expected_matchups
 
 
 def test_pipeline_scales_set_explicit_diagnostic_game_counts():
+    assert _build_config("small").dataset_games == 10_000
+    assert _build_config("default").dataset_games == 50_000
     assert all(
         _build_config(level).dataset_games == 100_000
-        for level in ("small", "default", "big", "huge", "forever")
+        for level in ("big", "huge", "forever")
     )
     assert all(
         _build_config(level).supervised_epochs == 5_000
@@ -1448,7 +1476,7 @@ def main():
         ("encoder JSON tile actions", test_encoder_accepts_list_tiles_from_json),
         (
             "neural forced tile skips network",
-            test_neural_agents_skip_network_for_single_option_tile_play,
+            test_neural_agent_skips_network_for_single_option_tile_play,
         ),
         ("opening double rule", test_engine_requires_highest_opening_double_when_present),
         ("unique game ids", test_engine_game_ids_are_unique_across_instances),
@@ -1539,6 +1567,10 @@ def main():
             test_negative_reward_decreases_chosen_masked_probability,
         ),
         ("optional value baseline", test_optional_value_head_learns_reward_baseline),
+        (
+            "value head prediction logging",
+            test_legacy_value_head_update_reports_pre_update_predictions,
+        ),
         ("policy checkpoint keys", test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys),
         ("value head CLI", test_value_head_cli_is_disabled_by_default),
         (
@@ -1564,7 +1596,6 @@ def main():
             test_terminal_history_reconstructs_the_non_advanced_final_actor,
         ),
         ("pairwise CSV initial hands", test_pairwise_csv_writes_initial_hands_as_json_arrays),
-        ("random neural baseline", test_random_neural_agent_has_reproducible_untrained_weights),
         (
             "atomic diagnostic replacement",
             test_diagnostics_atomic_directory_replacement_drops_stale_files,

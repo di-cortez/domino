@@ -96,13 +96,30 @@ hours of user work.
 
 ## Tests and command checks
 
+Run Pylint after every repository modification, including source,
+configuration, tests, scripts, and documentation:
+
+```bash
+python -m pylint agents benchmarks diagnostics middleware tests train_script \
+  training ui utils
+```
+
+This requirement applies while `exit-zero = true`: Pylint is initially a
+report-only technical-debt inventory, so contributors must review its output
+even though findings do not fail the command. Do not perform unrelated
+score-driven refactors. Install the development tools with
+`python -m pip install -r requirements-dev.txt`; the baseline and tightening
+sequence are maintained in [`docs/PYLINT_ROADMAP.md`](docs/PYLINT_ROADMAP.md).
+
 The standard full validation is:
 
 ```bash
+python -m pylint agents benchmarks diagnostics middleware tests train_script \
+  training ui utils
 python -m pytest -q
 python -m unittest discover -s tests -v
 python -m compileall -q agents diagnostics middleware training ui utils \
-  train_script run_pipeline.py
+  train_script
 bash -n train_script/run_training_pipeline.sh
 bash -n train_script/run_rl_parameter_sweep.sh
 bash -n train_script/run_rl_test_diagnostics.sh

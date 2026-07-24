@@ -32,6 +32,9 @@ DEFAULT_MEMORY_RESERVE_MB = 512
 DEFAULT_ESTIMATED_WORKER_MB = 256
 DEFAULT_MAX_WORKER_RSS_MB = 1024
 ESTIMATED_DIAGNOSTIC_RECORD_BYTES = 4096
+# Detailed per-turn timings are sampled deterministically.  Whole-job worker
+# CPU time remains exact, while this interval keeps profiler overhead tiny.
+DEEP_PROFILE_SAMPLE_INTERVAL = 32
 
 _WORKER_AGENT = None
 _WORKER_OPPONENT = None
@@ -99,6 +102,7 @@ class ParallelRunInfo:
     safety_capped: bool = False
     memory_monitoring_available: bool = True
     workers_cpu_only: bool = True
+    runtime_profile: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """Return JSON-serializable worker, fallback, and memory metadata."""
@@ -115,6 +119,7 @@ class ParallelRunInfo:
             "safety_capped": self.safety_capped,
             "memory_monitoring_available": self.memory_monitoring_available,
             "workers_cpu_only": self.workers_cpu_only,
+            "runtime_profile": self.runtime_profile,
         }
 
 
@@ -184,24 +189,88 @@ def _worker_initializer(
     _WORKER_SUPPRESS_OUTPUT = suppress_agent_output
 
 
-def _worker_play_games(jobs: tuple[tuple[int, int], ...]) -> list[dict]:
+def _add_numeric_tree(target: dict, source: dict) -> None:
+    """Recursively sum numeric timing leaves from completed worker jobs."""
+    for key, value in source.items():
+        if isinstance(value, dict):
+            _add_numeric_tree(target.setdefault(key, {}), value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            target[key] = target.get(key, 0) + value
+
+
+def _worker_play_games(jobs: tuple[tuple[int, int], ...]) -> dict:
     """Play one scheduled game block with stable absolute game seeds."""
     from diagnostics.pairwise import play_game
 
+    profile_started = time.perf_counter()
+    runtime_profile = {
+        "games": 0,
+        "profiled_games": 0,
+        "profiled_game_cpu_seconds": 0.0,
+        "worker_cpu_seconds": 0.0,
+        "sections_seconds": {},
+        "evaluated_agent_policy": {},
+        "opponent_policy": {},
+    }
     records = []
     for game_index, seed in jobs:
+        profile_game = game_index % DEEP_PROFILE_SAMPLE_INTERVAL == 0
+        game_profile = runtime_profile if profile_game else None
+        sampled_game_started = time.perf_counter() if profile_game else None
+        if hasattr(_WORKER_AGENT, "runtime_profile"):
+            _WORKER_AGENT.runtime_profile = (
+                runtime_profile["evaluated_agent_policy"] if profile_game else None
+            )
+        if hasattr(_WORKER_OPPONENT, "runtime_profile"):
+            _WORKER_OPPONENT.runtime_profile = (
+                runtime_profile["opponent_policy"] if profile_game else None
+            )
+        section_started = time.perf_counter() if profile_game else None
         random.seed(seed)
         np.random.seed(seed & 0xFFFFFFFF)
+        sections = runtime_profile["sections_seconds"]
+        if profile_game:
+            sections["per_game_rng_setup"] = (
+                sections.get("per_game_rng_setup", 0.0)
+                + time.perf_counter() - section_started
+            )
         record = play_game(
             _WORKER_AGENT,
             _WORKER_OPPONENT,
             agent_position=game_index % 2,
             suppress_agent_output=_WORKER_SUPPRESS_OUTPUT,
+            runtime_profile=game_profile,
         )
+        section_started = time.perf_counter() if profile_game else None
         record["game"] = game_index + 1
         record["game_seed"] = int(seed)
         records.append(record)
-    return records
+        runtime_profile["games"] += 1
+        if profile_game:
+            sections["result_payload_construction"] = (
+                sections.get("result_payload_construction", 0.0)
+                + time.perf_counter() - section_started
+            )
+            runtime_profile["profiled_games"] += 1
+            runtime_profile["profiled_game_cpu_seconds"] += (
+                time.perf_counter() - sampled_game_started
+            )
+    worker_seconds = time.perf_counter() - profile_started
+    runtime_profile["worker_cpu_seconds"] = float(worker_seconds)
+    sections = runtime_profile["sections_seconds"]
+    sections["unaccounted"] = max(
+        0.0,
+        runtime_profile["profiled_game_cpu_seconds"] - sum(sections.values()),
+    )
+    for policy_key in ("evaluated_agent_policy", "opponent_policy"):
+        policy_profile = runtime_profile[policy_key]
+        policy_sections = policy_profile.setdefault("sections_seconds", {})
+        policy_sections["unaccounted"] = max(
+            0.0,
+            float(policy_profile.get("total_seconds", 0.0))
+            - sum(policy_sections.values()),
+        )
+    return {"records": records, "runtime_profile": runtime_profile}
 
 
 def cap_parallel_workers(
@@ -327,11 +396,23 @@ def _run_pending_jobs(
                 for future in done:
                     in_flight.pop(future, None)
                     try:
-                        job_records = future.result()
+                        payload = future.result()
                     except Exception as exc:
                         if first_job_error is None:
                             first_job_error = exc
                         continue
+                    if (
+                        isinstance(payload, dict)
+                        and "records" in payload
+                        and "runtime_profile" in payload
+                    ):
+                        job_records = payload["records"]
+                        _add_numeric_tree(
+                            run_info.runtime_profile,
+                            payload["runtime_profile"],
+                        )
+                    else:
+                        job_records = payload
                     for record in job_records:
                         on_record(record)
                     completed_jobs += 1

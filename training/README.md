@@ -16,22 +16,33 @@ python -m training.pipeline huge
 python -m training.pipeline forever
 ```
 
-`run_pipeline.py` is an equivalent compatibility entry point. All five levels
-use one 100,000-game standard supervised dataset and the same supervised
-training configuration for a given seed; only the RL and diagnostic budgets
-change:
+`python -m train_script.run_pipeline` is an equivalent compatibility entry
+point; the wrapper now lives with the other executable training drivers.
 
-| Level | Cumulative RL games | Final games/matchup | Periodic monitor | Resume |
-|---|---:|---:|---|---|
-| `small` | 100,000 | 10,000 | No | Not exposed |
-| `default` | 500,000 | 10,000 | No | Not exposed |
-| `big` | 2,000,000 | 1,000,000 | 100,000 RL games | Yes |
-| `huge` | 10,000,000 | 1,000,000 | 100,000 RL games | Yes |
-| `forever` | Unbounded | None | 100,000 RL games | Yes |
+The quick profiles (`small` and `default`) deliberately do not reuse
+supervised artifacts. Unless `--seed` is explicit, each invocation gets a new
+seed, unique run directory, and run-local dataset/SL checkpoint. The long-run
+profiles (`big`, `huge`, and `forever`) retain the stable seed-42,
+seed-addressed 100,000-game assets and metadata-validated reuse:
 
-The standard assets are built from 100,000 heuristic games with a maximum
-supervised budget of 5,000 epochs (the convergence/plateau stopping rules can
-finish earlier). They are
+| Level | Dataset games | Default seed/assets | Cumulative RL games | Final games/matchup | Periodic monitor | Resume |
+|---|---:|---|---:|---:|---|---|
+| `small` | 10,000 | Random, run-local | 100,000 | 10,000 | No | Not exposed |
+| `default` | 50,000 | Random, run-local | 500,000 | 10,000 | No | Not exposed |
+| `big` | 100,000 | 42, reusable | 2,000,000 | 1,000,000 | 100,000 RL games | Yes |
+| `huge` | 100,000 | 42, reusable | 10,000,000 | 1,000,000 | 100,000 RL games | Yes |
+| `forever` | 100,000 | 42, reusable | Unbounded | None | 100,000 RL games | Yes |
+
+Direct self-play and the finite canonical profiles keep the four-epoch PPO
+default. The `forever` PPO profile uses a maximum budget of 16 epochs per
+on-policy buffer; its unchanged whole-buffer KL guard can finish each update
+earlier. Because the PPO configuration is part of exact resume identity, an
+older four-epoch `forever` PPO lineage must still be resumed with explicit
+`--ppo-max-epochs 4`; changing that lineage to 16 is intentionally rejected.
+
+The reusable standard assets are built from 100,000 heuristic games with a
+maximum supervised budget of 5,000 epochs (the convergence/plateau stopping
+rules can finish earlier). They are
 `dataset/supervised_dataset_standard_seed<seed>.jsonl` and
 `models/domino_sl_standard_seed<seed>.npz`. Their sibling `meta.json` files
 record structural versions, configuration, provenance, convergence fields,
@@ -39,22 +50,30 @@ and SHA-256. Presence alone is never enough for reuse. An incompatible asset
 stops the run unless one of these explicit replacement controls is supplied:
 
 ```bash
-python -m training.pipeline default --rebuild-dataset
-python -m training.pipeline default --retrain-supervised
-python -m training.pipeline default --rebuild-supervised-assets
+python -m training.pipeline big --rebuild-dataset
+python -m training.pipeline big --retrain-supervised
+python -m training.pipeline big --rebuild-supervised-assets
 ```
+
+Quick-run assets are retained for provenance under
+`models/rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/`, but a
+later invocation never selects them as inputs. Both quick and long-run
+profiles retain the 5,000-epoch maximum; their plateau rules normally finish
+earlier.
 
 RL output lives at `models/rl/domino_rl_<level>_seed<seed>/`. `big`, `huge`,
 and `forever` publish immutable exact resume generations plus the convenience
 aliases `latest_weights.npz`, `optimizer_state.npz`, `rng_state.json`, and
 `opponent_pool/pool_manifest.json`. `training_state.json` is the commit marker;
 resume restores policy, optimizer, RNG state, opponent pool/order, adaptive
-selection, PPO windows, and cumulative counters. Examples:
+selection, algorithm-specific update history, and cumulative counters. Examples:
 
 The marker advances at the normal numbered-checkpoint interval, not only at a
 100,000-game diagnostic boundary. Superseded non-milestone latest payloads are
-pruned only after the replacement marker is durable; full milestone resume
-pairs remain available for recovery and diagnostic replay.
+pruned only after the replacement marker is durable. Numbered policy-only
+checkpoints and full milestone resume states each retain a rolling window of
+the five newest generations; milestone policy weights remain available for
+the complete diagnostic history and best-checkpoint pointer.
 
 ```bash
 python -m training.pipeline big --resume
@@ -64,6 +83,22 @@ python -m training.pipeline forever --resume
 python -m training.pipeline forever \
   --resume models/rl/domino_rl_forever_seed42
 ```
+
+PPO remains the default. To run `forever` with the policy-only historical
+REINFORCE update and later resume that exact run:
+
+```bash
+python -m training.pipeline forever --no-ppo
+python -m training.pipeline forever --no-ppo --resume
+```
+
+`reinforce_v1` performs one update over the complete iteration buffer. It does
+not construct a PPO buffer or calculate PPO ratios, clipping, KL control,
+minibatches, or the post-update full-buffer evaluation. The algorithm is an
+immutable resume field, so `--no-ppo` must be repeated when resuming; changing
+between `ppo_v1` and `reinforce_v1` is rejected before training. Both canonical
+modes remain policy-only. The optional value head is still available only to
+direct `training.self_play` experiments.
 
 The optional value accepted by `--resume` is a convenience alias for
 `--resume-from`. In `forever`, diagnostic-worker autotuning is performed once,
@@ -85,7 +120,11 @@ never exceeded.
 | `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
 | `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
 | `supervised_runtime.py` | Implements CPU/GPU batch candidates, synchronized retained timing, GPU residency probes/windows, and supervised memory telemetry. |
-| `self_play.py` | Orchestrates exact-budget on-policy collection, PPO, logs, pool refresh, checkpoints, and resume. |
+| `self_play.py` | Orchestrates the exact-budget on-policy training lifecycle and delegates its specialized phases. |
+| `rl_config.py` / `rl_cli.py` | Validate side-effect-free RL options and own the standalone/canonical shared argument definitions. |
+| `rl_rollout.py` | Finalizes rewards and trajectories and plays one CPU-only self-play or heuristic-opponent training game. |
+| `rl_resume.py` | Loads compatible policies and atomically saves, validates, and restores exact numbered RL resume pairs. |
+| `rl_reporting.py` | Owns iteration summaries, durable metrics JSONL writes, worker metadata aggregation, and cumulative RL runtime profiles. |
 | `ppo.py` | Builds immutable decision buffers, selects minibatches, manages GPU/RAM storage, and performs KL-limited PPO epochs. |
 | `adaptive_tuning.py` | Selects GPI/workers with isolated seed streams, state restoration, safety checks, and `adaptive_tuning.json`. |
 | `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed real games across memory fallback. |
@@ -227,7 +266,7 @@ safely to CPU when that reserve cannot be kept; explicit `gpu` fails before a
 training update. Override host and GPU reserves with
 `--sl-memory-reserve-mb` and `--sl-gpu-memory-reserve-mb`. The detailed command
 reports the selected device, residency mode/capacity, one-time full upload,
-batch results, and memory high/low watermarks. `run_pipeline.py` uses
+batch results, and memory high/low watermarks. `train_script/run_pipeline.py` uses
 `quiet=True`, so it continues suppressing per-epoch, checkpoint, scheduler, and
 memory-detail chatter. It does display concise retained-batch benchmark lines
 through `tqdm.write`: candidate size, median epoch time, total test time,
@@ -245,7 +284,7 @@ CuPy import alone is not treated as proof of a working GPU. At startup,
 hidden device, or unusable runtime produces a documented NumPy/CPU fallback
 reason. The root README's **Linux GPU setup and verification** section contains
 the driver checks, CUDA 12.x/13.x installation commands, a real calculation
-test, and troubleshooting steps. `run_pipeline.py` prints the selected
+test, and troubleshooting steps. `train_script/run_pipeline.py` prints the selected
 supervised and RL-parent backends plus free/total RAM and VRAM before dataset
 generation starts.
 
@@ -462,6 +501,31 @@ requested/effective minibatches, optimizer steps, epochs, KL stops, clipping,
 entropy, gradient norms, buffer location/bytes, rollout time, and update time.
 Every iteration is also appended to `<weights>_training_metrics.jsonl`.
 
+Canonical runs additionally maintain
+`models/rl/<run>/diagnostics/runtime_profile.json`. The report is written
+atomically after every RL segment and periodic RL-vs-random diagnostic. It
+contains one session per pipeline process plus cumulative totals. RL timing is
+split into initialization/resume, adaptive tuning, runner setup, policy sync,
+rollout execution and parent aggregation, reward and buffer preparation, PPO,
+pool refresh, checkpoint I/O, metrics, callbacks, and shutdown. PPO is split
+again into storage preparation, minibatch materialization, optimizer work,
+synchronization, whole-buffer evaluation, KL control, and cleanup. The worker
+side of rollouts is split into rules/state generation, learner and opponent
+decisions, reward shaping, engine transitions, and episode finalization. Each
+RL policy decision is split again into exact-opponent-model update, encoding,
+network inference, legal-action selection, and trajectory recording. Worker
+totals are exact summed CPU-seconds, so they are intentionally distinct from
+(and can exceed) parent wall time when several workers overlap. Per-turn
+subphases use a deterministic 1-in-32 game sample; the JSON records both its
+coverage and sampled CPU denominator. This avoids making per-turn profiling a
+measurable bottleneck while still retaining thousands of sampled games in a
+normal checkpoint window. Optimizer steps and
+whole-buffer evaluation are also split at their existing GPU synchronization
+boundaries; the profiler does not add extra synchronizations merely to improve
+attribution. Existing long runs start their fine-grained coverage at the game
+counter where the profiler was introduced; earlier games are recorded as
+unprofiled instead of being estimated.
+
 Pass `--compact` to suppress iteration and checkpoint lines while retaining
 worker-autotuning messages, one absolute iteration progress bar, and one final
 summary. The parameter-sweep shell enables this presentation automatically.
@@ -474,9 +538,17 @@ same masked policy distribution.
 
 `PolicyNetwork` uses masked PPO by default with the critic disabled. At the
 start of an iteration, one policy is frozen for all rollouts. Every real
-decision stores its legal mask and `old_log_prob`; draw, pass, and single-choice
-plays never enter the buffer. Advantages use the existing finalized reward and
-are normalized once over the complete iteration.
+decision stores its legal mask and collection-time probability metadata; draw,
+pass, and single-choice plays never enter the buffer. PPO uses `old_log_prob`
+to compare the updated policy with the rollout policy. Advantages use the
+existing finalized reward and are normalized once over the complete iteration.
+
+With `--no-ppo`, the same fresh on-policy decisions go directly to the legacy
+full-buffer policy-gradient update. Exactly one optimizer step is attempted per
+non-empty iteration, and none of `training/ppo.py`'s buffer, ratio, clipped
+surrogate, KL, minibatch, or whole-buffer evaluation paths run. Checkpoint,
+optimizer, RNG, adaptive-tuning, opponent-pool, and canonical resume behavior
+remain unchanged apart from recording `reinforce_v1` instead of `ppo_v1`.
 
 The canonical contiguous buffer stays in RAM. If it fits within 70% of reported
 free VRAM and a dry first-minibatch workspace probe succeeds, a complete GPU
@@ -486,8 +558,12 @@ fallback restarts a partially applied epoch.
 Requested minibatches are `clamp(ceil(actual_games / 125), 4, 16)`, further
 capped to keep roughly 128 decisions per minibatch. Each epoch visits every
 decision exactly once with a deterministic new permutation. PPO uses clip
-epsilon `0.2`, target KL `0.01`, and does not start another epoch after
-whole-buffer approximate KL exceeds `0.015`; at most four epochs run.
+epsilon `0.2`, target KL `0.01`, and does not start another epoch after the
+completed epoch's whole-buffer approximate KL exceeds `0.015`. Direct
+self-play and finite canonical profiles run at most four epochs by default;
+the canonical `forever` profile runs at most 16. An explicit
+`--ppo-max-epochs` overrides the profile default within the supported 1–16
+range.
 
 Enable the optional actor-critic baseline with:
 
@@ -500,9 +576,9 @@ finalized policy reward is the value target, and the masked policy update uses
 `reward - V(s)` as its advantage. The value-loss coefficient defaults to `0.5`
 (`--value-coef`). In this mode checkpoints also contain `Wv` and `bv`.
 
-The canonical pipeline intentionally fixes the current policy-only PPO
-algorithm. Value-head regression remains available only to direct self-play
-and experiment wrappers.
+The canonical pipeline supports both policy-only `ppo_v1` and policy-only
+`reinforce_v1`. Value-head regression remains available only to direct
+self-play and experiment wrappers.
 
 Policy-only loading ignores `Wv`/`bv`, while value-head loading initializes
 them to zero when they are absent. This permits mode changes without changing
@@ -536,7 +612,11 @@ python -m training.self_play --gamma 0.97 --reward-schema shaped --seed 42
 A point-in-time value loss or win rate is dominated by batch noise; the
 iteration log always reports `reward mean/std/min/max` and a trailing moving
 average of value loss and win rate next to the raw values, so a plateau can be
-judged from the average rather than a single noisy line.
+judged from the average rather than a single noisy line. In detailed
+`training.self_play` output, a value-head run also prints the count and
+mean/std/min/max of the pre-update `V(s)` predictions for every displayed
+iteration. These are the same predictions used in `reward - V(s)`; the report
+reuses that forward pass rather than evaluating the buffer again.
 
 ### Device selection (`--device`)
 
@@ -546,20 +626,18 @@ project. `--device cpu` or `--device gpu` force one backend for that run
 regardless of what's installed, independently of the parent
 `SupervisedNeuralNetwork` class used by supervised training (which is
 unaffected and still always follows `GPU_ENABLED`). `--device gpu` raises a
-clear error if CuPy isn't installed. This is useful because, empirically, RL
-self-play is dominated by the exact opponent-hand inference in
-`middleware/opponent_model.py` (>80% of iteration time, profiled) rather than
-the policy network's forward/backward passes, so CuPy's per-decision
-transfer/kernel-launch overhead during rollout can make GPU measurably
-*slower* than CPU for this stage specifically -- `--device cpu` is worth
-trying if RL training feels slow.
+clear error if CuPy isn't installed. Rollout workers remain CPU-only, while
+PPO updates may use the GPU. Consult the run's cumulative runtime profile
+before changing devices: it records CPU/GPU optimizer-call counts and separates
+rollout rules, exact-model work, inference, buffer transfer, backpropagation,
+parameter updates, and metric transfers.
 
 `training.self_play` also accepts `--iterations`, `--total-training-games`,
 `--games-per-iteration`, `--adaptive-gpi`, `--gpi-candidates`,
 `--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
 `--checkpoint-interval`, `--pool-refresh-games`, `--max-pool-size`,
 `--sl-weights-path`, and `--rl-weights-path`; see
-`training/self_play.py:add_optional_rl_arguments` for the authoritative
+`training/rl_cli.py:add_optional_rl_arguments` for the authoritative
 definitions, or run `python -m training.self_play --help`.
 
 The former iteration-based `--pool-interval` and auxiliary

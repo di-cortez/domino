@@ -55,7 +55,7 @@ class _FakePPONetwork:
     def __init__(self, ratio_after_update=1.0, *, device="cpu", fail_first_eval=False):
         self.xp = np
         self.device = device
-        self.ratio_after_update = float(ratio_after_update)
+        self.ratio_after_update = ratio_after_update
         self.fail_first_eval = bool(fail_first_eval)
         self.eval_calls = 0
         self.optimizer_step_count = 0
@@ -80,7 +80,12 @@ class _FakePPONetwork:
             "A1": np.zeros((2, count), dtype=np.float32),
             "Z1": np.zeros((2, count), dtype=np.float32),
         }
-        ratio = 1.0 if self.optimizer_step_count == 0 else self.ratio_after_update
+        if self.optimizer_step_count == 0:
+            ratio = 1.0
+        elif callable(self.ratio_after_update):
+            ratio = float(self.ratio_after_update(self.optimizer_step_count))
+        else:
+            ratio = float(self.ratio_after_update)
         log_probs = np.full(count, np.log(ratio), dtype=np.float32)
         entropy = np.full(count, 0.5, dtype=np.float32)
         policy = np.zeros((action_size, count), dtype=np.float32)
@@ -228,18 +233,25 @@ def test_kl_early_stop_occurs_only_after_the_completed_epoch():
         iteration=1,
         entropy_coef=0.0,
         clip_grad_norm=5.0,
-        max_epochs=4,
+        max_epochs=16,
     )
 
     assert metrics["stopped_by_kl"]
     assert metrics["epochs_completed"] == 1
     assert metrics["final_approx_kl"] > 0.015
+    assert metrics["target_kl"] == 0.01
+    assert metrics["stop_kl"] == 0.015
+    assert [row["epoch"] for row in metrics["epoch_metrics"]] == [1]
     assert metrics["optimizer_steps"] == metrics["effective_minibatches"]
     assert network.optimizer_step_count == metrics["optimizer_steps"]
 
 
-def test_small_kl_runs_all_four_epochs_and_counts_every_optimizer_step():
-    network = _FakePPONetwork(ratio_after_update=1.001)
+def test_kl_early_stop_can_end_a_sixteen_epoch_budget_after_several_epochs():
+    network = _FakePPONetwork(
+        ratio_after_update=lambda optimizer_steps: (
+            1.001 if optimizer_steps < 10 else 1.30
+        )
+    )
     metrics = ppo_update(
         network,
         _buffer(),
@@ -248,13 +260,48 @@ def test_small_kl_runs_all_four_epochs_and_counts_every_optimizer_step():
         iteration=2,
         entropy_coef=0.0,
         clip_grad_norm=5.0,
-        max_epochs=4,
+        max_epochs=16,
+    )
+
+    assert metrics["stopped_by_kl"]
+    assert metrics["epochs_completed"] == 5
+    assert metrics["final_approx_kl"] > metrics["stop_kl"]
+    assert metrics["optimizer_steps"] == 5 * metrics["effective_minibatches"]
+    assert [row["epoch"] for row in metrics["epoch_metrics"]] == list(range(1, 6))
+
+
+def test_small_kl_runs_all_sixteen_epochs_and_counts_every_optimizer_step():
+    network = _FakePPONetwork(ratio_after_update=1.001)
+    metrics = ppo_update(
+        network,
+        _buffer(),
+        actual_games=100,
+        base_seed=42,
+        iteration=3,
+        entropy_coef=0.0,
+        clip_grad_norm=5.0,
+        max_epochs=16,
     )
 
     assert not metrics["stopped_by_kl"]
-    assert metrics["epochs_completed"] == 4
-    assert metrics["optimizer_steps"] == 4 * metrics["effective_minibatches"]
+    assert metrics["epochs_completed"] == 16
+    assert metrics["optimizer_steps"] == 16 * metrics["effective_minibatches"]
+    assert [row["epoch"] for row in metrics["epoch_metrics"]] == list(range(1, 17))
     assert network.optimizer_step_count == metrics["optimizer_steps"]
+
+
+def test_ppo_rejects_more_than_sixteen_epochs():
+    with np.testing.assert_raises_regex(ValueError, "between one and 16"):
+        ppo_update(
+            _FakePPONetwork(),
+            _buffer(),
+            actual_games=100,
+            base_seed=42,
+            iteration=4,
+            entropy_coef=0.0,
+            clip_grad_norm=5.0,
+            max_epochs=17,
+        )
 
 
 def test_complete_gpu_copy_and_ram_batches_are_equivalent():

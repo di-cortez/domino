@@ -9,7 +9,6 @@ many two-player domino games and write compact metrics, CSV data, and plots.
 |---|---|
 | `rl` | `RLAgent` loaded from the RL self-play checkpoint and used in evaluation mode. |
 | `neural` | `NeuralAgent` loaded from supervised-learning weights. |
-| `random_nn` | `RandomNeuralAgent` using the supervised architecture with fixed, untrained random weights. |
 | `heuristic` | `StrategicAgent`, the handcrafted rule-based agent. |
 | `random` | Uniform random legal move. |
 
@@ -17,7 +16,7 @@ many two-player domino games and write compact metrics, CSV data, and plots.
 
 | Command | Matchups |
 |---|---:|
-| `python -m diagnostics.evaluate` | 5: every supported agent vs `random`. |
+| `python -m diagnostics.evaluate` | 4: every supported agent vs `random`. |
 
 The command uses 10,000 games per matchup by default. Set the explicit count
 with `-n`/`--games`:
@@ -82,18 +81,19 @@ do not belong to the selected plan, keeping its contents internally consistent.
 
 | File or folder | Contents |
 |---|---|
-| `all_pairs_table.png` | Metadata-rich one-row comparison of all five agents against random. |
+| `all_pairs_table.png` | Metadata-rich one-row comparison of all four agents against random. |
 | `all_pairs_table.pdf` | Vector PDF version of the same aggregate comparison. |
 | `choice_opportunities.png` | Aggregate histogram of draw/pass/choice opportunities across all evaluated matchups. |
-| `all_pairs_matrix.csv` | One row per evaluated matchup. |
+| `all_pairs_matrix.csv` | One row per evaluated matchup, including `V(s)` count/mean/std/min/max columns when the evaluated checkpoint has a value head. |
 | `all_pairs_summary.json` | Full aggregate report with `selected_workers_by_matchup`, per-matchup retained autotuning reports, accumulated choice-opportunity stats, `duration_s`, and all pairwise summaries. |
 | `pairs/<agent>_vs_<opponent>/` | Standard pairwise artifacts for each matchup. |
 
 The aggregate PNG/PDF header records games per matchup, total games,
 elapsed evaluation time, seed, selected workers, checkpoint names, neural
 architectures, parameter counts, checkpoint SHA-256 prefixes, and whether the
-RL checkpoint contains a value head. It also reports the 95% worst-case
-percentage margin of error as
+RL checkpoint contains a value head. When it does, the table adds the count and
+mean/std/min/max of `V(s)` over RL's real decision states. It also reports the
+95% worst-case percentage margin of error as
 `sqrt(0.9604 / n)`, rounded to two significant digits, where `n` is the games
 per matchup.
 
@@ -108,7 +108,7 @@ The `big`, `huge`, and `forever` pipelines evaluate only RL versus `random` at
 0, 100,000, 200,000, ... cumulative RL games. Point zero is the canonical
 supervised checkpoint. Every point uses the same seed namespace and the same
 100,000 game identities, so checkpoints are compared on a paired monitor set.
-The final five-matchup evaluation uses a separate holdout namespace.
+The final four-matchup evaluation uses a separate holdout namespace.
 
 Each milestone is saved before evaluation. Diagnostics use separate RNG state
 and cannot change policy weights, optimizer, opponent pool, counters, GPI, or
@@ -117,16 +117,41 @@ rollout workers. The RL run directory receives:
 | File | Contents |
 |---|---|
 | `periodic_diagnostics.jsonl` | Append-safe source of truth; one deduplicated monitor point per checkpoint identity. |
-| `rl_vs_random_progress.csv` | Derived tabular learning curve. |
-| `rl_vs_random_progress.png` | Linear game-count curve with point zero and 95% intervals. |
-| `rl_vs_random_progress_logx.png` | Optional separate symlog rendering. |
+| `rl_vs_random_progress.csv` | Derived tabular learning curve, including cumulative RL training hours. |
+| `rl_vs_random_progress.png` | Linear cumulative-training-hours curve with point zero and 95% intervals. |
+| `rl_vs_random_progress_logx.png` | Optional separate symlog time rendering. |
 | `best_checkpoint.json` | Highest periodic win rate; never used implicitly for resume. |
 | `periodic_diagnostic_tuning.json` | Forever's one-time diagnostic-worker selection, reused after resume. |
+| `diagnostics/runtime_profile.json` | Atomic per-session and cumulative timing profile for RL plus periodic RL-vs-random monitoring. |
 
 In `forever`, automatic diagnostic-worker selection runs once and is reused at
 all later monitor points. Existing runs without the tuning file recover the
 most recent compatible selection from the JSONL history. The progress plot
-footer records the exact point-zero checkpoint name and SHA-256 prefix.
+footer records the exact point-zero checkpoint name and SHA-256 prefix. Its
+horizontal axis uses cumulative RL training time and therefore remains
+monotonic across resume sessions while excluding periodic-diagnostic time.
+
+Periodic monitoring does not persist per-game CSV records. The complete,
+compact JSONL learning history is retained, while only the 10 newest
+per-checkpoint `summary.json` directories are kept. This bounds recurring
+diagnostic storage without losing any point used by the CSV, graph, or best
+checkpoint selector.
+
+The runtime profile goes deeper than the monitor's single `diagnostic_seconds`
+field. It separates checkpoint identity/history work, optional worker tuning,
+pairwise evaluation, RNG restoration, JSONL append/fsync, CSV and graph
+rebuilds, and best-checkpoint maintenance. Pairwise evaluation is split again
+into game execution, parent ordering, statistics, CSV/JSON output, plots, and
+the atomic directory commit. Game execution inside the CPU workers is split
+into engine setup, rule/state generation, evaluated-agent statistics,
+evaluated-agent and opponent decisions, engine transitions, and final result
+serialization. Neural-agent decisions additionally expose exact-opponent-model,
+encoding, inference, and action-selection time. These inner worker values are
+measured on a deterministic 1-in-32 game sample, while whole-worker CPU totals
+remain exact. The report records the sample coverage and its own CPU
+denominator; this keeps profiling overhead negligible while preserving useful
+work accounting when workers execute concurrently. Reused diagnostic points are
+timed but add zero games to the profiled diagnostic-game counter.
 
 A killed final JSONL append is tolerated and repaired before the next append.
 Rebuild CSV and plots without starting training:
@@ -145,19 +170,28 @@ Use the helper directly when only one matchup is needed:
 ```bash
 python -m diagnostics.pairwise --agent heuristic --opponent random
 python -m diagnostics.pairwise --agent rl --opponent neural
-python -m diagnostics.pairwise --agent neural --opponent random_nn
+python -m diagnostics.pairwise --agent neural --opponent heuristic
 python -m diagnostics.pairwise --agent heuristic --opponent random -j 4
 ```
 
 The evaluated agent alternates between player 0 and player 1 to reduce
 first-player bias.
 
+If the evaluated RL checkpoint contains both `Wv` and `bv`, diagnostics load
+the critic and report `value_head_predictions`: sample/finite/non-finite counts
+plus mean, population standard deviation, minimum, and maximum `V(s)`. Only
+real policy decisions are included. The value is calculated from the hidden
+activation already produced for the policy choice, so diagnostics do not run a
+second network forward. Policy-only checkpoints retain the previous schema and
+console/table presentation without an empty value summary; the aggregate CSV's
+fixed value columns remain blank.
+
 By default, pairwise files are written under
 `diagnostics/results/pairwise/<agent>_vs_<opponent>/`:
 
 | File | Contents |
 |---|---|
-| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, and `duration_s`. |
+| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, optional value-head prediction statistics, and `duration_s`. |
 | `games.csv` | Compact one-row-per-game data with position, result, turns, initial hands as JSON arrays, and final pip counts. |
 | `cumulative_rates.png` | Win/draw/loss rates over time. |
 | `result_distribution.png` | Final result counts. |

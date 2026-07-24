@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import time
 
 import numpy as np
@@ -29,10 +30,13 @@ from utils.artifacts import atomic_write_json, atomic_write_text, file_sha256
 FORMAT_VERSION = 1
 PERIODIC_NAMESPACE = "periodic_rl_vs_random"
 FINAL_NAMESPACE = "final_all_pairs_holdout"
+PERIODIC_SUMMARY_RETENTION = 10
+_PERIODIC_DIRECTORY_PATTERN = re.compile(r"games_(\d+)")
 CSV_FIELDS = (
     "rl_games",
     "rl_iterations",
     "optimizer_steps",
+    "rl_elapsed_hours",
     "win_rate_percent",
     "score_percent",
     "draw_rate_percent",
@@ -43,6 +47,22 @@ CSV_FIELDS = (
     "checkpoint_path",
     "checkpoint_sha256",
 )
+
+
+def _rl_elapsed_hours(row):
+    """Return cumulative RL training time in hours for one monitor point."""
+    try:
+        seconds = float(row["rl_elapsed_seconds"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Periodic diagnostic point has no valid cumulative "
+            "rl_elapsed_seconds value."
+        ) from exc
+    if not np.isfinite(seconds) or seconds < 0.0:
+        raise ValueError(
+            "Periodic diagnostic rl_elapsed_seconds must be finite and non-negative."
+        )
+    return seconds / 3600.0
 
 
 def periodic_diagnostic_seed(seed):
@@ -135,6 +155,76 @@ def append_periodic_point(path, row):
     return row, True
 
 
+def prune_periodic_diagnostic_artifacts(
+    run_dir,
+    *,
+    keep_summaries=PERIODIC_SUMMARY_RETENTION,
+):
+    """Remove bulky game records and bound per-point summary directories.
+
+    The append-only ``periodic_diagnostics.jsonl`` remains the complete source
+    of truth. Only known generated files are removed, and an old directory is
+    removed only when that leaves it empty.
+    """
+    keep_summaries = int(keep_summaries)
+    if keep_summaries < 0:
+        raise ValueError("keep_summaries must be non-negative")
+    diagnostics_dir = Path(run_dir) / "diagnostics"
+    if not diagnostics_dir.is_dir():
+        return {
+            "games_csv_removed": 0,
+            "summary_json_removed": 0,
+            "directories_removed": 0,
+        }
+
+    point_directories = []
+    for path in diagnostics_dir.iterdir():
+        match = _PERIODIC_DIRECTORY_PATTERN.fullmatch(path.name)
+        if match and path.is_dir() and not path.is_symlink():
+            point_directories.append((int(match.group(1)), path))
+    point_directories.sort()
+    retained = {
+        path.resolve()
+        for _games, path in (
+            point_directories[-keep_summaries:]
+            if keep_summaries else ()
+        )
+    }
+
+    removed_games = 0
+    removed_summaries = 0
+    removed_directories = 0
+    for _games, directory in point_directories:
+        games_path = directory / "games.csv"
+        if games_path.is_file():
+            try:
+                games_path.unlink()
+            except OSError:
+                pass
+            else:
+                removed_games += 1
+        if directory.resolve() not in retained:
+            summary_path = directory / "summary.json"
+            if summary_path.is_file():
+                try:
+                    summary_path.unlink()
+                except OSError:
+                    pass
+                else:
+                    removed_summaries += 1
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+            else:
+                removed_directories += 1
+    return {
+        "games_csv_removed": removed_games,
+        "summary_json_removed": removed_summaries,
+        "directories_removed": removed_directories,
+    }
+
+
 def rebuild_progress_csv(run_dir):
     """Rebuild the derived CSV from JSONL, which remains the source of truth."""
     run_dir = Path(run_dir)
@@ -150,6 +240,7 @@ def rebuild_progress_csv(run_dir):
             "rl_games": row["rl_games"],
             "rl_iterations": row["rl_iterations"],
             "optimizer_steps": row["optimizer_steps"],
+            "rl_elapsed_hours": _rl_elapsed_hours(row),
             "win_rate_percent": 100.0 * row["win_rate"],
             "score_percent": 100.0 * row["score"],
             "draw_rate_percent": 100.0 * row["draw_rate"],
@@ -175,7 +266,7 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
     )
     if not rows:
         raise ValueError("Cannot plot RL progress without diagnostic points.")
-    x = np.asarray([row["rl_games"] for row in rows], dtype=np.float64)
+    x = np.asarray([_rl_elapsed_hours(row) for row in rows], dtype=np.float64)
     y = 100.0 * np.asarray([row["win_rate"] for row in rows])
     low = 100.0 * np.asarray([row["ci95_win_rate_low"] for row in rows])
     high = 100.0 * np.asarray([row["ci95_win_rate_high"] for row in rows])
@@ -195,8 +286,8 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
             label="Canonical supervised starting point",
         )
     if log_x:
-        axis.set_xscale("symlog", linthresh=100_000)
-    axis.set_xlabel("RL games completed")
+        axis.set_xscale("symlog", linthresh=1.0)
+    axis.set_xlabel("Cumulative RL training time (hours)")
     axis.set_ylabel("Win rate vs random (%)")
     axis.set_title(
         f"RL learning progress — {rows[-1]['pipeline_level']} seed {rows[-1]['seed']}"
@@ -322,6 +413,14 @@ def run_periodic_diagnostic(
     status_callback=None,
 ):
     """Evaluate one checkpoint on the fixed monitor set and persist one point."""
+    runtime_profile_started = time.perf_counter()
+    runtime_sections = {}
+
+    def add_runtime(section, started):
+        runtime_sections[section] = runtime_sections.get(section, 0.0) + (
+            time.perf_counter() - started
+        )
+
     run_dir = Path(run_dir)
     checkpoint_path = Path(checkpoint_path)
     diagnostic_seed = periodic_diagnostic_seed(seed)
@@ -336,18 +435,53 @@ def run_periodic_diagnostic(
     history_path = run_dir / "periodic_diagnostics.jsonl"
     existing_history = read_periodic_history(history_path)
     _repair_final_partial_line(history_path, existing_history)
+    runtime_sections["identity_hash_and_history_read"] = (
+        time.perf_counter() - runtime_profile_started
+    )
     for existing in existing_history:
         if _point_key(existing) == _point_key(identity):
-            rebuild_progress_reports(run_dir)
+            section_started = time.perf_counter()
+            rebuild_progress_csv(run_dir)
+            add_runtime("progress_csv_rebuild", section_started)
+            section_started = time.perf_counter()
+            rebuild_progress_plot(run_dir)
+            add_runtime("progress_plot_rebuild", section_started)
+            section_started = time.perf_counter()
+            rebuild_best_checkpoint(run_dir)
             _update_best(run_dir, existing)
+            add_runtime("best_checkpoint_update", section_started)
+            section_started = time.perf_counter()
+            prune_periodic_diagnostic_artifacts(run_dir)
+            add_runtime("diagnostic_artifact_pruning", section_started)
+            runtime_total_seconds = time.perf_counter() - runtime_profile_started
+            runtime_sections["unaccounted"] = max(
+                0.0,
+                runtime_total_seconds - sum(runtime_sections.values()),
+            )
+            existing = dict(existing)
+            existing["runtime_profile_delta"] = {
+                "execution_count": 1,
+                "reused_execution_count": 1,
+                "games": 0,
+                "execution_seconds": float(runtime_total_seconds),
+                "sections_seconds": {
+                    name: float(seconds)
+                    for name, seconds in runtime_sections.items()
+                },
+                "pairwise_sections_seconds": {},
+                "game_worker": {},
+            }
             return existing, False
 
     safety_config = safety_config or ParallelSafetyConfig()
     output_dir = run_dir / "diagnostics" / f"games_{int(rl_games):010d}"
+    section_started = time.perf_counter()
     python_state = random.getstate()
     numpy_state = np.random.get_state()
+    add_runtime("rng_snapshot", section_started)
     started = time.time()
     try:
+        section_started = time.perf_counter()
         if workers == "auto":
             matchup = MatchupSpec(
                 agent="rl",
@@ -367,12 +501,21 @@ def run_periodic_diagnostic(
             selected_workers = int(tuning["optimal_workers"])
             precomputed = tuning["precomputed_games"][matchup.key]
             precomputed_duration = tuning["durations_by_matchup"][matchup.key]
+            precomputed_runtime_profile = tuning[
+                "runtime_profiles_by_matchup"
+            ][matchup.key]
         else:
             selected_workers, _capped, _reason = cap_parallel_workers(
                 int(workers), safety_config
             )
             precomputed = ()
             precomputed_duration = 0.0
+            precomputed_runtime_profile = {}
+        add_runtime(
+            "worker_autotune" if workers == "auto" else "worker_selection",
+            section_started,
+        )
+        section_started = time.perf_counter()
         result = run_pairwise(
             "rl",
             "random",
@@ -388,11 +531,17 @@ def run_periodic_diagnostic(
             safety_config=safety_config,
             precomputed_games=precomputed,
             precomputed_duration_s=precomputed_duration,
+            precomputed_runtime_profile=precomputed_runtime_profile,
+            save_game_records=False,
         )
+        add_runtime("pairwise_evaluation", section_started)
     finally:
+        section_started = time.perf_counter()
         random.setstate(python_state)
         np.random.set_state(numpy_state)
+        add_runtime("rng_restore", section_started)
     diagnostic_seconds = time.time() - started
+    section_started = time.perf_counter()
     summary = result["summary"]
     wins = int(summary["counts"]["win"])
     draws = int(summary["counts"]["draw"])
@@ -426,9 +575,40 @@ def run_periodic_diagnostic(
         "selected_workers": selected_workers,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    add_runtime("diagnostic_summary_payload", section_started)
+    section_started = time.perf_counter()
     row, appended = append_periodic_point(history_path, row)
-    rebuild_progress_reports(run_dir)
+    add_runtime("history_jsonl_append_and_fsync", section_started)
+    section_started = time.perf_counter()
+    rebuild_progress_csv(run_dir)
+    add_runtime("progress_csv_rebuild", section_started)
+    section_started = time.perf_counter()
+    rebuild_progress_plot(run_dir)
+    add_runtime("progress_plot_rebuild", section_started)
+    section_started = time.perf_counter()
+    rebuild_best_checkpoint(run_dir)
     _update_best(run_dir, row)
+    add_runtime("best_checkpoint_update", section_started)
+    section_started = time.perf_counter()
+    prune_periodic_diagnostic_artifacts(run_dir)
+    add_runtime("diagnostic_artifact_pruning", section_started)
+    runtime_total_seconds = time.perf_counter() - runtime_profile_started
+    runtime_sections["unaccounted"] = max(
+        0.0,
+        runtime_total_seconds - sum(runtime_sections.values()),
+    )
+    pairwise_profile = result["runtime_profile_delta"]
+    row["runtime_profile_delta"] = {
+        "execution_count": 1,
+        "reused_execution_count": 0,
+        "games": int(diagnostic_games),
+        "execution_seconds": float(runtime_total_seconds),
+        "sections_seconds": {
+            name: float(seconds) for name, seconds in runtime_sections.items()
+        },
+        "pairwise_sections_seconds": dict(pairwise_profile["sections_seconds"]),
+        "game_worker": dict(pairwise_profile.get("game_worker", {})),
+    }
     return row, appended
 
 

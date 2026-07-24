@@ -8,19 +8,24 @@ ignored by Git.
 |---|---|
 | `supervised_dataset.jsonl` | JSON Lines file with one `{"state": ..., "target_action": ...}` training example per line. |
 | `supervised_dataset_encoded.npz` | Auto-generated cache with encoded `X/Y` arrays used by `training.training_loop`. |
-| `supervised_dataset_standard_seed<seed>.jsonl` | Canonical pipeline dataset shared by every level for that seed. |
+| `supervised_dataset_standard_seed<seed>.jsonl` | Reusable long-run pipeline dataset for that seed. |
 | `supervised_dataset_standard_seed<seed>.meta.json` | Structural identity, generation configuration, provenance, example count, and SHA-256. |
 
-The first two names belong to standalone training commands. The canonical
-pipeline generates 100,000 games for the seed-addressed dataset and reuses it
-only after its metadata, encoder/action dimensions, structural versions,
-configuration, and content hash all match. An incompatible existing file is
-never silently replaced:
+The first two names belong to standalone training commands. The `big`, `huge`,
+and `forever` pipeline levels generate 100,000 games for the seed-addressed
+dataset and reuse it only after its metadata, encoder/action dimensions,
+structural versions, configuration, and content hash all match. An
+incompatible existing file is never silently replaced:
 
 ```bash
-python -m training.pipeline default --seed 42
-python -m training.pipeline default --seed 42 --rebuild-dataset
+python -m training.pipeline big --seed 42
+python -m training.pipeline big --seed 42 --rebuild-dataset
 ```
+
+`small` generates 10,000 games and `default` generates 50,000. Their datasets
+are stored with the rest of the run-local supervised assets under that unique
+RL run directory, so a later invocation never reuses them. Both choose a fresh
+seed unless `--seed` is supplied explicitly.
 
 `state` is the compact dictionary returned by `DominoEngine._get_state()`.
 Rendering metadata is not part of the engine state or the dataset. `target_action`

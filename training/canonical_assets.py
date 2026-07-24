@@ -85,6 +85,21 @@ def canonical_asset_paths(root, seed):
     )
 
 
+def run_scoped_asset_paths(run_dir):
+    """Return non-reusable supervised paths owned by one pipeline run."""
+    asset_dir = Path(run_dir) / "supervised"
+    dataset = asset_dir / "supervised_dataset.jsonl"
+    weights = asset_dir / "domino_sl.npz"
+    return CanonicalAssetPaths(
+        dataset=dataset,
+        dataset_meta=dataset.with_suffix(".meta.json"),
+        encoded_cache=dataset.with_name("supervised_dataset_encoded.npz"),
+        weights=weights,
+        weights_meta=weights.with_suffix(".meta.json"),
+        loss_plot=weights.with_name("domino_sl_loss.png"),
+    )
+
+
 def _git_commit(root):
     for candidate in (Path(root), Path(__file__).resolve().parents[1]):
         try:

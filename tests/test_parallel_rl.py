@@ -20,6 +20,7 @@ from diagnostics.parallel_runner import (
     ParallelSafetyConfig,
 )
 from training.rl_parallel import RLRolloutRunner, worker_count
+from training.rl_resume import NUMBERED_CHECKPOINT_WEIGHT_RETENTION
 from training.self_play import (
     REWARD_SCHEMAS,
     _load_initial_network,
@@ -29,7 +30,7 @@ from training.self_play import (
     resume_state_path,
     train,
 )
-from run_pipeline import parse_args as parse_pipeline_args
+from train_script.run_pipeline import parse_args as parse_pipeline_args
 from utils.resource_limits import MemorySafetyError
 
 
@@ -147,6 +148,45 @@ class ParallelRLTests(unittest.TestCase):
                         np.testing.assert_array_equal(one[name], two[name])
             self.assertEqual(summaries[0]["effective_seed"], 987)
             self.assertEqual(summaries[1]["effective_seed"], 987)
+
+    def test_numbered_policy_checkpoint_history_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            summary = train(
+                iterations=NUMBERED_CHECKPOINT_WEIGHT_RETENTION + 2,
+                games_per_iteration=1,
+                checkpoint_interval=1,
+                pool_refresh_games=1,
+                max_pool_size=1,
+                seed=230723,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                rl_weights_path=str(root / "training.npz"),
+                numbered_checkpoints=True,
+                fresh_from_sl=True,
+                quiet=True,
+            )
+            policy_files = [
+                path
+                for path in root.glob("training_iter*.npz")
+                if ".resume." not in path.name
+            ]
+            resume_files = list(root.glob("training_iter*.resume.npz"))
+            metadata, _pool = load_resume_state(
+                summary["rl_weights_path"],
+                summary["resume_state_path"],
+            )
+
+        self.assertEqual(
+            len(policy_files),
+            NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
+        )
+        self.assertEqual(len(resume_files), 1)
+        self.assertEqual(
+            metadata["completed_training_games"],
+            NUMBERED_CHECKPOINT_WEIGHT_RETENTION + 2,
+        )
 
     def test_pool_refresh_uses_cumulative_training_games(self):
         with tempfile.TemporaryDirectory() as temp_dir:

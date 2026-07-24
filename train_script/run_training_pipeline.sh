@@ -7,7 +7,7 @@
 #      experiment profile, with RL
 #      hyperparameters overridable from the command line so the same script
 #      can drive repeated batch runs that only vary the RL stage;
-#   4. compare all five supported agents with the random baseline over the
+#   4. compare all four supported agents with the random baseline over the
 #      wrapper's historical 50,000-game profile, writing results to a subdirectory of
 #      `diagnostics/results/` named after the RL weights file this run
 #      produced (or reused), so repeated batch runs that vary RL
@@ -128,7 +128,7 @@ usage() {
 Run the domino training pipeline: dataset generation -> supervised training
 (both with README/module defaults) -> the wrapper's historical self-play RL
 profile ($BASE_RL_TOTAL_TRAINING_GAMES x ${BIG_SCALE_FACTOR} =
-$RL_TOTAL_TRAINING_GAMES real games by default) -> five agent-vs-random diagnostics
+$RL_TOTAL_TRAINING_GAMES real games by default) -> four agent-vs-random diagnostics
 ($BASE_DIAGNOSTIC_GAMES x ${BIG_SCALE_FACTOR} = $DIAG_GAMES games per matchup by default),
 written to diagnostics/results/<rl-weights-basename>/.
 

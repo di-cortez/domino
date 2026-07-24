@@ -130,7 +130,7 @@ class ParallelRLTests(unittest.TestCase):
             for workers, path in zip((1, 2), paths):
                 summaries.append(train(
                     iterations=3,
-                    games_per_iteration=6,
+                    gpi=6,
                     checkpoint_interval=100,
                     pool_refresh_games=6,
                     max_pool_size=3,
@@ -154,7 +154,7 @@ class ParallelRLTests(unittest.TestCase):
             root = Path(temp_dir)
             summary = train(
                 iterations=NUMBERED_CHECKPOINT_WEIGHT_RETENTION + 2,
-                games_per_iteration=1,
+                gpi=1,
                 checkpoint_interval=1,
                 pool_refresh_games=1,
                 max_pool_size=1,
@@ -194,7 +194,7 @@ class ParallelRLTests(unittest.TestCase):
             rows = []
             first = train(
                 iterations=6,
-                games_per_iteration=2,
+                gpi=2,
                 checkpoint_interval=2,
                 pool_refresh_games=4,
                 max_pool_size=10,
@@ -208,7 +208,7 @@ class ParallelRLTests(unittest.TestCase):
             )
             second = train(
                 iterations=4,
-                games_per_iteration=3,
+                gpi=3,
                 checkpoint_interval=2,
                 pool_refresh_games=4,
                 max_pool_size=10,
@@ -265,7 +265,7 @@ class ParallelRLTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "predates algorithm metadata"):
                 train(
                     iterations=1,
-                    games_per_iteration=2,
+                    gpi=2,
                     sl_weights_path=str(sl_path),
                     rl_weights_path=str(rl_path),
                     seed=7,
@@ -378,8 +378,7 @@ class ParallelRLTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             summary = train(
                 total_training_games=5,
-                games_per_iteration=2,
-                adaptive_gpi=False,
+                gpi=2,
                 checkpoint_interval=10,
                 pool_refresh_games=2,
                 max_pool_size=2,
@@ -443,7 +442,7 @@ class ParallelRLTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             summary = train(
                 iterations=4,
-                games_per_iteration=4,
+                gpi=4,
                 checkpoint_interval=100,
                 max_pool_size=2,
                 seed=44,
@@ -483,7 +482,7 @@ class ParallelRLTests(unittest.TestCase):
             with mock.patch.dict(os.environ, constrained_memory, clear=False):
                 summary = train(
                     iterations=4,
-                    games_per_iteration=4,
+                    gpi=4,
                     checkpoint_interval=100,
                     max_pool_size=2,
                     seed=55,
@@ -591,7 +590,7 @@ class ParallelRLTests(unittest.TestCase):
             with mock.patch.dict(os.environ, low_gpu, clear=False):
                 summary = train(
                     iterations=1,
-                    games_per_iteration=2,
+                    gpi=2,
                     checkpoint_interval=100,
                     max_pool_size=1,
                     seed=99,
@@ -613,7 +612,7 @@ class ParallelRLTests(unittest.TestCase):
                 with self.assertRaises(MemorySafetyError):
                     train(
                         iterations=1,
-                        games_per_iteration=40,
+                        gpi=40,
                         checkpoint_interval=100,
                         max_pool_size=50,
                         seed=99,

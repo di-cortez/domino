@@ -147,8 +147,7 @@ def test_self_play_profile_contains_rollout_and_nested_ppo_phases(tmp_path):
     ).save(supervised)
     result = self_play.train(
         iterations=1,
-        games_per_iteration=8,
-        adaptive_gpi=False,
+        gpi=8,
         workers=1,
         device="cpu",
         seed=123,

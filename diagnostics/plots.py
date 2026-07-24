@@ -573,40 +573,28 @@ SWEEP_TABLE_BASE_COLUMNS = (
     ("learning_rate", "LR"),
     ("gamma", "Gamma"),
     ("value_coef", "ValueCoef"),
+    ("win_rate_pct", "Win rate"),
 )
 
 
 def plot_sweep_comparison_table(
     rows,
     path,
-    games_per_iteration_values=(40, 80, 160),
 ):
-    """Render grouped runs with one win-rate column per games/iteration value.
-
-    Mirrors ``plot_all_pairs_table``'s look (same palette, same
-    ``ax.table``-based rendering). Models that differ only in
-    games-per-iteration share one row, reducing the visual table height while
-    preserving their separate percentages.
-    """
+    """Render one row per fixed-GPI hyperparameter-sweep result."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    columns = list(SWEEP_TABLE_BASE_COLUMNS) + [
-        (f"win_rate_pct_gpi_{value}", str(value))
-        for value in games_per_iteration_values
-    ]
+    columns = list(SWEEP_TABLE_BASE_COLUMNS)
     field_names = [field for field, _ in columns]
     headers = [label for _, label in columns]
-    win_rate_columns = {
-        field_names.index(f"win_rate_pct_gpi_{value}")
-        for value in games_per_iteration_values
-    }
+    win_rate_columns = {field_names.index("win_rate_pct")}
 
     def format_cell(row, field):
         value = row.get(field, "")
-        if field.startswith("win_rate_pct_gpi_"):
+        if field == "win_rate_pct":
             return "" if value == "" or value is None else f"{float(value):.1f}%"
         return str(value)
 
@@ -632,7 +620,7 @@ def plot_sweep_comparison_table(
     ax.set_facecolor(SURFACE)
     ax.axis("off")
     ax.set_title(
-        "RL sweep vs random: win rate (%) by games per iteration",
+        "RL hyperparameter sweep vs random: win rate (%)",
         color=INK,
         fontsize=14,
         loc="left",

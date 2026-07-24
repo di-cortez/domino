@@ -22,7 +22,7 @@
 #   python -m training.training_loop
 #
 # Stage 3 wraps `python -m training.self_play`, which does accept CLI flags
-# (exact games, optional manual games-per-iteration, learning rate, reward schema, gamma,
+# (exact games, learning rate, reward schema, gamma,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
 # passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
@@ -54,9 +54,6 @@ RL_ITERATIONS=""
 
 RL_WEIGHTS_FILE="models/domino_rl_weights.npz"
 RL_SL_WEIGHTS_PATH="models/domino_sl_weights.npz"
-RL_GAMES_PER_ITERATION=100
-RL_GPI_EXPLICIT=0
-RL_ADAPTIVE_GPI="auto"
 RL_TRAINING_OPPONENT="self_play"
 RL_LEARNING_RATE=0.001
 RL_ENTROPY_COEF=0.01
@@ -144,15 +141,12 @@ up to 2,000 epochs with automatic training-loss plateau stopping), unless one
 of the SL convergence flags below is passed.
 
 Self-play reinforcement learning ($RL_TOTAL_TRAINING_GAMES exact real games by
-default; adaptive GPI and discarded worker tuning; all forwarded to
+default; the self-play default GPI and discarded worker tuning; all forwarded to
 training.self_play):
   --rl-weights-file PATH       Output RL weights path (default: $RL_WEIGHTS_FILE)
   --rl-sl-weights-path PATH    Input SL weights used to initialize a fresh RL run (default: $RL_SL_WEIGHTS_PATH)
   --rl-total-training-games N  Exact real-game budget (default: $RL_TOTAL_TRAINING_GAMES)
-  --rl-iterations N            Legacy fixed iteration budget; implies manual GPI
-  --rl-games-per-iteration N   Explicit manual GPI (fallback: $RL_GAMES_PER_ITERATION; default is adaptive)
-  --rl-adaptive-gpi            Force GPI autotuning even with an explicit GPI fallback
-  --rl-no-adaptive-gpi         Use GPI 100 (or the explicit manual value) directly
+  --rl-iterations N            Legacy fixed iteration budget; uses self-play's fixed default GPI
   --rl-training-opponent NAME  "self_play" or "heuristic" (default: $RL_TRAINING_OPPONENT)
   --rl-learning-rate F         Learning rate (default: $RL_LEARNING_RATE)
   --rl-entropy-coef F          Entropy bonus coefficient (default: $RL_ENTROPY_COEF)
@@ -235,9 +229,6 @@ while [[ $# -gt 0 ]]; do
         --rl-sl-weights-path) RL_SL_WEIGHTS_PATH="$2"; shift 2 ;;
         --rl-total-training-games) RL_TOTAL_TRAINING_GAMES="$2"; shift 2 ;;
         --rl-iterations) RL_ITERATIONS="$2"; shift 2 ;;
-        --rl-games-per-iteration) RL_GAMES_PER_ITERATION="$2"; RL_GPI_EXPLICIT=1; shift 2 ;;
-        --rl-adaptive-gpi) RL_ADAPTIVE_GPI=1; shift ;;
-        --rl-no-adaptive-gpi) RL_ADAPTIVE_GPI=0; shift ;;
         --rl-training-opponent) RL_TRAINING_OPPONENT="$2"; shift 2 ;;
         --rl-learning-rate) RL_LEARNING_RATE="$2"; shift 2 ;;
         --rl-entropy-coef) RL_ENTROPY_COEF="$2"; shift 2 ;;
@@ -394,15 +385,7 @@ else
     fi
     BUDGET_ARGS=(--total-training-games "$RL_TOTAL_TRAINING_GAMES")
     if [[ -n "$RL_ITERATIONS" ]]; then
-        BUDGET_ARGS=(--iterations "$RL_ITERATIONS" --games-per-iteration "$RL_GAMES_PER_ITERATION")
-    elif [[ "$RL_GPI_EXPLICIT" -eq 1 ]]; then
-        BUDGET_ARGS+=(--games-per-iteration "$RL_GAMES_PER_ITERATION")
-    fi
-    ADAPTIVE_ARGS=()
-    if [[ "$RL_ADAPTIVE_GPI" == "1" ]]; then
-        ADAPTIVE_ARGS=(--adaptive-gpi)
-    elif [[ "$RL_ADAPTIVE_GPI" == "0" ]]; then
-        ADAPTIVE_ARGS=(--no-adaptive-gpi)
+        BUDGET_ARGS=(--iterations "$RL_ITERATIONS")
     fi
     PPO_FLAG="--ppo"
     if [[ "$RL_PPO" -eq 0 ]]; then
@@ -414,7 +397,6 @@ else
     fi
     "$PYTHON_BIN" -u -m training.self_play \
         "${BUDGET_ARGS[@]}" \
-        "${ADAPTIVE_ARGS[@]}" \
         --training-opponent "$RL_TRAINING_OPPONENT" \
         --learning-rate "$RL_LEARNING_RATE" \
         --entropy-coef "$RL_ENTROPY_COEF" \

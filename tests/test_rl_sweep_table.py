@@ -1,4 +1,4 @@
-"""Tests for the compact games-per-iteration sweep-table presentation."""
+"""Tests for the fixed-GPI hyperparameter-sweep table."""
 
 import csv
 import json
@@ -21,15 +21,14 @@ from diagnostics.rl_sweep_table import (
 )
 
 
-def _raw_row(gpi, win_rate_pct, *, value_coef=0.5):
-    """Return one representative flattened model row for pivot testing."""
+def _raw_row(learning_rate, win_rate_pct, *, value_coef=0.5):
+    """Return one representative flattened model row."""
     return {
-        "run_name": f"model_gpi{gpi}",
+        "run_name": f"model_lr{learning_rate}",
         "critic": "off",
         "critic_enabled": False,
-        "learning_rate": 0.001,
+        "learning_rate": learning_rate,
         "gamma": 0.97,
-        "games_per_iteration": gpi,
         "value_coef": value_coef,
         "rl_iterations": 2000,
         "seed": 42,
@@ -49,7 +48,6 @@ def _write_complete_diagnostic(root, *, games=3, include_hash=False):
         "critic_enabled": False,
         "learning_rate": 0.001,
         "gamma": 1.0,
-        "games_per_iteration": 40,
         "value_coef": 0.5,
         "rl_iterations": 3,
         "seed": 42,
@@ -157,52 +155,50 @@ class RLSweepTableTests(unittest.TestCase):
             self.assertTrue((output_dir / "rl_sweep_table.png").exists())
             self.assertTrue((output_dir / "rl_sweep_table.pdf").exists())
 
-    def test_three_gpi_models_become_one_display_row(self):
+    def test_each_model_remains_one_display_row(self):
         raw_rows = [
-            _raw_row(40, 61.0),
-            _raw_row(80, 63.5),
-            _raw_row(160, 64.2),
+            _raw_row(0.0005, 61.0),
+            _raw_row(0.001, 63.5),
+            _raw_row(0.005, 64.2),
         ]
 
-        display_rows, columns = build_display_rows(raw_rows)
+        display_rows = build_display_rows(raw_rows)
 
-        self.assertEqual(columns, (40, 80, 160))
-        self.assertEqual(len(display_rows), 1)
-        self.assertEqual(display_rows[0]["win_rate_pct_gpi_40"], 61.0)
-        self.assertEqual(display_rows[0]["win_rate_pct_gpi_80"], 63.5)
-        self.assertEqual(display_rows[0]["win_rate_pct_gpi_160"], 64.2)
+        self.assertEqual(len(display_rows), 3)
+        self.assertEqual(
+            [row["win_rate_pct"] for row in display_rows],
+            [61.0, 63.5, 64.2],
+        )
 
     def test_value_coefficient_remains_a_separate_row(self):
-        display_rows, _columns = build_display_rows([
-            _raw_row(40, 61.0, value_coef=0.25),
-            _raw_row(80, 62.0, value_coef=0.25),
-            _raw_row(40, 63.0, value_coef=0.75),
+        display_rows = build_display_rows([
+            _raw_row(0.001, 61.0, value_coef=0.25),
+            _raw_row(0.001, 63.0, value_coef=0.75),
         ])
 
         self.assertEqual(len(display_rows), 2)
         by_value_coef = {row["value_coef"]: row for row in display_rows}
-        self.assertEqual(by_value_coef[0.25]["win_rate_pct_gpi_80"], 62.0)
-        self.assertEqual(by_value_coef[0.75]["win_rate_pct_gpi_80"], "")
+        self.assertEqual(by_value_coef[0.25]["win_rate_pct"], 61.0)
+        self.assertEqual(by_value_coef[0.75]["win_rate_pct"], 63.0)
 
     def test_report_keeps_raw_csv_and_json_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             results_dir = root / "results"
             output_dir = root / "report"
-            for gpi, wins in ((40, 61), (80, 63), (160, 64)):
-                run_dir = results_dir / f"model_gpi{gpi}"
+            for learning_rate, wins in ((0.0005, 61), (0.001, 63), (0.005, 64)):
+                run_dir = results_dir / f"model_lr{learning_rate}"
                 run_dir.mkdir(parents=True)
                 (run_dir / "sweep_run.json").write_text(json.dumps({
-                    "run_name": f"model_gpi{gpi}",
+                    "run_name": f"model_lr{learning_rate}",
                     "critic_enabled": False,
-                    "varied_parameter": f"gpi{gpi}",
-                    "learning_rate": 0.001,
+                    "varied_parameter": f"lr{learning_rate}",
+                    "learning_rate": learning_rate,
                     "gamma": 0.97,
-                    "games_per_iteration": gpi,
                     "value_coef": 0.5,
                     "rl_iterations": 2000,
                     "seed": 42,
-                    "model_path": f"models/model_gpi{gpi}.npz",
+                    "model_path": f"models/model_lr{learning_rate}.npz",
                 }), encoding="utf-8")
                 (run_dir / "summary.json").write_text(json.dumps({
                     "rates": {
@@ -240,16 +236,13 @@ class RLSweepTableTests(unittest.TestCase):
                 self.assertEqual(len(list(csv.DictReader(stream))), 3)
 
             display_rows = plot_table.call_args.args[0]
-            self.assertEqual(len(display_rows), 1)
+            self.assertEqual(len(display_rows), 3)
             output_paths = [call.args[1].name for call in plot_table.call_args_list]
             self.assertEqual(
                 output_paths,
                 ["rl_sweep_table.png", "rl_sweep_table.pdf"],
             )
-            self.assertEqual(
-                plot_table.call_args.kwargs["games_per_iteration_values"],
-                (40, 80, 160),
-            )
+            self.assertEqual(plot_table.call_args.kwargs, {})
 
 
 if __name__ == "__main__":

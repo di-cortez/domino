@@ -29,10 +29,9 @@ from training.rl_cli import (
     parse_rl_worker_count,
 )
 from training.rl_config import (
-    DEFAULT_ADAPTIVE_GPI,
     DEFAULT_CLIP_GRAD_NORM,
     DEFAULT_DEVICE,
-    DEFAULT_GAMES_PER_ITERATION,
+    DEFAULT_GPI,
     DEFAULT_ITERATIONS,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
@@ -114,13 +113,11 @@ from training.rl_parallel import (
     RLRolloutRunner,
 )
 from training.adaptive_tuning import (
-    DEFAULT_GPI_BENCHMARK_GAMES_TARGET,
-    DEFAULT_GPI_CANDIDATES,
     DEFAULT_WORKER_BENCHMARK_FRACTION,
     atomic_write_json as atomic_write_tuning_json,
     hardware_metadata,
     hardware_warning,
-    run_adaptive_tuning,
+    run_worker_tuning,
 )
 from training.ppo import (
     DEFAULT_CLIP_EPSILON,
@@ -214,13 +211,8 @@ def _legacy_policy_update(
 def train(
     iterations=None,
     total_training_games=None,
-    games_per_iteration=None,
-    adaptive_gpi=None,
-    gpi_candidates=DEFAULT_GPI_CANDIDATES,
-    gpi_benchmark_games_target=DEFAULT_GPI_BENCHMARK_GAMES_TARGET,
-    retune_gpi=False,
+    gpi=DEFAULT_GPI,
     retune_workers=False,
-    retune_all=False,
     training_opponent=TRAINING_OPPONENT,
     learning_rate=0.001,
     entropy_coef=0.01,
@@ -277,21 +269,18 @@ def train(
     """Train an exact game budget with the selected on-policy update rule.
 
     Passing ``iterations`` keeps the old programmatic workload contract and
-    implies ``iterations * games_per_iteration`` real games. Normal CLI and
+    implies ``iterations * gpi`` real games. Normal CLI and
     pipeline runs use ``total_training_games`` directly, allowing the final
-    iteration to be partial. Benchmark games are always discarded.
+    iteration to be partial. Worker-benchmark games are always discarded.
     """
     runtime_profile = RLRuntimeProfile()
 
     resolved_options = resolve_training_options(
         iterations=iterations,
         total_training_games=total_training_games,
-        games_per_iteration=games_per_iteration,
-        adaptive_gpi=adaptive_gpi,
+        gpi=gpi,
         adaptive_tuning_training_games=adaptive_tuning_training_games,
-        retune_gpi=retune_gpi,
         retune_workers=retune_workers,
-        retune_all=retune_all,
         checkpoint_interval=checkpoint_interval,
         log_interval=log_interval,
         pool_refresh_games=pool_refresh_games,
@@ -316,12 +305,10 @@ def train(
         workers=workers,
         safety_config=safety_config,
     )
-    retune_gpi = resolved_options.retune_gpi
     retune_workers = resolved_options.retune_workers
-    games_per_iteration = resolved_options.games_per_iteration
+    gpi = resolved_options.gpi
     total_training_games = resolved_options.total_training_games
     tuning_training_games = resolved_options.tuning_training_games
-    adaptive_gpi = resolved_options.adaptive_gpi
     algorithm = resolved_options.algorithm
     normalize_advantages = resolved_options.normalize_advantages
     workers = resolved_options.workers
@@ -430,29 +417,25 @@ def train(
     saved_tuning = (
         None if resume_metadata is None else resume_metadata.get("adaptive_tuning")
     )
-    if saved_tuning and not (retune_gpi or retune_workers):
+    if saved_tuning and not retune_workers:
         warning = hardware_warning(saved_tuning, hardware_metadata(network.device))
         if warning:
             emit_status(f"Warning: {warning}")
     emit_status("-" * 70)
-    emit_status("Adaptive RL tuning")
+    emit_status("RL rollout-worker tuning")
     emit_status("-" * 70)
     runtime_profile.add(
         "validation_model_load_and_resume",
         time.perf_counter() - runtime_profile.started,
     )
     adaptive_tuning_started = time.perf_counter()
-    adaptive_tuning = run_adaptive_tuning(
+    adaptive_tuning = run_worker_tuning(
         network,
+        gpi=gpi,
         total_training_games=tuning_training_games,
-        manual_gpi=games_per_iteration,
-        adaptive_gpi=adaptive_gpi,
         workers=workers,
-        retune_gpi=retune_gpi,
         retune_workers=retune_workers,
         saved_tuning=saved_tuning,
-        gpi_candidates=gpi_candidates,
-        gpi_benchmark_games_target=gpi_benchmark_games_target,
         worker_benchmark_fraction=autotune_fraction,
         worker_minimum_gain=autotune_minimum_gain,
         worker_candidates=worker_candidates,
@@ -471,8 +454,9 @@ def train(
         time.perf_counter() - adaptive_tuning_started,
     )
     runner_setup_started = time.perf_counter()
-    selected_gpi = int(adaptive_tuning["selected_gpi"])
+    selected_gpi = int(gpi)
     selected_workers = int(adaptive_tuning["selected_workers"])
+    emit_status(f"Fixed GPI: {selected_gpi}.")
     emit_status("RL update configuration:")
     if ppo_enabled:
         emit_status(
@@ -535,8 +519,6 @@ def train(
             ignored.append("total_training_games")
         if allow_total_training_games_extension:
             ignored.append("total_training_games")
-        if retune_gpi:
-            ignored.append("selected_gpi")
         if retune_workers:
             ignored.append("selected_workers")
         if force_resume_incompatible:
@@ -1140,7 +1122,7 @@ def train(
             completed_training_games - completed_this_invocation
         ),
         "games_per_iteration": int(selected_gpi),
-        "requested_games_per_iteration": int(games_per_iteration),
+        "requested_games_per_iteration": int(gpi),
         "total_training_games": int(total_training_games),
         "completed_training_games": int(completed_training_games),
         "invocation_target_training_games": int(invocation_target_games),
@@ -1222,9 +1204,9 @@ def _run_compact_cli(args, training_kwargs):
 
     print("\nRL self-play")
     started = time.time()
-    manual_gpi = training_kwargs["games_per_iteration"]
+    fixed_gpi = training_kwargs["gpi"]
     planned_games = (
-        args.iterations * manual_gpi
+        args.iterations * fixed_gpi
         if args.iterations is not None
         else (
             DEFAULT_TOTAL_TRAINING_GAMES
@@ -1286,7 +1268,7 @@ def _run_compact_cli(args, training_kwargs):
     print(
         f"RL self-play complete in {format_duration(elapsed)} | "
         f"{summary['total_training_games']} exact training games in "
-        f"{summary['completed_iterations_this_run']} iteration(s), selected GPI "
+        f"{summary['completed_iterations_this_run']} iteration(s), GPI "
         f"{summary['games_per_iteration']}, "
         f"{summary['selected_workers']} rollout worker(s), "
         f"algorithm {summary['rl_training_algorithm']}, "

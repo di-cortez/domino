@@ -35,7 +35,7 @@ change crosses multiple areas.
 | RL or resume | Core/parallel RL tests, checkpoint/resume smoke, seed comparison | `training/README.md` |
 | Diagnostics | Diagnostic tests, CLI help, four-game temporary pairwise smoke | `diagnostics/README.md` |
 | Shell pipeline or sweep | `bash -n`, help, parser tests, dry-run/report-only | `train_script/README.md` |
-| GPI sweep/report | GPI tests, dry-run, report rebuild, CSV/XLSX when relevant | `train_script/README.md` |
+| RL parameter sweep/report | Sweep parser tests, report rebuild, CSV/JSON/PNG/PDF when relevant | `train_script/README.md` |
 | UI/controller | UI controller tests; visual run when rendering changed | `ui/README.md` or `ui/ui_workflow.md` |
 | Documentation only | Link check, command/help verification, language/path search | Owning document |
 

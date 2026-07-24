@@ -46,6 +46,7 @@ from middleware.opponent_model import (
     reconstruct_public_actions,
 )
 from training.self_play import (
+    DEFAULT_GPI,
     EVENT_REWARD_DECAY,
     LEARNER_DRAW_PENALTY,
     LEARNER_PASS_PENALTY,
@@ -1257,19 +1258,36 @@ def test_rl_workload_and_pool_defaults_use_games():
     standalone = parse_self_play_args([])
     pipeline = _build_config("default")
 
-    # ``None`` preserves whether a value was explicitly supplied; the CLI
-    # translation resolves standalone self-play independently; the canonical
-    # default pipeline owns a 500,000-game RL budget.
+    # The standalone and canonical entry points share the fixed GPI default;
+    # the canonical default pipeline owns a 500,000-game RL budget.
     assert standalone.iterations is None
     assert standalone.total_training_games is None
-    assert standalone.games_per_iteration is None
-    assert standalone.adaptive_gpi is None
+    assert standalone.gpi == DEFAULT_GPI
     assert standalone.ppo_enabled
     assert standalone.pool_refresh_games == 400
     assert not hasattr(standalone, "evaluation_games")
     assert not hasattr(standalone, "pool_interval")
     assert pipeline.total_rl_games == 500_000
     assert pipeline.rl_iterations * pipeline.rl_games_per_iteration == 500_000
+
+
+def test_rl_gpi_is_fixed_explicit_and_positive():
+    assert parse_self_play_args(["--gpi", "40"]).gpi == 40
+    for invalid_arguments in (["--gpi", "0"], ["--adaptive-gpi"]):
+        try:
+            parse_self_play_args(invalid_arguments)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(f"Expected rejection for {invalid_arguments!r}")
+
+    assert parse_pipeline_args([]).gpi == DEFAULT_GPI
+    try:
+        parse_pipeline_args(["--gpi", "40"])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("The canonical pipeline must not expose GPI")
 
 
 def test_reward_signal_summary_classifies_rewards():

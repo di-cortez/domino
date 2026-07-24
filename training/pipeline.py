@@ -83,7 +83,7 @@ class PipelineConfig:
     reuse_supervised_assets: bool
     dataset_games: int = CANONICAL_DATASET_GAMES
     supervised_epochs: int = CANONICAL_SUPERVISED_MAX_EPOCHS
-    rl_games_per_iteration: int = self_play.DEFAULT_GAMES_PER_ITERATION
+    rl_games_per_iteration: int = self_play.DEFAULT_GPI
     ppo_max_epochs: int = DEFAULT_MAX_EPOCHS
 
     @property
@@ -1308,6 +1308,7 @@ def parse_args(argv=None):
         parser,
         fresh_from_sl_default=True,
         ppo_max_epochs_default=argparse.SUPPRESS,
+        expose_gpi=False,
     )
     diagnostics = parser.add_argument_group("diagnostic controls")
     diagnostics.add_argument(

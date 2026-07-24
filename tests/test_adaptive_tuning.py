@@ -1,4 +1,4 @@
-"""Tests for isolated GPI/worker throughput selection."""
+"""Tests for isolated rollout-worker throughput selection."""
 
 from __future__ import annotations
 
@@ -14,17 +14,12 @@ import pytest
 from agents.rl_nn import PolicyNetwork
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from training.adaptive_tuning import (
-    DEFAULT_GPI_BENCHMARK_WORKERS,
-    DEFAULT_GPI_CANDIDATES,
-    benchmark_gpi_candidates,
     benchmark_worker_candidates,
     capture_isolation_state,
-    gpi_benchmark_iterations,
     hardware_warning,
     policy_sha256,
     restore_isolation_state,
-    run_adaptive_tuning,
-    select_fastest,
+    run_worker_tuning,
     selected_worker_candidate,
 )
 from training.self_play import REWARD_SCHEMAS
@@ -106,47 +101,33 @@ def _numpy_rng_equal(left, right):
     )
 
 
-def test_gpi_benchmark_iteration_table_is_exact():
-    expected = {100: 20, 200: 10, 400: 5, 600: 3, 800: 2, 1000: 2, 2000: 1}
-    assert {gpi: gpi_benchmark_iterations(gpi) for gpi in expected} == expected
-
-
-def test_gpi_benchmark_uses_ten_workers_warmup_and_exact_game_counts():
-    runner = _Runner()
-    with mock.patch(
-        "training.adaptive_tuning._new_runner",
-        return_value=runner,
-    ):
-        rows = benchmark_gpi_candidates(
-            _FrozenNetwork(),
-            candidates=DEFAULT_GPI_CANDIDATES,
-            benchmark_games_target=2000,
-            base_seed=42,
-            training_opponent="self_play",
-            schema=REWARD_SCHEMAS["default"],
-            gamma=1.0,
-            max_pool_size=2,
-            safety=ParallelSafetyConfig(memory_reserve_mb=0),
-        )
-
-    assert runner.closed
-    assert runner.calls[0][1] == 2  # discarded warm-up
-    assert all(call[3] == DEFAULT_GPI_BENCHMARK_WORKERS for call in runner.calls)
-    assert [row["benchmark_iterations"] for row in rows] == [20, 10, 5, 3, 2, 2, 1]
-    assert [row["actual_games"] for row in rows] == [2000, 2000, 2000, 1800, 1600, 2000, 2000]
-    assert all(row["success"] for row in rows)
-    assert sum(call[1] for call in runner.calls[1:]) == sum(row["actual_games"] for row in rows)
+def _tuning_kwargs(network, **overrides):
+    values = {
+        "gpi": 600,
+        "total_training_games": 100_000,
+        "workers": "auto",
+        "retune_workers": False,
+        "saved_tuning": None,
+        "worker_benchmark_fraction": 0.01,
+        "worker_minimum_gain": 0.10,
+        "worker_candidates": (1, 2),
+        "base_seed": 42,
+        "training_opponent": "self_play",
+        "schema": REWARD_SCHEMAS["default"],
+        "gamma": 1.0,
+        "max_pool_size": 2,
+        "safety": ParallelSafetyConfig(memory_reserve_mb=0),
+    }
+    values.update(overrides)
+    return run_worker_tuning(network, **values)
 
 
 def test_worker_benchmark_uses_exact_one_percent_with_partial_final_block():
     runner = _Runner()
-    with mock.patch(
-        "training.adaptive_tuning._new_runner",
-        return_value=runner,
-    ):
+    with mock.patch("training.adaptive_tuning._new_runner", return_value=runner):
         test_games, rows = benchmark_worker_candidates(
             _FrozenNetwork(),
-            selected_gpi=600,
+            gpi=600,
             total_training_games=100_000,
             benchmark_fraction=0.01,
             candidates=(1,),
@@ -158,23 +139,20 @@ def test_worker_benchmark_uses_exact_one_percent_with_partial_final_block():
             safety=ParallelSafetyConfig(memory_reserve_mb=0),
         )
 
+    assert runner.closed
     assert test_games == 1000
     assert [call[1] for call in runner.calls] == [600, 400]
     assert rows[0]["actual_games"] == 1000
     assert rows[0]["blocks"] == 2
     assert rows[0]["success"]
     assert rows[0]["accepted"]
-    assert rows[0]["improvement_over_previous"] is None
 
 
 def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
     runner = _Runner()
     messages = []
     with (
-        mock.patch(
-            "training.adaptive_tuning._new_runner",
-            return_value=runner,
-        ),
+        mock.patch("training.adaptive_tuning._new_runner", return_value=runner),
         mock.patch(
             "training.adaptive_tuning.time.perf_counter",
             side_effect=(0.0, 1.0, 2.0, 2.8, 4.0, 4.75),
@@ -182,7 +160,7 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
     ):
         test_games, rows = benchmark_worker_candidates(
             _FrozenNetwork(),
-            selected_gpi=100,
+            gpi=100,
             total_training_games=10_000,
             benchmark_fraction=0.01,
             minimum_gain=0.10,
@@ -202,21 +180,7 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
     assert rows[1]["improvement_over_previous"] == pytest.approx(0.25)
     assert rows[2]["improvement_over_previous"] == pytest.approx(1 / 15)
     assert selected_worker_candidate(rows)["requested_workers"] == 2
-    assert {call[3] for call in runner.calls} == {1, 2, 4}
     assert any("below 10%" in message for message in messages)
-
-
-def test_gpi_tie_rule_prefers_smaller_candidate():
-    close = [
-        {"success": True, "gpi": 100, "games_per_second": 98.0},
-        {"success": True, "gpi": 200, "games_per_second": 100.0},
-    ]
-    clear = [
-        {"success": True, "gpi": 100, "games_per_second": 96.0},
-        {"success": True, "gpi": 200, "games_per_second": 100.0},
-    ]
-    assert select_fastest(close, key="gpi", tie_fraction=0.03)["gpi"] == 100
-    assert select_fastest(clear, key="gpi", tie_fraction=0.03)["gpi"] == 200
 
 
 def test_capture_restore_recovers_weights_optimizer_rng_and_pool():
@@ -225,8 +189,6 @@ def test_capture_restore_recovers_weights_optimizer_rng_and_pool():
     random.seed(71)
     np.random.seed(72)
     snapshot = capture_isolation_state(network, pool)
-    expected_python = snapshot["python_rng"]
-    expected_numpy = snapshot["numpy_rng"]
 
     network.W1 += 5.0
     network.optimizer_step_count = 99
@@ -237,12 +199,12 @@ def test_capture_restore_recovers_weights_optimizer_rng_and_pool():
 
     assert policy_sha256(network) == snapshot["weights_sha256"]
     assert network.optimizer_state_dict() == snapshot["optimizer"]
-    assert random.getstate() == expected_python
-    assert _numpy_rng_equal(np.random.get_state(), expected_numpy)
+    assert random.getstate() == snapshot["python_rng"]
+    assert _numpy_rng_equal(np.random.get_state(), snapshot["numpy_rng"])
     np.testing.assert_array_equal(pool[0]["W1"], snapshot["pool_snapshots"][0]["W1"])
 
 
-def test_integrated_tuning_restores_state_and_writes_required_metadata():
+def test_worker_tuning_restores_state_and_writes_fixed_gpi_metadata():
     network = _policy(seed=8)
     pool = [_pool_snapshot(network)]
     initial_hash = policy_sha256(network)
@@ -252,111 +214,88 @@ def test_integrated_tuning_restores_state_and_writes_required_metadata():
     python_state = random.getstate()
     numpy_state = np.random.get_state()
 
-    def fake_gpi(policy, **kwargs):
+    def fake_workers(policy, **kwargs):
         policy.W1 += 1.0
         policy.optimizer_step_count += 10
         kwargs["pool_snapshots"][0]["W1"] += 3.0
         random.random()
         np.random.random()
-        return [
-            {"success": True, "gpi": 100, "games_per_second": 10.0},
-            {"success": True, "gpi": 200, "games_per_second": 20.0},
-        ]
-
-    def fake_workers(policy, **kwargs):
         return 1000, [
-            {"success": True, "accepted": True, "requested_workers": 1, "games_per_second": 10.0, "actual_games": 1000},
-            {"success": True, "accepted": True, "requested_workers": 2, "games_per_second": 12.0, "actual_games": 1000},
+            {
+                "success": True,
+                "accepted": True,
+                "requested_workers": 2,
+                "games_per_second": 12.0,
+                "actual_games": 1000,
+            }
         ]
 
     with tempfile.TemporaryDirectory() as temporary:
         path = Path(temporary) / "adaptive_tuning.json"
-        with (
-            mock.patch("training.adaptive_tuning.benchmark_gpi_candidates", side_effect=fake_gpi),
-            mock.patch("training.adaptive_tuning.benchmark_worker_candidates", side_effect=fake_workers),
+        with mock.patch(
+            "training.adaptive_tuning.benchmark_worker_candidates",
+            side_effect=fake_workers,
         ):
-            metadata = run_adaptive_tuning(
+            metadata = _tuning_kwargs(
                 network,
-                total_training_games=100_000,
-                manual_gpi=100,
-                adaptive_gpi=True,
-                workers="auto",
-                retune_gpi=False,
-                retune_workers=False,
-                saved_tuning=None,
-                gpi_candidates=(100, 200),
-                gpi_benchmark_games_target=2000,
-                worker_benchmark_fraction=0.01,
-                worker_minimum_gain=0.10,
-                worker_candidates=(1, 2),
-                base_seed=42,
-                training_opponent="self_play",
-                schema=REWARD_SCHEMAS["default"],
-                gamma=1.0,
-                max_pool_size=2,
-                safety=ParallelSafetyConfig(memory_reserve_mb=0),
                 pool_snapshots=pool,
                 output_path=path,
             )
         saved = json.loads(path.read_text(encoding="utf-8"))
 
-    assert metadata["selected_gpi"] == 200
+    assert metadata["gpi"] == 600
     assert metadata["selected_workers"] == 2
     assert metadata["worker_test_games"] == 1000
-    assert metadata["initial_weights_sha256"] == initial_hash
-    assert metadata["isolation_verified"]
-    assert saved["version"] == 3
-    assert saved["gpi_benchmark_workers"] == DEFAULT_GPI_BENCHMARK_WORKERS
+    assert saved["version"] == 4
     assert saved["worker_minimum_gain"] == 0.10
-    assert saved["base_seed"] == 42
-    assert saved["total_training_games"] == 100_000
+    assert saved["initial_weights_sha256"] == initial_hash
+    assert saved["isolation_verified"]
     assert policy_sha256(network) == initial_hash
     assert network.optimizer_state_dict() == initial_optimizer
     assert random.getstate() == python_state
     assert _numpy_rng_equal(np.random.get_state(), numpy_state)
 
 
-def test_saved_tuning_is_reused_without_new_benchmarks():
+def test_saved_worker_tuning_is_reused_for_the_same_fixed_gpi():
     network = _policy(seed=9)
     saved = {
-        "selected_gpi": 800,
-        "gpi_results": [{"gpi": 800, "success": True}],
+        "gpi": 800,
         "selected_workers": 6,
         "worker_results": [{"requested_workers": 6, "success": True}],
         "worker_test_games": 1000,
     }
-    with (
-        mock.patch("training.adaptive_tuning.benchmark_gpi_candidates") as gpi,
-        mock.patch("training.adaptive_tuning.benchmark_worker_candidates") as workers,
-    ):
-        result = run_adaptive_tuning(
-            network,
-            total_training_games=100_000,
-            manual_gpi=100,
-            adaptive_gpi=True,
-            workers="auto",
-            retune_gpi=False,
-            retune_workers=False,
-            saved_tuning=saved,
-            gpi_candidates=DEFAULT_GPI_CANDIDATES,
-            gpi_benchmark_games_target=2000,
-            worker_benchmark_fraction=0.01,
-            worker_minimum_gain=0.10,
-            worker_candidates=(1, 2, 4, 6),
-            base_seed=42,
-            training_opponent="self_play",
-            schema=REWARD_SCHEMAS["default"],
-            gamma=1.0,
-            max_pool_size=2,
-            safety=ParallelSafetyConfig(memory_reserve_mb=0),
-        )
+    with mock.patch(
+        "training.adaptive_tuning.benchmark_worker_candidates"
+    ) as benchmark:
+        result = _tuning_kwargs(network, gpi=800, saved_tuning=saved)
 
-    gpi.assert_not_called()
-    workers.assert_not_called()
-    assert result["selected_gpi"] == 800
+    benchmark.assert_not_called()
+    assert result["gpi"] == 800
     assert result["selected_workers"] == 6
-    assert result["gpi_source"] == "resume"
     assert result["worker_source"] == "resume"
+
+
+def test_changing_fixed_gpi_repeats_worker_tuning():
+    network = _policy(seed=10)
+    saved = {"gpi": 100, "selected_workers": 1}
+    rows = [
+        {
+            "success": True,
+            "accepted": True,
+            "requested_workers": 2,
+            "games_per_second": 12.0,
+        }
+    ]
+    with mock.patch(
+        "training.adaptive_tuning.benchmark_worker_candidates",
+        return_value=(1000, rows),
+    ) as benchmark:
+        result = _tuning_kwargs(network, gpi=200, saved_tuning=saved)
+
+    benchmark.assert_called_once()
+    assert result["gpi"] == 200
+    assert result["selected_workers"] == 2
+    assert result["worker_source"] == "autotune"
 
 
 def test_hardware_change_warning_names_changed_fields():

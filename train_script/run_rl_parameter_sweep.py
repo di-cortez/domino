@@ -8,11 +8,11 @@ and, on a GPU machine, re-initializes a CUDA context. For a large sweep that
 fixed cost per point can dwarf the actual training time, especially with a
 small ``--rl-iterations``.
 
-This script does the same grid search (learning_rate x gamma x
-games_per_iteration, 3x3x3 = 27 combinations, plus a separate value_coef
-axis of 10 values) and the same critic-off-then-on structure, but as a
+This script does the same learning-rate x gamma grid search (3x3 = 9
+combinations, plus a separate value_coef axis of 10 values) and the same
+critic-off-then-on structure, but as a
 single persistent process: the SL checkpoint is read from disk exactly once
-into memory (``_load_sl_weights_once``) and reused for every one of the 72
+into memory (``_load_sl_weights_once``) and reused for every one of the 36
 default sweep points via ``training.self_play.train(..., sl_weights_data=...)``,
 explicitly starts every non-resumed point from those supervised weights,
 and every point calls ``training.self_play.train()`` and
@@ -66,16 +66,13 @@ DEFAULT_DEVICE = "cpu"
 DEFAULT_RL_WORKERS = "auto"
 
 # Baselines and sweep values mirror train_script/run_rl_parameter_sweep.sh.
-# Learning-rate/gamma values follow diagnostics.hyperparameter_sweep; the
-# games-per-iteration values preserve the established 40/80/160 comparison.
+# Learning-rate/gamma values follow diagnostics.hyperparameter_sweep.
 BASELINE_LEARNING_RATE = 0.001
 BASELINE_GAMMA = 1.0
-BASELINE_GAMES_PER_ITERATION = 40
 BASELINE_VALUE_COEF = 0.5
 
 LR_VALUES = (0.0005, 0.001, 0.005)
 GAMMA_VALUES = (1.0, 0.97, 0.9)
-GAMES_PER_ITERATION_VALUES = (40, 80, 160)
 VALUE_COEF_VALUES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 
 
@@ -93,28 +90,27 @@ def load_sl_weights_once(sl_weights_path):
         return {name: npz[name] for name in npz.files}
 
 
-def _grid_tag(lr, gamma, gpi):
+def _grid_tag(lr, gamma):
     """Return this grid point's run tag: "default" at the exact baseline."""
-    if lr == BASELINE_LEARNING_RATE and gamma == BASELINE_GAMMA and gpi == BASELINE_GAMES_PER_ITERATION:
+    if lr == BASELINE_LEARNING_RATE and gamma == BASELINE_GAMMA:
         return "default"
-    return f"lr{lr}_gamma{gamma}_gpi{gpi}"
+    return f"lr{lr}_gamma{gamma}"
 
 
 def iter_sweep_points():
-    """Yield (tag, learning_rate, gamma, games_per_iteration, value_coef).
+    """Yield ``(tag, learning_rate, gamma, value_coef)`` sweep points.
 
-    27 grid points (learning_rate x gamma x games_per_iteration) followed by
-    9 value_coef points (value_coef varied alone, baseline excluded since
-    it's already covered by the grid's "default" point) -- 36 points total,
+    Nine learning-rate x gamma points are followed by nine value-coefficient
+    points (the baseline is already covered by ``default``) -- 18 points total,
     each run once per critic setting by ``run_sweep``.
     """
-    for lr, gamma, gpi in product(LR_VALUES, GAMMA_VALUES, GAMES_PER_ITERATION_VALUES):
-        yield _grid_tag(lr, gamma, gpi), lr, gamma, gpi, BASELINE_VALUE_COEF
+    for lr, gamma in product(LR_VALUES, GAMMA_VALUES):
+        yield _grid_tag(lr, gamma), lr, gamma, BASELINE_VALUE_COEF
 
     for vc in VALUE_COEF_VALUES:
         if vc == BASELINE_VALUE_COEF:
             continue
-        yield f"value_coef_{vc}", BASELINE_LEARNING_RATE, BASELINE_GAMMA, BASELINE_GAMES_PER_ITERATION, vc
+        yield f"value_coef_{vc}", BASELINE_LEARNING_RATE, BASELINE_GAMMA, vc
 
 
 def _write_sweep_run_json(diag_dir, **fields):
@@ -129,7 +125,6 @@ def run_sweep_point(
     critic_enabled,
     learning_rate,
     gamma,
-    games_per_iteration,
     value_coef,
     rl_iterations,
     diagnostic_games,
@@ -160,13 +155,12 @@ def run_sweep_point(
     else:
         print(
             f"[{name}] RL training: {rl_iterations} iterations, "
-            f"lr={learning_rate} gamma={gamma} games/iter={games_per_iteration} "
+            f"lr={learning_rate} gamma={gamma} "
             f"value_coef={value_coef} critic={critic_label} -> {model_path}"
         )
         start_time = time.time()
         self_play.train(
             iterations=rl_iterations,
-            games_per_iteration=games_per_iteration,
             learning_rate=learning_rate,
             gamma=gamma,
             value_coef=value_coef,
@@ -206,7 +200,6 @@ def run_sweep_point(
         critic_enabled=critic_enabled,
         learning_rate=learning_rate,
         gamma=gamma,
-        games_per_iteration=games_per_iteration,
         value_coef=value_coef,
         rl_iterations=rl_iterations,
         rl_workers=rl_workers,
@@ -255,14 +248,13 @@ def run_sweep(
 
     run_names = []
     for critic_enabled in (False, True):
-        for tag, lr, gamma, gpi, vc in sweep_points:
+        for tag, lr, gamma, vc in sweep_points:
             run_names.append(
                 run_sweep_point(
                     tag=tag,
                     critic_enabled=critic_enabled,
                     learning_rate=lr,
                     gamma=gamma,
-                    games_per_iteration=gpi,
                     value_coef=vc,
                     rl_iterations=rl_iterations,
                     diagnostic_games=diagnostic_games,

@@ -27,7 +27,7 @@ except ImportError:
 BASE_DATASET_GAMES = 100000
 BASE_SUPERVISED_EPOCHS = 5000
 BASE_RL_ITERATIONS = 1000
-BASE_RL_GAMES_PER_ITERATION = 100
+BASE_RL_GAMES_PER_ITERATION = 2000
 BASE_DIAGNOSTIC_GAMES = 10000
 
 SCALE_FACTORS = {
@@ -223,14 +223,10 @@ def _run_rl_training(config, args):
         else:
             print(message, flush=True)
 
-    manual_gpi = (
-        config.rl_games_per_iteration
-        if args.games_per_iteration is None
-        else args.games_per_iteration
-    )
+    fixed_gpi = args.gpi
     explicit_iterations = args.iterations
     total_training_games = (
-        explicit_iterations * manual_gpi
+        explicit_iterations * fixed_gpi
         if explicit_iterations is not None
         else (
             args.total_training_games
@@ -238,12 +234,6 @@ def _run_rl_training(config, args):
             else config.rl_iterations * config.rl_games_per_iteration
         )
     )
-    adaptive_gpi = (
-        (args.games_per_iteration is None and explicit_iterations is None)
-        if args.adaptive_gpi is None
-        else bool(args.adaptive_gpi)
-    )
-
     return _run_stage(
         "RL self-play",
         config.rl_iterations,
@@ -255,13 +245,8 @@ def _run_rl_training(config, args):
                 if explicit_iterations is not None
                 else total_training_games
             ),
-            games_per_iteration=manual_gpi,
-            adaptive_gpi=adaptive_gpi,
-            gpi_candidates=tuple(args.gpi_candidates),
-            gpi_benchmark_games_target=args.gpi_benchmark_games_target,
-            retune_gpi=args.retune_gpi,
+            gpi=fixed_gpi,
             retune_workers=args.retune_workers,
-            retune_all=args.retune_all,
             training_opponent=args.training_opponent,
             learning_rate=args.learning_rate,
             entropy_coef=args.entropy_coef,
@@ -311,7 +296,7 @@ def _run_rl_training(config, args):
         lambda summary: (
             f"{summary['total_training_games']} exact games in "
             f"{summary['completed_iterations_this_run']} iteration(s), "
-            f"selected GPI {summary['games_per_iteration']}, "
+            f"fixed GPI {summary['games_per_iteration']}, "
             f"{summary['selected_workers']} rollout worker(s), "
             f"algorithm {summary['rl_training_algorithm']}, "
             f"weights {summary['rl_weights_path']}"
@@ -410,7 +395,11 @@ def parse_args(argv=None):
     training_loop = _silent_import("training.training_loop")
     training_loop.add_optional_training_arguments(parser)
     self_play = importlib.import_module("training.self_play")
-    self_play.add_optional_rl_arguments(parser, fresh_from_sl_default=True)
+    self_play.add_optional_rl_arguments(
+        parser,
+        fresh_from_sl_default=True,
+        expose_gpi=False,
+    )
     evaluate = _silent_import("diagnostics.evaluate")
     diagnostics = parser.add_argument_group("diagnostic multiprocessing controls")
     diagnostics.add_argument(
@@ -447,8 +436,7 @@ def main():
 
     config = _build_config(args.scale)
     requested_rl_games = (
-        args.iterations
-        * (args.games_per_iteration or config.rl_games_per_iteration)
+        args.iterations * args.gpi
         if args.iterations is not None
         else (
             args.total_training_games
@@ -465,7 +453,7 @@ def main():
         f"{config.dataset_games} dataset games, "
         f"up to {config.supervised_epochs} supervised epochs, "
         f"{requested_rl_games} exact RL games with "
-        f"{'adaptive' if args.adaptive_gpi is not False and args.games_per_iteration is None and args.iterations is None else 'manual'} GPI, "
+        f"fixed GPI {args.gpi}, "
         f"diagnostics with {config.diagnostic_games} games per matchup "
         f"({diagnostic_matchups} matchups, {diagnostic_total_games} total games)."
     )

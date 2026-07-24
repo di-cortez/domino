@@ -27,7 +27,7 @@ except ImportError:
 BASE_DATASET_GAMES = 100000
 BASE_SUPERVISED_EPOCHS = 5000
 BASE_RL_ITERATIONS = 1000
-BASE_RL_GAMES_PER_ITERATION = 100
+BASE_RL_GAMES_PER_ITERATION = 2000
 BASE_DIAGNOSTIC_GAMES = 10000
 
 SCALE_FACTORS = {
@@ -296,7 +296,7 @@ def _run_rl_training(config, args):
         lambda summary: (
             f"{summary['total_training_games']} exact games in "
             f"{summary['completed_iterations_this_run']} iteration(s), "
-            f"selected GPI {summary['games_per_iteration']}, "
+            f"fixed GPI {summary['games_per_iteration']}, "
             f"{summary['selected_workers']} rollout worker(s), "
             f"algorithm {summary['rl_training_algorithm']}, "
             f"weights {summary['rl_weights_path']}"
@@ -395,7 +395,11 @@ def parse_args(argv=None):
     training_loop = _silent_import("training.training_loop")
     training_loop.add_optional_training_arguments(parser)
     self_play = importlib.import_module("training.self_play")
-    self_play.add_optional_rl_arguments(parser, fresh_from_sl_default=True)
+    self_play.add_optional_rl_arguments(
+        parser,
+        fresh_from_sl_default=True,
+        expose_gpi=False,
+    )
     evaluate = _silent_import("diagnostics.evaluate")
     diagnostics = parser.add_argument_group("diagnostic multiprocessing controls")
     diagnostics.add_argument(

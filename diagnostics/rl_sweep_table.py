@@ -3,18 +3,16 @@ Build a comparative table from ``train_script/run_rl_parameter_sweep.sh`` output
 
 Each RL sweep point directory under ``diagnostics/results/`` (one per
 training+diagnostics run, e.g. ``domino_rl[_critic]_default/``,
-``domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>/`` for the grid search, or
+``domino_rl[_critic]_lr<LR>_gamma<GAMMA>/`` for the grid search, or
 ``domino_rl_critic_<grid tag>_vc<VC>/`` for the critic-on value_coef axis)
 contains two JSON files written by
 that script: ``sweep_run.json`` (the exact RL hyperparameters used) and
 ``summary.json`` (the rl-vs-random win/draw/loss rates from
 ``diagnostics.pairwise``). This module discovers every such directory, joins
 the two JSON files into one row per run, and writes a comparative table --
-CSV, an aggregate JSON, a console summary, and PNG/PDF visual tables. The raw
-CSV/JSON retain one row per trained model. For the less cluttered console and
-PNG/PDF presentation, runs that differ only by games-per-iteration are pivoted
-into one row with win-rate columns labelled 40, 80, and 160. Rows are sorted
-directly on numeric hyperparameters rather than by parsing tag strings.
+CSV, an aggregate JSON, a console summary, and PNG/PDF visual tables. Each
+output retains one row per trained model, sorted directly on numeric
+hyperparameters rather than by parsing tag strings.
 
 Usage:
     python -m diagnostics.rl_sweep_table
@@ -37,7 +35,6 @@ from diagnostics.plots import plot_sweep_comparison_table
 
 DEFAULT_RESULTS_DIR = ROOT / "diagnostics" / "results"
 DEFAULT_OUTPUT_DIR = DEFAULT_RESULTS_DIR / "rl_sweep_table"
-DEFAULT_GAMES_PER_ITERATION_COLUMNS = (40, 80, 160)
 SWEEP_DIAGNOSTIC_PLOT_FILES = (
     "cumulative_rates.png",
     "result_distribution.png",
@@ -48,7 +45,7 @@ SWEEP_DIAGNOSTIC_PLOT_FILES = (
 
 CSV_FIELDS = [
     "run_name", "critic", "varied_parameter", "learning_rate", "gamma",
-    "games_per_iteration", "value_coef", "games", "wins", "draws", "losses",
+    "value_coef", "games", "wins", "draws", "losses",
     "win_rate", "draw_rate", "loss_rate", "win_ci95_low", "win_ci95_high",
     "mean_turns", "duration_s", "model_path",
 ]
@@ -222,7 +219,6 @@ def build_rows(run_dirs):
             "varied_parameter": hyperparameters["varied_parameter"],
             "learning_rate": hyperparameters["learning_rate"],
             "gamma": hyperparameters["gamma"],
-            "games_per_iteration": hyperparameters["games_per_iteration"],
             "value_coef": hyperparameters["value_coef"],
             "rl_iterations": hyperparameters["rl_iterations"],
             "seed": hyperparameters["seed"],
@@ -244,85 +240,32 @@ def build_rows(run_dirs):
 
     # Sort directly on the actual hyperparameter values rather than parsing
     # the tag string -- robust to both the grid tags (e.g.
-    # "lr0.0005_gamma0.9_gpi80", which vary three values at once) and the
+    # "lr0.0005_gamma0.9", which varies two values at once) and the
     # single-axis value_coef tags.
     rows.sort(
         key=lambda row: (
             row["critic_enabled"],
             row["learning_rate"],
             row["gamma"],
-            row["games_per_iteration"],
             row["value_coef"],
         )
     )
     return rows
 
 
-def build_display_rows(
-    rows,
-    games_per_iteration_values=DEFAULT_GAMES_PER_ITERATION_COLUMNS,
-):
-    """Pivot per-model rows into compact games-per-iteration win-rate columns.
-
-    Training output remains untouched: every input row still represents one
-    model and remains present in the raw CSV/JSON. This view groups only runs
-    with identical critic, learning-rate, gamma, value-coefficient, iteration,
-    and seed settings. Duplicate results for the same group and GPI are
-    rejected instead of being silently overwritten.
-    """
-    observed_values = sorted({
-        int(row["games_per_iteration"])
-        for row in rows
-    })
-    column_values = tuple(dict.fromkeys(
-        [int(value) for value in games_per_iteration_values] + observed_values
-    ))
-    grouped = {}
-
-    for row in rows:
-        key = (
-            bool(row["critic_enabled"]),
-            float(row["learning_rate"]),
-            float(row["gamma"]),
-            float(row["value_coef"]),
-            int(row["rl_iterations"]),
-            row.get("seed"),
-        )
-        display_row = grouped.setdefault(key, {
+def build_display_rows(rows):
+    """Return presentation rows without introducing another sweep dimension."""
+    return [
+        {
             "critic": row["critic"],
-            "critic_enabled": bool(row["critic_enabled"]),
+            "critic_enabled": row["critic_enabled"],
             "learning_rate": row["learning_rate"],
             "gamma": row["gamma"],
             "value_coef": row["value_coef"],
-            "rl_iterations": row["rl_iterations"],
-            "seed": row.get("seed"),
-        })
-        gpi = int(row["games_per_iteration"])
-        field = f"win_rate_pct_gpi_{gpi}"
-        if field in display_row:
-            raise ValueError(
-                "multiple sweep results have the same displayed configuration: "
-                f"critic={row['critic']}, learning_rate={row['learning_rate']}, "
-                f"gamma={row['gamma']}, value_coef={row['value_coef']}, "
-                f"games_per_iteration={gpi}"
-            )
-        display_row[field] = row["win_rate_pct"]
-
-    display_rows = list(grouped.values())
-    for row in display_rows:
-        for gpi in column_values:
-            row.setdefault(f"win_rate_pct_gpi_{gpi}", "")
-    display_rows.sort(
-        key=lambda row: (
-            row["critic_enabled"],
-            row["learning_rate"],
-            row["gamma"],
-            row["value_coef"],
-            row["rl_iterations"],
-            -1 if row["seed"] is None else row["seed"],
-        )
-    )
-    return display_rows, column_values
+            "win_rate_pct": row["win_rate_pct"],
+        }
+        for row in rows
+    ]
 
 
 def _save_csv(rows, path):
@@ -338,16 +281,14 @@ def _format_win_rate(value):
     return "" if value == "" or value is None else f"{float(value):.1f}%"
 
 
-def _print_console_table(rows, games_per_iteration_values):
-    """Print the pivoted games-per-iteration comparison to the console."""
+def _print_console_table(rows):
+    """Print the fixed-GPI hyperparameter comparison to the console."""
     if not rows:
         print("No sweep runs found (looked for directories with both "
               "sweep_run.json and summary.json).")
         return
 
-    headers = ["Critic", "LR", "Gamma", "VCoef"] + [
-        str(value) for value in games_per_iteration_values
-    ]
+    headers = ["Critic", "LR", "Gamma", "VCoef", "Win rate"]
     table_rows = []
     for row in rows:
         base_cells = [
@@ -356,11 +297,7 @@ def _print_console_table(rows, games_per_iteration_values):
             f"{row['gamma']:g}",
             f"{row['value_coef']:g}",
         ]
-        win_cells = [
-            _format_win_rate(row[f"win_rate_pct_gpi_{value}"])
-            for value in games_per_iteration_values
-        ]
-        table_rows.append(base_cells + win_cells)
+        table_rows.append(base_cells + [_format_win_rate(row["win_rate_pct"])])
 
     widths = [
         max(len(headers[i]), *(len(table_row[i]) for table_row in table_rows))
@@ -382,7 +319,7 @@ def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR,
     Writes ``rl_sweep_table.csv``, ``rl_sweep_table.json``,
     ``rl_sweep_table.png``, and ``rl_sweep_table.pdf`` to ``output_dir``.
     CSV/JSON and the returned list retain one row per model; console/PNG/PDF
-    use the compact pivoted view.
+    use the same one-model-per-row view.
     """
     results_dir = Path(results_dir)
     output_dir = Path(output_dir)
@@ -390,7 +327,7 @@ def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR,
 
     run_dirs = discover_sweep_runs(results_dir)
     rows = build_rows(run_dirs)
-    display_rows, gpi_columns = build_display_rows(rows)
+    display_rows = build_display_rows(rows)
 
     _save_csv(rows, output_dir / "rl_sweep_table.csv")
     with open(output_dir / "rl_sweep_table.json", "w", encoding="utf-8") as f:
@@ -398,12 +335,10 @@ def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR,
     plot_sweep_comparison_table(
         display_rows,
         output_dir / "rl_sweep_table.png",
-        games_per_iteration_values=gpi_columns,
     )
     plot_sweep_comparison_table(
         display_rows,
         output_dir / "rl_sweep_table.pdf",
-        games_per_iteration_values=gpi_columns,
     )
 
     if not quiet:
@@ -411,7 +346,7 @@ def build_report(results_dir=DEFAULT_RESULTS_DIR, output_dir=DEFAULT_OUTPUT_DIR,
             f"\nRL hyperparameter sweep comparison ({len(rows)} runs, "
             f"{len(display_rows)} displayed configurations found in {results_dir}/)"
         )
-        _print_console_table(display_rows, gpi_columns)
+        _print_console_table(display_rows)
         print(
             f"\nSaved: {output_dir}/rl_sweep_table.csv, "
             "rl_sweep_table.json, rl_sweep_table.png, rl_sweep_table.pdf"

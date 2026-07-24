@@ -52,7 +52,6 @@ DEFAULT_GAMMA_VALUES = (1.0, 0.97, 0.9)
 DEFAULT_REWARD_SCHEMAS = tuple(self_play.REWARD_SCHEMAS)
 
 DEFAULT_RL_ITERATIONS = 150
-DEFAULT_RL_GAMES_PER_ITERATION = self_play.DEFAULT_GPI
 DEFAULT_DIAGNOSTIC_GAMES = 10000
 
 
@@ -105,7 +104,6 @@ def _train_rl_checkpoint(
     rl_weights_path,
     *,
     iterations,
-    games_per_iteration,
     learning_rate,
     gamma,
     reward_schema,
@@ -116,7 +114,6 @@ def _train_rl_checkpoint(
     """Train one sweep-point RL checkpoint from the shared SL weights."""
     return self_play.train(
         iterations=iterations,
-        gpi=games_per_iteration,
         learning_rate=learning_rate,
         sl_weights_path=str(sl_weights_path),
         rl_weights_path=str(rl_weights_path),
@@ -178,7 +175,6 @@ def run_sweep(
     checkpoint_dir=DEFAULT_CHECKPOINT_DIR,
     output_json=DEFAULT_OUTPUT,
     rl_iterations=DEFAULT_RL_ITERATIONS,
-    rl_games_per_iteration=DEFAULT_RL_GAMES_PER_ITERATION,
     diagnostic_games=DEFAULT_DIAGNOSTIC_GAMES,
     lr_values=DEFAULT_LR_VALUES,
     gamma_values=DEFAULT_GAMMA_VALUES,
@@ -234,7 +230,6 @@ def run_sweep(
                     sl_weights_path,
                     checkpoint_path,
                     iterations=rl_iterations,
-                    gpi=rl_games_per_iteration,
                     learning_rate=hyperparameters["learning_rate"],
                     gamma=hyperparameters["gamma"],
                     reward_schema=hyperparameters["reward_schema"],
@@ -266,7 +261,6 @@ def run_sweep(
                         "reward_schema": hyperparameters["reward_schema"],
                         "value_coef": value_coef if critic_enabled else None,
                         "rl_iterations": rl_iterations,
-                        "rl_games_per_iteration": rl_games_per_iteration,
                     },
                     "rl_checkpoint": str(checkpoint_path),
                     "rl_training_duration_s": train_duration_s,
@@ -304,9 +298,6 @@ def parse_args(argv=None):
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--rl-iterations", type=int, default=DEFAULT_RL_ITERATIONS)
     parser.add_argument(
-        "--rl-games-per-iteration", type=int, default=DEFAULT_RL_GAMES_PER_ITERATION
-    )
-    parser.add_argument(
         "--diagnostic-games",
         type=int,
         default=DEFAULT_DIAGNOSTIC_GAMES,
@@ -337,7 +328,6 @@ def main(argv=None):
         checkpoint_dir=Path(args.checkpoint_dir),
         output_json=Path(args.output),
         rl_iterations=args.rl_iterations,
-        rl_games_per_iteration=args.rl_games_per_iteration,
         diagnostic_games=args.diagnostic_games,
         lr_values=args.lr_values,
         gamma_values=args.gamma_values,

@@ -1308,6 +1308,7 @@ def parse_args(argv=None):
         parser,
         fresh_from_sl_default=True,
         ppo_max_epochs_default=argparse.SUPPRESS,
+        expose_gpi=False,
     )
     diagnostics = parser.add_argument_group("diagnostic controls")
     diagnostics.add_argument(

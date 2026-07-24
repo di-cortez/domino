@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # RL-only hyperparameter sweep: train a dedicated self-play RL checkpoint for
-# every point in a full grid search over the three main hyperparameters
-# (learning_rate x gamma x games_per_iteration, 3x4x3 = 36 combinations),
+# every point in a full grid search over learning rate and gamma
+# (3x4 = 12 combinations),
 # then diagnose it against the random agent. The full grid runs for both
 # policies -- critic off (PPO) and critic on (legacy actor-critic/REINFORCE) at
 # the baseline value_coef. The algorithm difference is recorded explicitly.
@@ -24,21 +24,19 @@
 #
 # Baselines and the learning-rate/gamma sweep values mirror
 # diagnostics/hyperparameter_sweep.py: BASELINE_LEARNING_RATE, BASELINE_GAMMA,
-# BASELINE_VALUE_COEF, DEFAULT_LR_VALUES, DEFAULT_GAMMA_VALUES,
-# DEFAULT_RL_GAMES_PER_ITERATION. That module exposes only one baseline rather
-# than a sweep tuple, so this script preserves the established
-# games-per-iteration comparison {40, 80, 160}.
+# BASELINE_VALUE_COEF, DEFAULT_LR_VALUES, and DEFAULT_GAMMA_VALUES. GPI is not
+# a sweep axis; every point uses ``training.self_play``'s fixed default.
 #
 # Every sweep point is one training run (per the baseline
 # training-opponent/reward-schema/etc. defaults in training/self_play.py)
 # followed by one diagnostics matchup against the random agent
 # (diagnostics.pairwise). The grid combination that matches every baseline
-# value exactly is tagged "default" rather than spelling out all three
+# value exactly is tagged "default" rather than spelling out both
 # values.
 #
 # Naming (models and diagnostics share one name per run):
 #   models/rl_test/domino_rl[_critic]_default_iter002000.npz
-#   models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>_iter002000.npz
+#   models/rl_test/domino_rl[_critic]_lr<LR>_gamma<GAMMA>_iter002000.npz
 #   models/rl_test/domino_rl_critic_<grid tag>_vc<VC>_iter002000.npz
 #   diagnostics/results/domino_rl[_critic]_<same tag>/
 #
@@ -89,16 +87,12 @@ SKIP_REPORT=0
 # Baselines: diagnostics/hyperparameter_sweep.py BASELINE_* constants.
 BASELINE_LEARNING_RATE=0.001
 BASELINE_GAMMA=1.0
-BASELINE_GAMES_PER_ITERATION=40  # DEFAULT_RL_GAMES_PER_ITERATION
 BASELINE_VALUE_COEF=0.5
 
-# Grid-search values (3x4x3 = 36 combinations): DEFAULT_LR_VALUES /
+# Grid-search values (3x4 = 12 combinations): DEFAULT_LR_VALUES /
 # DEFAULT_GAMMA_VALUES from diagnostics/hyperparameter_sweep.py.
-# Games-per-iteration is not a tuple there, so this driver owns the established
-# 40/80/160 comparison.
 LR_VALUES=(0.0005 0.001 0.005)
 GAMMA_VALUES=(1.0 0.97 0.95 0.92)
-GAMES_PER_ITERATION_VALUES=(40 80 160)
 
 # value_coef axis (critic-on only; value_coef has no effect with the critic
 # off). Swept over VC_SAMPLE_COUNT base combinations drawn at random from the
@@ -111,8 +105,8 @@ VC_SAMPLE_COUNT=10
 usage() {
     cat <<EOF
 Train a dedicated RL self-play checkpoint ($RL_ITERATIONS iterations) per
-sweep point. The full learning_rate x gamma x games_per_iteration grid
-(3x4x3 = 36 combinations) runs for both policies -- critic off and critic on
+sweep point. The full learning_rate x gamma grid (3x4 = 12 combinations)
+runs for both policies -- critic off and critic on
 at the baseline value_coef -- with every base combination identical between
 the two. The value_coef axis runs with the critic ON only (it has no effect
 otherwise): $VC_SAMPLE_COUNT base combinations are sampled at random (seeded)
@@ -122,10 +116,9 @@ elapsed wall-clock time at the end.
 
 Usage: $(basename "$0") [options]
 
-Grid search axes (cross product, 36 combinations, both critic settings):
+Grid search axes (cross product, 12 combinations, both critic settings):
   learning_rate        ${LR_VALUES[*]} (baseline: $BASELINE_LEARNING_RATE)
   gamma                 ${GAMMA_VALUES[*]} (baseline: $BASELINE_GAMMA)
-  games_per_iteration   ${GAMES_PER_ITERATION_VALUES[*]} (baseline: $BASELINE_GAMES_PER_ITERATION)
 
 value_coef axis (critic on only, over $VC_SAMPLE_COUNT sampled grid combinations):
   value_coef            ${VALUE_COEF_VALUES[*]} (baseline: $BASELINE_VALUE_COEF, covered by the critic-on grid run)
@@ -258,7 +251,7 @@ mkdir -p "$MODEL_DIR"
 # ------------------------------------------------------------------
 #
 # Draw VC_SAMPLE_COUNT base combinations (without replacement) from the full
-# lr x gamma x gpi grid, seeded with --seed so the sample is reproducible and
+# learning-rate x gamma grid, seeded with --seed so the sample is reproducible and
 # identical for every value_coef value. Python's random.Random is used
 # instead of shuf because shuf offers no portable way to seed. Values travel
 # as strings end to end, so they come back byte-identical to the bash arrays.
@@ -269,11 +262,11 @@ if [[ "$VC_SAMPLE_COUNT" -gt 0 ]]; then
     done < <("$PYTHON_BIN" -c '
 import itertools, random, sys
 seed, count = int(sys.argv[1]), int(sys.argv[2])
-lrs, gammas, gpis = (arg.split() for arg in sys.argv[3:6])
-combos = list(itertools.product(lrs, gammas, gpis))
+lrs, gammas = (arg.split() for arg in sys.argv[3:5])
+combos = list(itertools.product(lrs, gammas))
 for combo in random.Random(seed).sample(combos, min(count, len(combos))):
     print(" ".join(combo))
-' "$SEED" "$VC_SAMPLE_COUNT" "${LR_VALUES[*]}" "${GAMMA_VALUES[*]}" "${GAMES_PER_ITERATION_VALUES[*]}")
+' "$SEED" "$VC_SAMPLE_COUNT" "${LR_VALUES[*]}" "${GAMMA_VALUES[*]}")
 fi
 
 section() {
@@ -297,15 +290,16 @@ format_duration() {
     fi
 }
 
-# validate_resume_pair WEIGHTS STATE GPI LR GAMMA VC CRITIC
+# validate_resume_pair WEIGHTS STATE LR GAMMA VC CRITIC
 validate_resume_pair() {
-    "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$SEED" "$DEVICE" "$RL_ITERATIONS" "$SL_WEIGHTS_PATH" <<'PY'
+    "$PYTHON_BIN" - "$1" "$2" "$3" "$4" "$5" "$6" "$SEED" "$DEVICE" "$RL_ITERATIONS" "$SL_WEIGHTS_PATH" <<'PY'
 import sys
 
 from training.self_play import (
     DEFAULT_CLIP_EPSILON,
     DEFAULT_GAMES_PER_MINIBATCH_SCALE,
     DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
+    DEFAULT_GPI,
     DEFAULT_MAX_EPOCHS,
     DEFAULT_MAX_MINIBATCHES,
     DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
@@ -322,14 +316,14 @@ from training.self_play import (
 from utils.resource_limits import choose_safe_rl_device
 
 try:
-    (weights_path, state_path, gpi, learning_rate, gamma, value_coef,
+    (weights_path, state_path, learning_rate, gamma, value_coef,
      critic, seed, requested_device, iterations, sl_weights_path) = sys.argv[1:]
     metadata, _pool = load_resume_state(weights_path, state_path)
     critic_enabled = bool(int(critic))
     ppo_enabled = not critic_enabled
     expected = _resume_configuration(
-        total_training_games=int(iterations) * int(gpi),
-        selected_gpi=int(gpi),
+        total_training_games=int(iterations) * DEFAULT_GPI,
+        selected_gpi=DEFAULT_GPI,
         selected_workers=int(metadata["configuration"]["selected_workers"]),
         rl_training_algorithm=(PPO_TRAINING_ALGORITHM if ppo_enabled else LEGACY_TRAINING_ALGORITHM),
         training_opponent="self_play",
@@ -364,12 +358,12 @@ except Exception as exc:
 PY
 }
 
-# find_latest_resume_checkpoint BASE_PATH GPI LR GAMMA VC CRITIC
+# find_latest_resume_checkpoint BASE_PATH LR GAMMA VC CRITIC
 # Sets LAST_RESUME_ITERATION/WEIGHTS/STATE to the newest complete, compatible
 # pair at or below RL_ITERATIONS. A weights file without its validated state is
 # intentionally ignored after a sudden interruption.
 find_latest_resume_checkpoint() {
-    local base_path="$1" gpi="$2" lr="$3" gamma="$4" vc="$5" critic="$6"
+    local base_path="$1" lr="$2" gamma="$3" vc="$4" critic="$5"
     local base_stem="${base_path%.npz}"
     local state_path weights_path filename digits iteration
     LAST_RESUME_ITERATION=0
@@ -391,7 +385,7 @@ find_latest_resume_checkpoint() {
             continue
         fi
         if ! validate_resume_pair \
-            "$weights_path" "$state_path" "$gpi" "$lr" "$gamma" "$vc" "$critic"; then
+            "$weights_path" "$state_path" "$lr" "$gamma" "$vc" "$critic"; then
             echo "Warning: ignoring invalid resume pair $weights_path / $state_path" >&2
             continue
         fi
@@ -404,9 +398,9 @@ find_latest_resume_checkpoint() {
     shopt -u nullglob
 }
 
-# write_run_metadata NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH DIAG_DIR
+# write_run_metadata NAME TAG CRITIC LR GAMMA VC MODEL_PATH DIAG_DIR
 write_run_metadata() {
-    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" gpi="$6" vc="$7" model_path="$8" diag_dir="$9"
+    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" vc="$6" model_path="$7" diag_dir="$8"
     local critic_bool="false"
     local model_sha256
     if [[ "$critic" -eq 1 ]]; then critic_bool="true"; fi
@@ -425,7 +419,6 @@ PY
   "critic_enabled": $critic_bool,
   "learning_rate": $lr,
   "gamma": $gamma,
-  "games_per_iteration": $gpi,
   "value_coef": $vc,
   "rl_iterations": $RL_ITERATIONS,
   "seed": $SEED,
@@ -437,12 +430,12 @@ PY
 EOF
 }
 
-# reusable_diagnostics NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH DIAG_DIR
+# reusable_diagnostics NAME TAG CRITIC LR GAMMA VC MODEL_PATH DIAG_DIR
 # Returns success only when every requested diagnostic artifact is complete
 # and belongs to this exact sweep configuration and numbered model checkpoint.
 reusable_diagnostics() {
     "$PYTHON_BIN" - \
-        "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" \
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" \
         "$RL_ITERATIONS" "$SEED" "$DIAGNOSTIC_GAMES" "$SL_WEIGHTS_PATH" \
         "$DIAG_PLOTS" <<'PY'
 import sys
@@ -455,7 +448,6 @@ from diagnostics.rl_sweep_table import validate_reusable_sweep_diagnostic
     critic,
     learning_rate,
     gamma,
-    games_per_iteration,
     value_coef,
     model_path,
     diagnostic_dir,
@@ -471,7 +463,6 @@ expected = {
     "critic_enabled": bool(int(critic)),
     "learning_rate": float(learning_rate),
     "gamma": float(gamma),
-    "games_per_iteration": int(games_per_iteration),
     "value_coef": float(value_coef),
     "rl_iterations": int(rl_iterations),
     "seed": int(seed),
@@ -489,9 +480,9 @@ raise SystemExit(0 if valid else 1)
 PY
 }
 
-# run_point TAG CRITIC LR GAMMA GPI VC
+# run_point TAG CRITIC LR GAMMA VC
 run_point() {
-    local tag="$1" critic="$2" lr="$3" gamma="$4" gpi="$5" vc="$6"
+    local tag="$1" critic="$2" lr="$3" gamma="$4" vc="$5"
     local name="domino_rl"
     if [[ "$critic" -eq 1 ]]; then
         name="${name}_critic"
@@ -514,7 +505,7 @@ run_point() {
     printf -v final_model_path '%s_iter%06d.npz' \
         "${model_base_path%.npz}" "$RL_ITERATIONS"
     if [[ "$RESUME" -eq 1 ]] && reusable_diagnostics \
-        "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" \
+        "$name" "$tag" "$critic" "$lr" "$gamma" "$vc" \
         "$final_model_path" "$diag_dir"; then
         section "[$name] training already complete at iteration $RL_ITERATIONS (--resume: $final_model_path)"
         section "[$name] diagnostics already complete ($DIAGNOSTIC_GAMES games; --resume: $diag_dir/summary.json)"
@@ -526,7 +517,7 @@ run_point() {
     LAST_RESUME_STATE=""
     if [[ "$RESUME" -eq 1 ]]; then
         find_latest_resume_checkpoint \
-            "$model_base_path" "$gpi" "$lr" "$gamma" "$vc" "$critic"
+            "$model_base_path" "$lr" "$gamma" "$vc" "$critic"
     fi
 
     if [[ "$LAST_RESUME_ITERATION" -eq "$RL_ITERATIONS" ]]; then
@@ -542,9 +533,9 @@ run_point() {
                 --resume-weights-path "$LAST_RESUME_WEIGHTS"
                 --resume-state-file "$LAST_RESUME_STATE"
             )
-            section "[$name] resuming RL at iteration $LAST_RESUME_ITERATION/$RL_ITERATIONS, lr=$lr gamma=$gamma games/iter=$gpi value_coef=$vc critic=$critic_label"
+            section "[$name] resuming RL at iteration $LAST_RESUME_ITERATION/$RL_ITERATIONS, lr=$lr gamma=$gamma value_coef=$vc critic=$critic_label"
         else
-            section "[$name] RL training: $RL_ITERATIONS iterations, lr=$lr gamma=$gamma games/iter=$gpi value_coef=$vc critic=$critic_label"
+            section "[$name] RL training: $RL_ITERATIONS iterations, lr=$lr gamma=$gamma value_coef=$vc critic=$critic_label"
         fi
         VALUE_HEAD_FLAG=()
         PPO_FLAG=(--ppo)
@@ -558,7 +549,6 @@ run_point() {
         fi
         "${RUN_PREFIX[@]}" "$PYTHON_BIN" -u -m training.self_play \
             --iterations "$RL_ITERATIONS" \
-            --gpi "$gpi" \
             --learning-rate "$lr" \
             --gamma "$gamma" \
             --value-coef "$vc" \
@@ -577,7 +567,7 @@ run_point() {
     fi
 
     if [[ "$RESUME" -eq 1 ]] && reusable_diagnostics \
-        "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" \
+        "$name" "$tag" "$critic" "$lr" "$gamma" "$vc" \
         "$model_path" "$diag_dir"; then
         section "[$name] diagnostics already complete ($DIAGNOSTIC_GAMES games; --resume: $diag_dir/summary.json)"
     else
@@ -595,7 +585,7 @@ run_point() {
             --output "$diag_dir" \
             "${DIAG_EXTRA_ARGS[@]}"
 
-        write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$diag_dir"
+        write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$vc" "$model_path" "$diag_dir"
     fi
 }
 
@@ -604,7 +594,7 @@ run_point() {
 # hours of RL training)
 # ------------------------------------------------------------------
 
-grid_point_count=$((${#LR_VALUES[@]} * ${#GAMMA_VALUES[@]} * ${#GAMES_PER_ITERATION_VALUES[@]}))
+grid_point_count=$((${#LR_VALUES[@]} * ${#GAMMA_VALUES[@]}))
 vc_extra_values=0
 for vc in "${VALUE_COEF_VALUES[@]}"; do
     [[ "$vc" == "$BASELINE_VALUE_COEF" ]] || vc_extra_values=$((vc_extra_values + 1))
@@ -613,7 +603,7 @@ total_points=$((grid_point_count * 2 + ${#VC_SAMPLED_LOOKUP[@]} * vc_extra_value
 
 section "RL parameter sweep: $total_points training+diagnostics runs ($RL_ITERATIONS iterations each: $grid_point_count-point grid x 2 critic settings, plus ${#VC_SAMPLED_LOOKUP[@]} sampled combinations x $vc_extra_values non-baseline value_coef values, critic on)"
 if [[ "${#VC_SAMPLED_LOOKUP[@]}" -gt 0 ]]; then
-    echo "value_coef axis combinations (lr gamma gpi), sampled with seed $SEED:"
+    echo "value_coef axis combinations (lr gamma), sampled with seed $SEED:"
     printf '  %s\n' "${!VC_SAMPLED_LOOKUP[@]}" | sort
 fi
 
@@ -630,25 +620,23 @@ fi
 # above already covers it.
 for LR in "${LR_VALUES[@]}"; do
     for GAMMA in "${GAMMA_VALUES[@]}"; do
-        for GPI in "${GAMES_PER_ITERATION_VALUES[@]}"; do
-            if [[ "$LR" == "$BASELINE_LEARNING_RATE" && "$GAMMA" == "$BASELINE_GAMMA" && "$GPI" == "$BASELINE_GAMES_PER_ITERATION" ]]; then
-                TAG="default"
-            else
-                TAG="lr${LR}_gamma${GAMMA}_gpi${GPI}"
-            fi
+        if [[ "$LR" == "$BASELINE_LEARNING_RATE" && "$GAMMA" == "$BASELINE_GAMMA" ]]; then
+            TAG="default"
+        else
+            TAG="lr${LR}_gamma${GAMMA}"
+        fi
 
-            run_point "$TAG" 0 "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
-            run_point "$TAG" 1 "$LR" "$GAMMA" "$GPI" "$BASELINE_VALUE_COEF"
+        run_point "$TAG" 0 "$LR" "$GAMMA" "$BASELINE_VALUE_COEF"
+        run_point "$TAG" 1 "$LR" "$GAMMA" "$BASELINE_VALUE_COEF"
 
-            if [[ -n "${VC_SAMPLED_LOOKUP["$LR $GAMMA $GPI"]:-}" ]]; then
-                for VC in "${VALUE_COEF_VALUES[@]}"; do
-                    if [[ "$VC" == "$BASELINE_VALUE_COEF" ]]; then
-                        continue
-                    fi
-                    run_point "${TAG}_vc${VC}" 1 "$LR" "$GAMMA" "$GPI" "$VC"
-                done
-            fi
-        done
+        if [[ -n "${VC_SAMPLED_LOOKUP["$LR $GAMMA"]:-}" ]]; then
+            for VC in "${VALUE_COEF_VALUES[@]}"; do
+                if [[ "$VC" == "$BASELINE_VALUE_COEF" ]]; then
+                    continue
+                fi
+                run_point "${TAG}_vc${VC}" 1 "$LR" "$GAMMA" "$VC"
+            done
+        fi
     done
 done
 

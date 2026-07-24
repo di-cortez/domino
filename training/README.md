@@ -108,8 +108,8 @@ persisted in `periodic_diagnostic_tuning.json`, and reused at subsequent
 
 `forever` has no percentage or target. SIGINT/SIGTERM stops admission of a new
 iteration, lets an in-flight iteration finish, atomically publishes state, and
-exits without an automatic all-pairs evaluation. GPI is fixed at 2,000 by
-default and may be changed explicitly with `--gpi`. Worker autotuning is
+exits without an automatic all-pairs evaluation. Pipeline GPI is fixed at
+2,000; only direct `training.self_play` runs expose `--gpi`. Worker autotuning is
 unchanged. A boundary iteration is shortened so a periodic or final target is
 never exceeded.
 
@@ -432,8 +432,9 @@ inside an iteration publishes the newly updated policy after that batch; if a
 single large batch crosses multiple thresholds, it publishes only one snapshot
 instead of storing duplicate copies of the same weights.
 
-GPI is never autotuned. It is fixed at `2000` by default. `--gpi` accepts any
-positive integer; common experiment values are
+GPI is never autotuned and is fixed at `2000` in every pipeline and sweep.
+Direct `training.self_play --gpi N` experiments accept any positive integer;
+common values are
 `100, 200, 400, 600, 800, 1000, 2000`.
 
 Worker tuning tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1%

@@ -154,7 +154,7 @@ keeps fine-grained RL/PPO and periodic RL-vs-random timing cumulative across
 
 Dataset games, RL rollouts, and diagnostic games are independent CPU work.
 Their bounded worker pools use stable per-game seeds, preserve game-id ordering,
-and reduce worker counts after resource or execution failures. RL GPI/worker
+and reduce worker counts after resource or execution failures. RL worker
 autotunes use separate seed streams and discard every benchmark trajectory.
 The process running supervised or RL network updates is the only process
 allowed to use CuPy/GPU.
@@ -180,11 +180,11 @@ points, and derives CSV/PNG reports. Final all-pairs evaluation uses a distinct
 holdout namespace. Diagnostic execution preserves parent training RNG state
 and never mutates the checkpoint or training schedule.
 
-Parameter and games-per-iteration sweeps train points sequentially while each
-point can use internal rollout workers. Their manifests, fingerprints, hashes,
-numbered checkpoints, metrics, and diagnostic artifacts support conservative
-resume. Report builders consume those immutable run artifacts to create CSV,
-JSON, XLSX, PNG, and PDF outputs.
+Parameter sweeps train points sequentially while each point can use internal
+rollout workers. GPI remains fixed and is not a sweep axis. Their manifests,
+fingerprints, hashes, numbered checkpoints, metrics, and diagnostic artifacts
+support conservative resume. Report builders consume those immutable run
+artifacts to create CSV, JSON, PNG, and PDF outputs.
 
 Every new canonical pipeline and parameter-sweep point initializes RL from its
 selected supervised checkpoint, independent of an older RL output. Canonical

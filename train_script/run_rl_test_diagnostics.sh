@@ -12,7 +12,7 @@
 # which encodes them exactly (see the naming section of
 # run_rl_parameter_sweep.sh):
 #   domino_rl[_critic]_default.npz
-#   domino_rl[_critic]_lr<LR>_gamma<GAMMA>_gpi<GPI>[_vc<VC>].npz
+#   domino_rl[_critic]_lr<LR>_gamma<GAMMA>[_vc<VC>].npz
 # and written to <results-dir>/<name>/sweep_run.json in the same format the
 # sweep script produces, so diagnostics.rl_sweep_table works unchanged.
 #
@@ -63,7 +63,6 @@ SL_WEIGHTS_PATH="models/domino_sl_weights.npz"
 # to the baseline whenever the filename carries no _vc suffix.
 BASELINE_LEARNING_RATE=0.001
 BASELINE_GAMMA=1.0
-BASELINE_GAMES_PER_ITERATION=40
 BASELINE_VALUE_COEF=0.5
 
 usage() {
@@ -155,11 +154,11 @@ format_duration() {
     fi
 }
 
-# write_run_metadata NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH DIAG_DIR
+# write_run_metadata NAME TAG CRITIC LR GAMMA VC MODEL_PATH DIAG_DIR
 # (same format as run_rl_parameter_sweep.sh, so diagnostics.rl_sweep_table
 # consumes it unchanged)
 write_run_metadata() {
-    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" gpi="$6" vc="$7" model_path="$8" diag_dir="$9"
+    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" vc="$6" model_path="$7" diag_dir="$8"
     local critic_bool="false"
     if [[ "$critic" -eq 1 ]]; then critic_bool="true"; fi
     cat > "$diag_dir/sweep_run.json" <<EOF
@@ -169,7 +168,6 @@ write_run_metadata() {
   "critic_enabled": $critic_bool,
   "learning_rate": $lr,
   "gamma": $gamma,
-  "games_per_iteration": $gpi,
   "value_coef": $vc,
   "rl_iterations": $RL_ITERATIONS,
   "seed": $SEED,
@@ -180,9 +178,9 @@ write_run_metadata() {
 EOF
 }
 
-# run_point NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH
+# run_point NAME TAG CRITIC LR GAMMA VC MODEL_PATH
 run_point() {
-    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" gpi="$6" vc="$7" model_path="$8"
+    local name="$1" tag="$2" critic="$3" lr="$4" gamma="$5" vc="$6" model_path="$7"
     local diag_dir="$RESULTS_DIR/${name}"
 
     section "[$name] diagnostics: rl vs random ($DIAGNOSTIC_GAMES games) -> $diag_dir/"
@@ -202,7 +200,7 @@ run_point() {
         --output "$diag_dir" \
         "${DIAG_EXTRA_ARGS[@]}"
 
-    write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path" "$diag_dir"
+    write_run_metadata "$name" "$tag" "$critic" "$lr" "$gamma" "$vc" "$model_path" "$diag_dir"
 }
 
 # ------------------------------------------------------------------
@@ -229,7 +227,7 @@ wait_for_batch() {
     JOB_NAMES=()
 }
 
-# launch_point NAME TAG CRITIC LR GAMMA GPI VC MODEL_PATH
+# launch_point NAME TAG CRITIC LR GAMMA VC MODEL_PATH
 launch_point() {
     if [[ "$JOBS" -le 1 ]]; then
         run_point "$@"
@@ -291,20 +289,18 @@ for model_path in "${MODEL_PATHS[@]}"; do
     if [[ "$tag" =~ ^default(_vc([0-9.]+))?$ ]]; then
         lr="$BASELINE_LEARNING_RATE"
         gamma="$BASELINE_GAMMA"
-        gpi="$BASELINE_GAMES_PER_ITERATION"
         vc="${BASH_REMATCH[2]:-$BASELINE_VALUE_COEF}"
-    elif [[ "$tag" =~ ^lr([0-9.]+)_gamma([0-9.]+)_gpi([0-9]+)(_vc([0-9.]+))?$ ]]; then
+    elif [[ "$tag" =~ ^lr([0-9.]+)_gamma([0-9.]+)(_vc([0-9.]+))?$ ]]; then
         lr="${BASH_REMATCH[1]}"
         gamma="${BASH_REMATCH[2]}"
-        gpi="${BASH_REMATCH[3]}"
-        vc="${BASH_REMATCH[5]:-$BASELINE_VALUE_COEF}"
+        vc="${BASH_REMATCH[4]:-$BASELINE_VALUE_COEF}"
     else
         echo "[$name] SKIPPED: unrecognized tag '$tag'" >&2
         FAILED_NAMES+=("$name")
         continue
     fi
 
-    launch_point "$name" "$tag" "$critic" "$lr" "$gamma" "$gpi" "$vc" "$model_path"
+    launch_point "$name" "$tag" "$critic" "$lr" "$gamma" "$vc" "$model_path"
 done
 
 # Reap any still-running jobs from the final (possibly partial) batch.

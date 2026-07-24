@@ -22,7 +22,7 @@
 #   python -m training.training_loop
 #
 # Stage 3 wraps `python -m training.self_play`, which does accept CLI flags
-# (exact games, fixed GPI, learning rate, reward schema, gamma,
+# (exact games, learning rate, reward schema, gamma,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
 # passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
@@ -54,7 +54,6 @@ RL_ITERATIONS=""
 
 RL_WEIGHTS_FILE="models/domino_rl_weights.npz"
 RL_SL_WEIGHTS_PATH="models/domino_sl_weights.npz"
-RL_GPI=2000
 RL_TRAINING_OPPONENT="self_play"
 RL_LEARNING_RATE=0.001
 RL_ENTROPY_COEF=0.01
@@ -142,13 +141,12 @@ up to 2,000 epochs with automatic training-loss plateau stopping), unless one
 of the SL convergence flags below is passed.
 
 Self-play reinforcement learning ($RL_TOTAL_TRAINING_GAMES exact real games by
-default; fixed GPI and discarded worker tuning; all forwarded to
+default; the self-play default GPI and discarded worker tuning; all forwarded to
 training.self_play):
   --rl-weights-file PATH       Output RL weights path (default: $RL_WEIGHTS_FILE)
   --rl-sl-weights-path PATH    Input SL weights used to initialize a fresh RL run (default: $RL_SL_WEIGHTS_PATH)
   --rl-total-training-games N  Exact real-game budget (default: $RL_TOTAL_TRAINING_GAMES)
-  --rl-iterations N            Legacy fixed iteration budget; implies iterations x GPI games
-  --rl-gpi N                   Fixed games per iteration (default: $RL_GPI)
+  --rl-iterations N            Legacy fixed iteration budget; uses self-play's fixed default GPI
   --rl-training-opponent NAME  "self_play" or "heuristic" (default: $RL_TRAINING_OPPONENT)
   --rl-learning-rate F         Learning rate (default: $RL_LEARNING_RATE)
   --rl-entropy-coef F          Entropy bonus coefficient (default: $RL_ENTROPY_COEF)
@@ -231,7 +229,6 @@ while [[ $# -gt 0 ]]; do
         --rl-sl-weights-path) RL_SL_WEIGHTS_PATH="$2"; shift 2 ;;
         --rl-total-training-games) RL_TOTAL_TRAINING_GAMES="$2"; shift 2 ;;
         --rl-iterations) RL_ITERATIONS="$2"; shift 2 ;;
-        --rl-gpi) RL_GPI="$2"; shift 2 ;;
         --rl-training-opponent) RL_TRAINING_OPPONENT="$2"; shift 2 ;;
         --rl-learning-rate) RL_LEARNING_RATE="$2"; shift 2 ;;
         --rl-entropy-coef) RL_ENTROPY_COEF="$2"; shift 2 ;;
@@ -386,9 +383,9 @@ else
     elif [[ "$RL_NORMALIZE_ADVANTAGES" == "0" ]]; then
         NORMALIZE_ARGS=(--no-normalize-advantages)
     fi
-    BUDGET_ARGS=(--total-training-games "$RL_TOTAL_TRAINING_GAMES" --gpi "$RL_GPI")
+    BUDGET_ARGS=(--total-training-games "$RL_TOTAL_TRAINING_GAMES")
     if [[ -n "$RL_ITERATIONS" ]]; then
-        BUDGET_ARGS=(--iterations "$RL_ITERATIONS" --gpi "$RL_GPI")
+        BUDGET_ARGS=(--iterations "$RL_ITERATIONS")
     fi
     PPO_FLAG="--ppo"
     if [[ "$RL_PPO" -eq 0 ]]; then

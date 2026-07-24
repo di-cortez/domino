@@ -70,9 +70,10 @@ Pipeline levels differ primarily in exact cumulative RL games:
 | `huge` | 100,000 | 42, reusable | 10,000,000 | 1,000,000 | Every 100,000 games |
 | `forever` | 100,000 | 42, reusable | No limit | None automatically | Every 100,000 games |
 
-Before real RL games begin, the existing isolated benchmark selects GPI from
-`100, 200, 400, 600, 800, 1000, 2000`, then selects the rollout-worker count;
-benchmark games are discarded. Training uses masked PPO with adaptive
+RL uses a fixed GPI of 2,000. Only direct `training.self_play` experiments can
+override it with `--gpi`; pipelines and sweeps do not expose GPI as a tuning
+axis. Before real games begin, an isolated benchmark selects the rollout-worker
+count and discards its games. Training uses masked PPO with adaptive
 minibatches. Direct self-play and the finite canonical profiles retain the
 four-epoch default; `forever` now allows up to 16 epochs. After each complete
 epoch, a whole-buffer KL check stops the update before the next epoch when its
@@ -141,30 +142,9 @@ The standalone self-play command preserves its historical default of
 continuing a compatible RL checkpoint when one exists; `--fresh-from-sl`
 forces a new RL run from the supervised checkpoint.
 
-The long RL parameter sweep and the controlled games-per-iteration study have
-safe resume and reporting commands documented in
-[`train_script/README.md`](train_script/README.md). Inspect a GPI plan without
-running games:
-
-```bash
-python train_script/run_rl_games_per_iteration_sweep.py \
-  --preset standard --dry-run
-```
-
-Choose a custom sweep size with `--total-training-games`, and choose the tested
-batch sizes with `--games-per-iteration-values`:
-
-```bash
-python train_script/run_rl_games_per_iteration_sweep.py \
-  --total-training-games 384000 \
-  --games-per-iteration-values 40 80 160 320 640 960 1280 \
-  --seeds 42 43 44 \
-  --run-id gpi_custom
-```
-
-The total must be exactly divisible by every selected games-per-iteration
-value. Use `--diagnostic-games N` separately to set final evaluation games per
-opponent.
+The long RL parameter sweep has safe resume and reporting commands documented
+in [`train_script/README.md`](train_script/README.md). It varies learning rate,
+gamma, and the critic value coefficient while retaining the fixed GPI.
 
 ## Diagnostics
 
@@ -201,7 +181,6 @@ locations are:
 | `models/rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Non-reused dataset, cache, supervised checkpoint, metadata, and loss plot for one quick run. |
 | `models/rl/domino_rl_<level>_seed42/` | Complete RL state, milestones, diagnostics, and progress curve. |
 | `models/rl_test/` | Numbered parameter-sweep checkpoints and resume state. |
-| `models/rl_gpi_sweep/` | Games-per-iteration sweep checkpoints and manifests. |
 | `diagnostics/results/` | Pairwise, aggregate, sweep, CSV, JSON, XLSX, and plot outputs. |
 
 Do not commit, manually edit, or casually delete generated artifacts. Long

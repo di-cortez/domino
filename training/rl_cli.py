@@ -53,6 +53,7 @@ def add_optional_rl_arguments(
     *,
     fresh_from_sl_default=False,
     ppo_max_epochs_default=DEFAULT_MAX_EPOCHS,
+    expose_gpi=True,
 ):
     """Add self-play hyperparameter and rollout-resource flags to ``parser``."""
     group = parser.add_argument_group("optional reinforcement-learning controls")
@@ -74,16 +75,20 @@ def add_optional_rl_arguments(
             f"(normal default: {DEFAULT_TOTAL_TRAINING_GAMES})."
         ),
     )
-    group.add_argument(
-        "--gpi",
-        type=_positive_int,
-        default=DEFAULT_GPI,
-        help=(
-            "Fixed games per RL iteration. "
-            f"Common values: {', '.join(str(value) for value in COMMON_GPI_VALUES)} "
-            f"(default: {DEFAULT_GPI})."
-        ),
-    )
+    if expose_gpi:
+        group.add_argument(
+            "--gpi",
+            type=_positive_int,
+            default=DEFAULT_GPI,
+            help=(
+                "Fixed games per RL iteration. "
+                f"Common values: "
+                f"{', '.join(str(value) for value in COMMON_GPI_VALUES)} "
+                f"(default: {DEFAULT_GPI})."
+            ),
+        )
+    else:
+        parser.set_defaults(gpi=DEFAULT_GPI)
     group.add_argument("--retune-workers", action="store_true")
     group.add_argument(
         "--training-opponent",

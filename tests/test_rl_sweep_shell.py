@@ -4,6 +4,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from train_script import run_rl_parameter_sweep
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SWEEP_SCRIPT = ROOT / "train_script" / "run_rl_parameter_sweep.sh"
@@ -25,6 +27,8 @@ class RLSweepShellTests(unittest.TestCase):
         self.assertIn("reuse complete, compatible diagnostics", result.stdout)
         self.assertIn("diagnostic per sweep point (default: 10000)", result.stdout)
         self.assertIn("--compact", SWEEP_SCRIPT.read_text(encoding="utf-8"))
+        self.assertNotIn("games_per_iteration", result.stdout)
+        self.assertNotIn("GPI", result.stdout)
 
     def test_removed_jobs_option_is_rejected_as_unknown(self):
         result = subprocess.run(
@@ -59,6 +63,25 @@ class RLSweepShellTests(unittest.TestCase):
         self.assertIn("FRESH_START_ARGS=(--fresh-from-sl)", shell_source)
         self.assertIn("fresh_from_sl=True", python_source)
         self.assertIn("fresh_from_sl=True", diagnostic_source)
+
+    def test_sweeps_do_not_expose_or_forward_gpi(self):
+        shell_source = SWEEP_SCRIPT.read_text(encoding="utf-8")
+        python_source = PYTHON_SWEEP.read_text(encoding="utf-8")
+        diagnostic_source = HYPERPARAMETER_SWEEP.read_text(encoding="utf-8")
+
+        self.assertNotIn("--gpi", shell_source)
+        self.assertNotIn("games_per_iteration", shell_source)
+        self.assertNotIn("GAMES_PER_ITERATION_VALUES", python_source)
+        self.assertNotIn("gpi=", python_source)
+        self.assertNotIn("--rl-games-per-iteration", diagnostic_source)
+        self.assertNotIn("gpi=", diagnostic_source)
+
+    def test_python_sweep_grid_has_no_gpi_axis(self):
+        points = list(run_rl_parameter_sweep.iter_sweep_points())
+
+        self.assertEqual(len(points), 18)
+        self.assertTrue(all(len(point) == 4 for point in points))
+        self.assertTrue(all("gpi" not in point[0].lower() for point in points))
 
 
 if __name__ == "__main__":

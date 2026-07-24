@@ -1281,6 +1281,14 @@ def test_rl_gpi_is_fixed_explicit_and_positive():
         else:
             raise AssertionError(f"Expected rejection for {invalid_arguments!r}")
 
+    assert parse_pipeline_args([]).gpi == DEFAULT_GPI
+    try:
+        parse_pipeline_args(["--gpi", "40"])
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("The canonical pipeline must not expose GPI")
+
 
 def test_reward_signal_summary_classifies_rewards():
     samples = [

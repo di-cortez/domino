@@ -22,7 +22,7 @@ commands; put deeper material in the owner listed below.
 | [`../agents/README.md`](../agents/README.md) | Agent implementations, 168-feature encoder, 56 policy actions, and checkpoint shapes. |
 | [`../training/README.md`](../training/README.md) | Dataset loading, supervised training, RL algorithm, devices, parallel rollout, checkpointing, and resume. |
 | [`../diagnostics/README.md`](../diagnostics/README.md) | Supported agents, evaluation commands, output schemas, plots, statistics, and report interpretation. |
-| [`../train_script/README.md`](../train_script/README.md) | Shell pipeline, RL parameter sweep, GPI sweep, budgets, safe resume, and report locations. |
+| [`../train_script/README.md`](../train_script/README.md) | Shell pipeline, fixed-GPI RL parameter sweep, budgets, safe resume, and report locations. |
 | [`../ui/README.md`](../ui/README.md) | Simulator startup, controls, HUD, agent menu, and UI tests. |
 | [`../ui/ui_workflow.md`](../ui/ui_workflow.md) | Controller, human-turn, visibility, layout, and rendering sequence. |
 | [`../dataset/README.md`](../dataset/README.md) | Generated supervised dataset and encoded-cache formats. |

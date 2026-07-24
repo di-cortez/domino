@@ -47,6 +47,7 @@ from training.rl_resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
 )
+from training.ppo import DEFAULT_MAX_EPOCHS, MAX_PPO_EPOCHS
 from utils.artifacts import atomic_copy, atomic_write_json, file_sha256
 from utils.runtime_status import format_duration, pipeline_compute_report
 
@@ -83,6 +84,7 @@ class PipelineConfig:
     dataset_games: int = CANONICAL_DATASET_GAMES
     supervised_epochs: int = CANONICAL_SUPERVISED_MAX_EPOCHS
     rl_games_per_iteration: int = self_play.DEFAULT_GAMES_PER_ITERATION
+    ppo_max_epochs: int = DEFAULT_MAX_EPOCHS
 
     @property
     def unbounded(self):
@@ -156,6 +158,7 @@ CANONICAL_PIPELINE_LEVELS = {
         final_all_pairs=False,
         default_seed=DEFAULT_SEED,
         reuse_supervised_assets=True,
+        ppo_max_epochs=MAX_PPO_EPOCHS,
     ),
 }
 PIPELINE_LEVELS = {
@@ -188,6 +191,15 @@ def _resolve_execution_identity(args):
     args.execution_id = (
         None if config.reuse_supervised_assets else _new_execution_id()
     )
+    if getattr(args, "ppo_max_epochs", None) is None:
+        # Inactive PPO controls are still persisted in exact no-PPO resume
+        # state. Keep their historical defaults stable while giving only the
+        # forever PPO profile the larger epoch budget.
+        args.ppo_max_epochs = (
+            int(config.ppo_max_epochs)
+            if args.ppo_enabled
+            else DEFAULT_MAX_EPOCHS
+        )
     return args
 
 
@@ -1292,7 +1304,11 @@ def parse_args(argv=None):
     dataset.add_argument("--dataset-max-worker-rss-mb", type=int, default=1024)
     dataset.add_argument("--dataset-games", type=int, default=None, help=argparse.SUPPRESS)
     training_loop.add_optional_training_arguments(parser)
-    self_play.add_optional_rl_arguments(parser, fresh_from_sl_default=True)
+    self_play.add_optional_rl_arguments(
+        parser,
+        fresh_from_sl_default=True,
+        ppo_max_epochs_default=argparse.SUPPRESS,
+    )
     diagnostics = parser.add_argument_group("diagnostic controls")
     diagnostics.add_argument(
         "--diagnostic-workers",

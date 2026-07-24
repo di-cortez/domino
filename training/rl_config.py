@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
+from training.ppo import MAX_PPO_EPOCHS
 from training.rl_resume import LEGACY_TRAINING_ALGORITHM, PPO_TRAINING_ALGORITHM
 from training.rl_rollout import REWARD_SCHEMAS
 
@@ -151,8 +152,10 @@ def resolve_training_options(
             raise ValueError(
                 "PPO KL thresholds require 0 < target_kl <= stop_kl"
             )
-        if not 1 <= int(ppo_max_epochs) <= 4:
-            raise ValueError("ppo_max_epochs must be between 1 and 4")
+        if not 1 <= int(ppo_max_epochs) <= MAX_PPO_EPOCHS:
+            raise ValueError(
+                f"ppo_max_epochs must be between 1 and {MAX_PPO_EPOCHS}"
+            )
         if int(ppo_min_minibatches) < 1 or int(ppo_max_minibatches) < int(
             ppo_min_minibatches
         ):

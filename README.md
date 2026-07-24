@@ -73,7 +73,10 @@ Pipeline levels differ primarily in exact cumulative RL games:
 Before real RL games begin, the existing isolated benchmark selects GPI from
 `100, 200, 400, 600, 800, 1000, 2000`, then selects the rollout-worker count;
 benchmark games are discarded. Training uses masked PPO with adaptive
-minibatches and up to four epochs by default. Pass `--no-ppo` to use one
+minibatches. Direct self-play and the finite canonical profiles retain the
+four-epoch default; `forever` now allows up to 16 epochs. After each complete
+epoch, a whole-buffer KL check stops the update before the next epoch when its
+hard `0.015` limit is exceeded. Pass `--no-ppo` to use one
 full-buffer REINFORCE update per iteration instead; that path does not build a
 PPO buffer or calculate ratios, clipping, KL control, minibatches, or the
 post-update full-buffer PPO evaluation. Opponent snapshots refresh every 400

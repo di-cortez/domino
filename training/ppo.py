@@ -23,6 +23,7 @@ DEFAULT_CLIP_EPSILON = 0.2
 DEFAULT_TARGET_KL = 0.01
 DEFAULT_STOP_KL = 0.015
 DEFAULT_MAX_EPOCHS = 4
+MAX_PPO_EPOCHS = 16
 DEFAULT_MIN_MINIBATCHES = 4
 DEFAULT_MAX_MINIBATCHES = 16
 DEFAULT_GAMES_PER_MINIBATCH_SCALE = 125
@@ -522,7 +523,7 @@ def ppo_update(
     prefer_gpu_buffer=True,
     gpu_buffer_safety_fraction=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
 ):
-    """Run up to four deterministic PPO epochs over one on-policy buffer."""
+    """Run deterministic, KL-limited PPO epochs over one on-policy buffer."""
     profile_started = time.perf_counter()
     timing = {
         "setup_and_first_partition": 0.0,
@@ -541,8 +542,10 @@ def ppo_update(
         raise ValueError("PPO clip_epsilon must be in (0, 1).")
     if target_kl <= 0 or stop_kl <= 0 or stop_kl < target_kl:
         raise ValueError("PPO KL thresholds must satisfy 0 < target_kl <= stop_kl.")
-    if not 1 <= int(max_epochs) <= 4:
-        raise ValueError("PPO max_epochs must be between one and four.")
+    if not 1 <= int(max_epochs) <= MAX_PPO_EPOCHS:
+        raise ValueError(
+            f"PPO max_epochs must be between one and {MAX_PPO_EPOCHS}."
+        )
     if not 0 < float(gpu_buffer_safety_fraction) <= 1:
         raise ValueError("GPU buffer safety fraction must be in (0, 1].")
 

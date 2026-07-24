@@ -33,6 +33,13 @@ seed-addressed 100,000-game assets and metadata-validated reuse:
 | `huge` | 100,000 | 42, reusable | 10,000,000 | 1,000,000 | 100,000 RL games | Yes |
 | `forever` | 100,000 | 42, reusable | Unbounded | None | 100,000 RL games | Yes |
 
+Direct self-play and the finite canonical profiles keep the four-epoch PPO
+default. The `forever` PPO profile uses a maximum budget of 16 epochs per
+on-policy buffer; its unchanged whole-buffer KL guard can finish each update
+earlier. Because the PPO configuration is part of exact resume identity, an
+older four-epoch `forever` PPO lineage must still be resumed with explicit
+`--ppo-max-epochs 4`; changing that lineage to 16 is intentionally rejected.
+
 The reusable standard assets are built from 100,000 heuristic games with a
 maximum supervised budget of 5,000 epochs (the convergence/plateau stopping
 rules can finish earlier). They are
@@ -551,8 +558,12 @@ fallback restarts a partially applied epoch.
 Requested minibatches are `clamp(ceil(actual_games / 125), 4, 16)`, further
 capped to keep roughly 128 decisions per minibatch. Each epoch visits every
 decision exactly once with a deterministic new permutation. PPO uses clip
-epsilon `0.2`, target KL `0.01`, and does not start another epoch after
-whole-buffer approximate KL exceeds `0.015`; at most four epochs run.
+epsilon `0.2`, target KL `0.01`, and does not start another epoch after the
+completed epoch's whole-buffer approximate KL exceeds `0.015`. Direct
+self-play and finite canonical profiles run at most four epochs by default;
+the canonical `forever` profile runs at most 16. An explicit
+`--ppo-max-epochs` overrides the profile default within the supported 1–16
+range.
 
 Enable the optional actor-critic baseline with:
 

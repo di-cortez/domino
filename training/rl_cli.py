@@ -19,6 +19,7 @@ from training.ppo import (
     DEFAULT_MIN_MINIBATCHES,
     DEFAULT_STOP_KL,
     DEFAULT_TARGET_KL,
+    MAX_PPO_EPOCHS,
 )
 from training.rl_config import (
     DEFAULT_ADAPTIVE_GPI,
@@ -45,7 +46,12 @@ from training.rl_parallel import (
 from training.rl_rollout import DEFAULT_GAMMA, DEFAULT_REWARD_SCHEMA, REWARD_SCHEMAS
 
 
-def add_optional_rl_arguments(parser, *, fresh_from_sl_default=False):
+def add_optional_rl_arguments(
+    parser,
+    *,
+    fresh_from_sl_default=False,
+    ppo_max_epochs_default=DEFAULT_MAX_EPOCHS,
+):
     """Add self-play hyperparameter and rollout-resource flags to ``parser``."""
     group = parser.add_argument_group("optional reinforcement-learning controls")
     group.add_argument(
@@ -297,7 +303,17 @@ def add_optional_rl_arguments(parser, *, fresh_from_sl_default=False):
     ppo.add_argument("--ppo-clip-epsilon", type=float, default=DEFAULT_CLIP_EPSILON)
     ppo.add_argument("--ppo-target-kl", type=float, default=DEFAULT_TARGET_KL)
     ppo.add_argument("--ppo-stop-kl", type=float, default=DEFAULT_STOP_KL)
-    ppo.add_argument("--ppo-max-epochs", type=int, default=DEFAULT_MAX_EPOCHS)
+    ppo.add_argument(
+        "--ppo-max-epochs",
+        type=int,
+        default=ppo_max_epochs_default,
+        help=(
+            "Maximum PPO epochs over one on-policy buffer; whole-buffer KL is "
+            "checked after every epoch. Standalone and finite canonical "
+            f"profiles default to {DEFAULT_MAX_EPOCHS}; canonical forever "
+            f"defaults to {MAX_PPO_EPOCHS}."
+        ),
+    )
     ppo.add_argument(
         "--ppo-min-minibatches",
         type=int,
@@ -433,5 +449,3 @@ def _training_kwargs_from_args(args):
         "prefer_gpu_buffer": args.prefer_gpu_buffer,
         "gpu_buffer_safety_fraction": args.gpu_buffer_safety_fraction,
     }
-
-

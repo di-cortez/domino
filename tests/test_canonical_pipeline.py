@@ -162,6 +162,11 @@ def test_quick_and_long_run_level_policies_are_distinct(monkeypatch):
     assert PIPELINE_LEVELS["big"].supervised_epochs == 5_000
     assert PIPELINE_LEVELS["huge"].supervised_epochs == 5_000
     assert PIPELINE_LEVELS["forever"].supervised_epochs == 5_000
+    assert all(
+        PIPELINE_LEVELS[level].ppo_max_epochs == 4
+        for level in ("small", "default", "big", "huge")
+    )
+    assert PIPELINE_LEVELS["forever"].ppo_max_epochs == 16
     assert PIPELINE_LEVELS["small"].total_rl_games == 100_000
     assert PIPELINE_LEVELS["default"].total_rl_games == 500_000
     assert PIPELINE_LEVELS["big"].total_rl_games == 2_000_000
@@ -190,11 +195,17 @@ def test_resume_accepts_default_or_explicit_run_directory():
 def test_canonical_pipeline_accepts_policy_only_reinforce():
     ppo = parse_args(["forever"])
     reinforce = parse_args(["forever", "--no-ppo"])
+    finite = parse_args(["huge"])
+    explicit = parse_args(["forever", "--ppo-max-epochs", "7"])
 
     validate_args(ppo, PIPELINE_LEVELS["forever"])
     validate_args(reinforce, PIPELINE_LEVELS["forever"])
     assert ppo.ppo_enabled is True
+    assert ppo.ppo_max_epochs == 16
     assert reinforce.ppo_enabled is False
+    assert reinforce.ppo_max_epochs == 4
+    assert finite.ppo_max_epochs == 4
+    assert explicit.ppo_max_epochs == 7
 
     critic = parse_args(["forever", "--no-ppo", "--value-head"])
     with pytest.raises(ValueError, match="remain policy-only"):

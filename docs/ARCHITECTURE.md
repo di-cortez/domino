@@ -124,8 +124,10 @@ of training loss can stop a saturated run early.
 RL uses fresh on-policy trajectories: all games in an iteration observe the
 same frozen policy. The default update stores masked collection-time
 log-probabilities, normalizes advantages once over the complete decision
-buffer, and runs masked PPO in deterministic minibatches for up to four
-epochs. The optional policy-only `reinforce_v1` update instead applies one
+buffer, and runs masked PPO in deterministic minibatches. Direct and finite
+canonical runs default to at most four epochs; `forever` defaults to 16, with
+a whole-buffer KL guard after every completed epoch. The optional policy-only
+`reinforce_v1` update instead applies one
 full-buffer policy-gradient step and skips PPO buffer construction, ratios,
 clipping, KL control, minibatches, and post-update full-buffer evaluation.
 There is no replay buffer or cross-iteration reuse in either mode. Decision

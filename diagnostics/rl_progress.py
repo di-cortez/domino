@@ -23,6 +23,7 @@ from diagnostics.worker_autotune import (
     MatchupSpec,
     autotune_diagnostic_workers,
 )
+from training.canonical_run import load_run_config
 from training.ppo import stable_seed
 from utils.artifacts import atomic_write_json, atomic_write_text, file_sha256
 
@@ -47,6 +48,34 @@ CSV_FIELDS = (
     "checkpoint_path",
     "checkpoint_sha256",
 )
+
+
+def _format_machine_memory(byte_count):
+    """Return a compact binary memory size for the plot footer."""
+    value = float(byte_count)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+
+
+def _machine_footer_lines(metadata):
+    """Return separate CPU and GPU descriptions for the progress plot."""
+    metadata = dict(metadata or {})
+    cpu = metadata.get("cpu_model") or "unknown CPU"
+    logical = metadata.get("logical_cpu_count")
+    cpu_text = f"{cpu} ({logical} logical)" if logical else cpu
+    ram = metadata.get("ram_total_bytes")
+    ram_text = "RAM unknown" if ram is None else f"RAM {_format_machine_memory(ram)}"
+
+    gpu = metadata.get("gpu_name") or "no detected GPU"
+    vram = metadata.get("vram_total_bytes")
+    vram_text = (
+        "VRAM unavailable"
+        if vram is None
+        else f"VRAM {_format_machine_memory(vram)}"
+    )
+    return f"CPU: {cpu_text} · {ram_text}", f"GPU: {gpu} · {vram_text}"
 
 
 def _rl_elapsed_hours(row):
@@ -296,16 +325,37 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
     axis.legend(loc="best")
     updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     games = int(rows[-1]["diagnostic_games"])
+    try:
+        run_config = load_run_config(run_dir)
+    except (FileNotFoundError, ValueError):
+        run_config = {}
     starting_point = zero_rows[-1] if zero_rows else rows[0]
     start_name = Path(starting_point["checkpoint_path"]).name
     start_hash = starting_point["checkpoint_sha256"][:12]
+    cpu_text, gpu_text = _machine_footer_lines(run_config.get("machine", {}))
     figure.text(
         0.01,
-        0.01,
+        0.06,
         f"Start: {start_name} · sha256 {start_hash}...",
         ha="left",
         va="bottom",
         fontsize=8,
+    )
+    figure.text(
+        0.01,
+        0.035,
+        cpu_text,
+        ha="left",
+        va="bottom",
+        fontsize=7,
+    )
+    figure.text(
+        0.01,
+        0.01,
+        gpu_text,
+        ha="left",
+        va="bottom",
+        fontsize=7,
     )
     figure.text(
         0.99,
@@ -315,7 +365,7 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
         va="bottom",
         fontsize=8,
     )
-    figure.tight_layout(rect=(0, 0.035, 1, 1))
+    figure.tight_layout(rect=(0, 0.095, 1, 1))
     filename = "rl_vs_random_progress_logx.png" if log_x else "rl_vs_random_progress.png"
     output = run_dir / filename
     temporary = output.with_name(

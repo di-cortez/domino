@@ -7,7 +7,7 @@ training+diagnostics run, e.g. ``domino_rl[_critic]_default/``,
 ``domino_rl_critic_<grid tag>_vc<VC>/`` for the critic-on value_coef axis)
 contains two JSON files written by
 that script: ``sweep_run.json`` (the exact RL hyperparameters used) and
-``summary.json`` (the rl-vs-random win/draw/loss rates from
+``summary.json`` (the rl-vs-random win/loss rates from
 ``diagnostics.pairwise``). This module discovers every such directory, joins
 the two JSON files into one row per run, and writes a comparative table --
 CSV, an aggregate JSON, a console summary, and PNG/PDF visual tables. Each
@@ -45,8 +45,8 @@ SWEEP_DIAGNOSTIC_PLOT_FILES = (
 
 CSV_FIELDS = [
     "run_name", "critic", "varied_parameter", "learning_rate", "gamma",
-    "value_coef", "games", "wins", "draws", "losses",
-    "win_rate", "draw_rate", "loss_rate", "win_ci95_low", "win_ci95_high",
+    "value_coef", "games", "wins", "losses",
+    "win_rate", "loss_rate", "win_ci95_low", "win_ci95_high",
     "mean_turns", "duration_s", "model_path",
 ]
 
@@ -134,8 +134,8 @@ def validate_reusable_sweep_diagnostic(
     if not isinstance(counts, dict) or not isinstance(rates, dict):
         return False, "diagnostic counts or rates are missing"
     try:
-        count_total = sum(int(counts[key]) for key in ("win", "draw", "loss"))
-        for key in ("win", "draw", "loss"):
+        count_total = sum(int(counts[key]) for key in ("win", "loss"))
+        for key in ("win", "loss"):
             rate = float(rates[key])
             if not math.isfinite(rate) or not math.isclose(
                 rate,
@@ -224,13 +224,10 @@ def build_rows(run_dirs):
             "seed": hyperparameters["seed"],
             "games": summary["game_count"],
             "wins": counts["win"],
-            "draws": counts["draw"],
             "losses": counts["loss"],
             "win_rate": rates["win"],
-            "draw_rate": rates["draw"],
             "loss_rate": rates["loss"],
             "win_rate_pct": round(100 * rates["win"], 1),
-            "draw_rate_pct": round(100 * rates["draw"], 1),
             "win_ci95_low": win_ci_low,
             "win_ci95_high": win_ci_high,
             "mean_turns": summary["mean_turns"],
@@ -360,7 +357,7 @@ def parse_args(argv=None):
         description=(
             "Build a comparative table from train_script/run_rl_parameter_sweep.sh "
             "output: joins each sweep point's sweep_run.json (hyperparameters) with "
-            "its summary.json (rl-vs-random win/draw/loss rates)."
+            "its summary.json (rl-vs-random win/loss rates)."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )

@@ -12,10 +12,11 @@ import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.rl_nn import PolicyNetwork
+from middleware.domino_engine import RULESET_VERSION
 
 
-RESUME_STATE_VERSION = 3
-SUPPORTED_RESUME_STATE_VERSIONS = (2, RESUME_STATE_VERSION)
+RESUME_STATE_VERSION = 4
+SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
 RESUME_POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 PPO_TRAINING_ALGORITHM = "ppo_v1"
 LEGACY_TRAINING_ALGORITHM = "reinforce_v1"
@@ -310,6 +311,7 @@ def _resume_configuration(
     ppo_min_decisions_per_minibatch,
     prefer_gpu_buffer,
     gpu_buffer_safety_fraction,
+    run_configuration_sha256=None,
 ):
     """Return every setting that can affect post-checkpoint RL computation."""
     return {
@@ -333,6 +335,8 @@ def _resume_configuration(
         "effective_seed": int(effective_seed),
         "device": device,
         "sl_weights_sha256": sl_weights_sha256,
+        "ruleset_version": RULESET_VERSION,
+        "run_configuration_sha256": run_configuration_sha256,
         "ppo_clip_epsilon": float(ppo_clip_epsilon),
         "ppo_target_kl": float(ppo_target_kl),
         "ppo_stop_kl": float(ppo_stop_kl),

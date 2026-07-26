@@ -166,7 +166,7 @@ training process is expected to use the GPU.
 
 ## Memory behavior
 
-Supervised training benchmarks retained mini-batch candidates and can keep the
+Supervised training uses a fixed, memory-checked mini-batch and can keep the
 full encoded dataset on GPU or use bounded rotating windows. RL checks host
 workspace and effective free VRAM before assembling large batches. Both use
 float32 arrays and release disposable forward caches and unused CuPy pool
@@ -176,7 +176,7 @@ Controls include:
 
 ```bash
 python -m training.training_loop \
-  --sl-batch-size 1024 \
+  --sl-batch-size 8192 \
   --sl-memory-reserve-mb 1024 \
   --sl-gpu-memory-reserve-mb 1024
 

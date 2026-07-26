@@ -102,7 +102,10 @@ class HeadlessEngineStepTests(unittest.TestCase):
         self.assertIsNotNone(state)
         self.assertEqual(state, engine._get_state())
         self.assertEqual(game_over, engine.game_over)
-        self.assertEqual(info, {"winner": engine.winner})
+        self.assertEqual(
+            info,
+            {"winner": engine.winner, "win_reason": engine.win_reason},
+        )
 
     def test_headless_step_returns_stable_tuple_without_building_state(self):
         """return_state=False returns None and never calls _get_state."""
@@ -124,7 +127,10 @@ class HeadlessEngineStepTests(unittest.TestCase):
         self.assertEqual(len(result), 3)
         self.assertIsNone(result[0])
         self.assertEqual(result[1], engine.game_over)
-        self.assertEqual(result[2], {"winner": engine.winner})
+        self.assertEqual(
+            result[2],
+            {"winner": engine.winner, "win_reason": engine.win_reason},
+        )
         get_state.assert_not_called()
 
     def test_supplied_actions_skip_generation_but_still_validate_membership(self):

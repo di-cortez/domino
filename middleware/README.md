@@ -136,9 +136,15 @@ serialized history actions, and rejects any result-fingerprint difference.
 
 A game ends one of two ways: a player empties their hand (that player wins),
 or the game is blocked -- every player has passed consecutively
-(`consecutive_passes >= player_count`) with an empty stock, decided by
-comparing each hand's remaining pip total (lowest wins; a tie is a draw,
-`winner == -1`).
+(`consecutive_passes >= player_count`) with an empty stock. A blocked game
+always has one winner, selected by the first criterion that differs:
+
+1. fewest remaining pips;
+2. fewest remaining tiles;
+3. most recent valid tile play among the still-tied players.
+
+The serialized result includes the winning player and a stable `win_reason`.
+There is no game-result draw.
 
 The blocked-game check only fires when the action that just completed was a
 `PASS` (`action is None`). A `DRAW` never triggers it, even if it empties the

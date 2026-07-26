@@ -28,7 +28,7 @@ from training.ppo import stable_seed
 from utils.artifacts import atomic_write_json, atomic_write_text, file_sha256
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 PERIODIC_NAMESPACE = "periodic_rl_vs_random"
 FINAL_NAMESPACE = "final_all_pairs_holdout"
 PERIODIC_SUMMARY_RETENTION = 10
@@ -39,14 +39,13 @@ CSV_FIELDS = (
     "optimizer_steps",
     "rl_elapsed_hours",
     "win_rate_percent",
-    "score_percent",
-    "draw_rate_percent",
     "ci95_low_percent",
     "ci95_high_percent",
     "diagnostic_games",
     "diagnostic_seconds",
     "checkpoint_path",
     "checkpoint_sha256",
+    "configuration_sha256",
 )
 
 
@@ -141,6 +140,7 @@ def _point_key(row):
     return (
         int(row["rl_games"]),
         row["checkpoint_sha256"],
+        row.get("configuration_sha256"),
         int(row["diagnostic_seed"]),
         int(row["diagnostic_games"]),
         row["opponent"],
@@ -271,14 +271,13 @@ def rebuild_progress_csv(run_dir):
             "optimizer_steps": row["optimizer_steps"],
             "rl_elapsed_hours": _rl_elapsed_hours(row),
             "win_rate_percent": 100.0 * row["win_rate"],
-            "score_percent": 100.0 * row["score"],
-            "draw_rate_percent": 100.0 * row["draw_rate"],
             "ci95_low_percent": 100.0 * row["ci95_win_rate_low"],
             "ci95_high_percent": 100.0 * row["ci95_win_rate_high"],
             "diagnostic_games": row["diagnostic_games"],
             "diagnostic_seconds": row["diagnostic_seconds"],
             "checkpoint_path": row["checkpoint_path"],
             "checkpoint_sha256": row["checkpoint_sha256"],
+            "configuration_sha256": row.get("configuration_sha256"),
         })
     return atomic_write_text(run_dir / "rl_vs_random_progress.csv", stream.getvalue())
 
@@ -300,11 +299,18 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
     low = 100.0 * np.asarray([row["ci95_win_rate_low"] for row in rows])
     high = 100.0 * np.asarray([row["ci95_win_rate_high"] for row in rows])
 
+    window = 10
+    y_smooth = np.asarray([
+        np.mean(y[max(0, index - window + 1): index + 1])
+        for index in range(len(y))
+    ])
+
     figure = Figure(figsize=(9.5, 5.5), facecolor="white")
     FigureCanvasAgg(figure)
     axis = figure.add_subplot(1, 1, 1)
     axis.plot(x, y, marker="o", linewidth=2.0, label="RL vs random win rate")
     axis.fill_between(x, low, high, alpha=0.2, label="95% confidence interval")
+    axis.plot(x,y_smooth,linewidth=2.5,label=f"{window}-point trailing moving average")
     zero_rows = [row for row in rows if int(row["rl_games"]) == 0]
     if zero_rows:
         axis.scatter(
@@ -332,6 +338,26 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
     starting_point = zero_rows[-1] if zero_rows else rows[0]
     start_name = Path(starting_point["checkpoint_path"]).name
     start_hash = starting_point["checkpoint_sha256"][:12]
+    config_hash = (
+        run_config.get("configuration_sha256")
+        or rows[-1].get("configuration_sha256")
+        or "unknown"
+    )
+    rl_config = run_config.get("rl_config", {})
+    ppo_config = run_config.get("ppo_config", {})
+    seed = run_config.get("seed", rows[-1].get("seed"))
+    gpi = rl_config.get("games_per_iteration", rows[-1].get("gpi"))
+    learning_rate = rl_config.get("learning_rate")
+    if run_config.get("algorithm") == "reinforce_v1":
+        ppo_text = "PPO off"
+    else:
+        epochs = ppo_config.get("max_epochs")
+        ppo_text = f"PPO {epochs} ep" if epochs is not None else "PPO"
+    gpi_text = f"GPI {int(gpi):,}" if gpi is not None else "GPI unknown"
+    lr_text = (
+        f"lr {float(learning_rate):g}"
+        if learning_rate is not None else "lr unknown"
+    )
     cpu_text, gpu_text = _machine_footer_lines(run_config.get("machine", {}))
     figure.text(
         0.01,
@@ -359,11 +385,20 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
     )
     figure.text(
         0.99,
-        0.01,
-        f"Updated {updated} · {games:,} games per diagnostic",
+        0.035,
+        f"Updated {updated} · {games:,} games/diagnostic",
         ha="right",
         va="bottom",
         fontsize=8,
+    )
+    figure.text(
+        0.99,
+        0.01,
+        f"seed {seed} · {gpi_text} · {ppo_text} · {lr_text} · "
+        f"config {config_hash[:8]}...",
+        ha="right",
+        va="bottom",
+        fontsize=7,
     )
     figure.tight_layout(rect=(0, 0.095, 1, 1))
     filename = "rl_vs_random_progress_logx.png" if log_x else "rl_vs_random_progress.png"
@@ -407,9 +442,9 @@ def _update_best(run_dir, row):
         "criterion": "win_rate_vs_random",
         "rl_games": int(row["rl_games"]),
         "win_rate": float(row["win_rate"]),
-        "score": float(row["score"]),
         "checkpoint_path": row["checkpoint_path"],
         "checkpoint_sha256": row["checkpoint_sha256"],
+        "configuration_sha256": row.get("configuration_sha256"),
         "diagnostic_seed": int(row["diagnostic_seed"]),
         "updated_at": row["created_at"],
     }
@@ -434,9 +469,9 @@ def rebuild_best_checkpoint(run_dir):
         "criterion": "win_rate_vs_random",
         "rl_games": int(best["rl_games"]),
         "win_rate": float(best["win_rate"]),
-        "score": float(best["score"]),
         "checkpoint_path": best["checkpoint_path"],
         "checkpoint_sha256": best["checkpoint_sha256"],
+        "configuration_sha256": best.get("configuration_sha256"),
         "diagnostic_seed": int(best["diagnostic_seed"]),
         "updated_at": best["created_at"],
     }
@@ -472,12 +507,17 @@ def run_periodic_diagnostic(
         )
 
     run_dir = Path(run_dir)
+    try:
+        run_config = load_run_config(run_dir)
+    except (FileNotFoundError, ValueError):
+        run_config = {}
     checkpoint_path = Path(checkpoint_path)
     diagnostic_seed = periodic_diagnostic_seed(seed)
     checkpoint_hash = file_sha256(checkpoint_path)
     identity = {
         "rl_games": int(rl_games),
         "checkpoint_sha256": checkpoint_hash,
+        "configuration_sha256": run_config.get("configuration_sha256"),
         "diagnostic_seed": int(diagnostic_seed),
         "diagnostic_games": int(diagnostic_games),
         "opponent": "random",
@@ -594,7 +634,6 @@ def run_periodic_diagnostic(
     section_started = time.perf_counter()
     summary = result["summary"]
     wins = int(summary["counts"]["win"])
-    draws = int(summary["counts"]["draw"])
     losses = int(summary["counts"]["loss"])
     low, high = summary["win_ci95"]
     row = {
@@ -606,15 +645,13 @@ def run_periodic_diagnostic(
         "optimizer_steps": int(optimizer_steps),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_sha256": checkpoint_hash,
+        "configuration_sha256": run_config.get("configuration_sha256"),
         "opponent": "random",
         "diagnostic_games": int(diagnostic_games),
         "wins": wins,
-        "draws": draws,
         "losses": losses,
         "win_rate": wins / int(diagnostic_games),
-        "draw_rate": draws / int(diagnostic_games),
         "loss_rate": losses / int(diagnostic_games),
-        "score": (wins + 0.5 * draws) / int(diagnostic_games),
         "ci95_win_rate_low": float(low),
         "ci95_win_rate_high": float(high),
         "diagnostic_seed": int(diagnostic_seed),

@@ -527,9 +527,7 @@ class HudRenderer:
 
         winner = controller.final_info.get("winner")
 
-        if winner == -1:
-            message = "DRAW!"
-        elif winner is not None:
+        if winner is not None:
             message = f"Game over! Winner: P{winner} ({names[winner]})"
         else:
             message = "Game over"

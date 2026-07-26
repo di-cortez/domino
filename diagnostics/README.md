@@ -127,9 +127,11 @@ rollout workers. The RL run directory receives:
 In `forever`, automatic diagnostic-worker selection runs once and is reused at
 all later monitor points. Existing runs without the tuning file recover the
 most recent compatible selection from the JSONL history. The progress plot
-footer records the exact point-zero checkpoint name and SHA-256 prefix. Its
-horizontal axis uses cumulative RL training time and therefore remains
-monotonic across resume sessions while excluding periodic-diagnostic time.
+footer records the exact point-zero checkpoint name and SHA-256 prefix, the
+machine captured when the run began, seed, fixed GPI, PPO epoch budget,
+learning rate, and canonical configuration-hash prefix. Its horizontal axis
+uses cumulative RL training time and therefore remains monotonic across resume
+sessions while excluding periodic-diagnostic time.
 
 Periodic monitoring does not persist per-game CSV records. The complete,
 compact JSONL learning history is retained, while only the 10 newest
@@ -191,9 +193,9 @@ By default, pairwise files are written under
 
 | File | Contents |
 |---|---|
-| `summary.json` | Win/draw/loss rates, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, optional value-head prediction statistics, and `duration_s`. |
-| `games.csv` | Compact one-row-per-game data with position, result, turns, initial hands as JSON arrays, and final pip counts. |
-| `cumulative_rates.png` | Win/draw/loss rates over time. |
+| `summary.json` | Win/loss rates, winning-reason counts, Wilson 95% confidence interval, position split, mean turns, remaining pips, choice-opportunity totals, optional value-head prediction statistics, and `duration_s`. |
+| `games.csv` | Compact one-row-per-game data with position, result, winning reason, turns, initial hands as JSON arrays, and final pip counts. |
+| `cumulative_rates.png` | Win/loss rates over time. |
 | `result_distribution.png` | Final result counts. |
 | `wins_by_position.png` | Win rate as player 0 vs. player 1. |
 | `game_lengths.png` | Turn-count histogram. |
@@ -228,7 +230,7 @@ older RL file at its target path, keeping the comparison centered on the
 tested hyperparameters rather than prior RL history.
 
 Every record — the exact RL hyperparameters used plus every matchup's
-win/draw/loss rates — is appended to a single JSON array on disk
+win/loss rates — is appended to a single JSON array on disk
 (`--output`, default `diagnostics/results/hyperparameter_sweep.json`), so
 repeated invocations accumulate a growing log instead of overwriting it.
 Trained checkpoints are written under `--checkpoint-dir` (default

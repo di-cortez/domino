@@ -32,7 +32,14 @@ from diagnostics.pairwise import (
     save_csv,
 )
 from diagnostics.evaluate import diagnostic_plan
-from middleware.domino_engine import DominoEngine, infer_dead_suits
+from middleware.domino_engine import (
+    DominoEngine,
+    WIN_REASON_BLOCKED_FEWEST_PIPS,
+    WIN_REASON_BLOCKED_FEWEST_TILES,
+    WIN_REASON_BLOCKED_LAST_VALID_PLAY,
+    WIN_REASON_EMPTY_HAND,
+    infer_dead_suits,
+)
 from middleware.middleware import GameManager
 from middleware.opponent_model import (
     ALL_TILES,
@@ -248,6 +255,80 @@ def test_engine_game_ids_are_unique_across_instances():
     second = DominoEngine(player_count=2)
 
     assert first.game_id != second.game_id
+
+
+def _blocked_engine(first_hand, second_hand, *, last_player=None):
+    engine = DominoEngine(player_count=2)
+    engine.ends = [6, 6]
+    engine.hands = [list(first_hand), list(second_hand)]
+    engine.initial_hands = [list(first_hand), list(second_hand)]
+    engine.drawn_tiles_by_player = [[], []]
+    engine.stock = []
+    engine.board_history = []
+    engine.current_player = 0
+    engine.required_opening_tile = None
+    engine.consecutive_passes = 0
+    engine.drew_this_turn = {0: False, 1: False}
+    engine.turn = 10
+    engine.game_over = False
+    engine.winner = None
+    engine.win_reason = None
+    engine.last_valid_tile_player = last_player
+    engine._last_valid_tile_turn_by_player = (
+        [4, 8] if last_player == 1 else [8, 4]
+    )
+    return engine
+
+
+def test_engine_empty_hand_win_has_an_explicit_reason():
+    engine = DominoEngine(player_count=2)
+    player = engine.current_player
+    engine.ends = [1, 2]
+    engine.hands[player] = [(1, 3)]
+    engine.hands[1 - player] = [(4, 4)]
+    engine.stock = []
+    engine.required_opening_tile = None
+
+    _state, done, info = engine.step(((1, 3), 0))
+
+    assert done
+    assert engine.winner == player
+    assert engine.win_reason == WIN_REASON_EMPTY_HAND
+    assert info["win_reason"] == WIN_REASON_EMPTY_HAND
+
+
+def test_blocked_game_uses_fewest_pips_before_other_tiebreakers():
+    engine = _blocked_engine([(0, 1)], [(2, 2)], last_player=1)
+
+    engine.step(None)
+    _state, done, _info = engine.step(None)
+
+    assert done
+    assert engine.winner == 0
+    assert engine.win_reason == WIN_REASON_BLOCKED_FEWEST_PIPS
+
+
+def test_blocked_game_uses_fewest_tiles_when_pips_are_tied():
+    engine = _blocked_engine([(0, 2)], [(0, 0), (1, 1)], last_player=1)
+
+    engine.step(None)
+    _state, done, _info = engine.step(None)
+
+    assert done
+    assert engine.winner == 0
+    assert engine.win_reason == WIN_REASON_BLOCKED_FEWEST_TILES
+
+
+def test_blocked_game_uses_last_valid_play_as_final_tiebreaker():
+    engine = _blocked_engine([(0, 3)], [(1, 2)], last_player=1)
+
+    engine.step(None)
+    _state, done, info = engine.step(None)
+
+    assert done
+    assert engine.winner == 1
+    assert engine.win_reason == WIN_REASON_BLOCKED_LAST_VALID_PLAY
+    assert info["winner"] in (0, 1)
 
 
 def test_engine_final_stock_draw_unplayable_tile_requires_pass_before_blocked_game():
@@ -1272,8 +1353,12 @@ def test_rl_workload_and_pool_defaults_use_games():
 
 
 def test_rl_gpi_is_fixed_explicit_and_positive():
-    assert parse_self_play_args(["--gpi", "40"]).gpi == 40
-    for invalid_arguments in (["--gpi", "0"], ["--adaptive-gpi"]):
+    assert parse_self_play_args(["--gpi", "1000"]).gpi == 1000
+    for invalid_arguments in (
+        ["--gpi", "0"],
+        ["--gpi", "40"],
+        ["--adaptive-gpi"],
+    ):
         try:
             parse_self_play_args(invalid_arguments)
         except SystemExit:
@@ -1282,12 +1367,7 @@ def test_rl_gpi_is_fixed_explicit_and_positive():
             raise AssertionError(f"Expected rejection for {invalid_arguments!r}")
 
     assert parse_pipeline_args([]).gpi == DEFAULT_GPI
-    try:
-        parse_pipeline_args(["--gpi", "40"])
-    except SystemExit:
-        pass
-    else:
-        raise AssertionError("The canonical pipeline must not expose GPI")
+    assert parse_pipeline_args(["--gpi", "1000"]).gpi == 1000
 
 
 def test_reward_signal_summary_classifies_rewards():
@@ -1498,6 +1578,19 @@ def main():
         ),
         ("opening double rule", test_engine_requires_highest_opening_double_when_present),
         ("unique game ids", test_engine_game_ids_are_unique_across_instances),
+        ("empty-hand winner reason", test_engine_empty_hand_win_has_an_explicit_reason),
+        (
+            "blocked fewer-pips winner",
+            test_blocked_game_uses_fewest_pips_before_other_tiebreakers,
+        ),
+        (
+            "blocked fewer-tiles winner",
+            test_blocked_game_uses_fewest_tiles_when_pips_are_tied,
+        ),
+        (
+            "blocked last-play winner",
+            test_blocked_game_uses_last_valid_play_as_final_tiebreaker,
+        ),
         (
             "final stock draw unplayable tile requires pass",
             test_engine_final_stock_draw_unplayable_tile_requires_pass_before_blocked_game,

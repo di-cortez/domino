@@ -68,10 +68,9 @@ def _write_complete_diagnostic(root, *, games=3, include_hash=False):
         "seed": 42,
         "requested_seed": 42,
         "effective_seed": 42,
-        "counts": {"win": games - 1, "draw": 0, "loss": 1},
+        "counts": {"win": games - 1, "loss": 1},
         "rates": {
             "win": (games - 1) / games,
-            "draw": 0.0,
             "loss": 1 / games,
         },
         "win_ci95": [0.1, 0.9],
@@ -203,10 +202,9 @@ class RLSweepTableTests(unittest.TestCase):
                 (run_dir / "summary.json").write_text(json.dumps({
                     "rates": {
                         "win": wins / 100,
-                        "draw": 0.01,
-                        "loss": (99 - wins) / 100,
+                        "loss": (100 - wins) / 100,
                     },
-                    "counts": {"win": wins, "draw": 1, "loss": 99 - wins},
+                    "counts": {"win": wins, "loss": 100 - wins},
                     "win_ci95": [0.5, 0.7],
                     "mean_turns": 25.0,
                     "game_count": 100,

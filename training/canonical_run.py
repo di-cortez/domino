@@ -12,6 +12,7 @@ import subprocess
 import numpy as np
 
 from agents.encoder import DominoEncoder
+from middleware.domino_engine import RULESET_VERSION
 from training.rl_resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
@@ -25,7 +26,8 @@ from utils.artifacts import (
 )
 
 
-RUN_FORMAT_VERSION = 1
+RUN_FORMAT_VERSION = 2
+CONFIG_HASH_VERSION = 1
 MILESTONE_RESUME_RETENTION = 5
 NETWORK_ARCHITECTURE = [
     DominoEncoder.VECTOR_SIZE,
@@ -55,19 +57,25 @@ class ResumePoint:
         return int(self.training_state["rl_iterations_completed"])
 
 
-def canonical_run_dir(root, level, seed, execution_id=None):
+def _validated_run_label(value, label):
+    value = str(value)
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    if not value or any(character not in allowed for character in value):
+        raise ValueError(
+            f"{label} must contain only letters, digits, '-' or '_'."
+        )
+    return value
+
+
+def canonical_run_dir(root, level, seed, execution_id=None, run_name=None):
     """Return a stable canonical path or a unique run-scoped path."""
     name = f"domino_rl_{level}_seed{int(seed)}"
+    if run_name is not None:
+        name = f"{name}_run{_validated_run_label(run_name, 'run_name')}"
     if execution_id is not None:
-        execution_id = str(execution_id)
-        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
-        if not execution_id or any(
-            character not in allowed for character in execution_id
-        ):
-            raise ValueError(
-                "execution_id must contain only letters, digits, '-' or '_'."
-            )
-        name = f"{name}_run{execution_id}"
+        execution_id = _validated_run_label(execution_id, "execution_id")
+        separator = "_" if run_name is not None else "_run"
+        name = f"{name}{separator}{execution_id}"
     return Path(root) / "models" / "rl" / name
 
 
@@ -109,6 +117,60 @@ def _validated_algorithm(algorithm):
     if algorithm not in SUPPORTED_TRAINING_ALGORITHMS:
         raise ValueError(f"Unsupported canonical RL algorithm: {algorithm!r}.")
     return algorithm
+
+
+def configuration_sha256(configuration):
+    """Return the canonical SHA-256 for one path-independent run identity."""
+    payload = {
+        "config_hash_version": CONFIG_HASH_VERSION,
+        "pipeline_level": configuration["pipeline_level"],
+        "run_name": configuration.get("run_name"),
+        "seed": int(configuration["seed"]),
+        "target_rl_games": configuration.get("target_rl_games"),
+        "ruleset_version": configuration["ruleset_version"],
+        "encoder_size": int(configuration["encoder_size"]),
+        "action_count": int(configuration["action_count"]),
+        "network_architecture": list(configuration["network_architecture"]),
+        "algorithm": configuration["algorithm"],
+        "supervised_weights_sha256": configuration[
+            "supervised_weights_sha256"
+        ],
+        "ppo_config": configuration["ppo_config"],
+        "rl_config": configuration["rl_config"],
+        "diagnostic_config": configuration["diagnostic_config"],
+        "locked_arguments": configuration.get("locked_arguments", {}),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def load_run_config(run_dir):
+    """Load and validate the immutable configuration for a canonical run."""
+    path = Path(run_dir) / "run_config.json"
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            value = json.load(stream)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"No run configuration exists at {path}.") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Run configuration cannot be read: {path}.") from exc
+    if value.get("format_version") != RUN_FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported run configuration version: "
+            f"{value.get('format_version')!r}."
+        )
+    expected_hash = configuration_sha256(value)
+    if value.get("configuration_sha256") != expected_hash:
+        raise ValueError(
+            f"Run configuration hash is inconsistent at {path}."
+        )
+    return value
 
 
 def _snapshot_digest(snapshot):
@@ -217,6 +279,9 @@ def create_run_config(
     diagnostic_config=None,
     lineage=None,
     allow_target_extension=False,
+    run_name=None,
+    locked_arguments=None,
+    machine=None,
 ):
     """Atomically publish the immutable identity and requested target of a run."""
     algorithm = _validated_algorithm(algorithm)
@@ -226,12 +291,15 @@ def create_run_config(
         (run_dir / child).mkdir(parents=True, exist_ok=True)
     value = {
         "format_version": RUN_FORMAT_VERSION,
+        "config_hash_version": CONFIG_HASH_VERSION,
         "pipeline_level": pipeline_level,
+        "run_name": run_name,
         "seed": int(seed),
         "target_rl_games": (
             None if target_rl_games is None else int(target_rl_games)
         ),
         "unbounded": target_rl_games is None,
+        "ruleset_version": RULESET_VERSION,
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
         "network_architecture": NETWORK_ARCHITECTURE,
@@ -241,22 +309,22 @@ def create_run_config(
         "ppo_config": dict(ppo_config),
         "rl_config": dict(rl_config),
         "diagnostic_config": dict(diagnostic_config or {}),
+        "locked_arguments": dict(locked_arguments or {}),
+        "machine": dict(machine or {}),
         "lineage": list(lineage or ()),
         "git_commit": _git_commit(root),
         "created_at": _utc_now(),
     }
+    value["configuration_sha256"] = configuration_sha256(value)
     config_path = run_dir / "run_config.json"
     if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as stream:
-                existing = json.load(stream)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(
-                f"Existing canonical run config cannot be read: {config_path}."
-            ) from exc
+        existing = load_run_config(run_dir)
         immutable_keys = (
             "format_version",
+            "config_hash_version",
+            "run_name",
             "seed",
+            "ruleset_version",
             "encoder_size",
             "action_count",
             "network_architecture",
@@ -264,6 +332,9 @@ def create_run_config(
             "supervised_weights_sha256",
             "ppo_config",
             "rl_config",
+            "diagnostic_config",
+            "locked_arguments",
+            "machine",
         )
         differences = [
             key for key in immutable_keys if existing.get(key) != value.get(key)
@@ -281,10 +352,7 @@ def create_run_config(
             raise ValueError(
                 "Existing canonical run_config.json is incompatible in: " + fields
             )
-        diagnostic_changed = (
-            existing.get("diagnostic_config") != value["diagnostic_config"]
-        )
-        if target_changed or level_changed or lineage or diagnostic_changed:
+        if target_changed or level_changed or lineage:
             existing.update({
                 "pipeline_level": pipeline_level,
                 "target_rl_games": value["target_rl_games"],
@@ -292,7 +360,7 @@ def create_run_config(
                 "lineage": list(lineage or existing.get("lineage", ())),
                 "updated_at": _utc_now(),
             })
-            existing["diagnostic_config"] = value["diagnostic_config"]
+            existing["configuration_sha256"] = configuration_sha256(existing)
             atomic_write_json(config_path, existing)
         return existing
     atomic_write_json(config_path, value)
@@ -307,10 +375,20 @@ def load_resume_point(
     ppo_config,
     algorithm=PPO_TRAINING_ALGORITHM,
     force_incompatible=False,
+    expected_configuration_sha256=None,
 ):
     """Validate the latest marker and exact weights/resume pair."""
     algorithm = _validated_algorithm(algorithm)
     run_dir = Path(run_dir)
+    run_config = load_run_config(run_dir)
+    configuration_hash = run_config["configuration_sha256"]
+    if (
+        expected_configuration_sha256 is not None
+        and expected_configuration_sha256 != configuration_hash
+    ):
+        raise ValueError(
+            "Requested run configuration hash does not match run_config.json."
+        )
     state_path = run_dir / "training_state.json"
     try:
         with open(state_path, "r", encoding="utf-8") as stream:
@@ -332,6 +410,7 @@ def load_resume_point(
         "algorithm": algorithm,
         "supervised_weights_sha256": supervised_weights_sha256,
         "ppo_config": dict(ppo_config),
+        "configuration_sha256": configuration_hash,
     }
     for key, expected_value in expected.items():
         if state.get(key) != expected_value:
@@ -387,6 +466,7 @@ def load_resume_point(
         "gpu_buffer_safety_fraction": float(
             ppo_config["gpu_buffer_safety_fraction"]
         ),
+        "run_configuration_sha256": configuration_hash,
     }
     pair_differences = [
         key
@@ -468,6 +548,8 @@ def publish_checkpoint(
     """Publish split canonical state and update latest only after all payloads."""
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
+    run_config = load_run_config(run_dir)
+    configuration_hash = run_config["configuration_sha256"]
     source_weights = Path(summary["rl_weights_path"])
     source_resume = Path(summary["resume_state_path"])
     resume_metadata, pool_snapshots = load_resume_state(
@@ -477,6 +559,14 @@ def publish_checkpoint(
     algorithm = _validated_algorithm(
         resume_metadata.get("configuration", {}).get("rl_training_algorithm")
     )
+    resume_configuration_hash = resume_metadata.get("configuration", {}).get(
+        "run_configuration_sha256"
+    )
+    if resume_configuration_hash != configuration_hash:
+        raise ValueError(
+            "Exact resume state does not match the canonical run "
+            "configuration hash."
+        )
     reported_algorithm = summary.get("rl_training_algorithm", algorithm)
     if reported_algorithm != algorithm:
         raise ValueError(
@@ -604,6 +694,7 @@ def publish_checkpoint(
                 "weights_path": _relative(run_dir, checkpoint_path),
                 "weights_sha256": file_sha256(checkpoint_path),
                 "resume_state_path": _relative(run_dir, checkpoint_state_path),
+                "configuration_sha256": configuration_hash,
                 "reason": reason,
                 "created_at": _utc_now(),
             },
@@ -623,8 +714,11 @@ def publish_checkpoint(
     )
     state = {
         "format_version": RUN_FORMAT_VERSION,
+        "configuration_sha256": configuration_hash,
+        "ruleset_version": RULESET_VERSION,
         "algorithm": algorithm,
         "pipeline_level": pipeline_level,
+        "run_name": run_config.get("run_name"),
         "seed": int(seed),
         "target_rl_games": (
             None if target_rl_games is None else int(target_rl_games)
@@ -661,6 +755,7 @@ def publish_checkpoint(
         "supervised_weights_path": str(supervised_weights_path),
         "supervised_weights_sha256": supervised_weights_sha256,
         "ppo_config": dict(summary["ppo_configuration"]),
+        "machine": dict(run_config.get("machine", {})),
         "rng_state_files": {"parent": _relative(run_dir, rng_path)},
         "rng_state_sha256": file_sha256(rng_path),
         "last_periodic_diagnostic_game": int(last_periodic_diagnostic_game),
@@ -696,6 +791,7 @@ def publish_checkpoint(
         "checkpoint_path": state["latest_weights_path"],
         "checkpoint_sha256": latest_hash,
         "resume_state_path": state["latest_resume_state_path"],
+        "configuration_sha256": configuration_hash,
         "reason": reason,
         "updated_at": state["updated_at"],
     })

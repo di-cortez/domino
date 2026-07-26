@@ -10,7 +10,6 @@ from middleware.domino_engine import DominoEngine
 
 
 TERMINAL_WIN_REWARD = 0.50
-TERMINAL_TIE_REWARD = 0.00
 TERMINAL_LOSS_REWARD = -0.50
 FINAL_PIP_PENALTY = 0.001
 
@@ -27,7 +26,6 @@ REWARD_ZERO_EPSILON = 1e-8
 REWARD_SCHEMAS = {
     "default": {
         "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_tie": TERMINAL_TIE_REWARD,
         "terminal_loss": TERMINAL_LOSS_REWARD,
         "final_pip_penalty": FINAL_PIP_PENALTY,
         "opponent_draw": OPPONENT_DRAW_REWARD,
@@ -38,7 +36,6 @@ REWARD_SCHEMAS = {
     },
     "sparse": {
         "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_tie": TERMINAL_TIE_REWARD,
         "terminal_loss": TERMINAL_LOSS_REWARD,
         "final_pip_penalty": 0.0,
         "opponent_draw": 0.0,
@@ -49,7 +46,6 @@ REWARD_SCHEMAS = {
     },
     "shaped": {
         "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_tie": TERMINAL_TIE_REWARD,
         "terminal_loss": TERMINAL_LOSS_REWARD,
         "final_pip_penalty": FINAL_PIP_PENALTY,
         "opponent_draw": OPPONENT_DRAW_REWARD * 2.0,
@@ -135,9 +131,7 @@ def _remaining_pips(hand):
 def _terminal_reward(engine, learner_position, schema):
     """Return terminal outcome reward plus final remaining-pip penalty."""
     winner = engine.winner
-    if winner == -1:
-        outcome_reward = schema["terminal_tie"]
-    elif winner == learner_position:
+    if winner == learner_position:
         outcome_reward = schema["terminal_win"]
     else:
         outcome_reward = schema["terminal_loss"]

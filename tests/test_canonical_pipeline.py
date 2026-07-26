@@ -49,8 +49,12 @@ from training.pipeline import (
     PERIODIC_DIAGNOSTIC_TUNING_FILE,
     PIPELINE_LEVELS,
     _cumulative_rl_games_per_second,
+    _locked_forever_arguments,
+    _ppo_config,
+    _rl_config,
     _resolve_periodic_diagnostic_workers,
     _run_periodic_point,
+    _write_forever_active_run,
     next_training_stop,
     parse_args,
     validate_args,
@@ -97,7 +101,7 @@ def _training_config():
 
 def _periodic_row(games, checkpoint_hash="a", diagnostic_seed=7):
     return {
-        "format_version": 1,
+        "format_version": 2,
         "pipeline_level": "big",
         "seed": 42,
         "rl_games": games,
@@ -108,12 +112,9 @@ def _periodic_row(games, checkpoint_hash="a", diagnostic_seed=7):
         "opponent": "random",
         "diagnostic_games": 100,
         "wins": 60,
-        "draws": 5,
-        "losses": 35,
+        "losses": 40,
         "win_rate": 0.60,
-        "draw_rate": 0.05,
-        "loss_rate": 0.35,
-        "score": 0.625,
+        "loss_rate": 0.40,
         "ci95_win_rate_low": 0.50,
         "ci95_win_rate_high": 0.69,
         "diagnostic_seed": diagnostic_seed,
@@ -190,6 +191,86 @@ def test_resume_accepts_default_or_explicit_run_directory():
     assert explicit.resume_from == Path(
         "models/rl/domino_rl_forever_seed42"
     )
+
+
+def test_forever_run_reloads_locked_arguments_from_the_active_pointer(tmp_path):
+    initial = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+        "--seed",
+        "7",
+        "--run-name",
+        "epochs8",
+        "--gpi",
+        "1000",
+        "--ppo-max-epochs",
+        "8",
+    ])
+    run_dir = canonical_run_dir(
+        tmp_path,
+        "forever",
+        initial.seed,
+        run_name=initial.run_name,
+    )
+    config = create_run_config(
+        run_dir,
+        root=tmp_path,
+        pipeline_level="forever",
+        seed=initial.seed,
+        target_rl_games=None,
+        supervised_weights_path="supervised.npz",
+        supervised_weights_sha256="f" * 64,
+        ppo_config=_ppo_config(initial),
+        rl_config=_rl_config(initial),
+        diagnostic_config={"periodic_games": 100},
+        run_name=initial.run_name,
+        locked_arguments=_locked_forever_arguments(initial),
+        machine={
+            "cpu_model": "Test CPU",
+            "logical_cpu_count": 4,
+            "ram_total_bytes": 8 * 1024**3,
+            "gpu_name": None,
+            "vram_total_bytes": None,
+            "rl_device": "cpu",
+        },
+    )
+    _write_forever_active_run(tmp_path, run_dir, config)
+
+    resumed = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+    ])
+    assert resumed.seed == 7
+    assert resumed.run_name == "epochs8"
+    assert resumed.gpi == 1000
+    assert resumed.ppo_max_epochs == 8
+    assert resumed._selected_run_dir == run_dir
+
+    with pytest.raises(SystemExit):
+        parse_args([
+            "forever",
+            "--artifact-root",
+            str(tmp_path),
+            "--gpi",
+            "2000",
+        ])
+
+    separate = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+        "--seed",
+        "8",
+        "--run-name",
+        "new",
+        "--gpi",
+        "2000",
+    ])
+    assert separate.seed == 8
+    assert separate.run_name == "new"
+    assert separate.gpi == 2000
 
 
 def test_canonical_pipeline_accepts_policy_only_reinforce():
@@ -478,10 +559,24 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         fresh_from_sl=True,
         **common,
     )
+    run_dir = canonical_run_dir(tmp_path, "forever", 321)
+    run_config = create_run_config(
+        run_dir,
+        root=ROOT,
+        pipeline_level="forever",
+        seed=321,
+        target_rl_games=None,
+        supervised_weights_path=supervised,
+        supervised_weights_sha256=supervised_hash,
+        ppo_config=uninterrupted["ppo_configuration"],
+        rl_config={"normalize_advantages": False},
+        algorithm=LEGACY_TRAINING_ALGORITHM,
+    )
     partial = self_play.train(
         rl_weights_path=str(tmp_path / "split" / "training.npz"),
         stop_after_training_games=2,
         fresh_from_sl=True,
+        run_configuration_sha256=run_config["configuration_sha256"],
         **common,
     )
 
@@ -490,19 +585,6 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
     assert "ppo_update" not in profile["sections_seconds"]
     assert profile["ppo_sections_seconds"] == {}
 
-    run_dir = canonical_run_dir(tmp_path, "forever", 321)
-    create_run_config(
-        run_dir,
-        root=ROOT,
-        pipeline_level="forever",
-        seed=321,
-        target_rl_games=None,
-        supervised_weights_path=supervised,
-        supervised_weights_sha256=supervised_hash,
-        ppo_config=partial["ppo_configuration"],
-        rl_config={"normalize_advantages": False},
-        algorithm=LEGACY_TRAINING_ALGORITHM,
-    )
     state = publish_checkpoint(
         run_dir,
         root=ROOT,
@@ -541,6 +623,7 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         start_iteration=point.completed_iterations,
         resume_weights_path=str(point.weights_path),
         resume_state_file=str(point.resume_state_path),
+        run_configuration_sha256=run_config["configuration_sha256"],
         **common,
     )
     with np.load(uninterrupted["rl_weights_path"], allow_pickle=False) as left:
@@ -644,7 +727,7 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
     tmp_path,
 ):
     supervised = ROOT / "models" / "domino_sl_weights.npz"
-    summary = self_play.train(
+    probe_summary = self_play.train(
         total_training_games=3,
         stop_after_training_games=2,
         gpi=2,
@@ -667,7 +750,7 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
     )
     run_dir = canonical_run_dir(tmp_path, "big", 42)
     supervised_hash = file_sha256(supervised)
-    create_run_config(
+    run_config = create_run_config(
         run_dir,
         root=ROOT,
         pipeline_level="big",
@@ -675,8 +758,30 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
         target_rl_games=3,
         supervised_weights_path=supervised,
         supervised_weights_sha256=supervised_hash,
-        ppo_config=summary["ppo_configuration"],
+        ppo_config=probe_summary["ppo_configuration"],
         rl_config={"test": True},
+    )
+    summary = self_play.train(
+        total_training_games=3,
+        stop_after_training_games=2,
+        gpi=2,
+        checkpoint_interval=1,
+        pool_refresh_games=2,
+        max_pool_size=2,
+        sl_weights_path=str(supervised),
+        rl_weights_path=str(tmp_path / "canonical" / "training.npz"),
+        seed=42,
+        device="cpu",
+        workers=1,
+        safety_config=ParallelSafetyConfig(
+            memory_reserve_mb=0,
+            estimated_worker_mb=1,
+            max_worker_rss_mb=1024,
+        ),
+        quiet=True,
+        numbered_checkpoints=True,
+        fresh_from_sl=True,
+        run_configuration_sha256=run_config["configuration_sha256"],
     )
     state = publish_checkpoint(
         run_dir,

@@ -1,11 +1,9 @@
-"""Train the supervised domino policy with safe CPU/GPU autotuning.
+"""Train the supervised domino policy with a fixed, memory-checked batch.
 
 The encoded dataset stays in host RAM when that is safe, falls back to a
 disk-backed ``.npy`` cache when it is not, and may be kept fully or partially
-resident on a selected GPU. Every completed autotuning epoch updates the live
-network and counts toward the requested maximum epoch total. Once tuning is
-complete, repeated low-improvement training-loss blocks can stop a saturated
-run early.
+resident on a selected GPU. Repeated low-improvement training-loss blocks can
+stop a saturated run early.
 """
 
 from __future__ import annotations
@@ -22,10 +20,8 @@ import numpy as np
 from agents.encoder import DominoEncoder
 from agents.nn import SupervisedNeuralNetwork
 from training.supervised_runtime import (
-    DEFAULT_SUPERVISED_CPU_BATCH_SIZE,
-    DEFAULT_SUPERVISED_GPU_BATCH_SIZE,
-    RetainedBatchAutotuner,
-    SUPERVISED_BATCH_AUTOTUNE_EPOCHS,
+    DEFAULT_SUPERVISED_BATCH_SIZE,
+    SUPERVISED_BATCH_SIZE_CHOICES,
     SUPERVISED_GPU_MEMORY_RESERVE_MB,
     SupervisedDataPlan,
     SupervisedResourceTracker,
@@ -45,7 +41,7 @@ from utils.runtime_status import format_duration, memory_report
 
 
 EPOCHS = 2000
-BATCH_SIZE = DEFAULT_SUPERVISED_CPU_BATCH_SIZE
+BATCH_SIZE = DEFAULT_SUPERVISED_BATCH_SIZE
 INITIAL_SUPERVISED_LEARNING_RATE = 0.005
 DEFAULT_WEIGHT_DECAY = 0.0001
 DEFAULT_EARLY_STOPPING_PATIENCE = 5
@@ -347,7 +343,7 @@ def _host_dataset_working_set_bytes(example_count, encoder):
         _encoded_bytes(example_count, encoder)
         + train_count * np.dtype(np.int64).itemsize
         + estimate_supervised_workspace_bytes(
-            min(DEFAULT_SUPERVISED_CPU_BATCH_SIZE, train_count),
+            min(DEFAULT_SUPERVISED_BATCH_SIZE, train_count),
             encoder.VECTOR_SIZE,
             256,
             128,
@@ -611,13 +607,12 @@ def _is_gpu_startup_failure(exc):
 
 def train_supervised(
     epochs=EPOCHS,
-    batch_size=None,
+    batch_size=DEFAULT_SUPERVISED_BATCH_SIZE,
     dataset_file="dataset/supervised_dataset.jsonl",
     weights_file="models/domino_sl_weights.npz",
     cache_file=ENCODED_CACHE_FILE,
     quiet=False,
     progress_callback=None,
-    status_callback=None,
     weight_decay=0.0,
     early_stopping_patience=None,
     lr_decay_factor=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
@@ -630,13 +625,12 @@ def train_supervised(
         DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT
     ),
     device="auto",
-    autotune_batch_size=True,
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
     gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
     seed=None,
     resume_existing_weights=True,
 ):
-    """Train the policy and return scheduler, storage, tuning, and memory data."""
+    """Train the policy and return scheduler, storage, batch, and memory data."""
     if epochs < 1:
         raise ValueError("epochs must be positive")
     started = time.time()
@@ -787,35 +781,38 @@ def train_supervised(
     elif not quiet:
         print("No existing supervised model found. Training from scratch.")
 
-    fixed_batch = None
-    if batch_size is not None:
-        fixed_batch = int(batch_size)
-    elif not autotune_batch_size:
-        fixed_batch = (
-            DEFAULT_SUPERVISED_GPU_BATCH_SIZE
-            if selected_device == "gpu"
-            else DEFAULT_SUPERVISED_CPU_BATCH_SIZE
-        )
-
-    emit_status = status_callback
-    if emit_status is None:
-        emit_status = (lambda _message: None) if quiet else print
-    autotuner = RetainedBatchAutotuner(
-        device=selected_device,
-        training_examples=train_count,
-        total_epochs=epochs,
-        preflight=lambda candidate: data_plan.batch_memory_preflight(
+    requested_batch_size = int(batch_size)
+    if requested_batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    selected_batch_size = min(requested_batch_size, train_count)
+    batch_memory_preflight = dict(
+        data_plan.batch_memory_preflight(
             network,
-            candidate,
-            gpu_memory_reserve_mb
-            if selected_device == "gpu"
-            else memory_reserve_mb,
-        ),
-        enabled=autotune_batch_size and batch_size is None,
-        fixed_batch_size=fixed_batch,
-        epochs_per_candidate=SUPERVISED_BATCH_AUTOTUNE_EPOCHS,
-        status_callback=emit_status,
+            selected_batch_size,
+            (
+                gpu_memory_reserve_mb
+                if selected_device == "gpu"
+                else memory_reserve_mb
+            ),
+        )
     )
+    if not batch_memory_preflight.get("safe", False):
+        reason = batch_memory_preflight.get(
+            "reason",
+            "memory preflight rejected the fixed batch",
+        )
+        raise MemorySafetyError(
+            f"Fixed supervised batch {selected_batch_size:,} is unsafe: {reason}."
+        )
+    if not quiet:
+        print(
+            f"Supervised batch size: {selected_batch_size:,}"
+            + (
+                f" (requested {requested_batch_size:,}; capped to training set)."
+                if selected_batch_size != requested_batch_size
+                else "."
+            )
+        )
 
     tracker = SupervisedResourceTracker(selected_device)
     best_state = {
@@ -890,7 +887,7 @@ def train_supervised(
             x_val=x_val,
             y_val=y_val,
             epochs=epochs,
-            batch_size=autotuner.current_batch_size,
+            batch_size=selected_batch_size,
             on_validation=save_if_best,
             progress_callback=progress_callback,
             quiet=quiet,
@@ -900,7 +897,6 @@ def train_supervised(
             validation_interval=SUPERVISED_VALIDATION_INTERVAL_EPOCHS,
             epoch_runner=data_plan.train_epoch,
             validation_runner=data_plan.validation_loss,
-            batch_controller=autotuner,
             epoch_metrics_callback=record_epoch_metrics,
             training_plateau_window=(
                 training_plateau_window if training_plateau_enabled else None
@@ -928,7 +924,6 @@ def train_supervised(
     )
 
     elapsed = time.time() - started
-    tuning_summary = autotuner.to_dict()
     training_summary = network.last_training_summary
     final_validation_loss = next(
         (
@@ -991,8 +986,9 @@ def train_supervised(
         ),
         "final_training_loss": float(loss_history[-1]),
         "final_validation_loss": final_validation_loss,
-        "batch_size": tuning_summary["selected_batch_size"],
-        "selected_batch_size": tuning_summary["selected_batch_size"],
+        "batch_size": selected_batch_size,
+        "requested_batch_size": requested_batch_size,
+        "selected_batch_size": selected_batch_size,
         "total_examples": total_examples,
         "train_examples": train_count,
         "validation_examples": validation_count,
@@ -1035,8 +1031,7 @@ def train_supervised(
         "resident_window_examples": data_plan.resident_window_examples,
         "full_dataset_on_gpu": data_plan.full_dataset_on_gpu,
         "full_dataset_upload_seconds": data_plan.full_upload_seconds,
-        "batch_autotune_attempts": tuning_summary["attempts"],
-        "autotune_epochs_retained": tuning_summary["autotune_epochs_retained"],
+        "batch_memory_preflight": batch_memory_preflight,
         "initial_learning_rate": training_summary["initial_learning_rate"],
         "final_learning_rate": training_summary["final_learning_rate"],
         "lr_decay_factor": lr_decay_factor,
@@ -1187,13 +1182,9 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
     group.add_argument(
         "--sl-batch-size",
         type=_positive_int,
-        default=None,
-        help="Use a fixed supervised mini-batch and disable autotuning.",
-    )
-    group.add_argument(
-        "--sl-no-batch-autotune",
-        action="store_true",
-        help="Use the device default batch without retained autotuning.",
+        choices=SUPERVISED_BATCH_SIZE_CHOICES,
+        default=DEFAULT_SUPERVISED_BATCH_SIZE,
+        help="Fixed supervised mini-batch size.",
     )
     group.add_argument(
         "--sl-memory-reserve-mb",
@@ -1241,7 +1232,6 @@ def main(argv=None):
             args.sl_training_plateau_min_relative_improvement
         ),
         device=args.sl_device,
-        autotune_batch_size=not args.sl_no_batch_autotune,
         memory_reserve_mb=args.sl_memory_reserve_mb,
         gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
         seed=args.sl_seed,

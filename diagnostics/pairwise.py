@@ -273,18 +273,14 @@ def _play_game_unprofiled(agent, opponent, agent_position, suppress_agent_output
 
     final_state = engine.to_dict()
     winner = final_state["winner"]
-    if winner == -1:
-        result = "draw"
-    elif winner == agent_position:
-        result = "win"
-    else:
-        result = "loss"
+    result = "win" if winner == agent_position else "loss"
     pips = [sum(tile[0] + tile[1] for tile in hand) for hand in final_state["hands"]]
     initial_hands = final_state["initial_hands"]
     record = {
         "game": None,
         "agent_position": agent_position,
         "result": result,
+        "win_reason": final_state["win_reason"],
         "turns": final_state["turn"],
         "agent_initial_hand": initial_hands[agent_position],
         "opponent_initial_hand": initial_hands[1 - agent_position],
@@ -390,12 +386,7 @@ def play_game(
     final_state = engine.to_dict()
     winner = final_state["winner"]
 
-    if winner == -1:
-        result = "draw"
-    elif winner == agent_position:
-        result = "win"
-    else:
-        result = "loss"
+    result = "win" if winner == agent_position else "loss"
 
     pips = [sum(tile[0] + tile[1] for tile in hand) for hand in final_state["hands"]]
     initial_hands = final_state["initial_hands"]
@@ -404,6 +395,7 @@ def play_game(
         "game": None,
         "agent_position": agent_position,
         "result": result,
+        "win_reason": final_state["win_reason"],
         "turns": final_state["turn"],
         "agent_initial_hand": initial_hands[agent_position],
         "opponent_initial_hand": initial_hands[1 - agent_position],
@@ -490,6 +482,7 @@ def save_csv(games, path):
         "game_seed",
         "agent_position",
         "result",
+        "win_reason",
         "turns",
         "agent_initial_hand",
         "opponent_initial_hand",
@@ -592,7 +585,7 @@ def print_summary(summary, duration_s):
         f"Games: {game_count} | time: {format_duration(duration_s)} "
         f"({games_per_second:.1f} games/s)"
     )
-    for key in ("win", "draw", "loss"):
+    for key in ("win", "loss"):
         rate = summary["rates"][key]
         print(f"  {LABEL[key]:<8} {summary['counts'][key]:>5}  ({rate:6.1%})")
     lo, hi = summary["win_ci95"]

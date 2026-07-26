@@ -86,10 +86,8 @@ def _matrix_rows(summaries):
             "opponent": summary["opponent"],
             "games": summary["game_count"],
             "wins": counts["win"],
-            "draws": counts["draw"],
             "losses": counts["loss"],
             "win_rate": rates["win"],
-            "draw_rate": rates["draw"],
             "loss_rate": rates["loss"],
             "mean_turns": summary["mean_turns"],
             "value_sample_count": values.get("sample_count"),
@@ -109,10 +107,8 @@ def _save_matrix_csv(rows, path):
         "opponent",
         "games",
         "wins",
-        "draws",
         "losses",
         "win_rate",
-        "draw_rate",
         "loss_rate",
         "mean_turns",
         "value_sample_count",
@@ -250,6 +246,7 @@ def run_all_pairs(
     autotune_fraction=DEFAULT_AUTOTUNE_FRACTION,
     autotune_minimum_gain=DEFAULT_MINIMUM_GAIN,
     status_callback=None,
+    run_metadata=None,
 ):
     """Evaluate canonical agents and write aggregate artifacts.
 
@@ -424,6 +421,7 @@ def run_all_pairs(
     rows = _matrix_rows(summaries)
     choice_opportunities = _aggregate_choice_opportunities(summaries)
     report = {
+        "run": dict(run_metadata or {}),
         "choice_opportunities": choice_opportunities,
         "comparison_opponent": RANDOM_BASELINE_OPPONENT,
         "report_layout": "single_row",

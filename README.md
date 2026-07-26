@@ -70,10 +70,12 @@ Pipeline levels differ primarily in exact cumulative RL games:
 | `huge` | 100,000 | 42, reusable | 10,000,000 | 1,000,000 | Every 100,000 games |
 | `forever` | 100,000 | 42, reusable | No limit | None automatically | Every 100,000 games |
 
-RL uses a fixed GPI of 2,000. Only direct `training.self_play` experiments can
-override it with `--gpi`; pipelines and sweeps do not expose GPI as a tuning
-axis. Before real games begin, an isolated benchmark selects the rollout-worker
-count and discards its games. Training uses masked PPO with adaptive
+GPI is never autotuned. Canonical pipelines and direct
+`training.self_play` runs accept `--gpi` from
+`100, 200, 400, 600, 800, 1000, 2000`, defaulting to 2,000; sweeps keep it
+fixed rather than using it as a tuning axis. Before real games begin, an
+isolated benchmark selects the rollout-worker count and discards its games.
+Training uses masked PPO with adaptive
 minibatches. Direct self-play and the finite canonical profiles retain the
 four-epoch default; `forever` now allows up to 16 epochs. After each complete
 epoch, a whole-buffer KL check stops the update before the next epoch when its
@@ -85,33 +87,39 @@ cumulative real games, and checkpoint saves do not run an extra evaluation
 matchup.
 
 `big`, `huge`, and `forever` persist weights, optimizer, RNGs, counters, and
-the opponent pool. Continue the same cumulative target with `--resume`, or
-extend a lineage with `--resume-from`:
+the opponent pool. Continue finite cumulative targets with `--resume`, or
+extend a lineage with `--resume-from`. A first `forever` start accepts and
+locks its complete configuration:
 
 ```bash
 python -m training.pipeline big --resume
 python -m training.pipeline huge \
   --resume-from models/rl/domino_rl_big_seed42
-python -m training.pipeline forever --resume
-python -m training.pipeline forever \
-  --resume models/rl/domino_rl_forever_seed42
+
+python -m training.pipeline forever --seed 42 --gpi 2000 \
+  --ppo-max-epochs 16 --run-name baseline
+# Later starts reload the active run and all locked arguments:
+python -m training.pipeline forever
 ```
 
 Start and later resume an unbounded policy-only REINFORCE run with:
 
 ```bash
 python -m training.pipeline forever --no-ppo
-python -m training.pipeline forever --no-ppo --resume
+python -m training.pipeline forever
 ```
 
-The algorithm is part of the exact resume identity. Repeat `--no-ppo` on every
-resume command; a `reinforce_v1` run cannot be resumed as `ppo_v1`, or vice
+The algorithm is part of the exact resume identity and is reloaded
+automatically; a `reinforce_v1` run cannot be resumed as `ppo_v1`, or vice
 versa. Canonical runs remain policy-only in both modes, so `--value-head` stays
 limited to direct self-play experiments.
 
-`--resume` without a value uses the level/seed default directory. For
-convenience, `--resume RUN_DIR` is also accepted and is equivalent to
-`--resume-from RUN_DIR`.
+For `forever`, `run_config.json` records the full locked configuration and its
+SHA-256, the ruleset, optional run name, supervised origin, and the machine on
+which the run started. A checkpoint must carry the same hash. A conflicting
+argument on a later invocation is rejected; use a new `--run-name` or
+`--restart-rl` for a distinct experiment. `--resume RUN_DIR` remains an explicit
+alias for `--resume-from RUN_DIR`.
 
 The `forever` periodic RL-vs-random worker autotune runs once. Its selection is
 stored in `periodic_diagnostic_tuning.json` and reused at every later milestone
@@ -120,6 +128,11 @@ over the full persisted RL training lineage.
 
 The first SIGINT/SIGTERM finishes the current iteration, publishes a safe
 checkpoint, and exits; `forever` never launches the final all-pairs diagnostic.
+
+Domino games always produce one winner. Empty hand wins first; blocked games
+use fewest pips, then fewest tiles, then the most recent valid tile play among
+the players still tied. Diagnostics therefore report win/loss outcomes and the
+winning-reason distribution, never game-result draws.
 
 Supervised epoch counts are maximum budgets. Training stops earlier by default
 after a conservative repeated-block check confirms that training loss has

@@ -25,7 +25,11 @@ def summarize(games, agent_name, opponent_name, seed):
     """Aggregate per-game rows into rates, confidence intervals, and means."""
     game_count = len(games)
     counts = {result: sum(1 for game in games if game["result"] == result)
-              for result in ("win", "draw", "loss")}
+              for result in ("win", "loss")}
+    win_reasons = {}
+    for game in games:
+        reason = game.get("win_reason", "unknown")
+        win_reasons[reason] = win_reasons.get(reason, 0) + 1
 
     summary = {
         "agent": agent_name,
@@ -35,7 +39,7 @@ def summarize(games, agent_name, opponent_name, seed):
         "counts": counts,
         "rates": {result: count / game_count for result, count in counts.items()},
         "win_ci95": wilson_interval(counts["win"], game_count),
-        "draw_ci95": wilson_interval(counts["draw"], game_count),
+        "win_reasons": dict(sorted(win_reasons.items())),
         "mean_turns": float(np.mean([game["turns"] for game in games])),
         "std_turns": float(np.std([game["turns"] for game in games])),
         "mean_agent_remaining_pips": float(np.mean([game["agent_remaining_pips"] for game in games])),
@@ -64,8 +68,8 @@ MUTED = "#898781"
 GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 
-COLOR = {"win": "#2a78d6", "draw": "#1baf7a", "loss": "#eda100"}
-LABEL = {"win": "Win", "draw": "Draw", "loss": "Loss"}
+COLOR = {"win": "#2a78d6", "loss": "#eda100"}
+LABEL = {"win": "Win", "loss": "Loss"}
 
 
 def _prepare_axis(ax, title):
@@ -98,13 +102,13 @@ def _save_figure(fig, path):
 
 
 def plot_cumulative_rates(games, path, subtitle):
-    """Plot cumulative win/draw/loss rates over the evaluation run."""
+    """Plot cumulative win/loss rates over the evaluation run."""
     fig, ax = _new_figure()
     _prepare_axis(ax, f"Cumulative result rates - {subtitle}")
 
     n = len(games)
     x = np.arange(1, n + 1)
-    for result in ("win", "draw", "loss"):
+    for result in ("win", "loss"):
         cumulative = np.cumsum([game["result"] == result for game in games]) / x
         ax.plot(x, 100 * cumulative, color=COLOR[result], linewidth=2, label=LABEL[result])
         ax.annotate(
@@ -132,7 +136,7 @@ def plot_distribution(summary, path, subtitle):
     ax.grid(axis="x", color=GRID, linewidth=0.8)
     ax.grid(axis="y", visible=False)
 
-    results = ["loss", "draw", "win"]
+    results = ["loss", "win"]
     values = [summary["counts"][result] for result in results]
     colors = [COLOR[result] for result in results]
     ax.barh([LABEL[result] for result in results], values, color=colors, height=0.55)

@@ -1,4 +1,4 @@
-"""Focused tests for safe retained supervised CPU/GPU autotuning."""
+"""Focused tests for safe supervised CPU/GPU training."""
 
 from __future__ import annotations
 
@@ -24,11 +24,9 @@ from agents.neural_agent import NeuralAgent
 from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
 from agents.rl_nn import PolicyNetwork
 from training.supervised_runtime import (
-    RetainedBatchAutotuner,
-    SUPERVISED_CPU_BATCH_CANDIDATES,
-    SUPERVISED_GPU_BATCH_CANDIDATES,
+    DEFAULT_SUPERVISED_BATCH_SIZE,
+    SUPERVISED_BATCH_SIZE_CHOICES,
     SupervisedDataPlan,
-    effective_batch_candidates,
     probe_gpu_residency,
 )
 from training.training_loop import (
@@ -45,10 +43,6 @@ from utils.resource_limits import (
     choose_safe_supervised_device,
 )
 from train_script import run_pipeline
-
-
-def _safe_preflight(batch_size):
-    return {"safe": True, "batch_size": batch_size}
 
 
 def _dataset_record(game_id):
@@ -74,180 +68,12 @@ def _write_dataset(path, count=12):
             stream.write(json.dumps(_dataset_record(game_id)) + "\n")
 
 
-class BatchAutotunerTests(unittest.TestCase):
-    def test_candidate_lists_and_full_dataset_caps(self):
-        self.assertEqual(SUPERVISED_CPU_BATCH_CANDIDATES[0], 1024)
-        self.assertEqual(SUPERVISED_CPU_BATCH_CANDIDATES[-1], 1048576)
-        self.assertEqual(SUPERVISED_GPU_BATCH_CANDIDATES[0], 2048)
-        self.assertEqual(SUPERVISED_GPU_BATCH_CANDIDATES[-1], 1048576)
-        self.assertEqual(effective_batch_candidates("cpu", 900), (900,))
-        self.assertEqual(
-            effective_batch_candidates("gpu", 5000),
-            (2048, 4096, 5000),
-        )
-
-    def _run_two_candidates(self, second_gain):
-        examples = 4096
-        tuner = RetainedBatchAutotuner(
-            device="cpu",
-            training_examples=examples,
-            total_epochs=30,
-            preflight=_safe_preflight,
-        )
-        for epoch in range(10):
-            tuner.record_epoch(epoch, 1.0)
-        second_duration = 1.0 / (1.0 + second_gain)
-        for epoch in range(10, 20):
-            tuner.record_epoch(epoch, second_duration)
-        return tuner
-
-    def test_exact_ten_percent_is_accepted_but_9_9_percent_is_rejected(self):
-        rejected = self._run_two_candidates(0.099)
-        self.assertTrue(rejected.finished)
-        self.assertEqual(rejected.selected_batch_size, 1024)
-        self.assertAlmostEqual(
-            rejected.attempts[1]["gain_over_accepted"],
-            0.099,
-        )
-        accepted = self._run_two_candidates(0.10)
-        self.assertFalse(accepted.finished)
-        self.assertEqual(accepted.selected_batch_size, 2048)
-        self.assertGreaterEqual(
-            accepted.attempts[1]["gain_over_accepted"],
-            0.10,
-        )
-
-    def test_status_lines_report_times_throughput_gain_and_selection(self):
-        messages = []
-        tuner = RetainedBatchAutotuner(
-            device="gpu",
-            training_examples=4096,
-            total_epochs=20,
-            preflight=_safe_preflight,
-            status_callback=messages.append,
-        )
-        for epoch in range(10):
-            tuner.record_epoch(epoch, 0.5)
-        for epoch in range(10, 20):
-            tuner.record_epoch(epoch, 0.5)
-
-        combined = "\n".join(messages)
-        self.assertIn("optimal supervised batch size on GPU", combined)
-        self.assertIn("median epoch 0.500s", combined)
-        self.assertIn("test total 5.0s", combined)
-        self.assertIn("8,192 examples/s", combined)
-        self.assertIn("+0.0% improvement", combined)
-        self.assertIn("Marginal gain is below 10%", combined)
-        self.assertIn("Optimal supervised batch size: 2,048", combined)
-
-    def test_rejected_candidate_epochs_remain_and_progress_is_exact(self):
-        network = SupervisedNeuralNetwork(
-            input_size=2,
-            hidden1_size=2,
-            hidden2_size=2,
-            output_size=2,
-            random_seed=1,
-            device="cpu",
-        )
-        tuner = RetainedBatchAutotuner(
-            device="cpu",
-            training_examples=4096,
-            total_epochs=25,
-            preflight=_safe_preflight,
-        )
-        initial = network.W1.copy()
-        seen_batches = []
-        progress = []
-
-        def epoch_runner(current_network, batch_size, _epoch):
-            current_network.W1 += np.float32(1.0)
-            seen_batches.append(batch_size)
-            return 0.0, 1, 0
-
-        timer_values = [float(value) for value in range(50)]
-        with mock.patch("agents.nn.time.perf_counter", side_effect=timer_values):
-            history = network.train(
-                np.zeros((2, 1), dtype=np.float32),
-                np.zeros((2, 1), dtype=np.float32),
-                epochs=25,
-                batch_size=1024,
-                quiet=True,
-                epoch_runner=epoch_runner,
-                batch_controller=tuner,
-                progress_callback=lambda done, total: progress.append((done, total)),
-            )
-
-        self.assertEqual(len(history), 25)
-        np.testing.assert_allclose(network.W1, initial + np.float32(25.0))
-        self.assertEqual(seen_batches[:10], [1024] * 10)
-        self.assertEqual(seen_batches[10:20], [2048] * 10)
-        self.assertEqual(seen_batches[20:], [1024] * 5)
-        self.assertEqual(tuner.autotune_epochs_retained, 20)
-        self.assertEqual(progress, [(index, 25) for index in range(1, 26)])
-
-    def test_memory_preflight_rejects_before_larger_candidate_updates(self):
-        calls = []
-
-        def preflight(batch_size):
-            calls.append(batch_size)
-            return {
-                "safe": batch_size == 1024,
-                "reason": "simulated low memory",
-            }
-
-        tuner = RetainedBatchAutotuner(
-            device="cpu",
-            training_examples=4096,
-            total_epochs=30,
-            preflight=preflight,
-        )
-        for epoch in range(10):
-            tuner.record_epoch(epoch, 1.0)
-        self.assertEqual(calls, [1024, 2048])
-        self.assertTrue(tuner.finished)
-        self.assertEqual(tuner.current_batch_size, 1024)
-        self.assertEqual(tuner.attempts[-1]["completed_epochs"], 0)
-
-    def test_runtime_memory_failure_retries_with_last_accepted_batch(self):
-        network = SupervisedNeuralNetwork(
-            input_size=2,
-            hidden1_size=2,
-            hidden2_size=2,
-            output_size=2,
-            random_seed=1,
-            device="cpu",
-        )
-        tuner = RetainedBatchAutotuner(
-            device="cpu",
-            training_examples=4096,
-            total_epochs=25,
-            preflight=_safe_preflight,
-        )
-        successful_updates = []
-        failed_once = False
-
-        def epoch_runner(_network, batch_size, epoch):
-            nonlocal failed_once
-            if epoch == 10 and batch_size == 2048 and not failed_once:
-                failed_once = True
-                raise MemoryError("simulated allocator pressure")
-            successful_updates.append((epoch, batch_size))
-            return 0.0, 1, 0
-
-        history = network.train(
-            np.zeros((2, 1), dtype=np.float32),
-            np.zeros((2, 1), dtype=np.float32),
-            epochs=25,
-            batch_size=1024,
-            quiet=True,
-            epoch_runner=epoch_runner,
-            batch_controller=tuner,
-        )
-        self.assertEqual(len(history), 25)
-        self.assertEqual(len(successful_updates), 25)
-        self.assertEqual(successful_updates[10], (10, 1024))
-        self.assertEqual(tuner.selected_batch_size, 1024)
-        self.assertIn("MemoryError", tuner.attempts[-1]["failure_reason"])
+class FixedBatchConfigurationTests(unittest.TestCase):
+    def test_default_and_optional_batch_sizes(self):
+        self.assertEqual(DEFAULT_SUPERVISED_BATCH_SIZE, 8192)
+        self.assertEqual(SUPERVISED_BATCH_SIZE_CHOICES[0], 1024)
+        self.assertEqual(SUPERVISED_BATCH_SIZE_CHOICES[-1], 1048576)
+        self.assertIn(DEFAULT_SUPERVISED_BATCH_SIZE, SUPERVISED_BATCH_SIZE_CHOICES)
 
 
 class SchedulerAndNumericTests(unittest.TestCase):
@@ -380,41 +206,6 @@ class SchedulerAndNumericTests(unittest.TestCase):
                 "training_plateau_checks_without_improvement"
             ],
             1,
-        )
-
-    def test_training_plateau_excludes_batch_tuning_epochs(self):
-        network, x, y = self._network_and_arrays()
-
-        class TwoEpochBatchTuner:
-            current_batch_size = 3
-            finished = False
-
-            def record_epoch(self, epoch_index, _duration_s):
-                if epoch_index == 1:
-                    self.finished = True
-
-        history = network.train(
-            x,
-            y,
-            epochs=12,
-            batch_size=3,
-            quiet=True,
-            epoch_runner=lambda *_args: (0.5, 1, 0),
-            batch_controller=TwoEpochBatchTuner(),
-            training_plateau_window=2,
-            training_plateau_patience=1,
-            training_plateau_min_epochs=1,
-            training_plateau_min_relative_improvement=0.001,
-        )
-
-        self.assertEqual(len(history), 6)
-        self.assertEqual(
-            network.last_training_summary["training_plateau_loss_start_epoch"],
-            3,
-        )
-        self.assertEqual(
-            network.last_training_summary["stopping_reason"],
-            "training_loss_plateau",
         )
 
     def test_float32_forward_backward_and_legacy_checkpoint_loading(self):
@@ -611,7 +402,7 @@ class DatasetResidencyTests(unittest.TestCase):
         self.assertLess(lower, 0.316)
         self.assertGreater(lower, 0.30)
 
-    def test_quiet_training_hides_autotuner_and_returns_complete_summary(self):
+    def test_quiet_fixed_batch_training_returns_complete_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             dataset_path = root / "examples.jsonl"
@@ -688,22 +479,11 @@ class DatasetResidencyTests(unittest.TestCase):
             self.assertTrue((root / "weights.npz").is_file())
             self.assertTrue((root / "weights_loss.png").is_file())
 
-    def test_compact_pipeline_shows_autotuner_status_without_epoch_chatter(self):
+    def test_compact_pipeline_uses_fixed_batch_without_epoch_chatter(self):
         captured_kwargs = {}
 
         def fake_train_supervised(**kwargs):
             captured_kwargs.update(kwargs)
-            kwargs["status_callback"](
-                "Testing the optimal supervised batch size on GPU..."
-            )
-            kwargs["status_callback"](
-                "Supervised batch test with 2,048 passed; median epoch "
-                "0.100s; test total 1.0s; 100,000 examples/s (baseline); "
-                "10 epochs retained."
-            )
-            kwargs["status_callback"](
-                "Optimal supervised batch size: 2,048."
-            )
             kwargs["progress_callback"](2, 2)
             return {
                 "epochs": 2,
@@ -714,7 +494,7 @@ class DatasetResidencyTests(unittest.TestCase):
             }
 
         args = SimpleNamespace(
-            sl_batch_size=None,
+            sl_batch_size=8192,
             weight_decay=0.0,
             early_stopping=None,
             lr_decay=0.5,
@@ -725,7 +505,6 @@ class DatasetResidencyTests(unittest.TestCase):
             sl_training_plateau_min_epochs=100,
             sl_training_plateau_min_relative_improvement=0.001,
             sl_device="cpu",
-            sl_no_batch_autotune=False,
             sl_memory_reserve_mb=512,
             sl_gpu_memory_reserve_mb=512,
             sl_seed=9,
@@ -741,15 +520,13 @@ class DatasetResidencyTests(unittest.TestCase):
             )
         self.assertTrue(captured_kwargs["quiet"])
         self.assertEqual(captured_kwargs["device"], "cpu")
+        self.assertEqual(captured_kwargs["batch_size"], 8192)
         self.assertTrue(captured_kwargs["training_plateau_enabled"])
         self.assertEqual(captured_kwargs["training_plateau_window"], 25)
         self.assertIn(
             "2/2 epochs, best validation loss 0.2500, 20 examples",
             output.getvalue(),
         )
-        self.assertIn("Testing the optimal supervised batch size", output.getvalue())
-        self.assertIn("median epoch 0.100s", output.getvalue())
-        self.assertIn("Optimal supervised batch size: 2,048", output.getvalue())
         self.assertNotIn("Checkpoint saved", output.getvalue())
         self.assertNotIn("validation loss:", output.getvalue())
 

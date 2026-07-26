@@ -1,11 +1,11 @@
 # Training scripts
 
 These wrappers compose the training modules documented in
-[`training/README.md`](../training/README.md). All reinforcement-learning
-entry points use `training.self_play`'s fixed default of 2,000 games per
-iteration. GPI is not a pipeline or sweep option. Use
-`python -m training.self_play --gpi N` only for a direct, deliberate
-self-play experiment.
+[`training/README.md`](../training/README.md). The canonical Python wrapper
+`python -m train_script.run_pipeline` mirrors
+`python -m training.pipeline`, including `--gpi` with the supported fixed
+choices. The older shell batch wrapper and parameter sweeps retain
+`training.self_play`'s default of 2,000 games per iteration.
 
 ## Full batch wrapper
 

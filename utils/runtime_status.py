@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import platform
+import subprocess
+
 from utils.resource_limits import (
     MIB,
     gpu_memory_info,
@@ -66,6 +70,107 @@ def _gpu_memory_bytes():
         "pool_used": pool_used,
         "pool_total": pool_total,
     }
+
+
+def _cpu_model():
+    """Return a stable host CPU model label when the operating system exposes it."""
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8") as stream:
+            for line in stream:
+                key, separator, value = line.partition(":")
+                if separator and key.strip() in {"model name", "Hardware"}:
+                    model = value.strip()
+                    if model:
+                        return model
+    except OSError:
+        pass
+    return platform.processor() or platform.machine() or "unknown CPU"
+
+
+def _physical_ram_total():
+    """Return installed host RAM rather than a process cgroup allowance."""
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as stream:
+            for line in stream:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    memory = system_memory_info()
+    return None if memory is None else int(memory.total)
+
+
+def _gpu_inventory():
+    """Return the first CUDA GPU name and total VRAM, when detectable."""
+    name = None
+    total_bytes = None
+    try:
+        import cupy
+
+        properties = cupy.cuda.runtime.getDeviceProperties(0)
+        name = properties.get("name", "CUDA device")
+        if isinstance(name, bytes):
+            name = name.decode(errors="replace")
+        name = str(name)
+        _free_bytes, total_bytes = cupy.cuda.runtime.memGetInfo()
+        total_bytes = int(total_bytes)
+    except Exception:
+        pass
+
+    if name is None or total_bytes is None:
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            first_line = result.stdout.splitlines()[0]
+            queried_name, queried_mib = (
+                item.strip() for item in first_line.rsplit(",", 1)
+            )
+            name = name or queried_name
+            total_bytes = total_bytes or int(float(queried_mib) * MIB)
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            pass
+    return name, total_bytes
+
+
+def machine_metadata(rl_device):
+    """Capture the machine identity recorded for one complete RL run."""
+    gpu_name, vram_total = _gpu_inventory()
+    return {
+        "cpu_model": _cpu_model(),
+        "logical_cpu_count": int(os.cpu_count() or 1),
+        "ram_total_bytes": _physical_ram_total(),
+        "gpu_name": gpu_name,
+        "vram_total_bytes": vram_total,
+        "rl_device": str(rl_device),
+        "platform": platform.platform(),
+    }
+
+
+def machine_summary(metadata):
+    """Return a concise one-line machine description for logs and plots."""
+    metadata = dict(metadata or {})
+    cpu = metadata.get("cpu_model") or "unknown CPU"
+    logical = metadata.get("logical_cpu_count")
+    cpu_text = f"{cpu} ({logical} logical)" if logical else cpu
+    ram = metadata.get("ram_total_bytes")
+    gpu = metadata.get("gpu_name") or "no detected GPU"
+    vram = metadata.get("vram_total_bytes")
+    device = str(metadata.get("rl_device") or "unknown").upper()
+    ram_text = "unknown RAM" if ram is None else f"RAM {_format_bytes(ram)}"
+    vram_text = "VRAM unavailable" if vram is None else f"VRAM {_format_bytes(vram)}"
+    return (
+        f"Machine: {cpu_text} · {ram_text} · {gpu} · {vram_text} · "
+        f"RL {device}"
+    )
 
 
 def memory_report():

@@ -34,6 +34,10 @@ and serialized state. The stable action forms are:
 - `("DRAW", None)` for a legal stock draw;
 - `None` for a legal pass.
 
+Games never end in a draw. Emptying a hand wins immediately. A blocked game is
+resolved by fewest remaining pips, then fewest remaining tiles, then the most
+recent valid tile play among any players still tied.
+
 `middleware.middleware.Agent` is the minimal `choose_move(state,
 legal_actions)` protocol. `GameManager` connects an engine to player agents and
 records public game history used by supervised data generation.
@@ -118,8 +122,9 @@ Supervised training can keep encoded arrays in host RAM, use atomic disk-backed
 memory maps, and place all or rotating windows of data on the GPU. It saves the
 best validation checkpoint atomically and renders the training/validation loss
 history already collected during that run. The epoch count is a maximum
-budget: after batch-size tuning is complete, repeated low-improvement blocks
-of training loss can stop a saturated run early.
+budget: repeated low-improvement blocks of training loss can stop a saturated
+run early. Supervised optimization uses a fixed, memory-checked batch of 8,192
+examples by default.
 
 RL uses fresh on-policy trajectories: all games in an iteration observe the
 same frozen policy. The default update stores masked collection-time
@@ -145,6 +150,10 @@ The RL budget is cumulative games, with shortened final and milestone
 iterations. Canonical `big`, `huge`, and `forever` state uses immutable payload
 generations and an atomic `training_state.json` marker so resume restores weights,
 optimizer, RNGs, pool order/provenance, adaptive choices, and counters.
+`forever` also persists a canonical configuration and SHA-256 on first start.
+Later bare invocations select the active run, reload its locked arguments, and
+resume its latest committed state; a conflicting explicit argument is rejected.
+The start machine is captured once as run provenance.
 Each canonical RL process also appends a session to
 `diagnostics/runtime_profile.json` inside the run directory. That atomic report
 keeps fine-grained RL/PPO and periodic RL-vs-random timing cumulative across
@@ -166,7 +175,7 @@ See `GPU_SETUP.md` for the installation and runtime selection policy.
 ## Diagnostics and reports
 
 `diagnostics.pairwise` alternates the evaluated agent between player positions,
-writes one record per game, summarizes win/draw/loss and choice opportunities,
+writes one record per game, summarizes win/loss and choice opportunities,
 and can generate plots. `diagnostics.evaluate` runs the four canonical agents
 against `random` and atomically replaces the aggregate output directory only
 after all requested artifacts are complete. For an RL checkpoint with `Wv` and

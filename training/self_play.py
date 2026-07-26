@@ -56,7 +56,6 @@ from training.rl_rollout import (
     REWARD_SCHEMAS,
     REWARD_ZERO_EPSILON,
     TERMINAL_LOSS_REWARD,
-    TERMINAL_TIE_REWARD,
     TERMINAL_WIN_REWARD,
     EventStats,
     TrainingSample,
@@ -265,6 +264,8 @@ def train(
     adaptive_tuning_training_games=None,
     force_resume_incompatible=False,
     checkpoint_callback=None,
+    run_configuration_sha256=None,
+    metrics_metadata=None,
 ):
     """Train an exact game budget with the selected on-policy update rule.
 
@@ -508,6 +509,7 @@ def train(
         ppo_min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
         prefer_gpu_buffer=prefer_gpu_buffer,
         gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
+        run_configuration_sha256=run_configuration_sha256,
     )
     if resume_metadata is not None:
         ignored = []
@@ -610,7 +612,60 @@ def train(
     if metrics_output_path is None:
         weights = Path(rl_weights_path)
         metrics_output_path = weights.with_name(f"{weights.stem}_training_metrics.jsonl")
-    metrics_path = _prepare_metrics_file(metrics_output_path, start_iteration)
+    metrics_header = {
+        "run_configuration_sha256": run_configuration_sha256,
+        "run_configuration": dict(metrics_metadata or {}),
+        "training": {
+            "effective_seed": int(effective_seed),
+            "algorithm": algorithm,
+            "total_training_games": int(total_training_games),
+            "games_per_iteration": int(selected_gpi),
+            "training_opponent": training_opponent,
+            "learning_rate": float(learning_rate),
+            "entropy_coef": float(entropy_coef),
+            "pool_refresh_games": int(pool_refresh_games),
+            "max_pool_size": int(max_pool_size),
+            "use_value_head": bool(use_value_head),
+            "value_coef": float(value_coef),
+            "gamma": float(gamma),
+            "reward_schema": reward_schema,
+            "reward_constants": dict(schema),
+            "clip_grad_norm": (
+                None if clip_grad_norm is None else float(clip_grad_norm)
+            ),
+            "normalize_advantages": bool(normalize_advantages),
+            "moving_average_window": int(moving_average_window),
+            "requested_device": requested_device,
+            "resolved_device": network.device,
+            "requested_workers": workers,
+            "selected_workers": int(selected_workers),
+            "supervised_weights_sha256": sl_weights_sha256,
+            "ppo": {
+                "enabled": bool(ppo_enabled),
+                "clip_epsilon": float(ppo_clip_epsilon),
+                "target_kl": float(ppo_target_kl),
+                "stop_kl": float(ppo_stop_kl),
+                "max_epochs": int(ppo_max_epochs),
+                "min_minibatches": int(ppo_min_minibatches),
+                "max_minibatches": int(ppo_max_minibatches),
+                "games_per_minibatch_scale": int(
+                    ppo_games_per_minibatch_scale
+                ),
+                "min_decisions_per_minibatch": int(
+                    ppo_min_decisions_per_minibatch
+                ),
+                "prefer_gpu_buffer": bool(prefer_gpu_buffer),
+                "gpu_buffer_safety_fraction": float(
+                    gpu_buffer_safety_fraction
+                ),
+            },
+        },
+    }
+    metrics_path = _prepare_metrics_file(
+        metrics_output_path,
+        start_iteration,
+        metadata=metrics_header,
+    )
     metrics_stream = open(metrics_path, "a", encoding="utf-8")
     start_time = time.time()
     training_perf_started = time.perf_counter()
@@ -984,7 +1039,13 @@ def train(
                 time.perf_counter() - section_started,
             )
             section_started = time.perf_counter()
-            _write_metrics_row(metrics_stream, row)
+            serialized_row = {
+                key: round(float(value), 5)
+                if isinstance(value, (float, np.floating))
+                else value
+                for key, value in row.items()
+            }
+            _write_metrics_row(metrics_stream, serialized_row)
             runtime_profile.add(
                 "metrics_jsonl_write_and_fsync",
                 time.perf_counter() - section_started,
@@ -1177,6 +1238,7 @@ def train(
             if numbered_checkpoints else None
         ),
         "rl_training_algorithm": algorithm,
+        "run_configuration_sha256": run_configuration_sha256,
         "ppo_enabled": bool(ppo_enabled),
         "ppo_configuration": {
             "clip_epsilon": float(ppo_clip_epsilon),

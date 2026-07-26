@@ -87,7 +87,7 @@ RL_ESTIMATED_WORKER_MB=256
 RL_MAX_WORKER_RSS_MB=1024
 RL_PPO=1
 
-# SL convergence, device, memory, and retained-batch controls. Plateau decay is
+# SL convergence, device, memory, and fixed-batch controls. Plateau decay is
 # enabled by default and has an independent counter from optional early
 # stopping.
 SL_EARLY_STOPPING_PATIENCE=""
@@ -101,8 +101,7 @@ SL_TRAINING_PLATEAU_MIN_EPOCHS=100
 SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT=0.001
 SL_WEIGHT_DECAY=""
 SL_DEVICE="auto"
-SL_BATCH_SIZE=""
-SL_BATCH_AUTOTUNE=1
+SL_BATCH_SIZE=8192
 SL_MEMORY_RESERVE_MB=512
 SL_GPU_MEMORY_RESERVE_MB=512
 SL_SEED=""
@@ -187,8 +186,9 @@ SL training controls:
   --sl-training-plateau-min-relative-improvement F  Improvement threshold (default: $SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT)
   --sl-weight-decay F              L2 penalty on the weight matrices
   --sl-device {auto,cpu,gpu}       Supervised array backend (default: $SL_DEVICE)
-  --sl-batch-size N                Fixed mini-batch size; disables autotuning
-  --sl-no-batch-autotune           Use the device default mini-batch size
+  --sl-batch-size N                Fixed mini-batch size: 1024, 2048, 4096, 8192,
+                                   16384, 32768, 65536, 131072, 262144, 524288,
+                                   or 1048576 (default: $SL_BATCH_SIZE)
   --sl-memory-reserve-mb N         Host RAM reserve (default: $SL_MEMORY_RESERVE_MB)
   --sl-gpu-memory-reserve-mb N     GPU VRAM reserve (default: $SL_GPU_MEMORY_RESERVE_MB)
   --sl-seed N                      Fix supervised initialization and shuffling
@@ -266,7 +266,6 @@ while [[ $# -gt 0 ]]; do
         --sl-weight-decay) SL_WEIGHT_DECAY="$2"; shift 2 ;;
         --sl-device) SL_DEVICE="$2"; shift 2 ;;
         --sl-batch-size) SL_BATCH_SIZE="$2"; shift 2 ;;
-        --sl-no-batch-autotune) SL_BATCH_AUTOTUNE=0; shift ;;
         --sl-memory-reserve-mb) SL_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --sl-gpu-memory-reserve-mb) SL_GPU_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --sl-seed) SL_SEED="$2"; shift 2 ;;
@@ -341,6 +340,7 @@ else
         --sl-training-plateau-patience "$SL_TRAINING_PLATEAU_PATIENCE"
         --sl-training-plateau-min-epochs "$SL_TRAINING_PLATEAU_MIN_EPOCHS"
         --sl-training-plateau-min-relative-improvement "$SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT"
+        --sl-batch-size "$SL_BATCH_SIZE"
     )
     if [[ -n "$SL_EARLY_STOPPING_PATIENCE" ]]; then
         SL_EXTRA_ARGS+=(--early-stopping "$SL_EARLY_STOPPING_PATIENCE")
@@ -355,11 +355,6 @@ else
     fi
     if [[ -n "$SL_WEIGHT_DECAY" ]]; then
         SL_EXTRA_ARGS+=(--weight-decay "$SL_WEIGHT_DECAY")
-    fi
-    if [[ -n "$SL_BATCH_SIZE" ]]; then
-        SL_EXTRA_ARGS+=(--sl-batch-size "$SL_BATCH_SIZE")
-    elif [[ "$SL_BATCH_AUTOTUNE" -eq 0 ]]; then
-        SL_EXTRA_ARGS+=(--sl-no-batch-autotune)
     fi
     if [[ -n "$SL_SEED" ]]; then
         SL_EXTRA_ARGS+=(--sl-seed "$SL_SEED")

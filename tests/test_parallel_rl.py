@@ -286,7 +286,7 @@ class ParallelRLTests(unittest.TestCase):
             full_base = root / "full.npz"
             resumed_base = root / "resumed.npz"
             common = {
-                "games_per_iteration": 4,
+                "gpi": 4,
                 "checkpoint_interval": 2,
                 "pool_refresh_games": 4,
                 "max_pool_size": 3,
@@ -403,7 +403,7 @@ class ParallelRLTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             common = {
-                "games_per_iteration": 4,
+                "gpi": 4,
                 "checkpoint_interval": 1,
                 "pool_refresh_games": 4,
                 "max_pool_size": 2,

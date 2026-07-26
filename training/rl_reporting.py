@@ -16,6 +16,54 @@ import numpy as np
 from training.rl_rollout import REWARD_ZERO_EPSILON
 
 
+TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"
+TRAINING_METRICS_VERSION = 2
+TRAINING_METRIC_COLUMNS = (
+    "iteration",
+    "total_iterations",
+    "games",
+    "cumulative_games",
+    "decisions",
+    "wins_in_batch",
+    "batch_win_rate",
+    "moving_average_win_rate",
+    "reward_mean",
+    "reward_std",
+    "reward_min",
+    "reward_max",
+    "good_pct",
+    "neutral_pct",
+    "bad_pct",
+    "entropy",
+    "gradient_norm_max",
+    "applied_gradient_norm",
+    "gradient_clipped",
+    "value_loss",
+    "moving_average_value_loss",
+    "requested_minibatches",
+    "effective_minibatches",
+    "minibatch_sizes",
+    "epochs_completed",
+    "stopped_by_kl",
+    "optimizer_steps",
+    "final_approx_kl",
+    "max_approx_kl",
+    "final_clip_fraction",
+    "final_policy_loss",
+    "gradient_norm_mean",
+    "buffer_location",
+    "buffer_bytes",
+    "selected_workers",
+    "pool_size",
+    "rollout_seconds",
+    "update_seconds",
+    "iteration_seconds",
+    "checkpoint_written",
+    "checkpoint_path",
+    "elapsed_training_seconds",
+)
+
+
 class RLRuntimeProfile:
     """Accumulate one self-play invocation's hierarchical runtime profile."""
 
@@ -233,25 +281,152 @@ def _print_ppo_window(rows):
     )
 
 
-def _prepare_metrics_file(path, start_iteration):
-    """Create or truncate the built-in JSONL trace to the resumed checkpoint."""
+def _metrics_header(metadata):
+    return {
+        "format": TRAINING_METRICS_FORMAT,
+        "version": TRAINING_METRICS_VERSION,
+        "columns": list(TRAINING_METRIC_COLUMNS),
+        "metadata": dict(metadata or {}),
+    }
+
+
+def _metric_values(row):
+    """Project one verbose in-memory row onto the compact stable v2 schema."""
+    values = {
+        "iteration": row["iteration"],
+        "total_iterations": row["total_iterations"],
+        "games": row["games"],
+        "cumulative_games": row["cumulative_games"],
+        "decisions": row["decisions"],
+        "wins_in_batch": row["wins_in_batch"],
+        "batch_win_rate": row["batch_win_rate"],
+        "moving_average_win_rate": row["moving_average_win_rate"],
+        "reward_mean": row["reward_mean"],
+        "reward_std": row["reward_std"],
+        "reward_min": row["reward_min"],
+        "reward_max": row["reward_max"],
+        "good_pct": row["good_pct"],
+        "neutral_pct": row["neutral_pct"],
+        "bad_pct": row["bad_pct"],
+        "entropy": (
+            row["final_entropy"]
+            if row.get("final_entropy") is not None
+            else row.get("entropy")
+        ),
+        "gradient_norm_max": (
+            row["gradient_norm_max"]
+            if row.get("gradient_norm_max") is not None
+            else row.get("grad_norm")
+        ),
+        "applied_gradient_norm": row.get("applied_grad_norm"),
+        "gradient_clipped": row["grad_clipped"],
+        "value_loss": row["value_loss"],
+        "moving_average_value_loss": row["moving_average_value_loss"],
+        "requested_minibatches": row["requested_minibatches"],
+        "effective_minibatches": row["effective_minibatches"],
+        "minibatch_sizes": row["minibatch_sizes"],
+        "epochs_completed": row["epochs_completed"],
+        "stopped_by_kl": row["stopped_by_kl"],
+        "optimizer_steps": row["optimizer_steps"],
+        "final_approx_kl": row["final_approx_kl"],
+        "max_approx_kl": row["max_approx_kl"],
+        "final_clip_fraction": row["final_clip_fraction"],
+        "final_policy_loss": row["final_policy_loss"],
+        "gradient_norm_mean": row["gradient_norm_mean"],
+        "buffer_location": row["buffer_location"],
+        "buffer_bytes": row["buffer_bytes"],
+        "selected_workers": row["selected_workers"],
+        "pool_size": row["pool_size"],
+        "rollout_seconds": row["rollout_seconds"],
+        "update_seconds": row["update_duration_s"],
+        "iteration_seconds": row["iteration_duration_s"],
+        "checkpoint_written": row["checkpoint_written"],
+        "checkpoint_path": row["checkpoint_path"],
+        "elapsed_training_seconds": row["elapsed_training_s"],
+    }
+    return [values[column] for column in TRAINING_METRIC_COLUMNS]
+
+
+def read_training_metrics(path):
+    """Read a v2 metrics header and return decoded per-iteration dictionaries."""
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise ValueError(f"Training metrics file is empty: {path}.")
+    try:
+        header = json.loads(lines[0])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Training metrics header is invalid: {path}.") from exc
+    if (
+        not isinstance(header, dict)
+        or header.get("format") != TRAINING_METRICS_FORMAT
+        or header.get("version") != TRAINING_METRICS_VERSION
+        or header.get("columns") != list(TRAINING_METRIC_COLUMNS)
+    ):
+        raise ValueError(
+            f"Unsupported training metrics format in {path}; "
+            f"expected v{TRAINING_METRICS_VERSION}."
+        )
+    rows = []
+    for line_number, line in enumerate(lines[1:], start=2):
+        if not line.strip():
+            continue
+        try:
+            values = json.loads(line)
+        except json.JSONDecodeError:
+            if line_number == len(lines):
+                break
+            raise ValueError(
+                f"Training metrics row {line_number} is invalid."
+            )
+        if not isinstance(values, list) or len(values) != len(
+            TRAINING_METRIC_COLUMNS
+        ):
+            raise ValueError(
+                f"Training metrics row {line_number} has the wrong column count."
+            )
+        rows.append(dict(zip(TRAINING_METRIC_COLUMNS, values)))
+    return header, rows
+
+
+def _prepare_metrics_file(path, start_iteration, metadata=None):
+    """Create a v2 trace or truncate it to the exact resumed iteration."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    header = _metrics_header(metadata)
     retained = []
     if start_iteration and path.is_file():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if int(row.get("iteration", 0)) <= int(start_iteration):
+        existing_header, existing_rows = read_training_metrics(path)
+        existing_hash = existing_header.get("metadata", {}).get(
+            "run_configuration_sha256"
+        )
+        requested_hash = header.get("metadata", {}).get(
+            "run_configuration_sha256"
+        )
+        if existing_hash != requested_hash:
+            raise ValueError(
+                "Training metrics configuration hash does not match the "
+                "resumed run."
+            )
+        header = existing_header
+        for row in existing_rows:
+            if int(row["iteration"]) <= int(start_iteration):
                 retained.append(row)
     temporary = path.with_name(
         f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     )
     try:
         with open(temporary, "w", encoding="utf-8") as stream:
+            stream.write(
+                json.dumps(header, separators=(",", ":"), allow_nan=False)
+                + "\n"
+            )
             for row in retained:
-                stream.write(json.dumps(row, sort_keys=True) + "\n")
+                values = [row[column] for column in TRAINING_METRIC_COLUMNS]
+                stream.write(
+                    json.dumps(values, separators=(",", ":"), allow_nan=False)
+                    + "\n"
+                )
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
@@ -262,6 +437,13 @@ def _prepare_metrics_file(path, start_iteration):
 
 def _write_metrics_row(stream, row):
     """Append and durably flush one self-play metrics row."""
-    stream.write(json.dumps(row, sort_keys=True) + "\n")
+    stream.write(
+        json.dumps(
+            _metric_values(row),
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    )
     stream.flush()
     os.fsync(stream.fileno())

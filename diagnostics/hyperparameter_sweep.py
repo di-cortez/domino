@@ -7,7 +7,7 @@ policy against a uniform random agent and in self-play (the same agent
 mirrored against itself), using ``diagnostics.pairwise.evaluate_pair``.
 
 Every record — the exact RL hyperparameters used plus every matchup's
-win/draw/loss rates — is appended to a single JSON array on disk
+win/loss rates — is appended to a single JSON array on disk
 (``--output``, default ``diagnostics/results/hyperparameter_sweep.json``), so
 repeated invocations accumulate a growing benchmark log instead of
 overwriting it.
@@ -56,7 +56,7 @@ DEFAULT_DIAGNOSTIC_GAMES = 10000
 
 
 def _match_rates(agent_name, opponent_name, game_count, weights=None, opponent_weights=None, seed=None):
-    """Play one matchup and return compact win/draw/loss rates."""
+    """Play one matchup and return compact win/loss rates."""
     games = evaluate_pair(
         agent_name,
         opponent_name,
@@ -71,7 +71,6 @@ def _match_rates(agent_name, opponent_name, game_count, weights=None, opponent_w
     return {
         "games": total,
         "win_rate": counts.get("win", 0) / total,
-        "draw_rate": counts.get("draw", 0) / total,
         "loss_rate": counts.get("loss", 0) / total,
     }
 

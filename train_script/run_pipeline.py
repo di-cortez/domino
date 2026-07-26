@@ -171,12 +171,6 @@ def _run_supervised_training(config, args):
     """Train the supervised policy with compact epoch progress."""
     training_loop = _silent_import("training.training_loop")
 
-    def supervised_status(message):
-        if tqdm is not None:
-            tqdm.write(message)
-        else:
-            print(message, flush=True)
-
     return _run_stage(
         "Supervised training",
         config.supervised_epochs,
@@ -186,7 +180,6 @@ def _run_supervised_training(config, args):
             batch_size=args.sl_batch_size,
             quiet=True,
             progress_callback=progress,
-            status_callback=supervised_status,
             weight_decay=args.weight_decay,
             early_stopping_patience=args.early_stopping,
             lr_decay_factor=args.lr_decay,
@@ -199,7 +192,6 @@ def _run_supervised_training(config, args):
                 args.sl_training_plateau_min_relative_improvement
             ),
             device=args.sl_device,
-            autotune_batch_size=not args.sl_no_batch_autotune,
             memory_reserve_mb=args.sl_memory_reserve_mb,
             gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
             seed=args.sl_seed,
@@ -398,7 +390,7 @@ def parse_args(argv=None):
     self_play.add_optional_rl_arguments(
         parser,
         fresh_from_sl_default=True,
-        expose_gpi=False,
+        expose_gpi=True,
     )
     evaluate = _silent_import("diagnostics.evaluate")
     diagnostics = parser.add_argument_group("diagnostic multiprocessing controls")
@@ -466,28 +458,11 @@ def main():
         )
     else:
         print("RL initialization: continue from the existing RL checkpoint when present.")
-    if args.sl_batch_size is not None:
-        print(f"Supervised batch size: fixed at {args.sl_batch_size:,}.")
-    elif args.sl_no_batch_autotune:
-        print(
-            "Supervised batch autotuning: disabled; using the selected "
-            "device default (CPU 1,024 or GPU 2,048)."
-        )
-    else:
-        print(
-            "Supervised batches: automatic retained benchmark "
-            "(10 complete epochs per candidate; starts at CPU 1,024 or GPU "
-            "2,048, then doubles up to 1,048,576; stops below 10% marginal "
-            "gain)."
-        )
-        print(
-            "Every supervised batch test updates the live model and counts "
-            "toward the requested epoch total."
-        )
+    print(f"Supervised batch size: fixed at {args.sl_batch_size:,}.")
     if not args.disable_training_plateau:
         print(
-            "Supervised training-loss plateau stop: enabled after batch "
-            f"tuning and at least {args.sl_training_plateau_min_epochs} "
+            "Supervised training-loss plateau stop: enabled after at least "
+            f"{args.sl_training_plateau_min_epochs} "
             f"epochs; {args.sl_training_plateau_patience} consecutive "
             f"{args.sl_training_plateau_window}-epoch median blocks below "
             f"{args.sl_training_plateau_min_relative_improvement:.3%} "

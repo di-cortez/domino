@@ -289,7 +289,6 @@ class SupervisedNeuralNetwork:
         validation_interval=10,
         epoch_runner=None,
         validation_runner=None,
-        batch_controller=None,
         epoch_metrics_callback=None,
         training_plateau_window=None,
         training_plateau_patience=4,
@@ -338,68 +337,39 @@ class SupervisedNeuralNetwork:
         training_plateau_last_relative_improvement = None
         training_plateau_stopped = False
         stopping_reason = "epoch_limit"
-        plateau_loss_start = (
-            0
-            if batch_controller is None
-            or getattr(batch_controller, "finished", True)
-            else None
-        )
+        plateau_loss_start = 0
 
         for epoch in range(epochs):
-            current_batch_size = (
-                batch_controller.current_batch_size
-                if batch_controller is not None
-                else batch_size
-            )
+            current_batch_size = batch_size
             self.synchronize()
             training_started = time.perf_counter()
-            while True:
-                try:
-                    if epoch_runner is None:
-                        mean_loss, optimizer_updates, window_rotations = (
-                            self._run_array_training_epoch(
-                                x_train,
-                                y_train,
-                                current_batch_size,
-                            )
-                        )
-                    else:
-                        mean_loss, optimizer_updates, window_rotations = epoch_runner(
-                            self,
+            try:
+                if epoch_runner is None:
+                    mean_loss, optimizer_updates, window_rotations = (
+                        self._run_array_training_epoch(
+                            x_train,
+                            y_train,
                             current_batch_size,
-                            epoch,
-                        )
-                    break
-                except Exception as exc:
-                    if not self._is_backend_memory_error(exc):
-                        raise
-                    self.release_disposable_cache()
-                    retry = (
-                        batch_controller is not None
-                        and batch_controller.handle_runtime_memory_failure(
-                            epoch,
-                            exc,
                         )
                     )
-                    if not retry:
-                        raise MemoryError(
-                            "Supervised training exhausted memory at batch "
-                            f"{current_batch_size}; no smaller accepted batch "
-                            "is available."
-                        ) from exc
-                    current_batch_size = batch_controller.current_batch_size
+                else:
+                    mean_loss, optimizer_updates, window_rotations = epoch_runner(
+                        self,
+                        current_batch_size,
+                        epoch,
+                    )
+            except Exception as exc:
+                if not self._is_backend_memory_error(exc):
+                    raise
+                self.release_disposable_cache()
+                raise MemoryError(
+                    "Supervised training exhausted memory at fixed batch "
+                    f"{current_batch_size}."
+                ) from exc
             self.synchronize()
             training_seconds = time.perf_counter() - training_started
             loss_history.append(mean_loss)
             completed_epochs += 1
-
-            if batch_controller is not None:
-                batch_controller.record_epoch(epoch, training_seconds)
-                if plateau_loss_start is None and batch_controller.finished:
-                    # The epoch that completed/rejected the benchmark may use
-                    # a different batch. Begin plateau evidence on the next
-                    # epoch, after the selected batch is stable.
-                    plateau_loss_start = completed_epochs
 
             validation_loss = None
             if epoch % validation_interval == 0 and x_val is not None:

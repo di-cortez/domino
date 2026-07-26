@@ -36,9 +36,10 @@ seed-addressed 100,000-game assets and metadata-validated reuse:
 Direct self-play and the finite canonical profiles keep the four-epoch PPO
 default. The `forever` PPO profile uses a maximum budget of 16 epochs per
 on-policy buffer; its unchanged whole-buffer KL guard can finish each update
-earlier. Because the PPO configuration is part of exact resume identity, an
-older four-epoch `forever` PPO lineage must still be resumed with explicit
-`--ppo-max-epochs 4`; changing that lineage to 16 is intentionally rejected.
+earlier. The first `forever` invocation locks the complete run configuration.
+Later invocations reload it automatically, so the epoch budget and other
+training arguments do not need to be repeated and conflicting explicit values
+are rejected.
 
 The reusable standard assets are built from 100,000 heuristic games with a
 maximum supervised budget of 5,000 epochs (the convergence/plateau stopping
@@ -79,26 +80,30 @@ the complete diagnostic history and best-checkpoint pointer.
 python -m training.pipeline big --resume
 python -m training.pipeline huge \
   --resume-from models/rl/domino_rl_big_seed42
-python -m training.pipeline forever --resume
-python -m training.pipeline forever \
-  --resume models/rl/domino_rl_forever_seed42
+
+# First start: choose and lock the forever configuration.
+python -m training.pipeline forever --seed 42 --gpi 2000 \
+  --ppo-max-epochs 16 --run-name baseline
+
+# Later starts: the active run and all locked arguments are loaded automatically.
+python -m training.pipeline forever
 ```
 
 PPO remains the default. To run `forever` with the policy-only historical
 REINFORCE update and later resume that exact run:
 
 ```bash
-python -m training.pipeline forever --no-ppo
-python -m training.pipeline forever --no-ppo --resume
+python -m training.pipeline forever --no-ppo --run-name reinforce
+python -m training.pipeline forever
 ```
 
 `reinforce_v1` performs one update over the complete iteration buffer. It does
 not construct a PPO buffer or calculate PPO ratios, clipping, KL control,
 minibatches, or the post-update full-buffer evaluation. The algorithm is an
-immutable resume field, so `--no-ppo` must be repeated when resuming; changing
-between `ppo_v1` and `reinforce_v1` is rejected before training. Both canonical
-modes remain policy-only. The optional value head is still available only to
-direct `training.self_play` experiments.
+immutable resume field and is reloaded from the saved run configuration;
+changing between `ppo_v1` and `reinforce_v1` is rejected before training. Both
+canonical modes remain policy-only. The optional value head is still available
+only to direct `training.self_play` experiments.
 
 The optional value accepted by `--resume` is a convenience alias for
 `--resume-from`. In `forever`, diagnostic-worker autotuning is performed once,
@@ -108,17 +113,26 @@ persisted in `periodic_diagnostic_tuning.json`, and reused at subsequent
 
 `forever` has no percentage or target. SIGINT/SIGTERM stops admission of a new
 iteration, lets an in-flight iteration finish, atomically publishes state, and
-exits without an automatic all-pairs evaluation. Pipeline GPI is fixed at
-2,000; only direct `training.self_play` runs expose `--gpi`. Worker autotuning is
-unchanged. A boundary iteration is shortened so a periodic or final target is
-never exceeded.
+exits without an automatic all-pairs evaluation. GPI is never autotuned. The
+canonical pipeline and direct self-play expose `--gpi` with choices
+`100, 200, 400, 600, 800, 1000, 2000`; the default is 2,000. Worker autotuning
+is unchanged. A boundary iteration is shortened so a periodic or final target
+is never exceeded.
+
+On the first `forever` start, `run_config.json` stores every locked argument,
+the full canonical configuration, its SHA-256, ruleset version, optional run
+name, supervised origin, and start-machine metadata. The active-run pointer
+lets a later bare `python -m training.pipeline forever` find that run. Supply a
+new `--run-name` (or use `--restart-rl`) when intentionally starting a distinct
+configuration. A checkpoint is accepted only when its configuration hash
+matches the run configuration.
 
 | File | Purpose |
 |---|---|
 | `dataset_generator.py` | Coordinates retained worker tuning, bounded SQLite aggregation, and atomic ordered JSONL output. |
 | `dataset_parallel.py` | Plays deterministic dataset games in a bounded CPU-only worker pool with dynamic scheduling and memory fallback. |
-| `training_loop.py` | Selects safe host/GPU storage, orchestrates retained supervised batch tuning and plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
-| `supervised_runtime.py` | Implements CPU/GPU batch candidates, synchronized retained timing, GPU residency probes/windows, and supervised memory telemetry. |
+| `training_loop.py` | Selects safe host/GPU storage, validates the fixed supervised batch, orchestrates plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
+| `supervised_runtime.py` | Implements supervised batch/workspace safety, GPU residency probes/windows, and supervised memory telemetry. |
 | `self_play.py` | Orchestrates the exact-budget on-policy training lifecycle and delegates its specialized phases. |
 | `rl_config.py` / `rl_cli.py` | Validate side-effect-free RL options and own the standalone/canonical shared argument definitions. |
 | `rl_rollout.py` | Finalizes rewards and trajectories and plays one CPU-only self-play or heuristic-opponent training game. |
@@ -227,7 +241,7 @@ The loop:
 - splits data into training and validation sets;
 - selects CPU/GPU independently with `--sl-device {auto,cpu,gpu}` (`--device`
   is a standalone alias);
-- retains every batch-autotuning epoch as real training;
+- uses a fixed mini-batch of 8,192 examples by default;
 - keeps the complete dataset in GPU memory when safe, or rotates one reusable
   GPU window through a global per-epoch permutation when it is not;
 - keeps the best validation checkpoint in memory;
@@ -247,16 +261,10 @@ limit sits slightly below the terminal training loss and its upper limit is
 the maximum observed loss, making the learned change visible instead of
 spending most of the plot on the unused interval down to zero.
 
-CPU batch candidates are powers of two from 1,024 through 1,048,576; GPU
-candidates start at 2,048. Each candidate runs 10 complete epochs on the same
-live network. Timing includes recurring data materialization/transfers and the
-forward/backward update, synchronizes CUDA around each GPU epoch, excludes
-validation/checkpoint/log time, and compares median **examples/second**. A
-larger candidate is accepted only at a gain of at least 10%; a rejected
-candidate's epochs still remain in the model. Runs shorter than 10 epochs use
-the first safe device default without starting an incomplete benchmark. Use
-`--sl-batch-size N` for a fixed batch or `--sl-no-batch-autotune` for the
-device default.
+The supervised mini-batch is fixed at 8,192 by default and receives a memory
+preflight before the first update. `--sl-batch-size N` can select one of the
+former power-of-two candidate sizes from 1,024 through 1,048,576. The selected
+size is capped to the number of training examples for small datasets.
 
 GPU mode first probes resident example counts from 2,048 through 1,048,576
 without changing weights. It preserves 512 MiB by default for batches,
@@ -265,11 +273,9 @@ safely to CPU when that reserve cannot be kept; explicit `gpu` fails before a
 training update. Override host and GPU reserves with
 `--sl-memory-reserve-mb` and `--sl-gpu-memory-reserve-mb`. The detailed command
 reports the selected device, residency mode/capacity, one-time full upload,
-batch results, and memory high/low watermarks. `train_script/run_pipeline.py` uses
+fixed batch, and memory high/low watermarks. `train_script/run_pipeline.py` uses
 `quiet=True`, so it continues suppressing per-epoch, checkpoint, scheduler, and
-memory-detail chatter. It does display concise retained-batch benchmark lines
-through `tqdm.write`: candidate size, median epoch time, total test time,
-examples/second, marginal gain, retention decision, and final selected batch.
+memory-detail chatter.
 
 All supervised inputs, targets, weights, activations, gradients, and new
 checkpoints are `float32`. Legacy `float64` checkpoints remain loadable and are
@@ -305,12 +311,10 @@ All three retain benchmark work and enforce the same hard limit of 20 workers.
 
 The normal command starts at learning rate `0.005` and treats the requested
 epoch count as a maximum. Automatic training-loss stopping is enabled by
-default. After retained batch tuning finishes, it compares medians of
-non-overlapping 25-epoch blocks. A block counts as saturated when its relative
-improvement over the previous block is below `0.001` (0.1%). The run stops only
-after four consecutive saturated blocks and never before epoch 100. A genuine
-improvement resets the counter, and no autotuning epoch contributes plateau
-evidence, so a batch-size transition cannot cause an early stop.
+default. It compares medians of non-overlapping 25-epoch blocks. A block counts
+as saturated when its relative improvement over the previous block is below
+`0.001` (0.1%). The run stops only after four consecutive saturated blocks and
+never before epoch 100. A genuine improvement resets the counter.
 
 Validation remains every 10 epochs, and validation-based LR decay is also on
 by default. The first validation result establishes the global best; after
@@ -348,8 +352,7 @@ The supervised controls use these defaults:
 | `--sl-training-plateau-min-epochs N` | Minimum total epochs before this stop is allowed | `100` |
 | `--sl-training-plateau-min-relative-improvement F` | Block improvement below this fraction counts as saturated | `0.001` |
 | `--sl-device` / standalone `--device` | `auto`, forced `cpu`, or required `gpu` | `auto` |
-| `--sl-batch-size N` | Fixed safe batch; bypasses tuning | unset |
-| `--sl-no-batch-autotune` | Uses 1,024 on CPU or 2,048 on GPU | off |
+| `--sl-batch-size N` | Fixed safe batch; power of two from 1,024 through 1,048,576 | `8,192` |
 | `--sl-memory-reserve-mb N` | Free host RAM retained | `512` |
 | `--sl-gpu-memory-reserve-mb N` | Effective free VRAM retained | `512` |
 | `--sl-seed N` | Reproducible initialization and epoch permutations | unset |
@@ -432,10 +435,9 @@ inside an iteration publishes the newly updated policy after that batch; if a
 single large batch crosses multiple thresholds, it publishes only one snapshot
 instead of storing duplicate copies of the same weights.
 
-GPI is never autotuned and is fixed at `2000` in every pipeline and sweep.
-Direct `training.self_play --gpi N` experiments accept any positive integer;
-common values are
-`100, 200, 400, 600, 800, 1000, 2000`.
+GPI is never autotuned. Canonical pipelines and direct self-play accept
+`--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000`, defaulting to
+`2000`. Parameter sweeps keep it fixed and do not use it as an axis.
 
 Worker tuning tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1%
 of the real game budget per candidate. Starting from the one-worker baseline,
@@ -505,6 +507,15 @@ time, and total elapsed time. Every ten iterations it aggregates PPO decisions,
 requested/effective minibatches, optimizer steps, epochs, KL stops, clipping,
 entropy, gradient norms, buffer location/bytes, rollout time, and update time.
 Every iteration is also appended to `<weights>_training_metrics.jsonl`.
+
+That JSONL uses compact schema version 2. Its first line is a header object with
+the ordered column list, complete training configuration, and canonical
+configuration SHA-256. Each later line is an array in that column order. The
+format preserves full JSON numeric precision and every PPO iteration, including
+KL values, KL early-stop state, completed epochs, minibatch sizes, optimizer
+steps, entropy, clipping, and gradient norms, while avoiding repeated field
+names and duplicate aliases in every row. Exact resume validates the header
+hash and truncates any uncommitted tail beyond the checkpoint.
 
 Canonical runs additionally maintain
 `models/rl/<run>/diagnostics/runtime_profile.json`. The report is written
@@ -600,7 +611,7 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 |---|---|---:|
 | `--fresh-from-sl` / `--continue-existing-rl` | Force initialization from SL or allow a compatible existing RL checkpoint | continue existing RL (standalone); canonical continuation uses `--resume` |
 | `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
-| `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/tie/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
+| `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
 | `--clip-grad-norm` | Gradient-norm clipping threshold for the policy-gradient update | `5.0` |
 | `--ppo` / `--no-ppo` | Masked PPO or historical one-update REINFORCE regression | PPO |
 | `--normalize-advantages` / `--no-normalize-advantages` | Standardize once over the complete iteration buffer | on for PPO |
@@ -687,7 +698,6 @@ alternate preset, see above):
 | Event | Reward |
 |---|---:|
 | terminal win | `+0.50` |
-| terminal draw | `0.0` |
 | terminal loss | `-0.50` |
 | opponent draw | `+0.02` |
 | opponent pass | `+0.10` |

@@ -79,6 +79,7 @@ def add_optional_rl_arguments(
         group.add_argument(
             "--gpi",
             type=_positive_int,
+            choices=COMMON_GPI_VALUES,
             default=DEFAULT_GPI,
             help=(
                 "Fixed games per RL iteration. "

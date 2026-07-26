@@ -3,6 +3,13 @@
 import random
 
 
+RULESET_VERSION = 2
+WIN_REASON_EMPTY_HAND = "empty_hand"
+WIN_REASON_BLOCKED_FEWEST_PIPS = "blocked_fewest_pips"
+WIN_REASON_BLOCKED_FEWEST_TILES = "blocked_fewest_tiles"
+WIN_REASON_BLOCKED_LAST_VALID_PLAY = "blocked_last_valid_play"
+
+
 def _is_draw(action):
     return action is not None and action[0] == "DRAW"
 
@@ -80,10 +87,13 @@ class DominoEngine:
         self.board_history = []
         self.ends = []
         self.winner = None
+        self.win_reason = None
         self.game_over = False
         self.turn = 0
         self.consecutive_passes = 0
         self.drew_this_turn = {i: False for i in range(self.player_count)}
+        self.last_valid_tile_player = None
+        self._last_valid_tile_turn_by_player = [-1] * self.player_count
         self.horizontal_direction = [-1, 1]
 
         self.current_player = 0
@@ -182,6 +192,8 @@ class DominoEngine:
             self.board_history.append(action)
             self.consecutive_passes = 0
             self.drew_this_turn[self.current_player] = False
+            self.last_valid_tile_player = self.current_player
+            self._last_valid_tile_turn_by_player[self.current_player] = self.turn
 
             if self.required_opening_tile and tile == self.required_opening_tile:
                 self.required_opening_tile = None
@@ -218,22 +230,62 @@ class DominoEngine:
         if len(hand) == 0:
             self.game_over = True
             self.winner = self.current_player
+            self.win_reason = WIN_REASON_EMPTY_HAND
         elif (
             action is None
             and self.consecutive_passes >= self.player_count
             and not self.stock
         ):
             self.game_over = True
-            totals = [sum(tile[0] + tile[1] for tile in hand) for hand in self.hands]
-            lowest_total = min(totals)
-            possible_winners = [i for i, total in enumerate(totals) if total == lowest_total]
-            self.winner = possible_winners[0] if len(possible_winners) == 1 else -1
+            self.winner, self.win_reason = self._resolve_blocked_winner()
 
         if not self.game_over and advance_player:
             self.current_player = (self.current_player + 1) % self.player_count
 
         next_state = self._get_state() if return_state else None
-        return next_state, self.game_over, {"winner": self.winner}
+        return next_state, self.game_over, {
+            "winner": self.winner,
+            "win_reason": self.win_reason,
+        }
+
+    def _resolve_blocked_winner(self):
+        """Resolve a blocked game without producing a draw.
+
+        Remaining pip totals are compared first, then remaining hand sizes.
+        If both are still tied, the tied player with the most recent valid
+        tile play wins. In the canonical two-player game this is exactly the
+        player who made the last valid tile play.
+        """
+        pip_totals = [
+            sum(tile[0] + tile[1] for tile in hand)
+            for hand in self.hands
+        ]
+        lowest_total = min(pip_totals)
+        candidates = [
+            player
+            for player, total in enumerate(pip_totals)
+            if total == lowest_total
+        ]
+        if len(candidates) == 1:
+            return candidates[0], WIN_REASON_BLOCKED_FEWEST_PIPS
+
+        fewest_tiles = min(len(self.hands[player]) for player in candidates)
+        candidates = [
+            player
+            for player in candidates
+            if len(self.hands[player]) == fewest_tiles
+        ]
+        if len(candidates) == 1:
+            return candidates[0], WIN_REASON_BLOCKED_FEWEST_TILES
+
+        winner = max(
+            candidates,
+            key=lambda player: (
+                self._last_valid_tile_turn_by_player[player],
+                -player,
+            ),
+        )
+        return winner, WIN_REASON_BLOCKED_LAST_VALID_PLAY
 
     def _get_state(self):
         """Return the compact state consumed by agents and encoders."""
@@ -281,4 +333,7 @@ class DominoEngine:
             "turn": self.turn,
             "game_over": self.game_over,
             "winner": self.winner,
+            "win_reason": self.win_reason,
+            "last_valid_tile_player": self.last_valid_tile_player,
+            "ruleset_version": RULESET_VERSION,
         }

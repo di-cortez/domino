@@ -210,7 +210,7 @@ def test_periodic_profile_separates_reports_from_pairwise_work(tmp_path, monkeyp
         pairwise_options.update(kwargs)
         return {
             "summary": {
-                "counts": {"win": 2, "draw": 1, "loss": 1},
+                "counts": {"win": 2, "loss": 2},
                 "win_ci95": [0.10, 0.90],
             },
             "runtime_profile_delta": {

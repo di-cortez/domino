@@ -11,6 +11,7 @@ import subprocess
 import numpy as np
 
 from agents.encoder import DominoEncoder
+from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from training.training_loop import ENCODED_FEATURE_VERSION
 from utils.artifacts import atomic_write_json, file_sha256
 
@@ -20,21 +21,7 @@ DATASET_FORMAT = "jsonl_state_action_v1"
 DATASET_GENERATOR_VERSION = "canonical_real_decisions_v1"
 RULESET_VERSION = "two_player_domino_v1"
 HEURISTIC_VERSION = "strategic_exact_belief_v1"
-NETWORK_ARCHITECTURE = {
-    "input_size": DominoEncoder.VECTOR_SIZE,
-    "hidden1_size": 256,
-    "hidden2_size": 128,
-    "output_size": DominoEncoder.ACTION_SIZE,
-    "dtype": "float32",
-}
-EXPECTED_WEIGHT_SHAPES = {
-    "W1": (256, DominoEncoder.VECTOR_SIZE),
-    "b1": (256, 1),
-    "W2": (128, 256),
-    "b2": (128, 1),
-    "W3": (DominoEncoder.ACTION_SIZE, 128),
-    "b3": (DominoEncoder.ACTION_SIZE, 1),
-}
+EXPECTED_WEIGHT_SHAPES = DEFAULT_NETWORK_ARCHITECTURE.policy_weight_shapes()
 
 
 class ArtifactCompatibilityError(RuntimeError):
@@ -242,11 +229,11 @@ def write_dataset_metadata(
     return metadata
 
 
-def _inspect_weight_archive(path):
+def _inspect_weight_archive(path, expected_weight_shapes):
     reasons = []
     try:
         with np.load(path, allow_pickle=False) as archive:
-            for name, expected_shape in EXPECTED_WEIGHT_SHAPES.items():
+            for name, expected_shape in expected_weight_shapes.items():
                 if name not in archive:
                     reasons.append(f"weights archive is missing {name}")
                     continue
@@ -266,6 +253,7 @@ def inspect_canonical_weights(
     seed,
     dataset_sha256,
     training_config,
+    architecture=DEFAULT_NETWORK_ARCHITECTURE,
 ):
     """Validate supervised weights, origin dataset, architecture, and hash."""
     if not paths.weights.exists():
@@ -283,13 +271,18 @@ def inspect_canonical_weights(
         "dataset_sha256": dataset_sha256,
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
-        "network_architecture": NETWORK_ARCHITECTURE,
+        "network_architecture": architecture.as_dict(),
         "ruleset_version": RULESET_VERSION,
         "encoded_feature_version": ENCODED_FEATURE_VERSION,
         "training_config": _json_value(training_config),
     }
     reasons = _compare_fields(metadata, expected)
-    reasons.extend(_inspect_weight_archive(paths.weights))
+    reasons.extend(
+        _inspect_weight_archive(
+            paths.weights,
+            architecture.policy_weight_shapes(),
+        )
+    )
     actual_hash = file_sha256(paths.weights)
     if metadata.get("weights_sha256") != actual_hash:
         reasons.append(
@@ -313,6 +306,7 @@ def write_weights_metadata(
     dataset_sha256,
     training_config,
     training_summary,
+    architecture=DEFAULT_NETWORK_ARCHITECTURE,
 ):
     """Publish provenance and convergence metadata for supervised weights."""
     digest = file_sha256(paths.weights)
@@ -326,7 +320,7 @@ def write_weights_metadata(
         "weights_sha256": digest,
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
-        "network_architecture": NETWORK_ARCHITECTURE,
+        "network_architecture": architecture.as_dict(),
         "ruleset_version": RULESET_VERSION,
         "encoded_feature_version": ENCODED_FEATURE_VERSION,
         "training_config": _json_value(training_config),

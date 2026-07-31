@@ -70,6 +70,7 @@ class PPOBuffer:
     actions: np.ndarray
     legal_masks: np.ndarray
     old_log_probs: np.ndarray
+    old_values: np.ndarray | None
     advantages: np.ndarray
     returns: np.ndarray
     local_rewards: np.ndarray
@@ -79,7 +80,13 @@ class PPOBuffer:
     raw_advantage_std: float
 
     @classmethod
-    def from_samples(cls, samples: Iterable, *, normalize=True):
+    def from_samples(
+        cls,
+        samples: Iterable,
+        *,
+        normalize=True,
+        old_values=None,
+    ):
         samples = list(samples)
         if not samples:
             raise ValueError("Cannot build a PPO buffer without real decisions.")
@@ -117,6 +124,17 @@ class PPOBuffer:
             [sample.terminal_reward for sample in samples],
             dtype=np.float32,
         )
+        if old_values is not None:
+            old_values = np.ascontiguousarray(
+                _to_numpy(old_values, dtype=np.float32).reshape(-1),
+                dtype=np.float32,
+            )
+            if old_values.size != len(samples):
+                raise ValueError(
+                    "PPO old_values must contain one value per decision."
+                )
+            if not np.all(np.isfinite(old_values)):
+                raise ValueError("PPO old_values contain NaN or infinity.")
         if states.ndim != 2 or states.shape[1] != len(samples):
             raise ValueError("PPO states must have one column per decision.")
         if legal_masks.ndim != 2 or legal_masks.shape[1] != len(samples):
@@ -129,18 +147,26 @@ class PPOBuffer:
             raise ValueError("PPO buffer contains an action outside its legal mask.")
         if not np.all(np.isfinite(old_log_probs)):
             raise ValueError("PPO old_log_probs contain NaN or infinity.")
+        raw_advantages = (
+            returns.copy()
+            if old_values is None
+            else returns - old_values
+        )
         if normalize:
-            advantages, std_zero, raw_mean, raw_std = normalize_advantages(returns)
+            advantages, std_zero, raw_mean, raw_std = normalize_advantages(
+                raw_advantages
+            )
         else:
-            advantages = returns.copy()
+            advantages = raw_advantages.copy()
             std_zero = False
-            raw_mean = float(np.mean(returns, dtype=np.float64))
-            raw_std = float(np.std(returns, dtype=np.float64))
+            raw_mean = float(np.mean(raw_advantages, dtype=np.float64))
+            raw_std = float(np.std(raw_advantages, dtype=np.float64))
         buffer = cls(
             states=states,
             actions=actions,
             legal_masks=legal_masks,
             old_log_probs=old_log_probs,
+            old_values=old_values,
             advantages=advantages,
             returns=returns,
             local_rewards=local_rewards,
@@ -160,6 +186,8 @@ class PPOBuffer:
             buffer.terminal_rewards,
         ):
             array.setflags(write=False)
+        if buffer.old_values is not None:
+            buffer.old_values.setflags(write=False)
         return buffer
 
     @property
@@ -168,18 +196,21 @@ class PPOBuffer:
 
     @property
     def nbytes(self):
+        arrays = [
+            self.states,
+            self.actions,
+            self.legal_masks,
+            self.old_log_probs,
+            self.advantages,
+            self.returns,
+            self.local_rewards,
+            self.terminal_rewards,
+        ]
+        if self.old_values is not None:
+            arrays.append(self.old_values)
         return int(sum(
             array.nbytes
-            for array in (
-                self.states,
-                self.actions,
-                self.legal_masks,
-                self.old_log_probs,
-                self.advantages,
-                self.returns,
-                self.local_rewards,
-                self.terminal_rewards,
-            )
+            for array in arrays
         ))
 
 
@@ -303,6 +334,11 @@ class PPOBufferStorage:
                 "advantages": xp.asarray(self.buffer.advantages, dtype=xp.float32),
                 "returns": xp.asarray(self.buffer.returns, dtype=xp.float32),
             }
+            if self.buffer.old_values is not None:
+                self._device_arrays["old_values"] = xp.asarray(
+                    self.buffer.old_values,
+                    dtype=xp.float32,
+                )
             self.network.synchronize()
             self.location = "gpu"
         except Exception as exc:
@@ -319,7 +355,7 @@ class PPOBufferStorage:
         if self._device_arrays is not None:
             backend_indices = xp.asarray(indices, dtype=xp.int64)
             arrays = self._device_arrays
-            return {
+            batch = {
                 "states": arrays["states"][:, backend_indices],
                 "actions": arrays["actions"][backend_indices],
                 "legal_masks": arrays["legal_masks"][:, backend_indices],
@@ -327,7 +363,13 @@ class PPOBufferStorage:
                 "advantages": arrays["advantages"][backend_indices],
                 "returns": arrays["returns"][backend_indices],
             }
-        return {
+            batch["old_values"] = (
+                None
+                if self.buffer.old_values is None
+                else arrays["old_values"][backend_indices]
+            )
+            return batch
+        batch = {
             "states": xp.asarray(self.buffer.states[:, indices], dtype=xp.float32),
             "actions": xp.asarray(self.buffer.actions[indices], dtype=xp.int64),
             "legal_masks": xp.asarray(self.buffer.legal_masks[:, indices], dtype=xp.bool_),
@@ -335,6 +377,12 @@ class PPOBufferStorage:
             "advantages": xp.asarray(self.buffer.advantages[indices], dtype=xp.float32),
             "returns": xp.asarray(self.buffer.returns[indices], dtype=xp.float32),
         }
+        batch["old_values"] = (
+            None
+            if self.buffer.old_values is None
+            else xp.asarray(self.buffer.old_values[indices], dtype=xp.float32)
+        )
+        return batch
 
     def fallback_to_streaming(self, reason):
         """Discard only the optional GPU copy; the canonical RAM buffer survives."""
@@ -371,9 +419,13 @@ def _validate_first_minibatch(network, storage, indices):
         xp.empty_like(network.cache["A1"]),
         xp.empty_like(network.cache["Z1"]),
     ]
+    parameter_names = ["W1", "b1", "W2", "b2", "W3", "b3"]
+    if getattr(network, "use_value_head", False):
+        parameter_names.extend(("Wv", "bv"))
+        workspace.append(xp.empty((1, batch["states"].shape[1]), dtype=xp.float32))
     workspace.extend(
         xp.empty_like(getattr(network, name))
-        for name in ("W1", "b1", "W2", "b2", "W3", "b3")
+        for name in parameter_names
     )
     network.synchronize()
     del workspace
@@ -439,6 +491,14 @@ def evaluate_full_buffer(
     ratio_sum = 0.0
     ratio_min = float("inf")
     ratio_max = float("-inf")
+    value_loss_sum = 0.0
+    value_sum = 0.0
+    value_square_sum = 0.0
+    return_sum = 0.0
+    return_square_sum = 0.0
+    value_error_sum = 0.0
+    value_error_square_sum = 0.0
+    value_clipped_count = 0
     lower = 1.0 - float(clip_epsilon)
     upper = 1.0 + float(clip_epsilon)
     xp = network.xp
@@ -450,11 +510,28 @@ def evaluate_full_buffer(
         new_log_probs, entropy, _policy = network.evaluate_actions(
             batch["states"], batch["legal_masks"], batch["actions"]
         )
+        values = None
+        value_losses = None
+        value_delta = None
+        if getattr(network, "use_value_head", False):
+            values = xp.dot(network.Wv, network.cache["A2"]) + network.bv
+            value_losses, _value_gradient, value_delta = (
+                network.clipped_value_loss_terms(
+                    values,
+                    batch["returns"].reshape(1, -1),
+                    batch["old_values"].reshape(1, -1),
+                    clip_epsilon,
+                )
+            )
         finish_phase("policy_forward_and_action_mask_validation", phase_started)
         phase_started = time.perf_counter()
         log_ratio = new_log_probs - batch["old_log_probs"]
         ratio = xp.exp(log_ratio)
         finite = xp.all(xp.isfinite(ratio)) & xp.all(xp.isfinite(entropy))
+        if values is not None:
+            finite = finite & xp.all(xp.isfinite(values)) & xp.all(
+                xp.isfinite(value_losses)
+            )
         if not bool(network._as_float(finite)):
             raise FloatingPointError("PPO full-buffer metrics produced NaN/Inf.")
         finish_phase("ratio_construction_and_finite_validation", phase_started)
@@ -473,6 +550,20 @@ def evaluate_full_buffer(
         ratio_sum += network._as_float(xp.sum(ratio))
         ratio_min = min(ratio_min, network._as_float(xp.min(ratio)))
         ratio_max = max(ratio_max, network._as_float(xp.max(ratio)))
+        if values is not None:
+            flat_values = values.reshape(-1)
+            returns = batch["returns"].reshape(-1)
+            errors = returns - flat_values
+            value_loss_sum += network._as_float(xp.sum(value_losses))
+            value_sum += network._as_float(xp.sum(flat_values))
+            value_square_sum += network._as_float(xp.sum(flat_values ** 2))
+            return_sum += network._as_float(xp.sum(returns))
+            return_square_sum += network._as_float(xp.sum(returns ** 2))
+            value_error_sum += network._as_float(xp.sum(errors))
+            value_error_square_sum += network._as_float(xp.sum(errors ** 2))
+            value_clipped_count += int(network._as_float(
+                xp.sum(xp.abs(value_delta) > float(clip_epsilon))
+            ))
         finish_phase("surrogate_metric_reductions_and_host_transfers", phase_started)
     phase_started = time.perf_counter()
     network.synchronize()
@@ -486,7 +577,36 @@ def evaluate_full_buffer(
         "ratio_mean": float(ratio_sum / total),
         "ratio_min": ratio_min,
         "ratio_max": ratio_max,
+        "value_loss": None,
+        "value_clip_fraction": None,
+        "value_mean": None,
+        "value_std": None,
+        "explained_variance": None,
     }
+    if getattr(network, "use_value_head", False):
+        value_mean = value_sum / total
+        value_variance = max(0.0, value_square_sum / total - value_mean ** 2)
+        return_mean = return_sum / total
+        return_variance = max(
+            0.0,
+            return_square_sum / total - return_mean ** 2,
+        )
+        error_mean = value_error_sum / total
+        error_variance = max(
+            0.0,
+            value_error_square_sum / total - error_mean ** 2,
+        )
+        result.update({
+            "value_loss": float(value_loss_sum / total),
+            "value_clip_fraction": float(value_clipped_count / total),
+            "value_mean": float(value_mean),
+            "value_std": float(math.sqrt(value_variance)),
+            "explained_variance": (
+                None
+                if return_variance <= ADVANTAGE_EPSILON
+                else float(1.0 - error_variance / return_variance)
+            ),
+        })
     finish_phase("final_device_synchronization_and_accounting", phase_started)
     total_seconds = time.perf_counter() - profile_started
     timing["unaccounted"] = max(0.0, total_seconds - sum(timing.values()))
@@ -512,6 +632,7 @@ def ppo_update(
     iteration,
     entropy_coef,
     clip_grad_norm,
+    value_coef=0.5,
     clip_epsilon=DEFAULT_CLIP_EPSILON,
     target_kl=DEFAULT_TARGET_KL,
     stop_kl=DEFAULT_STOP_KL,
@@ -548,6 +669,17 @@ def ppo_update(
         )
     if not 0 < float(gpu_buffer_safety_fraction) <= 1:
         raise ValueError("GPU buffer safety fraction must be in (0, 1].")
+    if float(value_coef) < 0:
+        raise ValueError("PPO value_coef must be non-negative.")
+    use_value_head = bool(getattr(network, "use_value_head", False))
+    if use_value_head and buffer.old_values is None:
+        raise ValueError(
+            "PPO old_values are required when the value head is enabled."
+        )
+    if not use_value_head and buffer.old_values is not None:
+        raise ValueError(
+            "PPO old_values were provided, but the value head is disabled."
+        )
 
     requested = requested_minibatches(
         actual_games,
@@ -610,6 +742,11 @@ def ppo_update(
                     batch["legal_masks"],
                     batch["old_log_probs"],
                     batch["advantages"],
+                    returns=(batch["returns"] if use_value_head else None),
+                    old_values=(
+                        batch["old_values"] if use_value_head else None
+                    ),
+                    value_coef=value_coef,
                     clip_epsilon=clip_epsilon,
                     entropy_coef=entropy_coef,
                     clip_grad_norm=clip_grad_norm,
@@ -683,6 +820,31 @@ def ppo_update(
             "final_clip_fraction": float(final["clip_fraction"]),
             "final_entropy": float(final["entropy"]),
             "final_policy_loss": float(final["policy_loss"]),
+            "final_value_loss": (
+                None
+                if final["value_loss"] is None
+                else float(final["value_loss"])
+            ),
+            "final_value_clip_fraction": (
+                None
+                if final["value_clip_fraction"] is None
+                else float(final["value_clip_fraction"])
+            ),
+            "final_value_mean": (
+                None
+                if final["value_mean"] is None
+                else float(final["value_mean"])
+            ),
+            "final_value_std": (
+                None
+                if final["value_std"] is None
+                else float(final["value_std"])
+            ),
+            "final_explained_variance": (
+                None
+                if final["explained_variance"] is None
+                else float(final["explained_variance"])
+            ),
             "gradient_norm_mean": float(np.mean([
                 row["gradient_norm_mean"] for row in epoch_rows
             ])),
@@ -710,7 +872,11 @@ def ppo_update(
             "grad_clipped": bool(any(
                 row["clipped_gradient_minibatches"] for row in epoch_rows
             )),
-            "value_loss": None,
+            "value_loss": (
+                None
+                if final["value_loss"] is None
+                else float(final["value_loss"])
+            ),
         }
     finally:
         cleanup_started = time.perf_counter()

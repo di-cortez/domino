@@ -12,6 +12,7 @@ import subprocess
 import numpy as np
 
 from agents.encoder import DominoEncoder
+from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from middleware.domino_engine import RULESET_VERSION
 from training.rl_resume import (
     LEGACY_TRAINING_ALGORITHM,
@@ -29,12 +30,6 @@ from utils.artifacts import (
 RUN_FORMAT_VERSION = 2
 CONFIG_HASH_VERSION = 1
 MILESTONE_RESUME_RETENTION = 5
-NETWORK_ARCHITECTURE = [
-    DominoEncoder.VECTOR_SIZE,
-    256,
-    128,
-    DominoEncoder.ACTION_SIZE,
-]
 SUPPORTED_TRAINING_ALGORITHMS = frozenset((
     PPO_TRAINING_ALGORITHM,
     LEGACY_TRAINING_ALGORITHM,
@@ -282,6 +277,7 @@ def create_run_config(
     run_name=None,
     locked_arguments=None,
     machine=None,
+    network_architecture=DEFAULT_NETWORK_ARCHITECTURE,
 ):
     """Atomically publish the immutable identity and requested target of a run."""
     algorithm = _validated_algorithm(algorithm)
@@ -302,7 +298,7 @@ def create_run_config(
         "ruleset_version": RULESET_VERSION,
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
-        "network_architecture": NETWORK_ARCHITECTURE,
+        "network_architecture": network_architecture.as_list(),
         "algorithm": algorithm,
         "supervised_weights_path": str(supervised_weights_path),
         "supervised_weights_sha256": supervised_weights_sha256,
@@ -406,7 +402,7 @@ def load_resume_point(
         "seed": int(seed),
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
-        "network_architecture": NETWORK_ARCHITECTURE,
+        "network_architecture": run_config["network_architecture"],
         "algorithm": algorithm,
         "supervised_weights_sha256": supervised_weights_sha256,
         "ppo_config": dict(ppo_config),
@@ -726,7 +722,7 @@ def publish_checkpoint(
         "unbounded": target_rl_games is None,
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
-        "network_architecture": NETWORK_ARCHITECTURE,
+        "network_architecture": run_config["network_architecture"],
         "rl_games_completed": completed_games,
         "rl_iterations_completed": completed_iterations,
         "policy_updates_completed": policy_updates_completed,

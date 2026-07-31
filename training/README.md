@@ -71,7 +71,7 @@ selection, algorithm-specific update history, and cumulative counters. Examples:
 
 The marker advances at the normal numbered-checkpoint interval, not only at a
 100,000-game diagnostic boundary. Superseded non-milestone latest payloads are
-pruned only after the replacement marker is durable. Numbered policy-only
+pruned only after the replacement marker is durable. Numbered policy
 checkpoints and full milestone resume states each retain a rolling window of
 the five newest generations; milestone policy weights remain available for
 the complete diagnostic history and best-checkpoint pointer.
@@ -102,8 +102,13 @@ not construct a PPO buffer or calculate PPO ratios, clipping, KL control,
 minibatches, or the post-update full-buffer evaluation. The algorithm is an
 immutable resume field and is reloaded from the saved run configuration;
 changing between `ppo_v1` and `reinforce_v1` is rejected before training. Both
-canonical modes remain policy-only. The optional value head is still available
-only to direct `training.self_play` experiments.
+algorithms support the optional value head, which remains off by default. A
+canonical PPO actor-critic run can be started and resumed with:
+
+```bash
+python -m training.pipeline forever --value-head --run-name critic
+python -m training.pipeline forever
+```
 
 The optional value accepted by `--resume` is a convenience alias for
 `--resume-from`. In `forever`, diagnostic-worker autotuning is performed once,
@@ -353,6 +358,8 @@ The supervised controls use these defaults:
 | `--sl-training-plateau-min-relative-improvement F` | Block improvement below this fraction counts as saturated | `0.001` |
 | `--sl-device` / standalone `--device` | `auto`, forced `cpu`, or required `gpu` | `auto` |
 | `--sl-batch-size N` | Fixed safe batch; power of two from 1,024 through 1,048,576 | `8,192` |
+| `--hidden1-size N` | First hidden policy-layer width | `256` |
+| `--hidden2-size N` | Second hidden policy-layer width | `128` |
 | `--sl-memory-reserve-mb N` | Free host RAM retained | `512` |
 | `--sl-gpu-memory-reserve-mb N` | Effective free VRAM retained | `512` |
 | `--sl-seed N` | Reproducible initialization and epoch permutations | unset |
@@ -478,7 +485,7 @@ to the name, such as `model_iter000050.npz`, and atomically publishes a paired
 every computation-affecting RL/PPO setting, completed real games, optimizer
 state, RNGs, supervised-checkpoint hash, fixed GPI, tuned workers, rolling logs,
 and the exact opponent-policy pool. The newest pool state replaces the previous
-one to bound disk use; numbered policy-only files remain available.
+one to bound disk use; numbered policy files remain available.
 
 To continue manually, pass the matching pair and its completed iteration while
 keeping the original training configuration and total target:
@@ -581,20 +588,21 @@ the canonical `forever` profile runs at most 16. An explicit
 `--ppo-max-epochs` overrides the profile default within the supported 1–16
 range.
 
-Enable the optional actor-critic baseline with:
+Enable the optional PPO actor-critic with:
 
 ```bash
-python -m training.self_play --no-ppo --value-head
+python -m training.pipeline forever --value-head --run-name critic
+# Or directly:
+python -m training.self_play --value-head
 ```
 
-This legacy regression mode adds a linear `V(s)` head over the second hidden layer. The current
+This adds a linear `V(s)` head over the second hidden layer. The current
 finalized policy reward is the value target, and the masked policy update uses
-`reward - V(s)` as its advantage. The value-loss coefficient defaults to `0.5`
-(`--value-coef`). In this mode checkpoints also contain `Wv` and `bv`.
-
-The canonical pipeline supports both policy-only `ppo_v1` and policy-only
-`reinforce_v1`. Value-head regression remains available only to direct
-self-play and experiment wrappers.
+`reward - V(s)` as its advantage. PPO saves the collection-time values, uses a
+clipped value loss, and evaluates value loss, clipping, prediction moments, and
+explained variance after each epoch. The value-loss coefficient defaults to
+`0.5` (`--value-coef`). Checkpoints contain `Wv` and `bv`. Combining
+`--no-ppo --value-head` keeps the historical one-full-buffer actor-critic path.
 
 Policy-only loading ignores `Wv`/`bv`, while value-head loading initializes
 them to zero when they are absent. This permits mode changes without changing
@@ -614,6 +622,8 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 | `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
 | `--clip-grad-norm` | Gradient-norm clipping threshold for the policy-gradient update | `5.0` |
 | `--ppo` / `--no-ppo` | Masked PPO or historical one-update REINFORCE regression | PPO |
+| `--value-head` | Train a linear critic with PPO or REINFORCE | off |
+| `--value-coef` | Critic loss coefficient when the value head is enabled | `0.5` |
 | `--normalize-advantages` / `--no-normalize-advantages` | Standardize once over the complete iteration buffer | on for PPO |
 | `--total-training-games` | Exact real-game budget; final iteration may be partial | `100000` |
 | `--gpi` | Fixed positive number of games per RL iteration | `2000` |
@@ -633,6 +643,19 @@ judged from the average rather than a single noisy line. In detailed
 mean/std/min/max of the pre-update `V(s)` predictions for every displayed
 iteration. These are the same predictions used in `reward - V(s)`; the report
 reuses that forward pass rather than evaluating the buffer again.
+
+The policy architecture defaults to `168 -> 256 -> 128 -> 56`. Its two hidden
+widths come from `agents/network_architecture.py` and can be changed consistently
+for supervised training and a canonical pipeline with `--hidden1-size` and
+`--hidden2-size`, for example:
+
+```bash
+python -m training.pipeline forever --hidden1-size 512 --hidden2-size 256 \
+  --retrain-supervised --run-name wider
+```
+
+Architecture is part of supervised compatibility metadata and the immutable
+RL resume identity. A run cannot resume with different dimensions.
 
 ### Device selection (`--device`)
 

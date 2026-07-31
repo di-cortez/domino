@@ -63,6 +63,7 @@ def resolve_training_options(
     reward_schema,
     ppo_enabled,
     use_value_head,
+    value_coef,
     ppo_clip_epsilon,
     ppo_target_kl,
     ppo_stop_kl,
@@ -124,11 +125,8 @@ def resolve_training_options(
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
     if reward_schema not in REWARD_SCHEMAS:
         raise ValueError(f"Unknown reward_schema {reward_schema!r}.")
-    if ppo_enabled and use_value_head:
-        raise ValueError(
-            "PPO v1 keeps the critic disabled; use --no-ppo for "
-            "value-head regression."
-        )
+    if float(value_coef) < 0:
+        raise ValueError("value_coef must be non-negative")
     if ppo_enabled:
         if not 0 < float(ppo_clip_epsilon) < 1:
             raise ValueError("ppo_clip_epsilon must be in (0, 1)")

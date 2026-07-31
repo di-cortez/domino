@@ -111,8 +111,23 @@ python -m training.pipeline forever
 
 The algorithm is part of the exact resume identity and is reloaded
 automatically; a `reinforce_v1` run cannot be resumed as `ppo_v1`, or vice
-versa. Canonical runs remain policy-only in both modes, so `--value-head` stays
-limited to direct self-play experiments.
+versa. The optional critic is off by default and works with both algorithms.
+For PPO actor-critic training:
+
+```bash
+python -m training.pipeline forever --value-head --run-name critic
+python -m training.pipeline forever
+```
+
+The hidden layers default to 256 and 128 neurons. A clean architecture
+experiment can select both widths consistently for supervised and RL stages:
+
+```bash
+python -m training.pipeline forever --hidden1-size 512 --hidden2-size 256 \
+  --retrain-supervised --run-name wider
+```
+
+Value-head state and architecture are immutable resume fields.
 
 For `forever`, `run_config.json` records the full locked configuration and its
 SHA-256, the ruleset, optional run name, supervised origin, and the machine on

@@ -293,6 +293,7 @@ def train(
         reward_schema=reward_schema,
         ppo_enabled=ppo_enabled,
         use_value_head=use_value_head,
+        value_coef=value_coef,
         ppo_clip_epsilon=ppo_clip_epsilon,
         ppo_target_kl=ppo_target_kl,
         ppo_stop_kl=ppo_stop_kl,
@@ -459,6 +460,10 @@ def train(
     selected_workers = int(adaptive_tuning["selected_workers"])
     emit_status(f"Fixed GPI: {selected_gpi}.")
     emit_status("RL update configuration:")
+    emit_status(
+        f"  value head: {'on' if use_value_head else 'off'}"
+        + (f" | value coefficient: {value_coef:g}" if use_value_head else "")
+    )
     if ppo_enabled:
         emit_status(
             f"  algorithm: {algorithm} | clip epsilon: {ppo_clip_epsilon:.2f} | "
@@ -767,9 +772,31 @@ def train(
                 update_started = time.perf_counter()
                 if ppo_enabled:
                     buffer_started = time.perf_counter()
+                    old_values = None
+                    value_predictions = None
+                    if use_value_head:
+                        value_states = network.xp.hstack([
+                            network.xp.asarray(
+                                sample.x,
+                                dtype=network.xp.float32,
+                            )
+                            for sample in batch
+                        ])
+                        backend_old_values = network.predict_values(value_states)
+                        if not quiet and iteration % log_interval == 0:
+                            value_predictions = _value_prediction_summary(
+                                backend_old_values
+                            )
+                        old_values = np.ascontiguousarray(
+                            backend_old_values.get()
+                            if hasattr(backend_old_values, "get")
+                            else backend_old_values,
+                            dtype=np.float32,
+                        ).reshape(-1)
                     decision_buffer = PPOBuffer.from_samples(
                         batch,
                         normalize=normalize_advantages,
+                        old_values=old_values,
                     )
                     runtime_profile.add(
                         "ppo_buffer_assembly_and_advantage_normalization",
@@ -784,6 +811,7 @@ def train(
                         iteration=iteration,
                         entropy_coef=entropy_coef,
                         clip_grad_norm=clip_grad_norm,
+                        value_coef=value_coef,
                         clip_epsilon=ppo_clip_epsilon,
                         target_kl=ppo_target_kl,
                         stop_kl=ppo_stop_kl,
@@ -801,6 +829,10 @@ def train(
                         time.perf_counter() - ppo_started,
                     )
                     runtime_profile.merge_ppo_metrics(ppo_metrics)
+                    if value_predictions is not None:
+                        ppo_metrics["value_predictions_before_update"] = (
+                            value_predictions
+                        )
                     gradient_metrics = ppo_metrics
                 else:
                     legacy_started = time.perf_counter()

@@ -132,7 +132,7 @@ def _prune_numbered_checkpoint_weights(
     *,
     keep=NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
 ):
-    """Retain a small rolling window of policy-only numbered checkpoints."""
+    """Retain a small rolling window of numbered policy checkpoints."""
     keep = int(keep)
     if keep < 1:
         raise ValueError("keep must be positive")
@@ -419,7 +419,7 @@ def _save_numbered_resume_checkpoint(
         runner.export_pool_snapshots(),
     )
 
-    # Pool snapshots are much larger than policy-only checkpoints. The newest
+    # Pool snapshots are much larger than policy checkpoints. The newest
     # state is sufficient for continuation; older numbered weight files remain
     # available for analysis while their superseded resume states are removed.
     base = Path(base_path)

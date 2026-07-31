@@ -38,7 +38,7 @@ train_script/run_training_pipeline.sh --skip-dataset --skip-sl \
   --rl-iterations 2 --rl-checkpoint-interval 1 \
   --rl-weights-file models/smoke_test.npz
 
-# Historical value-head regression path; this disables PPO.
+# PPO actor-critic (add --rl-no-ppo for the historical update).
 train_script/run_training_pipeline.sh --skip-dataset --skip-sl \
   --rl-value-head --rl-weights-file models/domino_rl_weights_critic.npz
 ```
@@ -53,8 +53,9 @@ Important RL options are:
 | `--rl-gamma` | Terminal-reward discount | `1.0` |
 | `--rl-reward-schema` | `default`, `sparse`, or `shaped` | `default` |
 | `--rl-workers` | CPU rollout workers or `auto` | `auto` |
-| `--rl-value-head` | Enable the legacy value-head path and disable PPO | off |
+| `--rl-value-head` | Enable the value head with PPO or REINFORCE | off |
 | `--rl-ppo` / `--rl-no-ppo` | PPO or one-update REINFORCE | PPO |
+| `--hidden1-size` / `--hidden2-size` | Hidden policy widths used by supervised training | `256` / `128` |
 | `--rl-seed` | Fixed training seed | unset |
 | `--rl-device` | `auto`, `cpu`, or `gpu` | `auto` |
 

@@ -169,8 +169,8 @@ def add_optional_rl_arguments(
         "--value-head",
         action="store_true",
         help=(
-            "Train a linear V(s) baseline (the critic) and use reward-minus-value "
-            "policy advantages in the legacy path; combine with --no-ppo."
+            "Train a linear V(s) critic and use reward-minus-value policy "
+            "advantages with PPO or the legacy --no-ppo update."
         ),
     )
     group.add_argument("--value-coef", type=float, default=VALUE_COEF)

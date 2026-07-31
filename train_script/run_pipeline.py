@@ -178,6 +178,8 @@ def _run_supervised_training(config, args):
         lambda progress: training_loop.train_supervised(
             epochs=config.supervised_epochs,
             batch_size=args.sl_batch_size,
+            hidden1_size=args.hidden1_size,
+            hidden2_size=args.hidden2_size,
             quiet=True,
             progress_callback=progress,
             weight_decay=args.weight_decay,

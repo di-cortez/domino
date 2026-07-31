@@ -19,9 +19,8 @@ _ALGORITHM_KEY = "rl_training_algorithm"
 class PolicyNetwork(SupervisedNeuralNetwork):
     """Supervised policy architecture with masked PPO/REINFORCE gradients.
 
-    PPO is the default self-play algorithm and keeps the critic disabled.
-    ``use_value_head=True`` adds a linear ``V(s)`` head for the explicit legacy
-    REINFORCE regression path.
+    PPO is the default self-play algorithm. ``use_value_head=True`` adds a
+    linear ``V(s)`` critic shared by PPO and the legacy REINFORCE path.
 
     ``device`` selects the array backend independently of the parent class:
     ``"auto"`` (default) matches ``GPU_ENABLED`` exactly, reproducing prior
@@ -278,6 +277,118 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         entropy = -xp.sum(policy * log_policy, axis=0)
         return log_probs, entropy, policy
 
+    def clipped_value_loss_terms(
+        self,
+        values,
+        returns,
+        old_values,
+        clip_epsilon,
+    ):
+        """Return PPO-clipped value losses and their gradient per sample."""
+        xp = self.xp
+        delta = values - old_values
+        clipped_values = old_values + xp.clip(
+            delta,
+            -float(clip_epsilon),
+            float(clip_epsilon),
+        )
+        value_error = values - returns
+        clipped_error = clipped_values - returns
+        losses = 0.5 * value_error ** 2
+        clipped_losses = 0.5 * clipped_error ** 2
+        use_unclipped = losses >= clipped_losses
+        inside_clip = (
+            (delta >= -float(clip_epsilon))
+            & (delta <= float(clip_epsilon))
+        )
+        gradient = xp.where(
+            use_unclipped,
+            value_error,
+            clipped_error * inside_clip,
+        )
+        return xp.maximum(losses, clipped_losses), gradient, delta
+
+    def _ppo_value_update_terms(
+        self,
+        a2,
+        returns,
+        old_values,
+        *,
+        sample_count,
+        dtype,
+        value_coef,
+        clip_epsilon,
+    ):
+        """Build critic metrics and gradients for one PPO minibatch."""
+        if not getattr(self, "use_value_head", False):
+            if returns is not None or old_values is not None:
+                raise ValueError(
+                    "PPO value targets were provided, but the value head is disabled."
+                )
+            return None
+        if returns is None or old_values is None:
+            raise ValueError(
+                "PPO returns and old_values are required with a value head."
+            )
+        xp = self.xp
+        returns = xp.asarray(returns, dtype=dtype).reshape(1, -1)
+        old_values = xp.asarray(old_values, dtype=dtype).reshape(1, -1)
+        if returns.shape[1] != sample_count or old_values.shape[1] != sample_count:
+            raise ValueError("PPO returns and old_values must match the batch size.")
+        values = xp.dot(self.Wv, a2) + self.bv
+        losses, value_gradient, value_delta = self.clipped_value_loss_terms(
+            values,
+            returns,
+            old_values,
+            clip_epsilon,
+        )
+        finite_values = xp.all(xp.isfinite(values)) & xp.all(xp.isfinite(losses))
+        if not bool(self._as_float(finite_values)):
+            raise FloatingPointError("PPO value loss produced NaN/Inf.")
+        inverse_count = xp.asarray(1.0 / sample_count, dtype=dtype)
+        weighted_gradient = float(value_coef) * value_gradient
+        return {
+            "loss": self._as_float(xp.mean(losses)),
+            "clip_fraction": self._as_float(
+                xp.mean(xp.abs(value_delta) > float(clip_epsilon))
+            ),
+            "gradients": {
+                "Wv": inverse_count * xp.dot(weighted_gradient, a2.T),
+                "bv": inverse_count * xp.sum(
+                    weighted_gradient,
+                    axis=1,
+                    keepdims=True,
+                ),
+            },
+            "shared_a2_gradient": xp.dot(self.Wv.T, weighted_gradient),
+        }
+
+    def _apply_gradient_step(self, gradients, grad_norm, clip_grad_norm, dtype):
+        """Clip, apply, and account for one plain-SGD optimizer step."""
+        xp = self.xp
+        grad_clipped = False
+        applied_grad_norm = grad_norm
+        if clip_grad_norm is not None and grad_norm > clip_grad_norm:
+            scale = float(clip_grad_norm) / (grad_norm + 1e-8)
+            gradients = {
+                name: gradient * scale
+                for name, gradient in gradients.items()
+            }
+            grad_clipped = True
+            applied_grad_norm = float(clip_grad_norm)
+        learning_rate = xp.asarray(self.lr, dtype=dtype)
+        for name, gradient in gradients.items():
+            setattr(self, name, getattr(self, name) - learning_rate * gradient)
+        self.optimizer_step_count = int(
+            getattr(self, "optimizer_step_count", 0)
+        ) + 1
+        return {
+            "grad_norm": grad_norm,
+            "grad_clipped": grad_clipped,
+            "applied_grad_norm": applied_grad_norm,
+            "optimizer_steps": 1,
+        }
+
     def backward_ppo(
         self,
         x,
@@ -286,6 +397,9 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         old_log_probs,
         advantages,
         *,
+        returns=None,
+        old_values=None,
+        value_coef=0.5,
         clip_epsilon=0.2,
         entropy_coef=0.01,
         clip_grad_norm=5.0,
@@ -305,8 +419,6 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 time.perf_counter() - started
             )
 
-        if getattr(self, "use_value_head", False):
-            raise ValueError("PPO v1 requires the critic/value head to be disabled.")
         xp = self.xp
         phase_started = time.perf_counter()
         new_log_probs, entropy, masked_policy = self.evaluate_actions(
@@ -363,6 +475,18 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         dW3 = inverse_count * xp.dot(dz3, a2.T)
         db3 = inverse_count * xp.sum(dz3, axis=1, keepdims=True)
         da2 = xp.dot(self.W3.T, dz3)
+
+        value_terms = self._ppo_value_update_terms(
+            a2,
+            returns,
+            old_values,
+            sample_count=sample_count,
+            dtype=dz3.dtype,
+            value_coef=value_coef,
+            clip_epsilon=clip_epsilon,
+        )
+        if value_terms is not None:
+            da2 = da2 + value_terms["shared_a2_gradient"]
         dz2 = da2 * self.relu_derivative(self.cache["Z2"])
         dW2 = inverse_count * xp.dot(dz2, a1.T)
         db2 = inverse_count * xp.sum(dz2, axis=1, keepdims=True)
@@ -378,6 +502,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             "W3": dW3,
             "b3": db3,
         }
+        if value_terms is not None:
+            gradients.update(value_terms["gradients"])
         grad_norm = self._as_float(
             xp.sqrt(sum(xp.sum(gradient ** 2) for gradient in gradients.values()))
         )
@@ -386,17 +512,12 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             phase_started,
         )
         phase_started = time.perf_counter()
-        grad_clipped = False
-        applied_grad_norm = grad_norm
-        if clip_grad_norm is not None and grad_norm > clip_grad_norm:
-            scale = float(clip_grad_norm) / (grad_norm + 1e-8)
-            gradients = {name: gradient * scale for name, gradient in gradients.items()}
-            grad_clipped = True
-            applied_grad_norm = float(clip_grad_norm)
-        learning_rate = xp.asarray(self.lr, dtype=dz3.dtype)
-        for name, gradient in gradients.items():
-            setattr(self, name, getattr(self, name) - learning_rate * gradient)
-        self.optimizer_step_count = int(getattr(self, "optimizer_step_count", 0)) + 1
+        update_metrics = self._apply_gradient_step(
+            gradients,
+            grad_norm,
+            clip_grad_norm,
+            dz3.dtype,
+        )
 
         clip_fraction = xp.mean((ratio < lower) | (ratio > upper))
         approx_kl = xp.mean((ratio - 1.0) - log_ratio)
@@ -408,11 +529,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             "ratio_mean": self._as_float(xp.mean(ratio)),
             "ratio_min": self._as_float(xp.min(ratio)),
             "ratio_max": self._as_float(xp.max(ratio)),
-            "grad_norm": grad_norm,
-            "grad_clipped": grad_clipped,
-            "applied_grad_norm": applied_grad_norm,
-            "optimizer_steps": 1,
-            "value_loss": None,
+            **update_metrics,
+            "value_loss": None if value_terms is None else value_terms["loss"],
+            "value_clip_fraction": (
+                None if value_terms is None else value_terms["clip_fraction"]
+            ),
         }
         finish_phase(
             "gradient_clipping_parameter_update_and_metric_transfers",

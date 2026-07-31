@@ -83,8 +83,10 @@ public-information features and maps real tile decisions to 56 outputs: 28
 tiles times two board ends. Draw, pass, and single-option tile plays are forced
 by the engine and bypass neural inference and policy-gradient sampling.
 
-`SupervisedNeuralNetwork` is a float32 MLP with policy shape
-`168 -> 256 -> 128 -> 56`. `PolicyNetwork` extends it with masked
+`SupervisedNeuralNetwork` is a float32 MLP whose default policy shape is
+`168 -> 256 -> 128 -> 56`. The hidden widths have a single source of truth in
+`agents/network_architecture.py` and are configurable from supervised and
+canonical pipeline CLIs. `PolicyNetwork` extends it with masked
 policy-gradient updates and an optional training-only value head. Policy
 checkpoints store `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`; critic-enabled
 checkpoints also store `Wv` and `bv`. Current code still loads compatible
@@ -131,8 +133,9 @@ same frozen policy. The default update stores masked collection-time
 log-probabilities, normalizes advantages once over the complete decision
 buffer, and runs masked PPO in deterministic minibatches. Direct and finite
 canonical runs default to at most four epochs; `forever` defaults to 16, with
-a whole-buffer KL guard after every completed epoch. The optional policy-only
-`reinforce_v1` update instead applies one
+a whole-buffer KL guard after every completed epoch. With the optional value
+head, collection-time `V(s)` predictions define the advantages and PPO also
+optimizes a clipped critic loss. The optional `reinforce_v1` update instead applies one
 full-buffer policy-gradient step and skips PPO buffer construction, ratios,
 clipping, KL control, minibatches, and post-update full-buffer evaluation.
 There is no replay buffer or cross-iteration reuse in either mode. Decision

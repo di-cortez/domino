@@ -77,6 +77,22 @@ def _machine_footer_lines(metadata):
     return f"CPU: {cpu_text} · {ram_text}", f"GPU: {gpu} · {vram_text}"
 
 
+def _training_footer_line(run_config):
+    """Return critic and hidden-layer configuration for the plot footer."""
+    run_config = dict(run_config or {})
+    rl_config = dict(run_config.get("rl_config", {}))
+    architecture = run_config.get("network_architecture", ())
+    hidden_text = (
+        f"{int(architecture[1]):,} × {int(architecture[2]):,}"
+        if len(architecture) >= 3
+        else "unknown"
+    )
+    value_head_text = (
+        "on" if bool(rl_config.get("use_value_head", False)) else "off"
+    )
+    return f"Value head {value_head_text} · hidden {hidden_text}"
+
+
 def _rl_elapsed_hours(row):
     """Return cumulative RL training time in hours for one monitor point."""
     try:
@@ -269,12 +285,16 @@ def rebuild_progress_csv(run_dir):
             "rl_games": row["rl_games"],
             "rl_iterations": row["rl_iterations"],
             "optimizer_steps": row["optimizer_steps"],
-            "rl_elapsed_hours": _rl_elapsed_hours(row),
-            "win_rate_percent": 100.0 * row["win_rate"],
-            "ci95_low_percent": 100.0 * row["ci95_win_rate_low"],
-            "ci95_high_percent": 100.0 * row["ci95_win_rate_high"],
-            "diagnostic_games": row["diagnostic_games"],
-            "diagnostic_seconds": row["diagnostic_seconds"],
+            "rl_elapsed_hours": f"{_rl_elapsed_hours(row):.3f}",
+            "win_rate_percent": f"{100.0 * row['win_rate']:.3f}",
+            "ci95_low_percent": (
+                f"{100.0 * row['ci95_win_rate_low']:.3f}"
+            ),
+            "ci95_high_percent": (
+                f"{100.0 * row['ci95_win_rate_high']:.3f}"
+            ),
+            "diagnostic_games": f"{float(row['diagnostic_games']):.3f}",
+            "diagnostic_seconds": f"{float(row['diagnostic_seconds']):.3f}",
             "checkpoint_path": row["checkpoint_path"],
             "checkpoint_sha256": row["checkpoint_sha256"],
             "configuration_sha256": row.get("configuration_sha256"),
@@ -382,6 +402,14 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
         ha="left",
         va="bottom",
         fontsize=7,
+    )
+    figure.text(
+        0.99,
+        0.06,
+        _training_footer_line(run_config),
+        ha="right",
+        va="bottom",
+        fontsize=8,
     )
     figure.text(
         0.99,

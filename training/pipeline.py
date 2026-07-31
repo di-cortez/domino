@@ -14,6 +14,7 @@ import signal
 import sys
 import time
 
+from agents.network_architecture import architecture_from_hidden_sizes
 from agents.nn import resolve_device
 from diagnostics import evaluate
 from diagnostics.rl_progress import (
@@ -468,6 +469,14 @@ def _supervised_training_identity(args, max_epochs):
     )
 
 
+def _network_architecture(args):
+    """Return the one architecture selected for supervised and RL stages."""
+    return architecture_from_hidden_sizes(
+        args.hidden1_size,
+        args.hidden2_size,
+    )
+
+
 def _progress_callback(label, total, unit):
     if tqdm is None:
         last = {"done": 0}
@@ -497,6 +506,7 @@ def _progress_callback(label, total, unit):
 def ensure_canonical_supervised_assets(root, config, args):
     """Build run-local quick assets or reuse compatible long-run assets."""
     seed = int(args.seed)
+    architecture = _network_architecture(args)
     dataset_games = int(args.dataset_games or config.dataset_games)
     max_epochs = int(args.supervised_max_epochs or config.supervised_epochs)
     if config.reuse_supervised_assets:
@@ -562,6 +572,7 @@ def ensure_canonical_supervised_assets(root, config, args):
         seed=seed,
         dataset_sha256=dataset_metadata["dataset_sha256"],
         training_config=training_config,
+        architecture=architecture,
     )
     weights_check.require_compatible_or_missing(
         rebuild=retrain_weights,
@@ -578,6 +589,8 @@ def ensure_canonical_supervised_assets(root, config, args):
             supervised_summary = training_loop.train_supervised(
                 epochs=max_epochs,
                 batch_size=args.sl_batch_size,
+                hidden1_size=architecture.hidden1_size,
+                hidden2_size=architecture.hidden2_size,
                 dataset_file=paths.dataset,
                 weights_file=paths.weights,
                 cache_file=paths.encoded_cache,
@@ -607,6 +620,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             dataset_sha256=dataset_metadata["dataset_sha256"],
             training_config=training_config,
             training_summary=supervised_summary,
+            architecture=architecture,
         )
         weights_status = "trained"
 
@@ -1015,6 +1029,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             print(f"Archived previous RL run at {archive}.")
     algorithm = _rl_algorithm(args)
     ppo_config = _ppo_config(args)
+    architecture = _network_architecture(args)
     supervised_path = assets["paths"].weights
     supervised_hash = assets["weights_metadata"]["weights_sha256"]
     existing_run_config = (
@@ -1106,6 +1121,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
         run_name=args.run_name,
         locked_arguments=locked_arguments,
         machine=recorded_machine,
+        network_architecture=architecture,
     )
     if config.unbounded:
         _write_forever_active_run(root, run_dir, run_configuration)
@@ -1687,11 +1703,6 @@ def validate_args(args, config):
     ):
         if int(getattr(args, name)) < 1:
             raise ValueError(f"{name} must be positive.")
-    if args.value_head:
-        raise ValueError(
-            "Canonical pipelines remain policy-only; the value head is "
-            "available only in direct self-play experiments."
-        )
 
 
 def main(argv=None):

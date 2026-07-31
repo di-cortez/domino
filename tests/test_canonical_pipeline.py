@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 
@@ -9,10 +10,12 @@ import numpy as np
 import pytest
 
 from agents.rl_nn import PolicyNetwork
+from agents.network_architecture import architecture_from_hidden_sizes
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from diagnostics.rl_progress import (
     PERIODIC_SUMMARY_RETENTION,
     _rl_elapsed_hours,
+    _training_footer_line,
     append_periodic_point,
     final_diagnostic_seed,
     periodic_diagnostic_seed,
@@ -50,6 +53,7 @@ from training.pipeline import (
     PIPELINE_LEVELS,
     _cumulative_rl_games_per_second,
     _locked_forever_arguments,
+    _network_architecture,
     _ppo_config,
     _rl_config,
     _resolve_periodic_diagnostic_workers,
@@ -206,6 +210,10 @@ def test_forever_run_reloads_locked_arguments_from_the_active_pointer(tmp_path):
         "1000",
         "--ppo-max-epochs",
         "8",
+        "--hidden1-size",
+        "512",
+        "--hidden2-size",
+        "192",
     ])
     run_dir = canonical_run_dir(
         tmp_path,
@@ -226,6 +234,7 @@ def test_forever_run_reloads_locked_arguments_from_the_active_pointer(tmp_path):
         diagnostic_config={"periodic_games": 100},
         run_name=initial.run_name,
         locked_arguments=_locked_forever_arguments(initial),
+        network_architecture=_network_architecture(initial),
         machine={
             "cpu_model": "Test CPU",
             "logical_cpu_count": 4,
@@ -246,6 +255,8 @@ def test_forever_run_reloads_locked_arguments_from_the_active_pointer(tmp_path):
     assert resumed.run_name == "epochs8"
     assert resumed.gpi == 1000
     assert resumed.ppo_max_epochs == 8
+    assert resumed.hidden1_size == 512
+    assert resumed.hidden2_size == 192
     assert resumed._selected_run_dir == run_dir
 
     with pytest.raises(SystemExit):
@@ -255,6 +266,15 @@ def test_forever_run_reloads_locked_arguments_from_the_active_pointer(tmp_path):
             str(tmp_path),
             "--gpi",
             "2000",
+        ])
+
+    with pytest.raises(SystemExit):
+        parse_args([
+            "forever",
+            "--artifact-root",
+            str(tmp_path),
+            "--hidden1-size",
+            "256",
         ])
 
     separate = parse_args([
@@ -273,7 +293,7 @@ def test_forever_run_reloads_locked_arguments_from_the_active_pointer(tmp_path):
     assert separate.gpi == 2000
 
 
-def test_canonical_pipeline_accepts_policy_only_reinforce():
+def test_canonical_pipeline_accepts_ppo_and_reinforce_with_optional_critic(tmp_path):
     ppo = parse_args(["forever"])
     reinforce = parse_args(["forever", "--no-ppo"])
     finite = parse_args(["huge"])
@@ -288,9 +308,56 @@ def test_canonical_pipeline_accepts_policy_only_reinforce():
     assert finite.ppo_max_epochs == 4
     assert explicit.ppo_max_epochs == 7
 
-    critic = parse_args(["forever", "--no-ppo", "--value-head"])
-    with pytest.raises(ValueError, match="remain policy-only"):
-        validate_args(critic, PIPELINE_LEVELS["forever"])
+    critic_ppo = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+        "--run-name",
+        "critic_ppo",
+        "--value-head",
+    ])
+    critic_reinforce = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+        "--run-name",
+        "critic_reinforce",
+        "--no-ppo",
+        "--value-head",
+    ])
+    validate_args(critic_ppo, PIPELINE_LEVELS["forever"])
+    validate_args(critic_reinforce, PIPELINE_LEVELS["forever"])
+    assert critic_ppo.ppo_enabled is True
+    assert critic_ppo.value_head is True
+    assert critic_reinforce.ppo_enabled is False
+    assert critic_reinforce.value_head is True
+
+
+def test_pipeline_hidden_sizes_have_one_default_and_are_locked_for_forever(tmp_path):
+    defaults = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+        "--run-name",
+        "default_architecture",
+    ])
+    custom = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+        "--run-name",
+        "custom_architecture",
+        "--hidden1-size",
+        "512",
+        "--hidden2-size",
+        "192",
+    ])
+
+    assert (defaults.hidden1_size, defaults.hidden2_size) == (256, 128)
+    assert (custom.hidden1_size, custom.hidden2_size) == (512, 192)
+    locked = _locked_forever_arguments(custom)
+    assert locked["hidden1_size"] == 512
+    assert locked["hidden2_size"] == 192
 
 
 def test_forever_periodic_workers_are_recovered_once_and_then_persisted(tmp_path):
@@ -464,6 +531,18 @@ def test_canonical_asset_hashes_and_metadata_control_reuse(tmp_path):
         dataset_sha256=dataset_meta["dataset_sha256"],
         training_config=training,
     ).compatible
+    architecture_mismatch = inspect_canonical_weights(
+        paths,
+        seed=42,
+        dataset_sha256=dataset_meta["dataset_sha256"],
+        training_config=training,
+        architecture=architecture_from_hidden_sizes(512, 192),
+    )
+    assert architecture_mismatch.status == "incompatible"
+    assert any(
+        "network_architecture" in reason
+        for reason in architecture_mismatch.reasons
+    )
 
     paths.dataset.write_text("tampered\n", encoding="utf-8")
     incompatible = inspect_canonical_dataset(
@@ -660,6 +739,28 @@ def test_jsonl_repairs_partial_tail_deduplicates_and_rebuilds_reports(tmp_path):
     assert len(csv_path.read_text(encoding="utf-8").splitlines()) == 3
     assert "rl_elapsed_hours" in csv_path.read_text(encoding="utf-8").splitlines()[0]
     assert _rl_elapsed_hours(second) == pytest.approx(1000.0 / 3600.0)
+    with open(csv_path, newline="", encoding="utf-8") as stream:
+        csv_rows = list(csv.DictReader(stream))
+    for field in (
+        "rl_elapsed_hours",
+        "win_rate_percent",
+        "ci95_low_percent",
+        "ci95_high_percent",
+        "diagnostic_games",
+        "diagnostic_seconds",
+    ):
+        assert all(len(value[field].split(".")[-1]) == 3 for value in csv_rows)
+
+
+def test_progress_footer_reports_value_head_and_hidden_layers():
+    assert _training_footer_line({
+        "network_architecture": [168, 512, 192, 56],
+        "rl_config": {"use_value_head": True},
+    }) == "Value head on · hidden 512 × 192"
+    assert _training_footer_line({
+        "network_architecture": [168, 256, 128, 56],
+        "rl_config": {"use_value_head": False},
+    }) == "Value head off · hidden 256 × 128"
 
 
 def test_periodic_artifact_retention_drops_games_and_keeps_ten_summaries(tmp_path):

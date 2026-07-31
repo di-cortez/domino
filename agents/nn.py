@@ -7,6 +7,12 @@ import time
 
 import numpy as host_np
 
+from agents.network_architecture import (
+    DEFAULT_HIDDEN1_SIZE,
+    DEFAULT_HIDDEN2_SIZE,
+    DEFAULT_NETWORK_ARCHITECTURE,
+)
+
 
 DEVICES = ("auto", "cpu", "gpu")
 NETWORK_DTYPE = host_np.float32
@@ -60,14 +66,14 @@ if GPU_ENABLED:
 
 
 class SupervisedNeuralNetwork:
-    """Three-layer float32 MLP: 168 -> 256 -> 128 -> 56."""
+    """Three-layer float32 MLP with configurable hidden dimensions."""
 
     def __init__(
         self,
-        input_size=168,
-        hidden1_size=256,
-        hidden2_size=128,
-        output_size=56,
+        input_size=DEFAULT_NETWORK_ARCHITECTURE.input_size,
+        hidden1_size=DEFAULT_HIDDEN1_SIZE,
+        hidden2_size=DEFAULT_HIDDEN2_SIZE,
+        output_size=DEFAULT_NETWORK_ARCHITECTURE.output_size,
         learning_rate=0.01,
         random_seed=None,
         weight_decay=0.0,

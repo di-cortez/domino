@@ -18,6 +18,12 @@ import time
 import numpy as np
 
 from agents.encoder import DominoEncoder
+from agents.network_architecture import (
+    DEFAULT_HIDDEN1_SIZE,
+    DEFAULT_HIDDEN2_SIZE,
+    DEFAULT_NETWORK_ARCHITECTURE,
+    architecture_from_hidden_sizes,
+)
 from agents.nn import SupervisedNeuralNetwork
 from training.supervised_runtime import (
     DEFAULT_SUPERVISED_BATCH_SIZE,
@@ -336,7 +342,11 @@ def _encoded_bytes(example_count, encoder):
     )
 
 
-def _host_dataset_working_set_bytes(example_count, encoder):
+def _host_dataset_working_set_bytes(
+    example_count,
+    encoder,
+    architecture=DEFAULT_NETWORK_ARCHITECTURE,
+):
     """Estimate dataset, permutation, and minimum CPU training workspace."""
     train_count = max(1, int(example_count * 0.85))
     return (
@@ -345,8 +355,8 @@ def _host_dataset_working_set_bytes(example_count, encoder):
         + estimate_supervised_workspace_bytes(
             min(DEFAULT_SUPERVISED_BATCH_SIZE, train_count),
             encoder.VECTOR_SIZE,
-            256,
-            128,
+            architecture.hidden1_size,
+            architecture.hidden2_size,
             len(encoder.all_actions),
         )
     )
@@ -463,12 +473,17 @@ def load_dataset(
     encoder,
     quiet=False,
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
+    architecture=DEFAULT_NETWORK_ARCHITECTURE,
 ):
     """Encode a JSONL dataset directly into preallocated float32 RAM arrays."""
     if not quiet:
         print(f"Scanning dataset from {file_path}...")
     counts = _scan_dataset(file_path)
-    required = _host_dataset_working_set_bytes(counts["example_count"], encoder)
+    required = _host_dataset_working_set_bytes(
+        counts["example_count"],
+        encoder,
+        architecture,
+    )
     safe, status = host_allocation_status(required, memory_reserve_mb)
     if not safe:
         raise MemorySafetyError(
@@ -499,12 +514,17 @@ def load_or_build_dataset(
     *,
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
     return_info=False,
+    architecture=DEFAULT_NETWORK_ARCHITECTURE,
 ):
     """Return a validated RAM or mmap encoded cache without unsafe allocation."""
     source_metadata = _dataset_metadata(file_path, encoder)
     counts = _scan_dataset(file_path)
     example_count = counts["example_count"]
-    required = _host_dataset_working_set_bytes(example_count, encoder)
+    required = _host_dataset_working_set_bytes(
+        example_count,
+        encoder,
+        architecture,
+    )
     safe_in_ram, _status = host_allocation_status(required, memory_reserve_mb)
 
     if safe_in_ram and os.path.exists(cache_file):
@@ -555,6 +575,7 @@ def load_or_build_dataset(
         encoder,
         quiet=quiet,
         memory_reserve_mb=memory_reserve_mb,
+        architecture=architecture,
     )
     _save_encoded_cache(cache_file, x, y, source_metadata, quiet=quiet)
     result = EncodedDataset(x, y, "ram", source_metadata)
@@ -584,12 +605,12 @@ def _load_existing_weights(network, weights_file):
         network.load_policy_weights(weights)
 
 
-def _create_network(*, device, weight_decay, seed):
+def _create_network(*, device, weight_decay, seed, architecture):
     return SupervisedNeuralNetwork(
-        input_size=DominoEncoder.VECTOR_SIZE,
-        hidden1_size=256,
-        hidden2_size=128,
-        output_size=DominoEncoder.ACTION_SIZE,
+        input_size=architecture.input_size,
+        hidden1_size=architecture.hidden1_size,
+        hidden2_size=architecture.hidden2_size,
+        output_size=architecture.output_size,
         learning_rate=INITIAL_SUPERVISED_LEARNING_RATE,
         weight_decay=weight_decay,
         random_seed=seed,
@@ -608,6 +629,8 @@ def _is_gpu_startup_failure(exc):
 def train_supervised(
     epochs=EPOCHS,
     batch_size=DEFAULT_SUPERVISED_BATCH_SIZE,
+    hidden1_size=DEFAULT_HIDDEN1_SIZE,
+    hidden2_size=DEFAULT_HIDDEN2_SIZE,
     dataset_file="dataset/supervised_dataset.jsonl",
     weights_file="models/domino_sl_weights.npz",
     cache_file=ENCODED_CACHE_FILE,
@@ -633,6 +656,7 @@ def train_supervised(
     """Train the policy and return scheduler, storage, batch, and memory data."""
     if epochs < 1:
         raise ValueError("epochs must be positive")
+    architecture = architecture_from_hidden_sizes(hidden1_size, hidden2_size)
     started = time.time()
     if seed is not None:
         np.random.seed(seed)
@@ -647,6 +671,7 @@ def train_supervised(
         quiet=quiet,
         memory_reserve_mb=memory_reserve_mb,
         return_info=True,
+        architecture=architecture,
     )
     total_examples = dataset.x.shape[1]
     train_count = int(total_examples * 0.85)
@@ -666,6 +691,7 @@ def train_supervised(
             device=selected_device,
             weight_decay=weight_decay,
             seed=seed,
+            architecture=architecture,
         )
     except Exception as exc:
         if selected_device != "gpu" or not _is_gpu_startup_failure(exc):
@@ -681,6 +707,7 @@ def train_supervised(
             device="cpu",
             weight_decay=weight_decay,
             seed=seed,
+            architecture=architecture,
         )
     residency_probe = None
     resident_capacity = None
@@ -692,6 +719,8 @@ def train_supervised(
             dataset.x,
             dataset.y,
             reserve_mb=gpu_memory_reserve_mb,
+            hidden1_size=architecture.hidden1_size,
+            hidden2_size=architecture.hidden2_size,
         )
         if residency_probe.capacity_examples < 1:
             reason = (
@@ -707,6 +736,7 @@ def train_supervised(
                 device="cpu",
                 weight_decay=weight_decay,
                 seed=seed,
+                architecture=architecture,
             )
         else:
             resident_capacity = residency_probe.capacity_examples
@@ -730,6 +760,7 @@ def train_supervised(
             device="cpu",
             weight_decay=weight_decay,
             seed=seed,
+            architecture=architecture,
         )
         data_plan = SupervisedDataPlan(
             dataset.x,
@@ -989,6 +1020,7 @@ def train_supervised(
         "batch_size": selected_batch_size,
         "requested_batch_size": requested_batch_size,
         "selected_batch_size": selected_batch_size,
+        "network_architecture": architecture.as_dict(),
         "total_examples": total_examples,
         "train_examples": train_count,
         "validation_examples": validation_count,
@@ -1187,6 +1219,18 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
         help="Fixed supervised mini-batch size.",
     )
     group.add_argument(
+        "--hidden1-size",
+        type=_positive_int,
+        default=DEFAULT_HIDDEN1_SIZE,
+        help="Number of neurons in the first hidden policy layer.",
+    )
+    group.add_argument(
+        "--hidden2-size",
+        type=_positive_int,
+        default=DEFAULT_HIDDEN2_SIZE,
+        help="Number of neurons in the second hidden policy layer.",
+    )
+    group.add_argument(
         "--sl-memory-reserve-mb",
         type=_nonnegative_int,
         default=DATASET_MEMORY_RESERVE_MB,
@@ -1220,6 +1264,8 @@ def main(argv=None):
     args = parse_args(argv)
     train_supervised(
         batch_size=args.sl_batch_size,
+        hidden1_size=args.hidden1_size,
+        hidden2_size=args.hidden2_size,
         weight_decay=args.weight_decay,
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,

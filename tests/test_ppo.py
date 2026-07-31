@@ -191,6 +191,97 @@ def test_ppo_step_uses_saved_mask_and_increases_positive_action_probability():
     assert network.optimizer_step_count == 1
 
 
+def test_clipped_value_loss_uses_the_larger_loss_and_clips_its_gradient():
+    network = PolicyNetwork(
+        input_size=3,
+        hidden1_size=4,
+        hidden2_size=3,
+        output_size=4,
+        use_value_head=True,
+        device="cpu",
+    )
+    losses, gradients, deltas = network.clipped_value_loss_terms(
+        np.asarray([[0.4, 0.4]], dtype=np.float32),
+        np.asarray([[1.0, 0.0]], dtype=np.float32),
+        np.asarray([[0.0, 0.0]], dtype=np.float32),
+        0.2,
+    )
+
+    np.testing.assert_allclose(losses, [[0.32, 0.08]], atol=1e-7)
+    np.testing.assert_allclose(gradients, [[0.0, 0.4]], atol=1e-7)
+    np.testing.assert_allclose(deltas, [[0.4, 0.4]], atol=1e-7)
+
+
+def test_ppo_value_head_updates_critic_and_reports_value_metrics():
+    network = PolicyNetwork(
+        input_size=3,
+        hidden1_size=4,
+        hidden2_size=3,
+        output_size=4,
+        learning_rate=0.05,
+        random_seed=17,
+        use_value_head=True,
+        device="cpu",
+    )
+    samples = [_sample(index, reward=(-1.0 if index % 2 else 1.0)) for index in range(32)]
+    states = np.hstack([sample.x for sample in samples])
+    masks = np.hstack([sample.legal_mask for sample in samples])
+    actions = [sample.action_index for sample in samples]
+    old_log_probs, _entropy, _policy = network.evaluate_actions(
+        states,
+        masks,
+        actions,
+    )
+    for sample, old_log_prob in zip(samples, old_log_probs):
+        sample.old_log_prob = float(old_log_prob)
+    old_values = np.asarray(network.predict_values(states)).reshape(-1)
+    buffer = PPOBuffer.from_samples(samples, old_values=old_values)
+    critic_before = network.Wv.copy()
+
+    metrics = ppo_update(
+        network,
+        buffer,
+        actual_games=8,
+        base_seed=42,
+        iteration=1,
+        entropy_coef=0.0,
+        clip_grad_norm=5.0,
+        value_coef=0.5,
+        max_epochs=2,
+        min_minibatches=1,
+        max_minibatches=1,
+    )
+
+    assert not np.array_equal(network.Wv, critic_before)
+    assert metrics["value_loss"] is not None
+    assert metrics["final_value_loss"] >= 0.0
+    assert 0.0 <= metrics["final_value_clip_fraction"] <= 1.0
+    assert metrics["final_value_mean"] is not None
+    assert metrics["final_value_std"] is not None
+    assert all(row["value_loss"] is not None for row in metrics["epoch_metrics"])
+
+
+def test_ppo_value_head_requires_pre_update_values_in_the_buffer():
+    network = PolicyNetwork(
+        input_size=3,
+        hidden1_size=4,
+        hidden2_size=3,
+        output_size=4,
+        use_value_head=True,
+        device="cpu",
+    )
+    with np.testing.assert_raises_regex(ValueError, "old_values are required"):
+        ppo_update(
+            network,
+            _buffer(8),
+            actual_games=2,
+            base_seed=42,
+            iteration=1,
+            entropy_coef=0.0,
+            clip_grad_norm=5.0,
+        )
+
+
 def test_requested_minibatches_match_the_required_gpi_table():
     expected = {100: 4, 200: 4, 400: 4, 600: 5, 800: 7, 1000: 8, 2000: 16}
     assert {gpi: requested_minibatches(gpi) for gpi in expected} == expected

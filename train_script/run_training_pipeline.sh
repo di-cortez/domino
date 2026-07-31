@@ -102,6 +102,8 @@ SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT=0.001
 SL_WEIGHT_DECAY=""
 SL_DEVICE="auto"
 SL_BATCH_SIZE=8192
+HIDDEN1_SIZE=256
+HIDDEN2_SIZE=128
 SL_MEMORY_RESERVE_MB=512
 SL_GPU_MEMORY_RESERVE_MB=512
 SL_SEED=""
@@ -153,7 +155,7 @@ training.self_play):
   --rl-checkpoint-interval N   Iterations between checkpoints (default: $RL_CHECKPOINT_INTERVAL)
   --rl-pool-refresh-games N    Training games between self-play pool snapshots (default: $RL_POOL_REFRESH_GAMES)
   --rl-max-pool-size N         Max frozen snapshots kept in the pool (default: $RL_MAX_POOL_SIZE)
-  --rl-value-head              Turn the legacy critic ON; implies --rl-no-ppo
+  --rl-value-head              Turn the critic ON for PPO or --rl-no-ppo
   --rl-value-coef F            Value-loss coefficient, only used when --rl-value-head is set (default: $RL_VALUE_COEF)
   --rl-gamma F                 Terminal-reward discount per remaining real decision, 1.0 = no discount (default: $RL_GAMMA)
   --rl-reward-schema NAME      "default", "sparse", or "shaped" reward preset (default: $RL_REWARD_SCHEMA)
@@ -189,6 +191,8 @@ SL training controls:
   --sl-batch-size N                Fixed mini-batch size: 1024, 2048, 4096, 8192,
                                    16384, 32768, 65536, 131072, 262144, 524288,
                                    or 1048576 (default: $SL_BATCH_SIZE)
+  --hidden1-size N                 First hidden-layer width (default: $HIDDEN1_SIZE)
+  --hidden2-size N                 Second hidden-layer width (default: $HIDDEN2_SIZE)
   --sl-memory-reserve-mb N         Host RAM reserve (default: $SL_MEMORY_RESERVE_MB)
   --sl-gpu-memory-reserve-mb N     GPU VRAM reserve (default: $SL_GPU_MEMORY_RESERVE_MB)
   --sl-seed N                      Fix supervised initialization and shuffling
@@ -236,7 +240,7 @@ while [[ $# -gt 0 ]]; do
         --rl-checkpoint-interval) RL_CHECKPOINT_INTERVAL="$2"; shift 2 ;;
         --rl-pool-refresh-games) RL_POOL_REFRESH_GAMES="$2"; shift 2 ;;
         --rl-max-pool-size) RL_MAX_POOL_SIZE="$2"; shift 2 ;;
-        --rl-value-head) RL_VALUE_HEAD=1; RL_PPO=0; shift ;;
+        --rl-value-head) RL_VALUE_HEAD=1; shift ;;
         --rl-value-coef) RL_VALUE_COEF="$2"; shift 2 ;;
         --rl-gamma) RL_GAMMA="$2"; shift 2 ;;
         --rl-reward-schema) RL_REWARD_SCHEMA="$2"; shift 2 ;;
@@ -266,6 +270,8 @@ while [[ $# -gt 0 ]]; do
         --sl-weight-decay) SL_WEIGHT_DECAY="$2"; shift 2 ;;
         --sl-device) SL_DEVICE="$2"; shift 2 ;;
         --sl-batch-size) SL_BATCH_SIZE="$2"; shift 2 ;;
+        --hidden1-size) HIDDEN1_SIZE="$2"; shift 2 ;;
+        --hidden2-size) HIDDEN2_SIZE="$2"; shift 2 ;;
         --sl-memory-reserve-mb) SL_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --sl-gpu-memory-reserve-mb) SL_GPU_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --sl-seed) SL_SEED="$2"; shift 2 ;;
@@ -341,6 +347,8 @@ else
         --sl-training-plateau-min-epochs "$SL_TRAINING_PLATEAU_MIN_EPOCHS"
         --sl-training-plateau-min-relative-improvement "$SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT"
         --sl-batch-size "$SL_BATCH_SIZE"
+        --hidden1-size "$HIDDEN1_SIZE"
+        --hidden2-size "$HIDDEN2_SIZE"
     )
     if [[ -n "$SL_EARLY_STOPPING_PATIENCE" ]]; then
         SL_EXTRA_ARGS+=(--early-stopping "$SL_EARLY_STOPPING_PATIENCE")

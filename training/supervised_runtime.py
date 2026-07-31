@@ -8,6 +8,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from agents.network_architecture import (
+    DEFAULT_HIDDEN1_SIZE,
+    DEFAULT_HIDDEN2_SIZE,
+)
 from utils.resource_limits import (
     MIB,
     MemorySafetyError,
@@ -98,6 +102,8 @@ def probe_gpu_residency(
     y_host,
     *,
     reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
+    hidden1_size=DEFAULT_HIDDEN1_SIZE,
+    hidden2_size=DEFAULT_HIDDEN2_SIZE,
 ):
     """Probe dataset residency with temporary arrays and no weight updates."""
     import cupy as cp
@@ -108,8 +114,8 @@ def probe_gpu_residency(
     minimum_workspace = estimate_supervised_workspace_bytes(
         minimum_batch,
         x_host.shape[0],
-        256,
-        128,
+        hidden1_size,
+        hidden2_size,
         y_host.shape[0],
     )
     attempts = []

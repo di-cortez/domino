@@ -437,6 +437,45 @@ class ParallelRLTests(unittest.TestCase):
                     for name in left.files:
                         np.testing.assert_array_equal(left[name], right[name])
 
+    def test_numbered_resume_restores_ppo_value_head_training(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common = {
+                "gpi": 4,
+                "checkpoint_interval": 1,
+                "pool_refresh_games": 4,
+                "max_pool_size": 2,
+                "use_value_head": True,
+                "ppo_enabled": True,
+                "ppo_max_epochs": 2,
+                "seed": 655,
+                "device": "cpu",
+                "workers": 1,
+                "safety_config": self.safety,
+                "quiet": True,
+                "numbered_checkpoints": True,
+            }
+            full_base = root / "full_ppo_critic.npz"
+            resumed_base = root / "resumed_ppo_critic.npz"
+            full = train(iterations=3, rl_weights_path=str(full_base), **common)
+            train(iterations=1, rl_weights_path=str(resumed_base), **common)
+            partial_weights = numbered_checkpoint_path(resumed_base, 1)
+            resumed = train(
+                iterations=3,
+                rl_weights_path=str(resumed_base),
+                start_iteration=1,
+                resume_weights_path=str(partial_weights),
+                resume_state_file=str(resume_state_path(partial_weights)),
+                **common,
+            )
+
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
+                    self.assertIn("Wv", left.files)
+                    self.assertIn("bv", left.files)
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
+
     def test_autotuning_discards_benchmark_games(self):
         messages = []
         with tempfile.TemporaryDirectory() as temp_dir:

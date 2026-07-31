@@ -270,6 +270,24 @@ def _print_ppo_window(rows):
         f"{np.mean([row['gradient_norm_mean'] for row in rows]):.3f} avg/"
         f"{max(row['gradient_norm_max'] for row in rows):.3f} max"
     )
+    value_rows = [row for row in rows if row.get("final_value_loss") is not None]
+    if value_rows:
+        explained = [
+            row["final_explained_variance"]
+            for row in value_rows
+            if row.get("final_explained_variance") is not None
+        ]
+        explained_text = (
+            f"{np.mean(explained):+.3f} avg"
+            if explained else "undefined"
+        )
+        print(
+            f"  PPO/{count}: value loss "
+            f"{np.mean([row['final_value_loss'] for row in value_rows]):.4f} | "
+            f"value clip fraction "
+            f"{np.mean([row['final_value_clip_fraction'] for row in value_rows]):.3f} | "
+            f"explained variance {explained_text}"
+        )
     gpu_count = sum(row["buffer_location"] == "gpu" for row in rows)
     print(
         f"  PPO/{count}: buffer GPU {gpu_count}, RAM {count - gpu_count} | bytes "

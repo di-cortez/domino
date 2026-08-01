@@ -34,8 +34,7 @@ change crosses multiple areas.
 | Supervised training | Supervised autotuning tests, CPU smoke, compile | `training/README.md` |
 | RL or resume | Core/parallel RL tests, checkpoint/resume smoke, seed comparison | `training/README.md` |
 | Diagnostics | Diagnostic tests, CLI help, four-game temporary pairwise smoke | `diagnostics/README.md` |
-| Shell pipeline or sweep | `bash -n`, help, parser tests, dry-run/report-only | `train_script/README.md` |
-| RL parameter sweep/report | Sweep parser tests, report rebuild, CSV/JSON/PNG/PDF when relevant | `train_script/README.md` |
+| Shell pipeline | `bash -n`, help, parser tests, dry-run/report-only | `train_script/README.md` |
 | UI/controller | UI controller tests; visual run when rendering changed | `ui/README.md` or `ui/ui_workflow.md` |
 | Documentation only | Link check, command/help verification, language/path search | Owning document |
 
@@ -56,7 +55,7 @@ The following need explicit review:
 - NPZ array names and float32/float64 loading;
 - seed mapping and ordering;
 - checkpoint/resume metadata and hashes;
-- existing diagnostic and sweep directory layouts;
+- existing diagnostic directory layouts;
 - CSV/JSON fields consumed by current report builders.
 
 Do not silently reinterpret old state or checkpoints. Fail with a useful
@@ -81,7 +80,7 @@ When changing parallel code:
 ## Artifact and write safety
 
 Datasets, encoded caches, `.npz` weights, resume state, diagnostic results, and
-sweep reports are generated artifacts. They are ignored by Git and may contain
+experiment reports are generated artifacts. They are ignored by Git and may contain
 hours of user work.
 
 - Do not commit or manually edit them.
@@ -121,8 +120,6 @@ python -m unittest discover -s tests -v
 python -m compileall -q agents diagnostics middleware training ui utils \
   train_script
 bash -n train_script/run_training_pipeline.sh
-bash -n train_script/run_rl_parameter_sweep.sh
-bash -n train_script/run_rl_test_diagnostics.sh
 git diff --check
 ```
 

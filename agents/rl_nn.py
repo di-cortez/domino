@@ -68,18 +68,9 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         return a3
 
     @classmethod
-    def _load_npz_weights(cls, path, learning_rate, use_value_head=False, device="auto", data=None):
-        """Build a network from an ``.npz`` checkpoint.
-
-        ``data`` accepts an already-loaded mapping of arrays (e.g. a plain
-        dict, or an open ``np.load`` result) to skip reading ``path`` from
-        disk again -- see ``load_from_sl``'s ``data`` parameter for the
-        caller-facing version of this.
-        """
-        owns_data = data is None
-        if owns_data:
-            data = np.load(path, allow_pickle=False)
-        try:
+    def _load_npz_weights(cls, path, learning_rate, use_value_head=False, device="auto"):
+        """Build a network from an ``.npz`` checkpoint."""
+        with np.load(path, allow_pickle=False) as data:
             hidden1_size, input_size = data["W1"].shape
             hidden2_size, _ = data["W2"].shape
             output_size, _ = data["W3"].shape
@@ -118,9 +109,6 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                     np.asarray(data[_ALGORITHM_KEY]).item()
                 )
             return network
-        finally:
-            if owns_data:
-                data.close()
 
     @classmethod
     def load_from_sl(
@@ -129,22 +117,13 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         learning_rate=0.001,
         use_value_head=False,
         device="auto",
-        data=None,
     ):
-        """Use a supervised-learning checkpoint as the initial RL policy.
-
-        Pass a pre-loaded ``data`` mapping (e.g. from
-        ``np.load(sl_weights_path)`` or a plain ``{name: array}`` dict) to
-        initialize many networks from the same checkpoint without re-reading
-        it from disk each time -- useful for a hyperparameter sweep that
-        warm-starts every run from one shared SL checkpoint.
-        """
+        """Use a supervised-learning checkpoint as the initial RL policy."""
         return cls._load_npz_weights(
             sl_weights_path,
             learning_rate,
             use_value_head=use_value_head,
             device=device,
-            data=data,
         )
 
     @classmethod

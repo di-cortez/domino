@@ -15,8 +15,11 @@ import time
 import numpy as np
 
 from training.ppo import PPOBuffer, stable_seed
+from training.rl_constants import (
+    RL_WORKER_AUTOTUNE_FRACTION,
+    RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
+)
 from training.rl_parallel import (
-    DEFAULT_RL_MINIMUM_GAIN,
     DEFAULT_RL_WORKER_CANDIDATES,
     RLRolloutRunner,
     _candidate_counts,
@@ -30,7 +33,6 @@ from utils.resource_limits import (
 
 
 TUNING_VERSION = 4
-DEFAULT_WORKER_BENCHMARK_FRACTION = 0.01
 
 
 def _policy_arrays(network):
@@ -234,8 +236,6 @@ def benchmark_worker_candidates(
     *,
     gpi,
     total_training_games,
-    benchmark_fraction,
-    minimum_gain=DEFAULT_RL_MINIMUM_GAIN,
     candidates,
     base_seed,
     training_opponent,
@@ -248,9 +248,10 @@ def benchmark_worker_candidates(
 ):
     """Benchmark workers until marginal throughput gain falls below the limit."""
     emit = status_callback or (lambda _message: None)
-    if float(minimum_gain) < 0:
-        raise ValueError("minimum_gain must be non-negative.")
-    test_games = max(1, int(int(total_training_games) * float(benchmark_fraction)))
+    test_games = max(
+        1,
+        int(int(total_training_games) * RL_WORKER_AUTOTUNE_FRACTION),
+    )
     candidates = _candidate_counts(candidates, safety, max(gpi, test_games))
     runner = _new_runner(
         network,
@@ -353,7 +354,10 @@ def benchmark_worker_candidates(
                         - 1.0
                     )
                 )
-                accepted = improvement is None or improvement >= float(minimum_gain)
+                accepted = (
+                    improvement is None
+                    or improvement >= RL_WORKER_AUTOTUNE_MINIMUM_GAIN
+                )
                 result["improvement_over_previous"] = improvement
                 result["accepted"] = bool(accepted)
                 results.append(result)
@@ -370,7 +374,7 @@ def benchmark_worker_candidates(
                 if not accepted:
                     emit(
                         "  Marginal worker gain is below "
-                        f"{float(minimum_gain):.0%}; keeping "
+                        f"{RL_WORKER_AUTOTUNE_MINIMUM_GAIN:.0%}; keeping "
                         f"{previous_success['requested_workers']} workers and "
                         "stopping worker tuning."
                     )
@@ -474,8 +478,6 @@ def run_worker_tuning(
     workers,
     retune_workers,
     saved_tuning,
-    worker_benchmark_fraction,
-    worker_minimum_gain,
     worker_candidates,
     base_seed,
     training_opponent,
@@ -516,19 +518,17 @@ def run_worker_tuning(
                 )
             worker_test_games = max(
                 1,
-                int(int(total_training_games) * float(worker_benchmark_fraction)),
+                int(int(total_training_games) * RL_WORKER_AUTOTUNE_FRACTION),
             )
             emit(
                 f"Selecting worker count with {worker_test_games} benchmark games "
-                f"per candidate and {float(worker_minimum_gain):.0%} minimum "
+                f"per candidate and {RL_WORKER_AUTOTUNE_MINIMUM_GAIN:.0%} minimum "
                 "marginal gain..."
             )
             worker_test_games, worker_results = benchmark_worker_candidates(
                 network,
                 gpi=gpi,
                 total_training_games=total_training_games,
-                benchmark_fraction=worker_benchmark_fraction,
-                minimum_gain=worker_minimum_gain,
                 candidates=worker_candidates,
                 base_seed=base_seed,
                 training_opponent=training_opponent,
@@ -556,8 +556,8 @@ def run_worker_tuning(
             "total_training_games": int(total_training_games),
             "gpi": int(gpi),
             "worker_test_games": int(worker_test_games),
-            "worker_benchmark_fraction": float(worker_benchmark_fraction),
-            "worker_minimum_gain": float(worker_minimum_gain),
+            "worker_benchmark_fraction": RL_WORKER_AUTOTUNE_FRACTION,
+            "worker_minimum_gain": RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
             "worker_results": worker_results,
             "selected_workers": selected_workers,
             "worker_source": worker_source,

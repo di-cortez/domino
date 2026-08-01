@@ -152,7 +152,6 @@ Useful environment controls:
 |---|---|
 | `DOMINO_FORCE_CPU=1` | Makes project network code ignore CuPy. |
 | `CUDA_VISIBLE_DEVICES` | Controls which NVIDIA devices are visible to CUDA. |
-| `DOMINO_VRAM_LIMIT_MB=N` | Caps the process CuPy memory pool for shared-GPU experiments. |
 
 Unset an accidental CPU restriction with:
 

@@ -57,22 +57,16 @@ def resolve_training_options(
     pool_refresh_games,
     max_pool_size,
     moving_average_window,
-    autotune_fraction,
-    autotune_minimum_gain,
     training_opponent,
     reward_schema,
     ppo_enabled,
-    use_value_head,
     value_coef,
     ppo_clip_epsilon,
     ppo_target_kl,
     ppo_stop_kl,
     ppo_max_epochs,
-    ppo_min_minibatches,
-    ppo_max_minibatches,
     ppo_games_per_minibatch_scale,
     ppo_min_decisions_per_minibatch,
-    gpu_buffer_safety_fraction,
     normalize_advantages,
     workers,
     safety_config,
@@ -117,10 +111,6 @@ def resolve_training_options(
         raise ValueError("max_pool_size must be non-negative")
     if moving_average_window < 1:
         raise ValueError("moving_average_window must be positive")
-    if not 0 < float(autotune_fraction) <= 1:
-        raise ValueError("autotune_fraction must be in (0, 1]")
-    if float(autotune_minimum_gain) < 0:
-        raise ValueError("autotune_minimum_gain must be non-negative")
     if training_opponent not in ("self_play", "heuristic"):
         raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
     if reward_schema not in REWARD_SCHEMAS:
@@ -130,24 +120,18 @@ def resolve_training_options(
     if ppo_enabled:
         if not 0 < float(ppo_clip_epsilon) < 1:
             raise ValueError("ppo_clip_epsilon must be in (0, 1)")
-        if not 0 < float(ppo_target_kl) <= float(ppo_stop_kl):
+        if float(ppo_target_kl) <= 0 or float(ppo_stop_kl) <= 0:
             raise ValueError(
-                "PPO KL thresholds require 0 < target_kl <= stop_kl"
+                "PPO KL reporting target and stop threshold must be positive"
             )
         if not 1 <= int(ppo_max_epochs) <= MAX_PPO_EPOCHS:
             raise ValueError(
                 f"ppo_max_epochs must be between 1 and {MAX_PPO_EPOCHS}"
             )
-        if int(ppo_min_minibatches) < 1 or int(ppo_max_minibatches) < int(
-            ppo_min_minibatches
-        ):
-            raise ValueError("Invalid PPO minibatch bounds")
         if int(ppo_games_per_minibatch_scale) < 1:
             raise ValueError("ppo_games_per_minibatch_scale must be positive")
         if int(ppo_min_decisions_per_minibatch) < 1:
             raise ValueError("ppo_min_decisions_per_minibatch must be positive")
-        if not 0 < float(gpu_buffer_safety_fraction) <= 1:
-            raise ValueError("gpu_buffer_safety_fraction must be in (0, 1]")
     algorithm = (
         PPO_TRAINING_ALGORITHM if ppo_enabled else LEGACY_TRAINING_ALGORITHM
     )

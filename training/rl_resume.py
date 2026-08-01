@@ -13,6 +13,11 @@ import numpy as np
 from agents.encoder import DominoEncoder
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import RULESET_VERSION
+from training.rl_constants import (
+    PPO_GPU_BUFFER_SAFETY_FRACTION,
+    PPO_MAX_MINIBATCHES,
+    PPO_MIN_MINIBATCHES,
+)
 
 
 RESUME_STATE_VERSION = 4
@@ -39,18 +44,14 @@ def _load_initial_network(
     quiet=False,
     use_value_head=False,
     device="auto",
-    sl_weights_data=None,
     fresh_from_sl=False,
     expected_training_algorithm=None,
 ):
     """Load an RL checkpoint or initialize from compatible SL weights.
 
-    ``sl_weights_data`` accepts a pre-loaded mapping of SL weight arrays (see
-    ``PolicyNetwork.load_from_sl``), so a caller warm-starting many runs from
-    the same SL checkpoint can read it from disk once and reuse it. Unused when
-    resuming from an existing RL checkpoint. ``fresh_from_sl=True`` ignores
-    ``rl_weights_path`` as an initialization source while leaving that file
-    intact until the completed new model atomically replaces it.
+    ``fresh_from_sl=True`` ignores ``rl_weights_path`` as an initialization
+    source while leaving that file intact until the completed new model
+    atomically replaces it.
     """
     if rl_weights_path is not None and not fresh_from_sl:
         try:
@@ -94,7 +95,6 @@ def _load_initial_network(
         learning_rate=learning_rate,
         use_value_head=use_value_head,
         device=device,
-        data=sl_weights_data,
     )
     if not _checkpoint_matches_encoder(network):
         raise ValueError(
@@ -302,15 +302,11 @@ def _resume_configuration(
     device,
     sl_weights_sha256,
     ppo_clip_epsilon,
-    ppo_target_kl,
     ppo_stop_kl,
     ppo_max_epochs,
-    ppo_min_minibatches,
-    ppo_max_minibatches,
     ppo_games_per_minibatch_scale,
     ppo_min_decisions_per_minibatch,
     prefer_gpu_buffer,
-    gpu_buffer_safety_fraction,
     run_configuration_sha256=None,
 ):
     """Return every setting that can affect post-checkpoint RL computation."""
@@ -338,22 +334,23 @@ def _resume_configuration(
         "ruleset_version": RULESET_VERSION,
         "run_configuration_sha256": run_configuration_sha256,
         "ppo_clip_epsilon": float(ppo_clip_epsilon),
-        "ppo_target_kl": float(ppo_target_kl),
         "ppo_stop_kl": float(ppo_stop_kl),
         "ppo_max_epochs": int(ppo_max_epochs),
-        "ppo_min_minibatches": int(ppo_min_minibatches),
-        "ppo_max_minibatches": int(ppo_max_minibatches),
+        "ppo_min_minibatches": PPO_MIN_MINIBATCHES,
+        "ppo_max_minibatches": PPO_MAX_MINIBATCHES,
         "ppo_games_per_minibatch_scale": int(ppo_games_per_minibatch_scale),
         "ppo_min_decisions_per_minibatch": int(ppo_min_decisions_per_minibatch),
         "prefer_gpu_buffer": bool(prefer_gpu_buffer),
-        "gpu_buffer_safety_fraction": float(gpu_buffer_safety_fraction),
+        "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
     }
 
 
 def _validate_resume_configuration(metadata, expected, *, ignored_keys=()):
     """Reject a resume that would silently continue a different experiment."""
     saved = metadata.get("configuration")
-    ignored_keys = set(ignored_keys)
+    # This legacy key was informational: PPO reports target KL, but only stop
+    # KL controls early stopping. It must never reject an otherwise exact run.
+    ignored_keys = {"ppo_target_kl", *ignored_keys}
     comparable_saved = {
         key: value
         for key, value in (saved or {}).items()
@@ -431,20 +428,11 @@ def _save_numbered_resume_checkpoint(
     return weights_path, state_path
 
 
-def _sl_checkpoint_sha256(path, data=None):
+def _sl_checkpoint_sha256(path):
     path = Path(path)
     if path.is_file():
         return _file_sha256(path)
-    if data is None:
-        return None
-    digest = hashlib.sha256()
-    for name in RESUME_POLICY_WEIGHT_NAMES:
-        value = np.asarray(data[name])
-        digest.update(name.encode("ascii"))
-        digest.update(value.dtype.str.encode("ascii"))
-        digest.update(str(value.shape).encode("ascii"))
-        digest.update(value.tobytes(order="C"))
-    return digest.hexdigest()
+    return None
 
 
 def _training_state_payload(

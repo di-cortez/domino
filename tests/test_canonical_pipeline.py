@@ -13,6 +13,10 @@ from agents.rl_nn import PolicyNetwork
 from agents.network_architecture import architecture_from_hidden_sizes
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from diagnostics.rl_progress import (
+    CSV_FIELDS,
+    FORMAT_VERSION,
+    HISTORY_DATA_FIELDS,
+    HISTORY_RECORD_TYPE,
     PERIODIC_SUMMARY_RETENTION,
     _rl_elapsed_hours,
     _training_footer_line,
@@ -105,26 +109,21 @@ def _training_config():
 
 def _periodic_row(games, checkpoint_hash="a", diagnostic_seed=7):
     return {
-        "format_version": 2,
+        "format_version": FORMAT_VERSION,
         "pipeline_level": "big",
         "seed": 42,
         "rl_games": games,
         "rl_iterations": games // 100,
-        "optimizer_steps": games // 10,
         "checkpoint_path": f"checkpoint-{games}.npz",
         "checkpoint_sha256": checkpoint_hash,
+        "configuration_sha256": None,
         "opponent": "random",
         "diagnostic_games": 100,
         "wins": 60,
-        "losses": 40,
-        "win_rate": 0.60,
-        "loss_rate": 0.40,
-        "ci95_win_rate_low": 0.50,
-        "ci95_win_rate_high": 0.69,
         "diagnostic_seed": diagnostic_seed,
+        "diagnostic_seed_namespace": "periodic_rl_vs_random",
         "diagnostic_seconds": 1.25,
         "rl_elapsed_seconds": games / 100.0,
-        "wall_clock_seconds": 3.5,
         "selected_workers": 1,
         "created_at": "2026-01-01T00:00:00+00:00",
     }
@@ -181,20 +180,26 @@ def test_quick_and_long_run_level_policies_are_distinct(monkeypatch):
     assert PIPELINE_LEVELS["small"].diagnostic_games == 10_000
 
 
-def test_resume_accepts_default_or_explicit_run_directory():
-    automatic = parse_args(["forever", "--resume"])
+def test_resume_accepts_default_or_explicit_run_directory(tmp_path):
+    automatic = parse_args([
+        "forever",
+        "--resume",
+        "--artifact-root",
+        str(tmp_path),
+    ])
     assert automatic.resume is True
     assert automatic.resume_from is None
 
+    explicit_run = tmp_path / "models" / "rl" / "domino_rl_forever_seed42"
     explicit = parse_args([
         "forever",
         "--resume",
-        "models/rl/domino_rl_forever_seed42",
+        str(explicit_run),
+        "--artifact-root",
+        str(tmp_path),
     ])
     assert explicit.resume is False
-    assert explicit.resume_from == Path(
-        "models/rl/domino_rl_forever_seed42"
-    )
+    assert explicit.resume_from == explicit_run
 
 
 def test_forever_run_reloads_locked_arguments_from_the_active_pointer(tmp_path):
@@ -294,10 +299,16 @@ def test_forever_run_reloads_locked_arguments_from_the_active_pointer(tmp_path):
 
 
 def test_canonical_pipeline_accepts_ppo_and_reinforce_with_optional_critic(tmp_path):
-    ppo = parse_args(["forever"])
-    reinforce = parse_args(["forever", "--no-ppo"])
+    root_args = ["--artifact-root", str(tmp_path)]
+    ppo = parse_args(["forever", *root_args])
+    reinforce = parse_args(["forever", "--no-ppo", *root_args])
     finite = parse_args(["huge"])
-    explicit = parse_args(["forever", "--ppo-max-epochs", "7"])
+    explicit = parse_args([
+        "forever",
+        "--ppo-max-epochs",
+        "7",
+        *root_args,
+    ])
 
     validate_args(ppo, PIPELINE_LEVELS["forever"])
     validate_args(reinforce, PIPELINE_LEVELS["forever"])
@@ -365,6 +376,8 @@ def test_forever_periodic_workers_are_recovered_once_and_then_persisted(tmp_path
         "forever",
         "--periodic-diagnostic-games",
         "100",
+        "--artifact-root",
+        str(tmp_path),
     ])
     history = tmp_path / "periodic_diagnostics.jsonl"
     first = _periodic_row(
@@ -415,6 +428,8 @@ def test_new_forever_run_autotunes_periodic_workers_only_once(tmp_path, monkeypa
         "forever",
         "--periodic-diagnostic-games",
         "100",
+        "--artifact-root",
+        str(tmp_path),
     ])
     worker_requests = []
 
@@ -429,6 +444,14 @@ def test_new_forever_run_autotunes_periodic_workers_only_once(tmp_path, monkeypa
             pipeline_level="forever",
             diagnostic_games=100,
             selected_workers=8,
+            losses=40,
+            win_rate=0.60,
+            ci95_win_rate_low=0.50,
+            ci95_win_rate_high=0.69,
+            runtime_profile_delta={
+                "execution_seconds": 0.0,
+                "sections_seconds": {},
+            },
         )
         return row, True
 
@@ -442,9 +465,7 @@ def test_new_forever_run_autotunes_periodic_workers_only_once(tmp_path, monkeypa
         "level": "forever",
         "checkpoint": tmp_path / "weights.npz",
         "iterations": 0,
-        "optimizer_steps": 0,
         "elapsed_rl_seconds": 0.0,
-        "pipeline_started": 0.0,
     }
     _run_periodic_point(games=0, **common)
     _run_periodic_point(games=100_000, **common)
@@ -579,13 +600,21 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
         "target_rl_games": 2_000_000,
         "supervised_weights_path": "models/sl.npz",
         "supervised_weights_sha256": "abc",
-        "ppo_config": {"clip_epsilon": 0.2},
+        "ppo_config": {"clip_epsilon": 0.2, "target_kl": 0.01},
         "rl_config": {"gamma": 1.0},
     }
     first = create_run_config(run_dir, **values)
     second = create_run_config(run_dir, **values)
     assert second["created_at"] == first["created_at"]
     assert first["algorithm"] == PPO_TRAINING_ALGORITHM
+
+    reporting_only = dict(values)
+    reporting_only["ppo_config"] = {
+        "clip_epsilon": 0.2,
+        "target_kl": 0.005,
+    }
+    unchanged = create_run_config(run_dir, **reporting_only)
+    assert unchanged["configuration_sha256"] == first["configuration_sha256"]
 
     with pytest.raises(ValueError, match="algorithm"):
         create_run_config(
@@ -721,35 +750,71 @@ def test_periodic_and_final_seed_namespaces_are_separate_and_stable():
 def test_jsonl_repairs_partial_tail_deduplicates_and_rebuilds_reports(tmp_path):
     history = tmp_path / "periodic_diagnostics.jsonl"
     first = _periodic_row(0, checkpoint_hash="zero")
-    _row, appended = append_periodic_point(history, first)
-    assert appended
+    first["format_version"] = 2
+    first["checkpoint_path"] = str(
+        tmp_path / "checkpoints" / "games_0000000000_weights.npz"
+    )
+    with open(history, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(first) + "\n")
+        stream.write('{"partial":')
+    legacy_rows = read_periodic_history(history)
+    assert len(legacy_rows) == 1
+    assert legacy_rows[0]["wins"] == 60
+
     _row, appended = append_periodic_point(history, first)
     assert not appended
-    with open(history, "a", encoding="utf-8") as stream:
-        stream.write('{"partial":')
-    assert read_periodic_history(history) == [first]
 
     second = _periodic_row(100_000, checkpoint_hash="one")
+    second["checkpoint_path"] = str(
+        tmp_path / "checkpoints" / "games_0000100000_weights.npz"
+    )
     _row, appended = append_periodic_point(history, second)
     assert appended
-    assert read_periodic_history(history) == [first, second]
+    rows = read_periodic_history(history)
+    assert len(rows) == 2
+    assert rows[0]["losses"] == 40
+    assert rows[0]["win_rate"] == pytest.approx(0.60)
+    assert rows[0]["progress_elapsed_seconds"] == pytest.approx(1.25)
+    assert rows[1]["progress_elapsed_seconds"] == pytest.approx(1002.5)
+
+    raw_lines = history.read_text(encoding="utf-8").splitlines()
+    header = json.loads(raw_lines[0])
+    assert header["record_type"] == HISTORY_RECORD_TYPE
+    assert header["format_version"] == FORMAT_VERSION
+    assert header["columns"] == list(HISTORY_DATA_FIELDS)
+    assert header["checkpoint_path_base"] == "checkpoints"
+    assert len(raw_lines) == 3
+    compact_first = json.loads(raw_lines[1])
+    checkpoint_index = HISTORY_DATA_FIELDS.index("checkpoint_path")
+    assert compact_first[checkpoint_index] == "games_0000000000_weights.npz"
+    assert isinstance(compact_first, list)
+    assert "ci95" not in history.read_text(encoding="utf-8")
+    assert "loss_rate" not in history.read_text(encoding="utf-8")
+
     csv_path, plot_path, _log_path = rebuild_progress_reports(tmp_path)
     assert csv_path.is_file()
     assert plot_path.is_file()
     assert len(csv_path.read_text(encoding="utf-8").splitlines()) == 3
-    assert "rl_elapsed_hours" in csv_path.read_text(encoding="utf-8").splitlines()[0]
-    assert _rl_elapsed_hours(second) == pytest.approx(1000.0 / 3600.0)
+    assert _rl_elapsed_hours(rows[1]) == pytest.approx(1002.5 / 3600.0)
     with open(csv_path, newline="", encoding="utf-8") as stream:
         csv_rows = list(csv.DictReader(stream))
+    assert list(csv_rows[0]) == list(CSV_FIELDS)
     for field in (
         "rl_elapsed_hours",
         "win_rate_percent",
         "ci95_low_percent",
         "ci95_high_percent",
-        "diagnostic_games",
-        "diagnostic_seconds",
     ):
         assert all(len(value[field].split(".")[-1]) == 3 for value in csv_rows)
+    for removed in (
+        "optimizer_steps",
+        "diagnostic_games",
+        "diagnostic_seconds",
+        "checkpoint_path",
+        "checkpoint_sha256",
+        "configuration_sha256",
+    ):
+        assert removed not in csv_rows[0]
 
 
 def test_progress_footer_reports_value_head_and_hidden_layers():

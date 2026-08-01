@@ -6,9 +6,9 @@ rules stay in the middleware/engine; UI interaction stays in `GameController`.
 """
 
 import pygame
-from OpenGL.GL import *
-from OpenGL.GLU import *
-from pygame.locals import *
+from OpenGL.GL import GL_MODELVIEW, GL_PROJECTION, glMatrixMode
+from OpenGL.GLU import gluPerspective
+from pygame.locals import DOUBLEBUF, OPENGL
 
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager

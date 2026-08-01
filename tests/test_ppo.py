@@ -248,8 +248,6 @@ def test_ppo_value_head_updates_critic_and_reports_value_metrics():
         clip_grad_norm=5.0,
         value_coef=0.5,
         max_epochs=2,
-        min_minibatches=1,
-        max_minibatches=1,
     )
 
     assert not np.array_equal(network.Wv, critic_before)
@@ -379,6 +377,27 @@ def test_small_kl_runs_all_sixteen_epochs_and_counts_every_optimizer_step():
     assert metrics["optimizer_steps"] == 16 * metrics["effective_minibatches"]
     assert [row["epoch"] for row in metrics["epoch_metrics"]] == list(range(1, 17))
     assert network.optimizer_step_count == metrics["optimizer_steps"]
+
+
+def test_target_kl_is_informational_and_does_not_control_early_stopping():
+    network = _FakePPONetwork(ratio_after_update=1.001)
+    metrics = ppo_update(
+        network,
+        _buffer(),
+        actual_games=100,
+        base_seed=42,
+        iteration=4,
+        entropy_coef=0.0,
+        clip_grad_norm=5.0,
+        target_kl=0.5,
+        stop_kl=0.015,
+        max_epochs=2,
+    )
+
+    assert not metrics["stopped_by_kl"]
+    assert metrics["epochs_completed"] == 2
+    assert metrics["target_kl"] == 0.5
+    assert metrics["stop_kl"] == 0.015
 
 
 def test_ppo_rejects_more_than_sixteen_epochs():

@@ -444,7 +444,7 @@ instead of storing duplicate copies of the same weights.
 
 GPI is never autotuned. Canonical pipelines and direct self-play accept
 `--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000`, defaulting to
-`2000`. Parameter sweeps keep it fixed and do not use it as an axis.
+`2000`.
 
 Worker tuning tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1%
 of the real game budget per candidate. Starting from the one-worker baseline,
@@ -468,8 +468,6 @@ controls are:
 |---|---|---:|
 | `--gpi` | Fixed positive number of games per RL iteration | `2000` |
 | `--rl-workers` | CPU-only rollout workers or `auto` | `auto` |
-| `--rl-autotune-fraction` | Real-budget fraction discarded per worker candidate | `0.01` |
-| `--rl-autotune-min-gain` | Required gain over the previous accepted worker candidate | `0.10` |
 | `--retune-workers` | Explicitly rerun saved worker tuning on resume | off |
 | `--rl-memory-reserve-mb` | Host RAM that must remain free | `512` |
 | `--rl-estimated-worker-mb` | Conservative worker-memory estimate for preflight | `256` |
@@ -478,8 +476,8 @@ controls are:
 ### Numbered checkpoints and exact resume
 
 Direct-module calls keep the existing single-file checkpoint behavior unless
-`--numbered-checkpoints` is requested. The canonical pipeline and long shell
-sweep always use interruption-safe numbered pairs. Each save adds the absolute completed iteration
+`--numbered-checkpoints` is requested. The canonical pipeline always uses
+interruption-safe numbered pairs. Each save adds the absolute completed iteration
 to the name, such as `model_iter000050.npz`, and atomically publishes a paired
 `model_iter000050.resume.npz`. The state file contains a SHA-256 checksum,
 every computation-affecting RL/PPO setting, completed real games, optimizer
@@ -578,10 +576,14 @@ free VRAM and a dry first-minibatch workspace probe succeeds, a complete GPU
 copy is retained across epochs. Otherwise minibatches stream from RAM. No
 fallback restarts a partially applied epoch.
 
-Requested minibatches are `clamp(ceil(actual_games / 125), 4, 16)`, further
-capped to keep roughly 128 decisions per minibatch. Each epoch visits every
+Requested minibatches are fixed by the implementation as
+`clamp(ceil(actual_games / 125), 4, 16)`, further capped to keep roughly 128
+decisions per minibatch. The 4/16 bounds, 1% worker benchmark fraction, 10%
+worker acceptance gain, and 70% GPU-buffer safety fraction are centralized in
+`training/rl_constants.py` and are not experiment or CLI parameters. Each epoch visits every
 decision exactly once with a deterministic new permutation. PPO uses clip
-epsilon `0.2`, target KL `0.01`, and does not start another epoch after the
+epsilon `0.2`, reports target KL `0.01` as an informational reference, and
+does not start another epoch after the
 completed epoch's whole-buffer approximate KL exceeds `0.015`. Direct
 self-play and finite canonical profiles run at most four epochs by default;
 the canonical `forever` profile runs at most 16. An explicit
@@ -685,14 +687,6 @@ The former GPI-autotune options (`--games-per-iteration`, `--adaptive-gpi`,
 Existing numbered resume states
 that contain `pool_interval` are rejected rather than silently reinterpreted
 as a game count; start a new run with `--pool-refresh-games`.
-
-`train()` also accepts a programmatic-only `sl_weights_data` parameter (no
-CLI flag): a pre-loaded mapping of SL weight arrays, for a caller that runs
-many training calls back-to-back from the same SL checkpoint (e.g. a
-hyperparameter sweep) and wants to read it from disk once instead of on
-every call -- see `train_script/run_rl_parameter_sweep.py`, which loads it
-once and reuses it across all 72 of its sweep points. `None` (the default)
-reproduces the normal read-from-`sl_weights_path` behavior.
 
 `TRAINING_OPPONENT` at the top of `self_play.py` controls the training opponent:
 

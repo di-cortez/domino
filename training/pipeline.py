@@ -50,6 +50,13 @@ from training.rl_resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
 )
+from training.rl_constants import (
+    PPO_GPU_BUFFER_SAFETY_FRACTION,
+    PPO_MAX_MINIBATCHES,
+    PPO_MIN_MINIBATCHES,
+    RL_WORKER_AUTOTUNE_FRACTION,
+    RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
+)
 from training.ppo import DEFAULT_MAX_EPOCHS, MAX_PPO_EPOCHS
 from utils.artifacts import atomic_copy, atomic_write_json, file_sha256
 from utils.resource_limits import choose_safe_rl_device
@@ -82,6 +89,7 @@ _FOREVER_OPERATIONAL_ARGUMENTS = frozenset({
     "artifact_root",
     "execution_id",
     "force_resume_incompatible",
+    "ppo_target_kl",
     "rebuild_dataset",
     "rebuild_supervised_assets",
     "restart_rl",
@@ -373,6 +381,8 @@ def _hydrate_forever_arguments(parser, args, explicit):
             f"Forever run has no locked argument set: {selected_run}"
         )
     for name, saved_value in locked.items():
+        if name in _FOREVER_OPERATIONAL_ARGUMENTS:
+            continue
         if name in explicit:
             requested = _json_safe_argument(getattr(args, name, None))
             if requested != saved_value:
@@ -663,14 +673,14 @@ def _ppo_config(args):
         "target_kl": float(args.ppo_target_kl),
         "stop_kl": float(args.ppo_stop_kl),
         "max_epochs": int(args.ppo_max_epochs),
-        "min_minibatches": int(args.ppo_min_minibatches),
-        "max_minibatches": int(args.ppo_max_minibatches),
+        "min_minibatches": PPO_MIN_MINIBATCHES,
+        "max_minibatches": PPO_MAX_MINIBATCHES,
         "games_per_minibatch_scale": int(args.ppo_games_per_minibatch_scale),
         "min_decisions_per_minibatch": int(
             args.ppo_min_decisions_per_minibatch
         ),
         "prefer_gpu_buffer": bool(args.prefer_gpu_buffer),
-        "gpu_buffer_safety_fraction": float(args.gpu_buffer_safety_fraction),
+        "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
     }
 
 
@@ -705,8 +715,8 @@ def _rl_config(args):
         "moving_average_window": int(args.moving_average_window),
         "requested_device": args.device,
         "requested_workers": args.rl_workers,
-        "worker_autotune_fraction": float(args.rl_autotune_fraction),
-        "worker_autotune_minimum_gain": float(args.rl_autotune_min_gain),
+        "worker_autotune_fraction": RL_WORKER_AUTOTUNE_FRACTION,
+        "worker_autotune_minimum_gain": RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
         "worker_memory_reserve_mb": int(args.rl_memory_reserve_mb),
         "worker_estimated_mb": int(args.rl_estimated_worker_mb),
         "worker_max_rss_mb": int(args.rl_max_worker_rss_mb),
@@ -926,9 +936,7 @@ def _run_periodic_point(
     checkpoint,
     games,
     iterations,
-    optimizer_steps,
     elapsed_rl_seconds,
-    pipeline_started,
     runtime_profiler=None,
 ):
     wrapper_started = time.perf_counter()
@@ -943,11 +951,9 @@ def _run_periodic_point(
         seed=args.seed,
         rl_games=games,
         rl_iterations=iterations,
-        optimizer_steps=optimizer_steps,
         checkpoint_path=checkpoint,
         diagnostic_games=args.periodic_diagnostic_games,
         rl_elapsed_seconds=elapsed_rl_seconds,
-        wall_clock_seconds=time.time() - pipeline_started,
         workers=diagnostic_workers,
         safety_config=ParallelSafetyConfig(
             memory_reserve_mb=args.diagnostic_memory_reserve_mb,
@@ -1014,7 +1020,7 @@ def _run_periodic_point(
     return row
 
 
-def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
+def run_rl_pipeline(root, config, args, assets):
     """Run finite milestone segments or an unbounded sequence with exact resume."""
     seed = int(args.seed)
     target = (
@@ -1187,9 +1193,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             checkpoint=supervised_path,
             games=0,
             iterations=0,
-            optimizer_steps=0,
             elapsed_rl_seconds=0.0,
-            pipeline_started=pipeline_started,
             runtime_profiler=runtime_profiler,
         )
 
@@ -1215,9 +1219,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
             checkpoint=checkpoint,
             games=completed,
             iterations=iterations,
-            optimizer_steps=optimizer_steps,
             elapsed_rl_seconds=elapsed_rl,
-            pipeline_started=pipeline_started,
             runtime_profiler=runtime_profiler,
         )
         last_periodic = completed
@@ -1448,9 +1450,7 @@ def run_rl_pipeline(root, config, args, assets, *, pipeline_started):
                     checkpoint=checkpoint,
                     games=completed,
                     iterations=iterations,
-                    optimizer_steps=optimizer_steps,
                     elapsed_rl_seconds=elapsed_rl,
-                    pipeline_started=pipeline_started,
                     runtime_profiler=runtime_profiler,
                 )
                 last_periodic = completed
@@ -1751,7 +1751,6 @@ def main(argv=None):
         config,
         args,
         assets,
-        pipeline_started=started,
     )
     diagnostics = None
     if not rl_result["shutdown_requested"]:

@@ -208,8 +208,7 @@ locations are:
 | `models/domino_sl_standard_seed42_loss.png` | Canonical training and validation loss curves. |
 | `models/rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Non-reused dataset, cache, supervised checkpoint, metadata, and loss plot for one quick run. |
 | `models/rl/domino_rl_<level>_seed42/` | Complete RL state, milestones, diagnostics, and progress curve. |
-| `models/rl_test/` | Numbered parameter-sweep checkpoints and resume state. |
-| `diagnostics/results/` | Pairwise, aggregate, sweep, CSV, JSON, XLSX, and plot outputs. |
+| `diagnostics/results/` | Pairwise, aggregate, experiment, CSV, JSON, XLSX, and plot outputs. |
 
 Do not commit, manually edit, or casually delete generated artifacts. Long
 experiments may depend on their numbered checkpoints and `.resume.npz` state.
@@ -253,9 +252,9 @@ python benchmarks/headless_step_benchmark.py --games 100
 | `training/` | Dataset generation, supervised training, RL, checkpoints, resume. |
 | `diagnostics/` | Evaluation, metrics, reports, plots, and experiment analysis. |
 | `ui/` | Visual simulator, controls, layout, rendering, and controller tests. |
-| `train_script/` | Reproducible pipeline and sweep entry points. |
+| `train_script/` | Reproducible Python and shell pipeline entry points. |
 | `utils/` | Resource limits, runtime status, and atomic artifact helpers. |
-| `tests/` | Core, parallelism, sweep, and regression tests. |
+| `tests/` | Core, parallelism, pipeline, and regression tests. |
 
 ## Documentation
 

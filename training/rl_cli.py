@@ -7,11 +7,8 @@ from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConf
 from training.ppo import (
     DEFAULT_CLIP_EPSILON,
     DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
     DEFAULT_MAX_EPOCHS,
-    DEFAULT_MAX_MINIBATCHES,
     DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    DEFAULT_MIN_MINIBATCHES,
     DEFAULT_STOP_KL,
     DEFAULT_TARGET_KL,
     MAX_PPO_EPOCHS,
@@ -33,8 +30,6 @@ from training.rl_config import (
     VALUE_COEF,
 )
 from training.rl_parallel import (
-    DEFAULT_RL_AUTOTUNE_FRACTION,
-    DEFAULT_RL_MINIMUM_GAIN,
     DEFAULT_RL_WORKERS,
     worker_count as parse_rl_worker_count,
 )
@@ -236,21 +231,6 @@ def add_optional_rl_arguments(
             f"(maximum {MAX_PARALLEL_WORKERS})."
         ),
     )
-    group.add_argument(
-        "--rl-autotune-fraction",
-        type=float,
-        default=DEFAULT_RL_AUTOTUNE_FRACTION,
-        help="Fraction of the real game budget discarded by each worker candidate.",
-    )
-    group.add_argument(
-        "--rl-autotune-min-gain",
-        type=float,
-        default=DEFAULT_RL_MINIMUM_GAIN,
-        help=(
-            "Stop worker tuning when marginal rollout-throughput gain over the "
-            "previous accepted candidate is below this value."
-        ),
-    )
     group.add_argument("--rl-memory-reserve-mb", type=int, default=512)
     group.add_argument("--rl-estimated-worker-mb", type=int, default=256)
     group.add_argument("--rl-max-worker-rss-mb", type=int, default=1024)
@@ -289,16 +269,6 @@ def add_optional_rl_arguments(
         ),
     )
     ppo.add_argument(
-        "--ppo-min-minibatches",
-        type=int,
-        default=DEFAULT_MIN_MINIBATCHES,
-    )
-    ppo.add_argument(
-        "--ppo-max-minibatches",
-        type=int,
-        default=DEFAULT_MAX_MINIBATCHES,
-    )
-    ppo.add_argument(
         "--ppo-games-per-minibatch-scale",
         type=int,
         default=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
@@ -320,11 +290,6 @@ def add_optional_rl_arguments(
         dest="prefer_gpu_buffer",
         action="store_false",
         default=argparse.SUPPRESS,
-    )
-    ppo.add_argument(
-        "--gpu-buffer-safety-fraction",
-        type=float,
-        default=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
     )
     return parser
 
@@ -389,8 +354,6 @@ def _training_kwargs_from_args(args):
             estimated_worker_mb=args.rl_estimated_worker_mb,
             max_worker_rss_mb=args.rl_max_worker_rss_mb,
         ),
-        "autotune_fraction": args.rl_autotune_fraction,
-        "autotune_minimum_gain": args.rl_autotune_min_gain,
         "start_iteration": args.start_iteration,
         "resume_weights_path": args.resume_weights_path,
         "resume_state_file": args.resume_state_file,
@@ -400,10 +363,7 @@ def _training_kwargs_from_args(args):
         "ppo_target_kl": args.ppo_target_kl,
         "ppo_stop_kl": args.ppo_stop_kl,
         "ppo_max_epochs": args.ppo_max_epochs,
-        "ppo_min_minibatches": args.ppo_min_minibatches,
-        "ppo_max_minibatches": args.ppo_max_minibatches,
         "ppo_games_per_minibatch_scale": args.ppo_games_per_minibatch_scale,
         "ppo_min_decisions_per_minibatch": args.ppo_min_decisions_per_minibatch,
         "prefer_gpu_buffer": args.prefer_gpu_buffer,
-        "gpu_buffer_safety_fraction": args.gpu_buffer_safety_fraction,
     }

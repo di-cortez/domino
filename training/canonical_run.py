@@ -14,6 +14,11 @@ import numpy as np
 from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from middleware.domino_engine import RULESET_VERSION
+from training.rl_constants import (
+    PPO_GPU_BUFFER_SAFETY_FRACTION,
+    PPO_MAX_MINIBATCHES,
+    PPO_MIN_MINIBATCHES,
+)
 from training.rl_resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
@@ -112,6 +117,13 @@ def _validated_algorithm(algorithm):
     if algorithm not in SUPPORTED_TRAINING_ALGORITHMS:
         raise ValueError(f"Unsupported canonical RL algorithm: {algorithm!r}.")
     return algorithm
+
+
+def _ppo_resume_identity(configuration):
+    """Return PPO fields that can affect computation after a checkpoint."""
+    identity = dict(configuration or {})
+    identity.pop("target_kl", None)
+    return identity
 
 
 def configuration_sha256(configuration):
@@ -332,9 +344,15 @@ def create_run_config(
             "locked_arguments",
             "machine",
         )
-        differences = [
-            key for key in immutable_keys if existing.get(key) != value.get(key)
-        ]
+        differences = []
+        for key in immutable_keys:
+            existing_value = existing.get(key)
+            requested_value = value.get(key)
+            if key == "ppo_config":
+                existing_value = _ppo_resume_identity(existing_value)
+                requested_value = _ppo_resume_identity(requested_value)
+            if existing_value != requested_value:
+                differences.append(key)
         target_changed = existing.get("target_rl_games") != value["target_rl_games"]
         level_changed = existing.get("pipeline_level") != value["pipeline_level"]
         if differences or (
@@ -409,9 +427,14 @@ def load_resume_point(
         "configuration_sha256": configuration_hash,
     }
     for key, expected_value in expected.items():
-        if state.get(key) != expected_value:
+        checkpoint_value = state.get(key)
+        if key == "ppo_config":
+            checkpoint_value = _ppo_resume_identity(checkpoint_value)
+            expected_value = _ppo_resume_identity(expected_value)
+        if checkpoint_value != expected_value:
             differences.append(
-                f"{key}: checkpoint={state.get(key)!r}, requested={expected_value!r}"
+                f"{key}: checkpoint={checkpoint_value!r}, "
+                f"requested={expected_value!r}"
             )
     if differences and not force_incompatible:
         raise ValueError(
@@ -447,11 +470,10 @@ def load_resume_point(
         "rl_training_algorithm": algorithm,
         "sl_weights_sha256": supervised_weights_sha256,
         "ppo_clip_epsilon": float(ppo_config["clip_epsilon"]),
-        "ppo_target_kl": float(ppo_config["target_kl"]),
         "ppo_stop_kl": float(ppo_config["stop_kl"]),
         "ppo_max_epochs": int(ppo_config["max_epochs"]),
-        "ppo_min_minibatches": int(ppo_config["min_minibatches"]),
-        "ppo_max_minibatches": int(ppo_config["max_minibatches"]),
+        "ppo_min_minibatches": PPO_MIN_MINIBATCHES,
+        "ppo_max_minibatches": PPO_MAX_MINIBATCHES,
         "ppo_games_per_minibatch_scale": int(
             ppo_config["games_per_minibatch_scale"]
         ),
@@ -459,9 +481,7 @@ def load_resume_point(
             ppo_config["min_decisions_per_minibatch"]
         ),
         "prefer_gpu_buffer": bool(ppo_config["prefer_gpu_buffer"]),
-        "gpu_buffer_safety_fraction": float(
-            ppo_config["gpu_buffer_safety_fraction"]
-        ),
+        "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
         "run_configuration_sha256": configuration_hash,
     }
     pair_differences = [

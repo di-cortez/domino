@@ -16,6 +16,11 @@ from typing import Iterable
 
 import numpy as np
 
+from training.rl_constants import (
+    PPO_GPU_BUFFER_SAFETY_FRACTION,
+    PPO_MAX_MINIBATCHES,
+    PPO_MIN_MINIBATCHES,
+)
 from utils.resource_limits import effective_gpu_available_bytes
 
 
@@ -24,11 +29,8 @@ DEFAULT_TARGET_KL = 0.01
 DEFAULT_STOP_KL = 0.015
 DEFAULT_MAX_EPOCHS = 4
 MAX_PPO_EPOCHS = 16
-DEFAULT_MIN_MINIBATCHES = 4
-DEFAULT_MAX_MINIBATCHES = 16
 DEFAULT_GAMES_PER_MINIBATCH_SCALE = 125
 DEFAULT_MIN_DECISIONS_PER_MINIBATCH = 128
-DEFAULT_GPU_BUFFER_SAFETY_FRACTION = 0.70
 ADVANTAGE_EPSILON = 1e-8
 
 
@@ -217,17 +219,13 @@ class PPOBuffer:
 def requested_minibatches(
     actual_games,
     *,
-    minimum=DEFAULT_MIN_MINIBATCHES,
-    maximum=DEFAULT_MAX_MINIBATCHES,
     games_scale=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
 ):
     """Return the requested 4..16 minibatch count based on games collected."""
     if actual_games < 1 or games_scale < 1:
         raise ValueError("actual_games and games_scale must be positive.")
-    if minimum < 1 or maximum < minimum:
-        raise ValueError("Invalid PPO minibatch bounds.")
     raw = math.ceil(int(actual_games) / int(games_scale))
-    return max(int(minimum), min(int(maximum), raw))
+    return max(PPO_MIN_MINIBATCHES, min(PPO_MAX_MINIBATCHES, raw))
 
 
 def effective_minibatches(
@@ -296,7 +294,7 @@ def log_ratio_statistics(new_log_probs, old_log_probs, clip_epsilon=DEFAULT_CLIP
 class PPOBufferStorage:
     """Backend view of a canonical host PPO buffer."""
 
-    def __init__(self, network, buffer, *, prefer_gpu=True, safety_fraction=0.70):
+    def __init__(self, network, buffer, *, prefer_gpu=True):
         self.network = network
         self.buffer = buffer
         self.location = "ram_streamed" if network.device == "gpu" else "ram"
@@ -309,13 +307,15 @@ class PPOBufferStorage:
             "fallback_reason": None,
         }
         if prefer_gpu and network.device == "gpu":
-            self._try_full_gpu_copy(safety_fraction)
+            self._try_full_gpu_copy()
 
-    def _try_full_gpu_copy(self, safety_fraction):
-        if not 0 < float(safety_fraction) <= 1:
-            raise ValueError("GPU buffer safety fraction must be in (0, 1].")
+    def _try_full_gpu_copy(self):
         free_bytes = effective_gpu_available_bytes()
-        usable = None if free_bytes is None else int(free_bytes * float(safety_fraction))
+        usable = (
+            None
+            if free_bytes is None
+            else int(free_bytes * PPO_GPU_BUFFER_SAFETY_FRACTION)
+        )
         self.preflight["reported_free_vram_bytes"] = free_bytes
         self.preflight["usable_free_vram_bytes"] = usable
         if usable is None or self.buffer.nbytes > usable:
@@ -438,14 +438,12 @@ def prepare_storage(
     first_indices,
     *,
     prefer_gpu=True,
-    safety_fraction=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
 ):
     """Allocate and workspace-probe storage before the first optimizer step."""
     storage = PPOBufferStorage(
         network,
         buffer,
         prefer_gpu=prefer_gpu,
-        safety_fraction=safety_fraction,
     )
     try:
         _validate_first_minibatch(network, storage, first_indices)
@@ -637,12 +635,9 @@ def ppo_update(
     target_kl=DEFAULT_TARGET_KL,
     stop_kl=DEFAULT_STOP_KL,
     max_epochs=DEFAULT_MAX_EPOCHS,
-    min_minibatches=DEFAULT_MIN_MINIBATCHES,
-    max_minibatches=DEFAULT_MAX_MINIBATCHES,
     games_per_minibatch_scale=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
     min_decisions_per_minibatch=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
     prefer_gpu_buffer=True,
-    gpu_buffer_safety_fraction=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
 ):
     """Run deterministic, KL-limited PPO epochs over one on-policy buffer."""
     profile_started = time.perf_counter()
@@ -661,14 +656,14 @@ def ppo_update(
     full_buffer_detail = {}
     if not 0 < float(clip_epsilon) < 1:
         raise ValueError("PPO clip_epsilon must be in (0, 1).")
-    if target_kl <= 0 or stop_kl <= 0 or stop_kl < target_kl:
-        raise ValueError("PPO KL thresholds must satisfy 0 < target_kl <= stop_kl.")
+    if target_kl <= 0 or stop_kl <= 0:
+        raise ValueError(
+            "PPO KL reporting target and stop threshold must be positive."
+        )
     if not 1 <= int(max_epochs) <= MAX_PPO_EPOCHS:
         raise ValueError(
             f"PPO max_epochs must be between one and {MAX_PPO_EPOCHS}."
         )
-    if not 0 < float(gpu_buffer_safety_fraction) <= 1:
-        raise ValueError("GPU buffer safety fraction must be in (0, 1].")
     if float(value_coef) < 0:
         raise ValueError("PPO value_coef must be non-negative.")
     use_value_head = bool(getattr(network, "use_value_head", False))
@@ -683,8 +678,6 @@ def ppo_update(
 
     requested = requested_minibatches(
         actual_games,
-        minimum=min_minibatches,
-        maximum=max_minibatches,
         games_scale=games_per_minibatch_scale,
     )
     effective = effective_minibatches(
@@ -704,7 +697,6 @@ def ppo_update(
         buffer,
         first_partitions[0],
         prefer_gpu=prefer_gpu_buffer,
-        safety_fraction=gpu_buffer_safety_fraction,
     )
     timing["storage_prepare"] = time.perf_counter() - storage_started
     epoch_rows = []

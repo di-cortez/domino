@@ -116,9 +116,9 @@ rollout workers. The RL run directory receives:
 
 | File | Contents |
 |---|---|
-| `periodic_diagnostics.jsonl` | Append-safe source of truth; one deduplicated monitor point per checkpoint identity. |
-| `rl_vs_random_progress.csv` | Derived tabular learning curve, including cumulative RL training hours. |
-| `rl_vs_random_progress.png` | Linear cumulative-training-hours curve with point zero and 95% intervals. |
+| `periodic_diagnostics.jsonl` | Atomic compact source of truth: one static header followed by deduplicated data arrays. |
+| `rl_vs_random_progress.csv` | Six-column derived learning curve with cumulative RL-plus-diagnostic hours, win rate, and 95% interval. |
+| `rl_vs_random_progress.png` | Linear cumulative RL-plus-diagnostic-hours curve with point zero and 95% intervals. |
 | `rl_vs_random_progress_logx.png` | Optional separate symlog time rendering. |
 | `best_checkpoint.json` | Highest periodic win rate; never used implicitly for resume. |
 | `periodic_diagnostic_tuning.json` | Forever's one-time diagnostic-worker selection, reused after resume. |
@@ -131,18 +131,26 @@ footer records the exact point-zero checkpoint name and SHA-256 prefix, the
 machine captured when the run began, seed, fixed GPI, PPO epoch budget,
 learning rate, value-head state, hidden-layer widths, and canonical
 configuration-hash prefix. Its horizontal axis
-uses cumulative RL training time and therefore remains monotonic across resume
-sessions while excluding periodic-diagnostic time.
+uses cumulative RL training time plus every completed periodic diagnostic. It
+therefore remains monotonic across resume sessions without counting time while
+the process was stopped.
 
 Periodic monitoring does not persist per-game CSV records. The complete,
 compact JSONL learning history is retained, while only the 10 newest
 per-checkpoint `summary.json` directories are kept. This bounds recurring
 diagnostic storage without losing any point used by the CSV, graph, or best
-checkpoint selector.
+checkpoint selector. The JSONL header stores invariant run and matchup
+metadata once. Data rows store checkpoint paths relative to `checkpoints/` and
+omit redundant losses, rates, and confidence intervals; readers reconstruct
+those values from wins and the header's game count. Existing version-two
+object-per-line histories are migrated atomically on the next periodic update.
+The derived CSV contains only `rl_games`, `rl_iterations`,
+`rl_elapsed_hours`, `win_rate_percent`, `ci95_low_percent`, and
+`ci95_high_percent`.
 
 The runtime profile goes deeper than the monitor's single `diagnostic_seconds`
 field. It separates checkpoint identity/history work, optional worker tuning,
-pairwise evaluation, RNG restoration, JSONL append/fsync, CSV and graph
+pairwise evaluation, RNG restoration, atomic JSONL update, CSV and graph
 rebuilds, and best-checkpoint maintenance. Pairwise evaluation is split again
 into game execution, parent ordering, statistics, CSV/JSON output, plots, and
 the atomic directory commit. Game execution inside the CPU workers is split
@@ -237,28 +245,3 @@ repeated invocations accumulate a growing log instead of overwriting it.
 Trained checkpoints are written under `--checkpoint-dir` (default
 `models/hyperparameter_sweep/`). Run `python -m diagnostics.hyperparameter_sweep
 --help` for the full flag list.
-
-### RL Sweep Comparative Table
-
-`rl_sweep_table.py` is the counterpart for `train_script/run_rl_parameter_sweep.sh`
-(a separate, bash-driven sweep — see `train_script/README.md`): that script
-writes one `sweep_run.json` (hyperparameters) + `summary.json` (rl-vs-random
-results) pair per sweep point under `diagnostics/results/<run_name>/`. This
-module discovers every such pair and joins its data. CSV, JSON, console, PNG,
-and PDF keep one row per trained model; GPI is fixed and is not a report
-dimension:
-
-```bash
-python -m diagnostics.rl_sweep_table
-python -m diagnostics.rl_sweep_table --results-dir diagnostics/results --output-dir /tmp/report
-```
-
-Output defaults to `diagnostics/results/rl_sweep_table/` and includes
-`rl_sweep_table.csv`, `rl_sweep_table.json`, `rl_sweep_table.png`, and
-`rl_sweep_table.pdf`. `train_script/run_rl_parameter_sweep.sh` invokes this
-automatically as its final stage (`--skip-report` to opt out). On a shell
-`--resume`, the same module validates the saved matchup, seed, requested game
-count, result totals and rates, complete games CSV, requested plots, sweep
-metadata, and numbered model identity before an existing diagnostic is reused.
-New metadata includes the model SHA-256 checksum; older output uses conservative
-artifact timestamps for backward-compatible validation.

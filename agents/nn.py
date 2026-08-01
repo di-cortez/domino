@@ -56,15 +56,6 @@ def resolve_device(device="auto"):
     return host_np, "cpu"
 
 
-if GPU_ENABLED:
-    # Cap this process's CuPy pool when concurrent sweep jobs share one GPU.
-    _vram_limit_mb = os.environ.get("DOMINO_VRAM_LIMIT_MB")
-    if _vram_limit_mb:
-        _cupy.get_default_memory_pool().set_limit(
-            size=int(float(_vram_limit_mb) * 1024 * 1024)
-        )
-
-
 class SupervisedNeuralNetwork:
     """Three-layer float32 MLP with configurable hidden dimensions."""
 

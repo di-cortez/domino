@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 
 import pytest
@@ -10,6 +11,9 @@ from agents.encoder import DominoEncoder
 from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import run_pairwise
 from diagnostics.rl_progress import (
+    CSV_FIELDS,
+    HISTORY_DATA_FIELDS,
+    HISTORY_RECORD_TYPE,
     read_periodic_history,
     run_periodic_diagnostic,
 )
@@ -233,11 +237,9 @@ def test_periodic_profile_separates_reports_from_pairwise_work(tmp_path, monkeyp
         seed=42,
         rl_games=100,
         rl_iterations=1,
-        optimizer_steps=12,
         checkpoint_path=checkpoint,
         diagnostic_games=4,
         rl_elapsed_seconds=1.0,
-        wall_clock_seconds=2.0,
         workers=1,
         safety_config=ParallelSafetyConfig(memory_reserve_mb=0),
     )
@@ -246,9 +248,67 @@ def test_periodic_profile_separates_reports_from_pairwise_work(tmp_path, monkeyp
     profile = row["runtime_profile_delta"]
     assert profile["games"] == 4
     assert profile["sections_seconds"]["pairwise_evaluation"] > 0.0
-    assert profile["sections_seconds"]["history_jsonl_append_and_fsync"] > 0.0
+    assert profile["sections_seconds"]["history_jsonl_atomic_update"] > 0.0
     assert profile["sections_seconds"]["progress_csv_rebuild"] > 0.0
     assert profile["pairwise_sections_seconds"] == {"new_game_execution": 0.008}
     assert pairwise_options["save_game_records"] is False
     persisted = read_periodic_history(tmp_path / "periodic_diagnostics.jsonl")
     assert "runtime_profile_delta" not in persisted[-1]
+
+
+def test_real_periodic_history_is_compact_and_counts_diagnostic_time(tmp_path):
+    checkpoint = tmp_path / "checkpoints" / "games_0000000000_weights.npz"
+    checkpoint.parent.mkdir(parents=True)
+    PolicyNetwork(
+        input_size=DominoEncoder.VECTOR_SIZE,
+        hidden1_size=16,
+        hidden2_size=8,
+        output_size=DominoEncoder.ACTION_SIZE,
+        device="cpu",
+    ).save(checkpoint)
+    common = {
+        "run_dir": tmp_path,
+        "pipeline_level": "forever",
+        "seed": 42,
+        "checkpoint_path": checkpoint,
+        "diagnostic_games": 4,
+        "workers": 1,
+        "safety_config": ParallelSafetyConfig(memory_reserve_mb=0),
+    }
+    run_periodic_diagnostic(
+        rl_games=0,
+        rl_iterations=0,
+        rl_elapsed_seconds=0.0,
+        **common,
+    )
+    run_periodic_diagnostic(
+        rl_games=4,
+        rl_iterations=1,
+        rl_elapsed_seconds=2.0,
+        **common,
+    )
+
+    history_path = tmp_path / "periodic_diagnostics.jsonl"
+    raw = [
+        json.loads(line)
+        for line in history_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert raw[0]["record_type"] == HISTORY_RECORD_TYPE
+    assert len(raw) == 3
+    assert all(isinstance(value, list) for value in raw[1:])
+    checkpoint_index = HISTORY_DATA_FIELDS.index("checkpoint_path")
+    assert raw[1][checkpoint_index] == checkpoint.name
+    assert "ci95" not in history_path.read_text(encoding="utf-8")
+
+    rows = read_periodic_history(history_path)
+    expected = 2.0 + sum(row["diagnostic_seconds"] for row in rows)
+    assert rows[-1]["progress_elapsed_seconds"] == pytest.approx(expected)
+    assert rows[-1]["progress_elapsed_seconds"] > rows[-1]["rl_elapsed_seconds"]
+    with open(
+        tmp_path / "rl_vs_random_progress.csv",
+        newline="",
+        encoding="utf-8",
+    ) as stream:
+        csv_rows = list(csv.DictReader(stream))
+    assert list(csv_rows[0]) == list(CSV_FIELDS)
+    assert (tmp_path / "rl_vs_random_progress.png").is_file()

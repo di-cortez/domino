@@ -192,15 +192,9 @@ points, and derives CSV/PNG reports. Final all-pairs evaluation uses a distinct
 holdout namespace. Diagnostic execution preserves parent training RNG state
 and never mutates the checkpoint or training schedule.
 
-Parameter sweeps train points sequentially while each point can use internal
-rollout workers. GPI remains fixed and is not a sweep axis. Their manifests,
-fingerprints, hashes, numbered checkpoints, metrics, and diagnostic artifacts
-support conservative resume. Report builders consume those immutable run
-artifacts to create CSV, JSON, PNG, and PDF outputs.
-
-Every new canonical pipeline and parameter-sweep point initializes RL from its
-selected supervised checkpoint, independent of an older RL output. Canonical
-`--resume`/`--resume-from` and sweep resume restore exact numbered state.
+Every new canonical pipeline initializes RL from its selected supervised
+checkpoint, independent of an older RL output. Canonical
+`--resume`/`--resume-from` restores exact numbered state.
 Direct `training.self_play` calls continue an existing compatible RL checkpoint
 by default, with `--fresh-from-sl` available for controlled new runs.
 
@@ -222,7 +216,6 @@ approved and documented:
 - float64 checkpoint loading and optional value-head arrays;
 - deterministic seed-to-game mapping;
 - numbered checkpoint plus `.resume.npz` pairing and validation;
-- existing generated sweep layouts that report/resume tools read;
 - atomic replacement of datasets, checkpoints, diagnostics, and reports.
 
 See `CONTRIBUTING.md` for the required impact analysis and tests.

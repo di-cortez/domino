@@ -17,6 +17,7 @@ import numpy as np
 
 from diagnostics.pairwise import run_pairwise
 from diagnostics.parallel_runner import ParallelSafetyConfig, cap_parallel_workers
+from diagnostics.plots import wilson_interval
 from diagnostics.worker_autotune import (
     DEFAULT_AUTOTUNE_FRACTION,
     DEFAULT_MINIMUM_GAIN,
@@ -28,7 +29,7 @@ from training.ppo import stable_seed
 from utils.artifacts import atomic_write_json, atomic_write_text, file_sha256
 
 
-FORMAT_VERSION = 2
+FORMAT_VERSION = 3
 PERIODIC_NAMESPACE = "periodic_rl_vs_random"
 FINAL_NAMESPACE = "final_all_pairs_holdout"
 PERIODIC_SUMMARY_RETENTION = 10
@@ -36,16 +37,32 @@ _PERIODIC_DIRECTORY_PATTERN = re.compile(r"games_(\d+)")
 CSV_FIELDS = (
     "rl_games",
     "rl_iterations",
-    "optimizer_steps",
     "rl_elapsed_hours",
     "win_rate_percent",
     "ci95_low_percent",
     "ci95_high_percent",
+)
+HISTORY_RECORD_TYPE = "periodic_rl_vs_random_history"
+HISTORY_CHECKPOINT_BASE = "checkpoints"
+HISTORY_STATIC_FIELDS = (
+    "pipeline_level",
+    "seed",
+    "opponent",
     "diagnostic_games",
+    "diagnostic_seed",
+    "diagnostic_seed_namespace",
+    "configuration_sha256",
+)
+HISTORY_DATA_FIELDS = (
+    "rl_games",
+    "rl_iterations",
+    "rl_elapsed_seconds",
     "diagnostic_seconds",
     "checkpoint_path",
     "checkpoint_sha256",
-    "configuration_sha256",
+    "wins",
+    "selected_workers",
+    "created_at",
 )
 
 
@@ -94,17 +111,17 @@ def _training_footer_line(run_config):
 
 
 def _rl_elapsed_hours(row):
-    """Return cumulative RL training time in hours for one monitor point."""
+    """Return cumulative RL and periodic-diagnostic time in hours."""
     try:
-        seconds = float(row["rl_elapsed_seconds"])
+        seconds = float(row["progress_elapsed_seconds"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(
             "Periodic diagnostic point has no valid cumulative "
-            "rl_elapsed_seconds value."
+            "progress_elapsed_seconds value."
         ) from exc
     if not np.isfinite(seconds) or seconds < 0.0:
         raise ValueError(
-            "Periodic diagnostic rl_elapsed_seconds must be finite and non-negative."
+            "Periodic diagnostic progress time must be finite and non-negative."
         )
     return seconds / 3600.0
 
@@ -117,39 +134,195 @@ def final_diagnostic_seed(seed):
     return stable_seed(int(seed), FINAL_NAMESPACE)
 
 
+def _required_history_identity(row):
+    required = {
+        "rl_games",
+        "checkpoint_sha256",
+        "diagnostic_seed",
+        "diagnostic_games",
+        "opponent",
+    }
+    return isinstance(row, dict) and required.issubset(row)
+
+
+def _history_header(rows):
+    """Build and validate one compact history header from normalized rows."""
+    first = rows[0]
+    static = {name: first.get(name) for name in HISTORY_STATIC_FIELDS}
+    for row in rows[1:]:
+        differences = [
+            name
+            for name, expected in static.items()
+            if row.get(name) != expected
+        ]
+        if differences:
+            raise ValueError(
+                "Periodic diagnostic history mixes incompatible static metadata: "
+                + ", ".join(differences)
+            )
+    return {
+        "record_type": HISTORY_RECORD_TYPE,
+        "format_version": FORMAT_VERSION,
+        "checkpoint_path_base": HISTORY_CHECKPOINT_BASE,
+        "columns": list(HISTORY_DATA_FIELDS),
+        "static": static,
+    }
+
+
+def _checkpoint_path_for_storage(path, history_path):
+    """Return a checkpoint path relative to the history's checkpoints folder."""
+    run_dir = Path(history_path).parent.resolve()
+    checkpoint_base = run_dir / HISTORY_CHECKPOINT_BASE
+    checkpoint = Path(path)
+    if not checkpoint.is_absolute():
+        checkpoint = run_dir / checkpoint
+    return os.path.relpath(checkpoint.resolve(), checkpoint_base)
+
+
+def _checkpoint_path_from_storage(path, history_path, checkpoint_base):
+    """Resolve one stored checkpoint path for existing in-memory consumers."""
+    return str(
+        (
+            Path(history_path).parent
+            / checkpoint_base
+            / str(path)
+        ).resolve()
+    )
+
+
+def _derive_history_values(rows):
+    """Restore redundant report values without persisting them per point."""
+    cumulative_diagnostic_seconds = 0.0
+    derived = []
+    for original in rows:
+        row = dict(original)
+        try:
+            games = int(row["diagnostic_games"])
+            wins = int(row["wins"])
+            rl_seconds = float(row["rl_elapsed_seconds"])
+            diagnostic_seconds = float(row["diagnostic_seconds"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Periodic diagnostic history has invalid numeric data."
+            ) from exc
+        if games < 1 or not 0 <= wins <= games:
+            raise ValueError("Periodic diagnostic wins must be within game count.")
+        if (
+            not np.isfinite(rl_seconds)
+            or not np.isfinite(diagnostic_seconds)
+            or rl_seconds < 0.0
+            or diagnostic_seconds < 0.0
+        ):
+            raise ValueError(
+                "Periodic diagnostic elapsed times must be finite and non-negative."
+            )
+        cumulative_diagnostic_seconds += diagnostic_seconds
+        losses = games - wins
+        low, high = wilson_interval(wins, games)
+        row.update({
+            "format_version": FORMAT_VERSION,
+            "losses": losses,
+            "win_rate": wins / games,
+            "loss_rate": losses / games,
+            "ci95_win_rate_low": float(low),
+            "ci95_win_rate_high": float(high),
+            "progress_elapsed_seconds": (
+                rl_seconds + cumulative_diagnostic_seconds
+            ),
+        })
+        derived.append(row)
+    return derived
+
+
+def _legacy_row(value):
+    """Normalize one version-two object before compact migration."""
+    row = dict(value)
+    row.setdefault("diagnostic_seed_namespace", PERIODIC_NAMESPACE)
+    row.setdefault("configuration_sha256", None)
+    if "wins" not in row and "win_rate" in row:
+        row["wins"] = round(
+            float(row["win_rate"]) * int(row["diagnostic_games"])
+        )
+    return row
+
+
 def read_periodic_history(path):
-    """Read valid JSONL points, tolerating only a corrupt final partial line."""
+    """Read compact or legacy JSONL, tolerating a corrupt final partial line."""
     path = Path(path)
     if not path.exists():
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
-    rows = []
+    values = []
     for index, line in enumerate(lines):
         if not line.strip():
             continue
         try:
-            value = json.loads(line)
+            values.append((index, json.loads(line)))
         except json.JSONDecodeError:
             if index == len(lines) - 1:
                 break
             raise ValueError(
                 f"Periodic diagnostic history has corrupt line {index + 1}."
             )
-        required_identity = {
-            "rl_games",
-            "checkpoint_sha256",
-            "diagnostic_seed",
-            "diagnostic_games",
-            "opponent",
-        }
-        if not isinstance(value, dict) or not required_identity.issubset(value):
-            if index == len(lines) - 1:
+    if not values:
+        return []
+
+    _first_line, first = values[0]
+    if (
+        isinstance(first, dict)
+        and first.get("record_type") == HISTORY_RECORD_TYPE
+    ):
+        if first.get("format_version") != FORMAT_VERSION:
+            raise ValueError(
+                "Unsupported periodic diagnostic history format version "
+                f"{first.get('format_version')!r}."
+            )
+        columns = first.get("columns")
+        if columns != list(HISTORY_DATA_FIELDS):
+            raise ValueError("Periodic diagnostic history has unexpected columns.")
+        static = first.get("static")
+        if not isinstance(static, dict):
+            raise ValueError("Periodic diagnostic history has no static header.")
+        checkpoint_base = first.get("checkpoint_path_base")
+        if checkpoint_base != HISTORY_CHECKPOINT_BASE:
+            raise ValueError(
+                "Periodic diagnostic history has an unexpected checkpoint base."
+            )
+        rows = []
+        for line_index, value in values[1:]:
+            if not isinstance(value, list) or len(value) != len(columns):
+                if line_index == len(lines) - 1:
+                    break
+                raise ValueError(
+                    "Periodic diagnostic history line "
+                    f"{line_index + 1} has invalid compact data."
+                )
+            row = {**static, **dict(zip(columns, value))}
+            row["checkpoint_path"] = _checkpoint_path_from_storage(
+                row["checkpoint_path"],
+                path,
+                checkpoint_base,
+            )
+            if not _required_history_identity(row):
+                raise ValueError(
+                    "Periodic diagnostic history line "
+                    f"{line_index + 1} has no valid identity."
+                )
+            rows.append(row)
+        return _derive_history_values(rows)
+
+    rows = []
+    for line_index, value in values:
+        row = _legacy_row(value) if isinstance(value, dict) else value
+        if not _required_history_identity(row):
+            if line_index == len(lines) - 1:
                 break
             raise ValueError(
-                f"Periodic diagnostic history line {index + 1} has no valid identity."
+                f"Periodic diagnostic history line {line_index + 1} "
+                "has no valid identity."
             )
-        rows.append(value)
-    return rows
+        rows.append(row)
+    return _derive_history_values(rows)
 
 
 def _point_key(row):
@@ -163,27 +336,38 @@ def _point_key(row):
     )
 
 
+def _serialize_periodic_history(path, rows):
+    """Return canonical header-plus-data JSONL for normalized rows."""
+    if not rows:
+        return ""
+    header = _history_header(rows)
+    lines = [json.dumps(header, sort_keys=True, separators=(",", ":"))]
+    for row in rows:
+        stored = dict(row)
+        stored["checkpoint_path"] = _checkpoint_path_for_storage(
+            row["checkpoint_path"],
+            path,
+        )
+        values = [stored.get(name) for name in HISTORY_DATA_FIELDS]
+        lines.append(json.dumps(values, separators=(",", ":")))
+    return "\n".join(lines) + "\n"
+
+
 def _repair_final_partial_line(path, rows):
-    """Atomically normalize a valid prefix when the JSONL tail is incomplete."""
+    """Atomically migrate legacy data and normalize a valid compact prefix."""
     path = Path(path)
     if not path.exists():
         return False
     raw_text = path.read_text(encoding="utf-8")
-    nonempty_lines = [line for line in raw_text.splitlines() if line.strip()]
-    if (
-        len(rows) == len(nonempty_lines)
-        and (not raw_text or raw_text.endswith("\n"))
-    ):
+    valid_text = _serialize_periodic_history(path, rows)
+    if raw_text == valid_text:
         return False
-    valid_text = "".join(
-        json.dumps(existing, sort_keys=True) + "\n" for existing in rows
-    )
     atomic_write_text(path, valid_text)
     return True
 
 
 def append_periodic_point(path, row):
-    """Append one fsynced point unless its full diagnostic identity exists."""
+    """Persist one compact point unless its full diagnostic identity exists."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     row = dict(row)
@@ -193,11 +377,12 @@ def append_periodic_point(path, row):
     for existing in existing_rows:
         if _point_key(existing) == key:
             return existing, False
-    with open(path, "a", encoding="utf-8") as stream:
-        stream.write(json.dumps(row, sort_keys=True) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    return row, True
+    atomic_write_text(
+        path,
+        _serialize_periodic_history(path, [*existing_rows, row]),
+    )
+    persisted = read_periodic_history(path)[-1]
+    return persisted, True
 
 
 def prune_periodic_diagnostic_artifacts(
@@ -207,8 +392,8 @@ def prune_periodic_diagnostic_artifacts(
 ):
     """Remove bulky game records and bound per-point summary directories.
 
-    The append-only ``periodic_diagnostics.jsonl`` remains the complete source
-    of truth. Only known generated files are removed, and an old directory is
+    The compact ``periodic_diagnostics.jsonl`` remains the complete source of
+    truth. Only known generated files are removed, and an old directory is
     removed only when that leaves it empty.
     """
     keep_summaries = int(keep_summaries)
@@ -284,7 +469,6 @@ def rebuild_progress_csv(run_dir):
         writer.writerow({
             "rl_games": row["rl_games"],
             "rl_iterations": row["rl_iterations"],
-            "optimizer_steps": row["optimizer_steps"],
             "rl_elapsed_hours": f"{_rl_elapsed_hours(row):.3f}",
             "win_rate_percent": f"{100.0 * row['win_rate']:.3f}",
             "ci95_low_percent": (
@@ -293,11 +477,6 @@ def rebuild_progress_csv(run_dir):
             "ci95_high_percent": (
                 f"{100.0 * row['ci95_win_rate_high']:.3f}"
             ),
-            "diagnostic_games": f"{float(row['diagnostic_games']):.3f}",
-            "diagnostic_seconds": f"{float(row['diagnostic_seconds']):.3f}",
-            "checkpoint_path": row["checkpoint_path"],
-            "checkpoint_sha256": row["checkpoint_sha256"],
-            "configuration_sha256": row.get("configuration_sha256"),
         })
     return atomic_write_text(run_dir / "rl_vs_random_progress.csv", stream.getvalue())
 
@@ -330,11 +509,17 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
     axis = figure.add_subplot(1, 1, 1)
     axis.plot(x, y, marker="o", linewidth=2.0, label="RL vs random win rate")
     axis.fill_between(x, low, high, alpha=0.2, label="95% confidence interval")
-    axis.plot(x,y_smooth,linewidth=2.5,label=f"{window}-point trailing moving average")
+    axis.plot(
+        x,
+        y_smooth,
+        linewidth=2.5,
+        label=f"{window}-point trailing moving average",
+    )
     zero_rows = [row for row in rows if int(row["rl_games"]) == 0]
     if zero_rows:
+        starting_hours = _rl_elapsed_hours(zero_rows[-1])
         axis.scatter(
-            [0],
+            [starting_hours],
             [100.0 * zero_rows[-1]["win_rate"]],
             s=70,
             zorder=4,
@@ -342,7 +527,7 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
         )
     if log_x:
         axis.set_xscale("symlog", linthresh=1.0)
-    axis.set_xlabel("Cumulative RL training time (hours)")
+    axis.set_xlabel("Cumulative RL and periodic-diagnostic time (hours)")
     axis.set_ylabel("Win rate vs random (%)")
     axis.set_title(
         f"RL learning progress — {rows[-1]['pipeline_level']} seed {rows[-1]['seed']}"
@@ -514,11 +699,9 @@ def run_periodic_diagnostic(
     seed,
     rl_games,
     rl_iterations,
-    optimizer_steps,
     checkpoint_path,
     diagnostic_games,
     rl_elapsed_seconds,
-    wall_clock_seconds,
     workers="auto",
     safety_config=None,
     autotune_fraction=DEFAULT_AUTOTUNE_FRACTION,
@@ -539,7 +722,7 @@ def run_periodic_diagnostic(
         run_config = load_run_config(run_dir)
     except (FileNotFoundError, ValueError):
         run_config = {}
-    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path = Path(checkpoint_path).resolve()
     diagnostic_seed = periodic_diagnostic_seed(seed)
     checkpoint_hash = file_sha256(checkpoint_path)
     identity = {
@@ -662,38 +845,29 @@ def run_periodic_diagnostic(
     section_started = time.perf_counter()
     summary = result["summary"]
     wins = int(summary["counts"]["win"])
-    losses = int(summary["counts"]["loss"])
-    low, high = summary["win_ci95"]
     row = {
         "format_version": FORMAT_VERSION,
         "pipeline_level": pipeline_level,
         "seed": int(seed),
         "rl_games": int(rl_games),
         "rl_iterations": int(rl_iterations),
-        "optimizer_steps": int(optimizer_steps),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_sha256": checkpoint_hash,
         "configuration_sha256": run_config.get("configuration_sha256"),
         "opponent": "random",
         "diagnostic_games": int(diagnostic_games),
         "wins": wins,
-        "losses": losses,
-        "win_rate": wins / int(diagnostic_games),
-        "loss_rate": losses / int(diagnostic_games),
-        "ci95_win_rate_low": float(low),
-        "ci95_win_rate_high": float(high),
         "diagnostic_seed": int(diagnostic_seed),
         "diagnostic_seed_namespace": PERIODIC_NAMESPACE,
         "diagnostic_seconds": float(diagnostic_seconds),
         "rl_elapsed_seconds": float(rl_elapsed_seconds),
-        "wall_clock_seconds": float(wall_clock_seconds),
         "selected_workers": selected_workers,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     add_runtime("diagnostic_summary_payload", section_started)
     section_started = time.perf_counter()
     row, appended = append_periodic_point(history_path, row)
-    add_runtime("history_jsonl_append_and_fsync", section_started)
+    add_runtime("history_jsonl_atomic_update", section_started)
     section_started = time.perf_counter()
     rebuild_progress_csv(run_dir)
     add_runtime("progress_csv_rebuild", section_started)

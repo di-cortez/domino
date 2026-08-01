@@ -270,21 +270,16 @@ def _run_rl_training(config, args):
                 estimated_worker_mb=args.rl_estimated_worker_mb,
                 max_worker_rss_mb=args.rl_max_worker_rss_mb,
             ),
-            autotune_fraction=args.rl_autotune_fraction,
-            autotune_minimum_gain=args.rl_autotune_min_gain,
             ppo_enabled=args.ppo_enabled,
             ppo_clip_epsilon=args.ppo_clip_epsilon,
             ppo_target_kl=args.ppo_target_kl,
             ppo_stop_kl=args.ppo_stop_kl,
             ppo_max_epochs=args.ppo_max_epochs,
-            ppo_min_minibatches=args.ppo_min_minibatches,
-            ppo_max_minibatches=args.ppo_max_minibatches,
             ppo_games_per_minibatch_scale=args.ppo_games_per_minibatch_scale,
             ppo_min_decisions_per_minibatch=(
                 args.ppo_min_decisions_per_minibatch
             ),
             prefer_gpu_buffer=args.prefer_gpu_buffer,
-            gpu_buffer_safety_fraction=args.gpu_buffer_safety_fraction,
             status_callback=rl_status,
         ),
         lambda summary: (

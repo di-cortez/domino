@@ -168,29 +168,22 @@ def gpu_memory_info() -> MemoryInfo | None:
 
 
 def effective_gpu_available_bytes() -> int | None:
-    """Return reusable VRAM after applying the optional CuPy pool ceiling."""
+    """Return free VRAM plus reusable bytes cached by the CuPy pool."""
     info = gpu_memory_info()
-    pool_limit = _positive_env_mb("DOMINO_VRAM_LIMIT_MB")
     available = None if info is None else info.available
-    pool_used = 0
     pool_cached = 0
     if info is not None and not info.simulated:
         try:
             import cupy
 
             pool = cupy.get_default_memory_pool()
-            pool_used = int(pool.used_bytes())
-            pool_cached = max(0, int(pool.total_bytes()) - pool_used)
+            pool_cached = max(
+                0,
+                int(pool.total_bytes()) - int(pool.used_bytes()),
+            )
             available += pool_cached
         except Exception:
             pass
-    if pool_limit is not None:
-        pool_headroom = max(0, pool_limit - pool_used)
-        available = (
-            pool_headroom
-            if available is None
-            else min(available, pool_headroom)
-        )
     return available
 
 

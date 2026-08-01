@@ -106,13 +106,11 @@ from training.rl_reporting import (
     _write_metrics_row,
 )
 from training.rl_parallel import (
-    DEFAULT_RL_MINIMUM_GAIN,
     DEFAULT_RL_WORKER_CANDIDATES,
     DEFAULT_RL_WORKERS,
     RLRolloutRunner,
 )
 from training.adaptive_tuning import (
-    DEFAULT_WORKER_BENCHMARK_FRACTION,
     atomic_write_json as atomic_write_tuning_json,
     hardware_metadata,
     hardware_warning,
@@ -121,15 +119,19 @@ from training.adaptive_tuning import (
 from training.ppo import (
     DEFAULT_CLIP_EPSILON,
     DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
     DEFAULT_MAX_EPOCHS,
-    DEFAULT_MAX_MINIBATCHES,
     DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    DEFAULT_MIN_MINIBATCHES,
     DEFAULT_STOP_KL,
     DEFAULT_TARGET_KL,
     PPOBuffer,
     ppo_update,
+)
+from training.rl_constants import (
+    PPO_GPU_BUFFER_SAFETY_FRACTION,
+    PPO_MAX_MINIBATCHES,
+    PPO_MIN_MINIBATCHES,
+    RL_WORKER_AUTOTUNE_FRACTION,
+    RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
 )
 from utils.resource_limits import (
     MIB,
@@ -232,11 +234,8 @@ def train(
     moving_average_window=DEFAULT_MOVING_AVERAGE_WINDOW,
     seed=None,
     device=DEFAULT_DEVICE,
-    sl_weights_data=None,
     workers=DEFAULT_RL_WORKERS,
     safety_config=None,
-    autotune_fraction=DEFAULT_WORKER_BENCHMARK_FRACTION,
-    autotune_minimum_gain=DEFAULT_RL_MINIMUM_GAIN,
     worker_candidates=DEFAULT_RL_WORKER_CANDIDATES,
     status_callback=None,
     metrics_callback=None,
@@ -252,12 +251,9 @@ def train(
     ppo_target_kl=DEFAULT_TARGET_KL,
     ppo_stop_kl=DEFAULT_STOP_KL,
     ppo_max_epochs=DEFAULT_MAX_EPOCHS,
-    ppo_min_minibatches=DEFAULT_MIN_MINIBATCHES,
-    ppo_max_minibatches=DEFAULT_MAX_MINIBATCHES,
     ppo_games_per_minibatch_scale=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
     ppo_min_decisions_per_minibatch=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
     prefer_gpu_buffer=True,
-    gpu_buffer_safety_fraction=DEFAULT_GPU_BUFFER_SAFETY_FRACTION,
     stop_after_training_games=None,
     shutdown_requested=None,
     allow_total_training_games_extension=False,
@@ -287,22 +283,16 @@ def train(
         pool_refresh_games=pool_refresh_games,
         max_pool_size=max_pool_size,
         moving_average_window=moving_average_window,
-        autotune_fraction=autotune_fraction,
-        autotune_minimum_gain=autotune_minimum_gain,
         training_opponent=training_opponent,
         reward_schema=reward_schema,
         ppo_enabled=ppo_enabled,
-        use_value_head=use_value_head,
         value_coef=value_coef,
         ppo_clip_epsilon=ppo_clip_epsilon,
         ppo_target_kl=ppo_target_kl,
         ppo_stop_kl=ppo_stop_kl,
         ppo_max_epochs=ppo_max_epochs,
-        ppo_min_minibatches=ppo_min_minibatches,
-        ppo_max_minibatches=ppo_max_minibatches,
         ppo_games_per_minibatch_scale=ppo_games_per_minibatch_scale,
         ppo_min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
-        gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
         normalize_advantages=normalize_advantages,
         workers=workers,
         safety_config=safety_config,
@@ -393,13 +383,12 @@ def train(
         quiet=quiet,
         use_value_head=use_value_head,
         device=device,
-        sl_weights_data=sl_weights_data,
         fresh_from_sl=fresh_from_sl,
         expected_training_algorithm=algorithm,
     )
     if resume_metadata is not None:
         network.load_optimizer_state_dict(resume_metadata["optimizer_state"])
-    sl_weights_sha256 = _sl_checkpoint_sha256(sl_weights_path, sl_weights_data)
+    sl_weights_sha256 = _sl_checkpoint_sha256(sl_weights_path)
 
     if status_callback is not None:
         emit_status = status_callback
@@ -438,8 +427,6 @@ def train(
         workers=workers,
         retune_workers=retune_workers,
         saved_tuning=saved_tuning,
-        worker_benchmark_fraction=autotune_fraction,
-        worker_minimum_gain=autotune_minimum_gain,
         worker_candidates=worker_candidates,
         base_seed=effective_seed,
         training_opponent=training_opponent,
@@ -471,7 +458,7 @@ def train(
         )
         emit_status(
             f"  max epochs: {ppo_max_epochs} | minibatches: adaptive, "
-            f"{ppo_min_minibatches} to {ppo_max_minibatches} | preferred "
+            f"{PPO_MIN_MINIBATCHES} to {PPO_MAX_MINIBATCHES} | preferred "
             "buffer: GPU | fallback: RAM"
         )
     else:
@@ -505,15 +492,11 @@ def train(
         device=network.device,
         sl_weights_sha256=sl_weights_sha256,
         ppo_clip_epsilon=ppo_clip_epsilon,
-        ppo_target_kl=ppo_target_kl,
         ppo_stop_kl=ppo_stop_kl,
         ppo_max_epochs=ppo_max_epochs,
-        ppo_min_minibatches=ppo_min_minibatches,
-        ppo_max_minibatches=ppo_max_minibatches,
         ppo_games_per_minibatch_scale=ppo_games_per_minibatch_scale,
         ppo_min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
         prefer_gpu_buffer=prefer_gpu_buffer,
-        gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
         run_configuration_sha256=run_configuration_sha256,
     )
     if resume_metadata is not None:
@@ -651,8 +634,8 @@ def train(
                 "target_kl": float(ppo_target_kl),
                 "stop_kl": float(ppo_stop_kl),
                 "max_epochs": int(ppo_max_epochs),
-                "min_minibatches": int(ppo_min_minibatches),
-                "max_minibatches": int(ppo_max_minibatches),
+                "min_minibatches": PPO_MIN_MINIBATCHES,
+                "max_minibatches": PPO_MAX_MINIBATCHES,
                 "games_per_minibatch_scale": int(
                     ppo_games_per_minibatch_scale
                 ),
@@ -660,9 +643,7 @@ def train(
                     ppo_min_decisions_per_minibatch
                 ),
                 "prefer_gpu_buffer": bool(prefer_gpu_buffer),
-                "gpu_buffer_safety_fraction": float(
-                    gpu_buffer_safety_fraction
-                ),
+                "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
             },
         },
     }
@@ -816,12 +797,9 @@ def train(
                         target_kl=ppo_target_kl,
                         stop_kl=ppo_stop_kl,
                         max_epochs=ppo_max_epochs,
-                        min_minibatches=ppo_min_minibatches,
-                        max_minibatches=ppo_max_minibatches,
                         games_per_minibatch_scale=ppo_games_per_minibatch_scale,
                         min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
                         prefer_gpu_buffer=prefer_gpu_buffer,
-                        gpu_buffer_safety_fraction=gpu_buffer_safety_fraction,
                     )
                     network.synchronize()
                     runtime_profile.add(
@@ -1181,8 +1159,8 @@ def train(
         "candidate_workers": [
             int(row["requested_workers"]) for row in worker_results
         ],
-        "benchmark_fraction": float(autotune_fraction),
-        "minimum_gain": float(autotune_minimum_gain),
+        "benchmark_fraction": RL_WORKER_AUTOTUNE_FRACTION,
+        "minimum_gain": RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
         "iterations_per_test": None,
         "games_per_test": int(adaptive_tuning.get("worker_test_games", 0)),
         "reused_iteration_count": 0,
@@ -1277,12 +1255,12 @@ def train(
             "target_kl": float(ppo_target_kl),
             "stop_kl": float(ppo_stop_kl),
             "max_epochs": int(ppo_max_epochs),
-            "min_minibatches": int(ppo_min_minibatches),
-            "max_minibatches": int(ppo_max_minibatches),
+            "min_minibatches": PPO_MIN_MINIBATCHES,
+            "max_minibatches": PPO_MAX_MINIBATCHES,
             "games_per_minibatch_scale": int(ppo_games_per_minibatch_scale),
             "min_decisions_per_minibatch": int(ppo_min_decisions_per_minibatch),
             "prefer_gpu_buffer": bool(prefer_gpu_buffer),
-            "gpu_buffer_safety_fraction": float(gpu_buffer_safety_fraction),
+            "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
         },
         "runtime_profile_delta": runtime_profile_delta,
         "duration_s": elapsed_time,

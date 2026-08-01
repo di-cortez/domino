@@ -80,8 +80,6 @@ RL_SEED=""
 # one backend regardless of what's installed/enabled globally.
 RL_DEVICE="auto"
 RL_WORKERS="auto"
-RL_AUTOTUNE_FRACTION=0.01
-RL_AUTOTUNE_MIN_GAIN=0.10
 RL_MEMORY_RESERVE_MB=512
 RL_ESTIMATED_WORKER_MB=256
 RL_MAX_WORKER_RSS_MB=1024
@@ -160,8 +158,6 @@ training.self_play):
   --rl-gamma F                 Terminal-reward discount per remaining real decision, 1.0 = no discount (default: $RL_GAMMA)
   --rl-reward-schema NAME      "default", "sparse", or "shaped" reward preset (default: $RL_REWARD_SCHEMA)
   --rl-workers N|auto          CPU-only rollout workers with isolated tuning (default: $RL_WORKERS, maximum 20)
-  --rl-autotune-fraction F     Discarded real-budget fraction per worker candidate (default: $RL_AUTOTUNE_FRACTION)
-  --rl-autotune-min-gain F     Minimum marginal worker-throughput gain (default: $RL_AUTOTUNE_MIN_GAIN)
   --rl-memory-reserve-mb N     Host RAM kept free during rollouts (default: $RL_MEMORY_RESERVE_MB)
   --rl-estimated-worker-mb N   Preflight RAM estimate per worker (default: $RL_ESTIMATED_WORKER_MB)
   --rl-max-worker-rss-mb N     Runtime RSS ceiling for one worker (default: $RL_MAX_WORKER_RSS_MB)
@@ -253,8 +249,6 @@ while [[ $# -gt 0 ]]; do
         --rl-seed) RL_SEED="$2"; shift 2 ;;
         --rl-device) RL_DEVICE="$2"; shift 2 ;;
         --rl-workers) RL_WORKERS="$2"; shift 2 ;;
-        --rl-autotune-fraction) RL_AUTOTUNE_FRACTION="$2"; shift 2 ;;
-        --rl-autotune-min-gain) RL_AUTOTUNE_MIN_GAIN="$2"; shift 2 ;;
         --rl-memory-reserve-mb) RL_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --rl-estimated-worker-mb) RL_ESTIMATED_WORKER_MB="$2"; shift 2 ;;
         --rl-max-worker-rss-mb) RL_MAX_WORKER_RSS_MB="$2"; shift 2 ;;
@@ -418,8 +412,6 @@ else
         --moving-average-window "$RL_MOVING_AVERAGE_WINDOW" \
         --device "$RL_DEVICE" \
         --rl-workers "$RL_WORKERS" \
-        --rl-autotune-fraction "$RL_AUTOTUNE_FRACTION" \
-        --rl-autotune-min-gain "$RL_AUTOTUNE_MIN_GAIN" \
         --rl-memory-reserve-mb "$RL_MEMORY_RESERVE_MB" \
         --rl-estimated-worker-mb "$RL_ESTIMATED_WORKER_MB" \
         --rl-max-worker-rss-mb "$RL_MAX_WORKER_RSS_MB" \

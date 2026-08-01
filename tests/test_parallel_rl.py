@@ -357,6 +357,7 @@ class ParallelRLTests(unittest.TestCase):
                 start_iteration=2,
                 resume_weights_path=str(partial_weights),
                 resume_state_file=str(partial_state),
+                ppo_target_kl=0.005,
                 **common,
             )
             with np.load(full["rl_weights_path"], allow_pickle=False) as left:
@@ -372,6 +373,7 @@ class ParallelRLTests(unittest.TestCase):
             self.assertEqual(full["games_per_iteration"], resumed["games_per_iteration"])
             self.assertEqual(full["selected_workers"], resumed["selected_workers"])
             self.assertEqual(full["optimizer_step_count"], resumed["optimizer_step_count"])
+            self.assertEqual(resumed["ppo_configuration"]["target_kl"], 0.005)
 
     def test_exact_game_budget_uses_a_partial_final_iteration(self):
         rows = []
@@ -488,8 +490,6 @@ class ParallelRLTests(unittest.TestCase):
                 device="cpu",
                 workers="auto",
                 safety_config=self.safety,
-                autotune_fraction=0.25,
-                autotune_minimum_gain=1000.0,
                 worker_candidates=(1, 2),
                 status_callback=messages.append,
                 rl_weights_path=str(Path(temp_dir) / "auto.npz"),
@@ -497,10 +497,10 @@ class ParallelRLTests(unittest.TestCase):
             )
         tuning = summary["autotune"]
         self.assertIsNone(tuning["iterations_per_test"])
-        self.assertEqual(tuning["games_per_test"], 4)
+        self.assertEqual(tuning["games_per_test"], 1)
         self.assertEqual(tuning["reused_iteration_count"], 0)
         self.assertEqual(tuning["reused_game_count"], 0)
-        self.assertEqual(tuning["discarded_game_count"], 8)
+        self.assertEqual(tuning["discarded_game_count"], 2)
         self.assertEqual(len(tuning["attempts"]), 2)
         self.assertTrue(all(attempt["success"] for attempt in tuning["attempts"]))
         self.assertEqual(summary["completed_training_games"], 16)
@@ -528,8 +528,6 @@ class ParallelRLTests(unittest.TestCase):
                     device="cpu",
                     workers="auto",
                     safety_config=safety,
-                    autotune_fraction=0.25,
-                    autotune_minimum_gain=0.0,
                     worker_candidates=(1, 2),
                     status_callback=lambda _message: None,
                     rl_weights_path=str(Path(temp_dir) / "limited.npz"),

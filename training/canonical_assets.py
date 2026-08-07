@@ -22,6 +22,13 @@ DATASET_GENERATOR_VERSION = "canonical_real_decisions_v1"
 RULESET_VERSION = "two_player_domino_v1"
 HEURISTIC_VERSION = "strategic_exact_belief_v1"
 EXPECTED_WEIGHT_SHAPES = DEFAULT_NETWORK_ARCHITECTURE.policy_weight_shapes()
+# Opt-in supervised regularizers added after the first canonical assets were
+# published. Metadata written before them recorded no field, which is exactly
+# the disabled value, so filling it in keeps those assets reusable instead of
+# forcing a retrain that would reproduce the same weights.
+DEFAULTED_TRAINING_CONFIG_FIELDS = {
+    "dropout_rate": 0.0,
+}
 
 
 class ArtifactCompatibilityError(RuntimeError):
@@ -130,6 +137,14 @@ def canonical_generation_config(*, dataset_games, workers, tuning, safety):
 def canonical_training_config(**values):
     """Return a JSON-stable supervised training configuration mapping."""
     return _json_value(values)
+
+
+def _defaulted_training_config(training_config):
+    """Return one training config with disabled defaults for later fields."""
+    return {
+        **DEFAULTED_TRAINING_CONFIG_FIELDS,
+        **_json_value(dict(training_config or {})),
+    }
 
 
 def _load_metadata(path):
@@ -264,6 +279,14 @@ def inspect_canonical_weights(
     metadata, error = _load_metadata(paths.weights_meta)
     if error:
         return ArtifactCheck(False, "incompatible", (error,), metadata, None)
+    stored_training_config = metadata.get("training_config")
+    if isinstance(stored_training_config, dict):
+        metadata = {
+            **metadata,
+            "training_config": _defaulted_training_config(
+                stored_training_config
+            ),
+        }
     expected = {
         "format_version": FORMAT_VERSION,
         "artifact_type": "supervised_weights",
@@ -274,7 +297,7 @@ def inspect_canonical_weights(
         "network_architecture": architecture.as_dict(),
         "ruleset_version": RULESET_VERSION,
         "encoded_feature_version": ENCODED_FEATURE_VERSION,
-        "training_config": _json_value(training_config),
+        "training_config": _defaulted_training_config(training_config),
     }
     reasons = _compare_fields(metadata, expected)
     reasons.extend(

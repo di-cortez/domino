@@ -16,6 +16,9 @@ from agents.network_architecture import (
 
 DEVICES = ("auto", "cpu", "gpu")
 NETWORK_DTYPE = host_np.float32
+# Both regularizers are opt-in; these values reproduce an unregularized run.
+DISABLED_DROPOUT_RATE = 0.0
+DISABLED_WEIGHT_DECAY = 0.0
 GPU_UNAVAILABLE_REASON = None
 _cupy = None
 
@@ -40,6 +43,16 @@ except Exception as exc:
     GPU_ENABLED = False
 
 
+def validated_dropout_rate(value):
+    """Return one hidden-layer dropout probability inside ``[0, 1)``."""
+    rate = float(value)
+    if not 0.0 <= rate < 1.0:
+        raise ValueError(
+            f"dropout_rate must be at least 0 and below 1, got {rate!r}."
+        )
+    return rate
+
+
 def resolve_device(device="auto"):
     """Return the array backend and concrete device for one network."""
     if device not in DEVICES:
@@ -57,7 +70,12 @@ def resolve_device(device="auto"):
 
 
 class SupervisedNeuralNetwork:
-    """Three-layer float32 MLP with configurable hidden dimensions."""
+    """Three-layer float32 MLP with configurable hidden dimensions.
+
+    ``dropout_rate`` enables inverted dropout on both hidden activations. It is
+    applied only inside training forward passes (``forward(..., training=True)``);
+    validation, diagnostics, and gameplay always evaluate the complete network.
+    """
 
     def __init__(
         self,
@@ -67,12 +85,14 @@ class SupervisedNeuralNetwork:
         output_size=DEFAULT_NETWORK_ARCHITECTURE.output_size,
         learning_rate=0.01,
         random_seed=None,
-        weight_decay=0.0,
+        weight_decay=DISABLED_WEIGHT_DECAY,
+        dropout_rate=DISABLED_DROPOUT_RATE,
         device="auto",
     ):
         self.xp, self.device = resolve_device(device)
         self.lr = float(learning_rate)
         self.weight_decay = float(weight_decay)
+        self.dropout_rate = validated_dropout_rate(dropout_rate)
         random_source = (
             self.xp.random
             if random_seed is None
@@ -119,6 +139,31 @@ class SupervisedNeuralNetwork:
         exp_z = self.xp.exp(z - self.xp.max(z, axis=0, keepdims=True))
         return exp_z / self.xp.sum(exp_z, axis=0, keepdims=True)
 
+    def _dropout_uniform(self, shape):
+        """Return uniform samples used to build one dropout mask."""
+        return self.xp.random.random(shape)
+
+    def _hidden_dropout(self, activations, training):
+        """Return activations and the inverted-dropout scale mask, or ``None``.
+
+        The mask is returned so backpropagation can reuse exactly the units
+        that the forward pass kept.
+        """
+        if not training or self.dropout_rate <= 0.0:
+            return activations, None
+        keep_probability = 1.0 - self.dropout_rate
+        kept = self._dropout_uniform(activations.shape) < keep_probability
+        mask = kept.astype(activations.dtype, copy=False) / self.xp.asarray(
+            keep_probability,
+            dtype=activations.dtype,
+        )
+        return activations * mask, mask
+
+    def _backpropagate_dropout(self, gradient, mask_name):
+        """Scale one hidden gradient by the mask used in the forward pass."""
+        mask = self.cache.get(mask_name)
+        return gradient if mask is None else gradient * mask
+
     def _to_backend(self, array):
         """Move one array to this network's backend without promoting dtype."""
         return self.xp.asarray(array, dtype=self.xp.float32)
@@ -138,12 +183,12 @@ class SupervisedNeuralNetwork:
                 self.xp.asarray(data[name], dtype=self.xp.float32),
             )
 
-    def forward(self, x):
+    def forward(self, x, training=False):
         x = self._to_backend(x)
         z1 = self.xp.dot(self.W1, x) + self.b1
-        a1 = self.relu(z1)
+        a1, d1 = self._hidden_dropout(self.relu(z1), training)
         z2 = self.xp.dot(self.W2, a1) + self.b2
-        a2 = self.relu(z2)
+        a2, d2 = self._hidden_dropout(self.relu(z2), training)
         z3 = self.xp.dot(self.W3, a2) + self.b3
         a3 = self.softmax(z3)
 
@@ -156,6 +201,11 @@ class SupervisedNeuralNetwork:
             "Z3": z3,
             "A3": a3,
         }
+        # Mask entries exist only while dropout is active, so every cached
+        # value stays a float32 activation array for the disabled default.
+        if d1 is not None:
+            self.cache["D1"] = d1
+            self.cache["D2"] = d2
         return a3
 
     def backward(self, y_target):
@@ -174,12 +224,18 @@ class SupervisedNeuralNetwork:
         dW3 = inverse_count * self.xp.dot(dz3, a2.T)
         db3 = inverse_count * self.xp.sum(dz3, axis=1, keepdims=True)
 
-        da2 = self.xp.dot(self.W3.T, dz3)
+        da2 = self._backpropagate_dropout(
+            self.xp.dot(self.W3.T, dz3),
+            "D2",
+        )
         dz2 = da2 * self.relu_derivative(self.cache["Z2"])
         dW2 = inverse_count * self.xp.dot(dz2, a1.T)
         db2 = inverse_count * self.xp.sum(dz2, axis=1, keepdims=True)
 
-        da1 = self.xp.dot(self.W2.T, dz2)
+        da1 = self._backpropagate_dropout(
+            self.xp.dot(self.W2.T, dz2),
+            "D1",
+        )
         dz1 = da1 * self.relu_derivative(self.cache["Z1"])
         dW1 = inverse_count * self.xp.dot(dz1, x.T)
         db1 = inverse_count * self.xp.sum(dz1, axis=1, keepdims=True)
@@ -247,7 +303,7 @@ class SupervisedNeuralNetwork:
         for start in range(0, sample_count, batch_size):
             indices = permutation[start:start + batch_size]
             batch_count = len(indices)
-            self.forward(x_train[:, indices])
+            self.forward(x_train[:, indices], training=True)
             loss = self.backward(y_train[:, indices])
             weighted_loss += self._as_float(loss) * batch_count
             update_count += 1
@@ -507,6 +563,8 @@ class SupervisedNeuralNetwork:
         self.last_training_summary = {
             "completed_epochs": completed_epochs,
             "best_validation_loss": best_validation_loss,
+            "weight_decay": self.weight_decay,
+            "dropout_rate": self.dropout_rate,
             "initial_learning_rate": initial_learning_rate,
             "final_learning_rate": self.lr,
             "lr_decay_factor": lr_decay_factor,

@@ -11,6 +11,7 @@ import secrets
 import numpy as np
 
 from agents.encoder import DominoEncoder
+from agents.nn import DISABLED_DROPOUT_RATE
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import RULESET_VERSION
 from training.rl_constants import (
@@ -22,6 +23,13 @@ from training.rl_constants import (
 
 RESUME_STATE_VERSION = 4
 SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
+# Optional regularizers added after version 4 was published. A saved state
+# without them was produced with the regularizer disabled, so filling in the
+# disabled value reproduces that run exactly instead of rejecting the resume.
+DEFAULTED_CONFIGURATION_KEYS = {
+    "weight_decay": 0.0,
+    "dropout_rate": 0.0,
+}
 RESUME_POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 PPO_TRAINING_ALGORITHM = "ppo_v1"
 LEGACY_TRAINING_ALGORITHM = "reinforce_v1"
@@ -46,6 +54,8 @@ def _load_initial_network(
     device="auto",
     fresh_from_sl=False,
     expected_training_algorithm=None,
+    weight_decay=0.0,
+    dropout_rate=DISABLED_DROPOUT_RATE,
 ):
     """Load an RL checkpoint or initialize from compatible SL weights.
 
@@ -60,6 +70,8 @@ def _load_initial_network(
                 learning_rate=learning_rate,
                 use_value_head=use_value_head,
                 device=device,
+                weight_decay=weight_decay,
+                dropout_rate=dropout_rate,
             )
             if not _checkpoint_matches_encoder(network):
                 raise ValueError(
@@ -95,6 +107,8 @@ def _load_initial_network(
         learning_rate=learning_rate,
         use_value_head=use_value_head,
         device=device,
+        weight_decay=weight_decay,
+        dropout_rate=dropout_rate,
     )
     if not _checkpoint_matches_encoder(network):
         raise ValueError(
@@ -298,6 +312,8 @@ def _resume_configuration(
     reward_schema,
     clip_grad_norm,
     normalize_advantages,
+    weight_decay,
+    dropout_rate,
     effective_seed,
     device,
     sl_weights_sha256,
@@ -328,6 +344,8 @@ def _resume_configuration(
             None if clip_grad_norm is None else float(clip_grad_norm)
         ),
         "normalize_advantages": bool(normalize_advantages),
+        "weight_decay": float(weight_decay),
+        "dropout_rate": float(dropout_rate),
         "effective_seed": int(effective_seed),
         "device": device,
         "sl_weights_sha256": sl_weights_sha256,
@@ -347,13 +365,15 @@ def _resume_configuration(
 
 def _validate_resume_configuration(metadata, expected, *, ignored_keys=()):
     """Reject a resume that would silently continue a different experiment."""
-    saved = metadata.get("configuration")
+    saved = dict(metadata.get("configuration") or {})
+    for key, disabled_value in DEFAULTED_CONFIGURATION_KEYS.items():
+        saved.setdefault(key, disabled_value)
     # This legacy key was informational: PPO reports target KL, but only stop
     # KL controls early stopping. It must never reject an otherwise exact run.
     ignored_keys = {"ppo_target_kl", *ignored_keys}
     comparable_saved = {
         key: value
-        for key, value in (saved or {}).items()
+        for key, value in saved.items()
         if key not in ignored_keys
     }
     comparable_expected = {
@@ -361,7 +381,6 @@ def _validate_resume_configuration(metadata, expected, *, ignored_keys=()):
     }
     if comparable_saved != comparable_expected:
         differences = []
-        saved = saved or {}
         for key in sorted(set(saved) | set(expected)):
             if key in ignored_keys:
                 continue

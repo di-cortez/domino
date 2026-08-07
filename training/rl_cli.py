@@ -34,6 +34,7 @@ from training.rl_parallel import (
     worker_count as parse_rl_worker_count,
 )
 from training.rl_rollout import DEFAULT_GAMMA, DEFAULT_REWARD_SCHEMA, REWARD_SCHEMAS
+from training.training_loop import add_regularization_arguments
 
 
 def _positive_int(value):
@@ -49,8 +50,14 @@ def add_optional_rl_arguments(
     fresh_from_sl_default=False,
     ppo_max_epochs_default=DEFAULT_MAX_EPOCHS,
     expose_gpi=True,
+    include_regularization=True,
 ):
-    """Add self-play hyperparameter and rollout-resource flags to ``parser``."""
+    """Add self-play hyperparameter and rollout-resource flags to ``parser``.
+
+    ``include_regularization=False`` is for combined parsers that already
+    installed the shared ``--weight-decay``/``--dropout`` controls through
+    :func:`training.training_loop.add_optional_training_arguments`.
+    """
     group = parser.add_argument_group("optional reinforcement-learning controls")
     group.add_argument(
         "--iterations",
@@ -94,6 +101,8 @@ def add_optional_rl_arguments(
     )
     group.add_argument("--learning-rate", type=float, default=0.001)
     group.add_argument("--entropy-coef", type=float, default=0.01)
+    if include_regularization:
+        add_regularization_arguments(group)
     group.add_argument("--log-interval", type=int, default=10)
     group.add_argument("--checkpoint-interval", type=int, default=50)
     group.add_argument(
@@ -330,6 +339,8 @@ def _training_kwargs_from_args(args):
         "training_opponent": args.training_opponent,
         "learning_rate": args.learning_rate,
         "entropy_coef": args.entropy_coef,
+        "weight_decay": args.weight_decay,
+        "dropout_rate": args.dropout,
         "log_interval": args.log_interval,
         "checkpoint_interval": args.checkpoint_interval,
         "pool_refresh_games": args.pool_refresh_games,

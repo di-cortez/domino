@@ -461,6 +461,7 @@ def _supervised_training_identity(args, max_epochs):
         max_epochs=int(max_epochs),
         batch_size=args.sl_batch_size,
         weight_decay=float(args.weight_decay),
+        dropout_rate=float(args.dropout),
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,
         lr_decay_patience=int(args.lr_decay_patience),
@@ -607,6 +608,7 @@ def ensure_canonical_supervised_assets(root, config, args):
                 quiet=True,
                 progress_callback=progress,
                 weight_decay=args.weight_decay,
+                dropout_rate=args.dropout,
                 early_stopping_patience=args.early_stopping,
                 lr_decay_factor=args.lr_decay,
                 lr_decay_patience=args.lr_decay_patience,
@@ -702,6 +704,8 @@ def _rl_config(args):
         "training_opponent": args.training_opponent,
         "learning_rate": float(args.learning_rate),
         "entropy_coef": float(args.entropy_coef),
+        "weight_decay": float(args.weight_decay),
+        "dropout_rate": float(args.dropout),
         "log_interval": int(args.log_interval),
         "checkpoint_interval": int(args.checkpoint_interval),
         "pool_refresh_games": int(args.pool_refresh_games),
@@ -1165,6 +1169,10 @@ def run_rl_pipeline(root, config, args, assets):
     print(f"RL algorithm: {algorithm}")
     print(f"Fixed GPI: {args.gpi:,}")
     print(
+        "Regularization (SL and RL): "
+        f"dropout {args.dropout:g} | weight decay {args.weight_decay:g}"
+    )
+    print(
         "Configuration SHA-256: "
         f"{run_configuration['configuration_sha256']}"
     )
@@ -1581,6 +1589,7 @@ def parse_args(argv=None):
         fresh_from_sl_default=True,
         ppo_max_epochs_default=argparse.SUPPRESS,
         expose_gpi=True,
+        include_regularization=False,
     )
     diagnostics = parser.add_argument_group("diagnostic controls")
     diagnostics.add_argument(

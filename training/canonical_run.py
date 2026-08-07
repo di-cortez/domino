@@ -39,6 +39,10 @@ SUPPORTED_TRAINING_ALGORITHMS = frozenset((
     PPO_TRAINING_ALGORITHM,
     LEGACY_TRAINING_ALGORITHM,
 ))
+DEFAULTED_RL_CONFIG_FIELDS = {
+    "weight_decay": 0.0,
+    "dropout_rate": 0.0,
+}
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,17 @@ def _ppo_resume_identity(configuration):
     identity = dict(configuration or {})
     identity.pop("target_kl", None)
     return identity
+
+
+def _rl_config_identity(configuration):
+    """Return one rl_config with disabled defaults for later optional fields.
+
+    Runs created before the opt-in dropout and RL weight-decay controls stored
+    no such keys. Their absence is exactly the disabled value, so filling it in
+    lets those runs continue against the current CLI without rewriting the
+    stored configuration hash.
+    """
+    return {**DEFAULTED_RL_CONFIG_FIELDS, **dict(configuration or {})}
 
 
 def configuration_sha256(configuration):
@@ -351,6 +366,9 @@ def create_run_config(
             if key == "ppo_config":
                 existing_value = _ppo_resume_identity(existing_value)
                 requested_value = _ppo_resume_identity(requested_value)
+            elif key == "rl_config":
+                existing_value = _rl_config_identity(existing_value)
+                requested_value = _rl_config_identity(requested_value)
             if existing_value != requested_value:
                 differences.append(key)
         target_changed = existing.get("target_rl_games") != value["target_rl_games"]

@@ -22,6 +22,7 @@ import time
 
 import numpy as np
 
+from agents.nn import DISABLED_DROPOUT_RATE, DISABLED_WEIGHT_DECAY
 from training.rl_cli import (
     _training_kwargs_from_args,
     add_optional_rl_arguments,
@@ -180,14 +181,16 @@ def _legacy_policy_update(
     value_returns = None
     value_predictions = None
     policy_signal = rewards
+    # This forward pass owns the cache that ``backward_policy_gradient``
+    # differentiates, so it is the update pass and must apply dropout.
     if use_value_head:
-        values = network.predict_values(x_batch)
+        values = network.predict_values(x_batch, training=True)
         if collect_value_predictions:
             value_predictions = _value_prediction_summary(values)
         policy_signal = rewards - values
         value_returns = rewards
     else:
-        network.forward(x_batch)
+        network.forward(x_batch, training=True)
     if normalize_advantages:
         mean = xp.mean(policy_signal)
         std = float(xp.std(policy_signal))
@@ -217,6 +220,8 @@ def train(
     training_opponent=TRAINING_OPPONENT,
     learning_rate=0.001,
     entropy_coef=0.01,
+    weight_decay=DISABLED_WEIGHT_DECAY,
+    dropout_rate=DISABLED_DROPOUT_RATE,
     log_interval=10,
     checkpoint_interval=50,
     pool_refresh_games=DEFAULT_POOL_REFRESH_GAMES,
@@ -296,6 +301,8 @@ def train(
         normalize_advantages=normalize_advantages,
         workers=workers,
         safety_config=safety_config,
+        weight_decay=weight_decay,
+        dropout_rate=dropout_rate,
     )
     retune_workers = resolved_options.retune_workers
     gpi = resolved_options.gpi
@@ -385,6 +392,8 @@ def train(
         device=device,
         fresh_from_sl=fresh_from_sl,
         expected_training_algorithm=algorithm,
+        weight_decay=weight_decay,
+        dropout_rate=dropout_rate,
     )
     if resume_metadata is not None:
         network.load_optimizer_state_dict(resume_metadata["optimizer_state"])
@@ -451,6 +460,15 @@ def train(
         f"  value head: {'on' if use_value_head else 'off'}"
         + (f" | value coefficient: {value_coef:g}" if use_value_head else "")
     )
+    emit_status(
+        "  regularization: "
+        + (f"dropout {dropout_rate:g}" if dropout_rate > 0 else "dropout off")
+        + " | "
+        + (
+            f"decoupled weight decay {weight_decay:g}"
+            if weight_decay > 0 else "weight decay off"
+        )
+    )
     if ppo_enabled:
         emit_status(
             f"  algorithm: {algorithm} | clip epsilon: {ppo_clip_epsilon:.2f} | "
@@ -488,6 +506,8 @@ def train(
         reward_schema=reward_schema,
         clip_grad_norm=clip_grad_norm,
         normalize_advantages=normalize_advantages,
+        weight_decay=weight_decay,
+        dropout_rate=dropout_rate,
         effective_seed=effective_seed,
         device=network.device,
         sl_weights_sha256=sl_weights_sha256,
@@ -622,6 +642,8 @@ def train(
                 None if clip_grad_norm is None else float(clip_grad_norm)
             ),
             "normalize_advantages": bool(normalize_advantages),
+            "weight_decay": float(weight_decay),
+            "dropout_rate": float(dropout_rate),
             "moving_average_window": int(moving_average_window),
             "requested_device": requested_device,
             "resolved_device": network.device,
@@ -1207,6 +1229,8 @@ def train(
         "reward_schema": reward_schema,
         "clip_grad_norm": clip_grad_norm,
         "normalize_advantages": normalize_advantages,
+        "weight_decay": weight_decay,
+        "dropout_rate": dropout_rate,
         "moving_average_window": moving_average_window,
         "seed": seed,
         "effective_seed": effective_seed,

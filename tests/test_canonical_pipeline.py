@@ -51,6 +51,8 @@ from training.canonical_run import (
 from training.rl_resume import (
     NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
     _prune_numbered_checkpoint_weights,
+    _resume_configuration,
+    _validate_resume_configuration,
 )
 from training.pipeline import (
     PERIODIC_DIAGNOSTIC_TUNING_FILE,
@@ -636,6 +638,80 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
     assert updated["created_at"] == first["created_at"]
     assert updated["target_rl_games"] == 10_000_000
     assert updated["pipeline_level"] == "huge"
+
+
+def test_runs_without_stored_regularizers_still_resume(tmp_path):
+    """Read a missing dropout/weight-decay field as the disabled default."""
+    run_dir = canonical_run_dir(tmp_path, "big", 42)
+    legacy_rl_config = {"gamma": 1.0, "learning_rate": 0.001}
+    values = {
+        "root": ROOT,
+        "pipeline_level": "big",
+        "seed": 42,
+        "target_rl_games": 2_000_000,
+        "supervised_weights_path": "models/sl.npz",
+        "supervised_weights_sha256": "abc",
+        "ppo_config": {"clip_epsilon": 0.2, "target_kl": 0.01},
+        "rl_config": legacy_rl_config,
+    }
+    published = create_run_config(run_dir, **values)
+    assert "dropout_rate" not in published["rl_config"]
+
+    disabled = dict(values)
+    disabled["rl_config"] = {
+        **legacy_rl_config,
+        "weight_decay": 0.0,
+        "dropout_rate": 0.0,
+    }
+    reused = create_run_config(run_dir, **disabled)
+    assert reused["configuration_sha256"] == published["configuration_sha256"]
+
+    enabled = dict(values)
+    enabled["rl_config"] = {**legacy_rl_config, "dropout_rate": 0.2}
+    with pytest.raises(ValueError, match="rl_config"):
+        create_run_config(run_dir, **enabled)
+
+
+def test_resume_state_without_stored_regularizers_is_compatible():
+    """Continue a pre-regularization exact resume pair without a rebuild."""
+    expected = _resume_configuration(
+        total_training_games=1000,
+        selected_gpi=100,
+        selected_workers=1,
+        rl_training_algorithm=PPO_TRAINING_ALGORITHM,
+        training_opponent="self_play",
+        learning_rate=0.001,
+        entropy_coef=0.01,
+        pool_refresh_games=400,
+        max_pool_size=5,
+        use_value_head=False,
+        value_coef=0.5,
+        gamma=1.0,
+        reward_schema="default",
+        clip_grad_norm=5.0,
+        normalize_advantages=True,
+        weight_decay=0.0,
+        dropout_rate=0.0,
+        effective_seed=3,
+        device="cpu",
+        sl_weights_sha256="abc",
+        ppo_clip_epsilon=0.2,
+        ppo_stop_kl=0.015,
+        ppo_max_epochs=4,
+        ppo_games_per_minibatch_scale=1,
+        ppo_min_decisions_per_minibatch=1,
+        prefer_gpu_buffer=False,
+    )
+    legacy = {
+        key: value
+        for key, value in expected.items()
+        if key not in ("weight_decay", "dropout_rate")
+    }
+    _validate_resume_configuration({"configuration": legacy}, expected)
+
+    enabled = {**expected, "dropout_rate": 0.2}
+    with pytest.raises(ValueError, match="dropout_rate"):
+        _validate_resume_configuration({"configuration": legacy}, enabled)
 
 
 def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):

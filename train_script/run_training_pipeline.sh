@@ -85,6 +85,11 @@ RL_ESTIMATED_WORKER_MB=256
 RL_MAX_WORKER_RSS_MB=1024
 RL_PPO=1
 
+# Shared regularization: both coefficients are forwarded to the supervised and
+# the RL stage because both stages train the same architecture.
+WEIGHT_DECAY=""
+DROPOUT=""
+
 # SL convergence, device, memory, and fixed-batch controls. Plateau decay is
 # enabled by default and has an independent counter from optional early
 # stopping.
@@ -97,7 +102,6 @@ SL_TRAINING_PLATEAU_WINDOW=25
 SL_TRAINING_PLATEAU_PATIENCE=4
 SL_TRAINING_PLATEAU_MIN_EPOCHS=100
 SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT=0.001
-SL_WEIGHT_DECAY=""
 SL_DEVICE="auto"
 SL_BATCH_SIZE=8192
 HIDDEN1_SIZE=256
@@ -162,6 +166,10 @@ training.self_play):
   --rl-estimated-worker-mb N   Preflight RAM estimate per worker (default: $RL_ESTIMATED_WORKER_MB)
   --rl-max-worker-rss-mb N     Runtime RSS ceiling for one worker (default: $RL_MAX_WORKER_RSS_MB)
 
+Regularization, off unless requested (forwarded to both the SL and the RL stage):
+  --weight-decay F             L2 decay coefficient for the weight matrices; biases are never decayed
+  --dropout F                  Hidden-layer dropout rate used by training updates only
+
 RL convergence monitoring:
   --rl-clip-grad-norm F         Gradient-norm clipping threshold (default: $RL_CLIP_GRAD_NORM)
   --rl-ppo                      Use masked PPO with minibatches (default)
@@ -182,7 +190,6 @@ SL training controls:
   --sl-training-plateau-patience N  Consecutive saturated blocks before stopping (default: $SL_TRAINING_PLATEAU_PATIENCE)
   --sl-training-plateau-min-epochs N  Minimum total epochs before stopping (default: $SL_TRAINING_PLATEAU_MIN_EPOCHS)
   --sl-training-plateau-min-relative-improvement F  Improvement threshold (default: $SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT)
-  --sl-weight-decay F              L2 penalty on the weight matrices
   --sl-device {auto,cpu,gpu}       Supervised array backend (default: $SL_DEVICE)
   --sl-batch-size N                Fixed mini-batch size: 1024, 2048, 4096, 8192,
                                    16384, 32768, 65536, 131072, 262144, 524288,
@@ -261,7 +268,8 @@ while [[ $# -gt 0 ]]; do
         --sl-training-plateau-patience) SL_TRAINING_PLATEAU_PATIENCE="$2"; shift 2 ;;
         --sl-training-plateau-min-epochs) SL_TRAINING_PLATEAU_MIN_EPOCHS="$2"; shift 2 ;;
         --sl-training-plateau-min-relative-improvement) SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT="$2"; shift 2 ;;
-        --sl-weight-decay) SL_WEIGHT_DECAY="$2"; shift 2 ;;
+        --weight-decay) WEIGHT_DECAY="$2"; shift 2 ;;
+        --dropout) DROPOUT="$2"; shift 2 ;;
         --sl-device) SL_DEVICE="$2"; shift 2 ;;
         --sl-batch-size) SL_BATCH_SIZE="$2"; shift 2 ;;
         --hidden1-size) HIDDEN1_SIZE="$2"; shift 2 ;;
@@ -355,8 +363,11 @@ else
     if [[ "$SL_TRAINING_PLATEAU_STOP" -eq 0 ]]; then
         SL_EXTRA_ARGS+=(--sl-no-training-plateau-stop)
     fi
-    if [[ -n "$SL_WEIGHT_DECAY" ]]; then
-        SL_EXTRA_ARGS+=(--weight-decay "$SL_WEIGHT_DECAY")
+    if [[ -n "$WEIGHT_DECAY" ]]; then
+        SL_EXTRA_ARGS+=(--weight-decay "$WEIGHT_DECAY")
+    fi
+    if [[ -n "$DROPOUT" ]]; then
+        SL_EXTRA_ARGS+=(--dropout "$DROPOUT")
     fi
     if [[ -n "$SL_SEED" ]]; then
         SL_EXTRA_ARGS+=(--sl-seed "$SL_SEED")
@@ -392,6 +403,13 @@ else
     if [[ -n "$RL_SEED" ]]; then
         RL_SEED_ARGS+=(--seed "$RL_SEED")
     fi
+    RL_REGULARIZATION_ARGS=()
+    if [[ -n "$WEIGHT_DECAY" ]]; then
+        RL_REGULARIZATION_ARGS+=(--weight-decay "$WEIGHT_DECAY")
+    fi
+    if [[ -n "$DROPOUT" ]]; then
+        RL_REGULARIZATION_ARGS+=(--dropout "$DROPOUT")
+    fi
     "$PYTHON_BIN" -u -m training.self_play \
         "${BUDGET_ARGS[@]}" \
         --training-opponent "$RL_TRAINING_OPPONENT" \
@@ -417,6 +435,7 @@ else
         --rl-max-worker-rss-mb "$RL_MAX_WORKER_RSS_MB" \
         "$PPO_FLAG" \
         "${NORMALIZE_ARGS[@]}" \
+        "${RL_REGULARIZATION_ARGS[@]}" \
         "${RL_SEED_ARGS[@]}" \
         "${VALUE_HEAD_FLAG[@]}"
 fi

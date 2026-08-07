@@ -368,7 +368,7 @@ class SupervisedDataPlan:
         return result
 
     def _gpu_batch_update(self, network, x_batch, y_batch):
-        network.forward(x_batch)
+        network.forward(x_batch, training=True)
         return network.backward(y_batch)
 
     def train_epoch(self, network, batch_size, _epoch_index):
@@ -382,7 +382,7 @@ class SupervisedDataPlan:
                 self._observe_indices(indices)
                 x_batch = self.x_host[:, indices]
                 y_batch = self.y_host[:, indices]
-                network.forward(x_batch)
+                network.forward(x_batch, training=True)
                 loss = network.backward(y_batch)
                 weighted_loss += network._as_float(loss) * len(indices)
                 updates += 1

@@ -24,7 +24,11 @@ from agents.network_architecture import (
     DEFAULT_NETWORK_ARCHITECTURE,
     architecture_from_hidden_sizes,
 )
-from agents.nn import SupervisedNeuralNetwork
+from agents.nn import (
+    DISABLED_DROPOUT_RATE,
+    DISABLED_WEIGHT_DECAY,
+    SupervisedNeuralNetwork,
+)
 from training.supervised_runtime import (
     DEFAULT_SUPERVISED_BATCH_SIZE,
     SUPERVISED_BATCH_SIZE_CHOICES,
@@ -50,6 +54,7 @@ EPOCHS = 2000
 BATCH_SIZE = DEFAULT_SUPERVISED_BATCH_SIZE
 INITIAL_SUPERVISED_LEARNING_RATE = 0.005
 DEFAULT_WEIGHT_DECAY = 0.0001
+DEFAULT_DROPOUT_RATE = 0.1
 DEFAULT_EARLY_STOPPING_PATIENCE = 5
 DEFAULT_SUPERVISED_LR_DECAY_PATIENCE = 5
 DEFAULT_SUPERVISED_LR_DECAY_FACTOR = 0.5
@@ -605,7 +610,7 @@ def _load_existing_weights(network, weights_file):
         network.load_policy_weights(weights)
 
 
-def _create_network(*, device, weight_decay, seed, architecture):
+def _create_network(*, device, weight_decay, dropout_rate, seed, architecture):
     return SupervisedNeuralNetwork(
         input_size=architecture.input_size,
         hidden1_size=architecture.hidden1_size,
@@ -613,6 +618,7 @@ def _create_network(*, device, weight_decay, seed, architecture):
         output_size=architecture.output_size,
         learning_rate=INITIAL_SUPERVISED_LEARNING_RATE,
         weight_decay=weight_decay,
+        dropout_rate=dropout_rate,
         random_seed=seed,
         device=device,
     )
@@ -636,7 +642,8 @@ def train_supervised(
     cache_file=ENCODED_CACHE_FILE,
     quiet=False,
     progress_callback=None,
-    weight_decay=0.0,
+    weight_decay=DISABLED_WEIGHT_DECAY,
+    dropout_rate=DISABLED_DROPOUT_RATE,
     early_stopping_patience=None,
     lr_decay_factor=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
     lr_decay_patience=DEFAULT_SUPERVISED_LR_DECAY_PATIENCE,
@@ -690,6 +697,7 @@ def train_supervised(
         network = _create_network(
             device=selected_device,
             weight_decay=weight_decay,
+            dropout_rate=dropout_rate,
             seed=seed,
             architecture=architecture,
         )
@@ -706,6 +714,7 @@ def train_supervised(
         network = _create_network(
             device="cpu",
             weight_decay=weight_decay,
+            dropout_rate=dropout_rate,
             seed=seed,
             architecture=architecture,
         )
@@ -735,6 +744,7 @@ def train_supervised(
             network = _create_network(
                 device="cpu",
                 weight_decay=weight_decay,
+                dropout_rate=dropout_rate,
                 seed=seed,
                 architecture=architecture,
             )
@@ -759,6 +769,7 @@ def train_supervised(
         network = _create_network(
             device="cpu",
             weight_decay=weight_decay,
+            dropout_rate=dropout_rate,
             seed=seed,
             architecture=architecture,
         )
@@ -1026,6 +1037,7 @@ def train_supervised(
         "validation_examples": validation_count,
         "best_validation_loss": best_state["validation_loss"],
         "weight_decay": weight_decay,
+        "dropout_rate": dropout_rate,
         "early_stopping_patience": early_stopping_patience,
         "training_plateau_enabled": training_summary[
             "training_plateau_enabled"
@@ -1119,18 +1131,57 @@ def _decay_factor(value):
     return parsed
 
 
-def add_optional_training_arguments(parser, *, include_device_alias=False):
-    """Add supervised regularization, device, memory, and tuning controls."""
-    group = parser.add_argument_group("supervised-training controls")
+def _dropout_rate(value):
+    parsed = float(value)
+    if not 0.0 <= parsed < 1.0:
+        raise argparse.ArgumentTypeError(
+            "value must be at least 0 and less than 1"
+        )
+    return parsed
+
+
+def add_regularization_arguments(group):
+    """Add the regularization controls shared by supervised and RL training.
+
+    One flag owns both stages for each regularizer: the supervised policy and
+    the RL policy are the same architecture and the RL run starts from the
+    supervised checkpoint, so a single coefficient keeps the two stages
+    comparable. Both are opt-in and disabled by default; each accepts an
+    explicit coefficient and falls back to its default when passed bare.
+    """
     group.add_argument(
         "--weight-decay",
         nargs="?",
         type=_nonnegative_float,
         const=DEFAULT_WEIGHT_DECAY,
-        default=0.0,
+        default=DISABLED_WEIGHT_DECAY,
         metavar="COEFFICIENT",
-        help=f"Enable L2 weight decay (shortcut value: {DEFAULT_WEIGHT_DECAY}).",
+        help=(
+            "Enable L2 weight decay on the weight matrices of both the "
+            "supervised and the RL network; biases are never decayed. Pass a "
+            f"coefficient or omit it for {DEFAULT_WEIGHT_DECAY}."
+        ),
     )
+    group.add_argument(
+        "--dropout",
+        nargs="?",
+        type=_dropout_rate,
+        const=DEFAULT_DROPOUT_RATE,
+        default=DISABLED_DROPOUT_RATE,
+        metavar="RATE",
+        help=(
+            "Enable inverted dropout on both hidden layers of the supervised "
+            "and RL networks during training updates only. Pass a rate or "
+            f"omit it for {DEFAULT_DROPOUT_RATE}."
+        ),
+    )
+    return group
+
+
+def add_optional_training_arguments(parser, *, include_device_alias=False):
+    """Add supervised regularization, device, memory, and tuning controls."""
+    group = parser.add_argument_group("supervised-training controls")
+    add_regularization_arguments(group)
     group.add_argument(
         "--early-stopping",
         nargs="?",
@@ -1267,6 +1318,7 @@ def main(argv=None):
         hidden1_size=args.hidden1_size,
         hidden2_size=args.hidden2_size,
         weight_decay=args.weight_decay,
+        dropout_rate=args.dropout,
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,
         lr_decay_patience=args.lr_decay_patience,

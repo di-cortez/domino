@@ -23,7 +23,13 @@ if str(ROOT) not in sys.path:
 from agents.encoder import DominoEncoder
 from agents.heuristic_agent import StrategicAgent
 from agents.neural_agent import NeuralAgent
-from agents.nn import GPU_ENABLED, GPU_UNAVAILABLE_REASON, SupervisedNeuralNetwork
+from agents.nn import (
+    DISABLED_DROPOUT_RATE,
+    DISABLED_WEIGHT_DECAY,
+    GPU_ENABLED,
+    GPU_UNAVAILABLE_REASON,
+    SupervisedNeuralNetwork,
+)
 from agents.rl_agent import RLAgent, TrajectoryStep
 from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import (
@@ -67,7 +73,13 @@ from training.self_play import (
     _reward_signal_summary,
     parse_args as parse_self_play_args,
 )
+from training.pipeline import (
+    _rl_config as _canonical_rl_config,
+    parse_args as parse_canonical_pipeline_args,
+)
+from training.rl_cli import _training_kwargs_from_args
 from training.training_loop import (
+    DEFAULT_DROPOUT_RATE,
     DEFAULT_EARLY_STOPPING_PATIENCE,
     DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
     DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
@@ -159,6 +171,8 @@ def _small_policy_network(
     network.xp = xp
     network.device = "gpu" if GPU_ENABLED else "cpu"
     network.lr = learning_rate
+    network.weight_decay = 0.0
+    network.dropout_rate = 0.0
     network.W1 = xp.zeros((hidden1_size, input_size))
     network.b1 = xp.zeros((hidden1_size, 1))
     network.W2 = xp.zeros((hidden2_size, hidden1_size))
@@ -494,6 +508,249 @@ def test_supervised_weight_decay_regularizes_weights_but_not_biases():
         )
 
 
+def test_supervised_dropout_applies_only_to_training_forward_passes():
+    """Drop and rescale hidden units while updating, never while evaluating."""
+    common_args = {
+        "input_size": 4,
+        "hidden1_size": 64,
+        "hidden2_size": 48,
+        "output_size": 2,
+        "learning_rate": 0.01,
+        "random_seed": 5,
+        "device": "cpu",
+    }
+    network = SupervisedNeuralNetwork(**common_args, dropout_rate=0.5)
+    x_batch = host_np.ones((4, 6), dtype=float)
+
+    host_np.random.seed(3)
+    network.forward(x_batch, training=True)
+    for activation, mask in (("A1", "D1"), ("A2", "D2")):
+        scale = _to_numpy(network.cache[mask])
+        kept = scale > 0
+        assert kept.any() and not kept.all()
+        # Inverted dropout keeps the expected activation magnitude constant.
+        assert host_np.allclose(scale[kept], 2.0)
+        assert host_np.all(_to_numpy(network.cache[activation])[~kept] == 0.0)
+
+    network.forward(x_batch)
+    assert "D1" not in network.cache
+    assert "D2" not in network.cache
+
+    disabled = SupervisedNeuralNetwork(**common_args)
+    assert disabled.dropout_rate == DISABLED_DROPOUT_RATE
+    disabled.forward(x_batch, training=True)
+    assert "D1" not in disabled.cache
+
+
+def test_supervised_dropout_backpropagates_through_the_forward_mask():
+    """Zero the gradient of every unit the forward pass dropped."""
+    network = SupervisedNeuralNetwork(
+        input_size=4,
+        hidden1_size=32,
+        hidden2_size=16,
+        output_size=2,
+        learning_rate=0.05,
+        random_seed=7,
+        device="cpu",
+        dropout_rate=0.5,
+    )
+    # One column keeps the mask per hidden unit, so a dropped unit is dropped
+    # for the complete update.
+    x_batch = host_np.ones((4, 1), dtype=float)
+    y_batch = host_np.zeros((2, 1), dtype=float)
+    y_batch[0, :] = 1.0
+
+    w2_before = _to_numpy(network.W2).copy()
+    host_np.random.seed(11)
+    network.forward(x_batch, training=True)
+    dropped_first_layer = _to_numpy(network.cache["D1"])[:, 0] == 0.0
+    assert dropped_first_layer.any()
+    network.backward(y_batch)
+
+    w2_after = _to_numpy(network.W2)
+    # W2 columns read the first hidden layer, so a dropped unit cannot
+    # contribute to its update.
+    assert host_np.allclose(
+        w2_after[:, dropped_first_layer],
+        w2_before[:, dropped_first_layer],
+    )
+    assert not host_np.allclose(
+        w2_after[:, ~dropped_first_layer],
+        w2_before[:, ~dropped_first_layer],
+    )
+
+
+def test_rl_weight_decay_shrinks_weight_matrices_but_not_biases():
+    """Apply the decoupled RL shrink after the clipped gradient step."""
+    decay = 0.25
+    learning_rate = 0.1
+    plain = _small_policy_network(
+        output_size=DominoEncoder.ACTION_SIZE,
+        learning_rate=learning_rate,
+    )
+    regularized = _small_policy_network(
+        output_size=DominoEncoder.ACTION_SIZE,
+        learning_rate=learning_rate,
+    )
+    regularized.weight_decay = decay
+    for name in ("W1", "W2", "W3"):
+        filled = xp.ones_like(getattr(plain, name))
+        setattr(plain, name, filled)
+        setattr(regularized, name, filled.copy())
+
+    legal_mask = xp.zeros((DominoEncoder.ACTION_SIZE, 1))
+    legal_mask[3, 0] = 1.0
+    legal_mask[8, 0] = 1.0
+    x_batch = xp.ones((4, 1))
+
+    for network in (plain, regularized):
+        network.forward(x_batch)
+        network.backward_policy_gradient(
+            action_indices=[3],
+            policy_rewards=xp.ones((1, 1)),
+            legal_masks=legal_mask,
+            entropy_coef=0.0,
+            clip_grad_norm=None,
+        )
+
+    shrink = 1.0 - learning_rate * decay
+    for name in ("W1", "W2", "W3"):
+        assert host_np.allclose(
+            _to_numpy(getattr(regularized, name)),
+            _to_numpy(getattr(plain, name)) * shrink,
+        )
+    for name in ("b1", "b2", "b3"):
+        assert host_np.allclose(
+            _to_numpy(getattr(regularized, name)),
+            _to_numpy(getattr(plain, name)),
+        )
+
+
+def test_rl_dropout_is_absent_from_rollout_and_evaluation_forward_passes():
+    """Keep opponent rollouts and PPO metrics on the complete network."""
+    network = _small_policy_network(output_size=DominoEncoder.ACTION_SIZE)
+    network.dropout_rate = 0.5
+    x_batch = xp.ones((4, 4))
+    legal_mask = xp.zeros((DominoEncoder.ACTION_SIZE, 4))
+    legal_mask[3, :] = 1.0
+    legal_mask[8, :] = 1.0
+
+    network.forward(x_batch)
+    assert "D1" not in network.cache
+    network.evaluate_actions(x_batch, legal_mask, [3, 3, 3, 3])
+    assert "D1" not in network.cache
+    network.evaluate_actions(x_batch, legal_mask, [3, 3, 3, 3], training=True)
+    assert "D1" in network.cache and "D2" in network.cache
+
+    # The legacy --no-ppo update differentiates the cache built by
+    # _legacy_policy_update, so that pass must be a dropout pass too.
+    samples = [
+        TrainingSample(
+            x=host_np.ones((4, 1)),
+            action_index=3,
+            legal_mask=host_np.asarray(_to_numpy(legal_mask)[:, :1] > 0),
+            policy_reward=1.0,
+            raw_reward=1.0,
+            local_reward=0.0,
+            terminal_reward=1.0,
+            old_log_prob=-1.0,
+        )
+    ]
+    network.forward(x_batch)
+    _legacy_policy_update(
+        network,
+        samples,
+        entropy_coef=0.0,
+        clip_grad_norm=None,
+        normalize_advantages=False,
+        use_value_head=False,
+        value_coef=0.5,
+    )
+    assert "D1" in network.cache and "D2" in network.cache
+
+
+def test_regularization_is_disabled_unless_its_flag_is_passed():
+    """Keep every entry point unregularized until a flag requests otherwise."""
+    parsers = (
+        (parse_supervised_args, []),
+        (parse_self_play_args, []),
+        (parse_pipeline_args, []),
+        (parse_canonical_pipeline_args, ["small"]),
+    )
+    for parse, base in parsers:
+        defaults = parse(list(base))
+        assert defaults.weight_decay == DISABLED_WEIGHT_DECAY
+        assert defaults.dropout == DISABLED_DROPOUT_RATE
+        # A bare flag falls back to its default coefficient.
+        shortcut = parse(base + ["--weight-decay", "--dropout"])
+        assert shortcut.weight_decay == DEFAULT_WEIGHT_DECAY
+        assert shortcut.dropout == DEFAULT_DROPOUT_RATE
+        # An explicit coefficient wins over that fallback.
+        explicit = parse(base + ["--weight-decay", "0.002", "--dropout", "0.35"])
+        assert explicit.weight_decay == 0.002
+        assert explicit.dropout == 0.35
+        # Requesting one regularizer must never enable the other.
+        only_decay = parse(base + ["--weight-decay"])
+        assert only_decay.dropout == DISABLED_DROPOUT_RATE
+        only_dropout = parse(base + ["--dropout"])
+        assert only_dropout.weight_decay == DISABLED_WEIGHT_DECAY
+
+    # The same single coefficient reaches the supervised and the RL network.
+    rl_kwargs = _training_kwargs_from_args(
+        parse_self_play_args(["--weight-decay", "0.002", "--dropout", "0.35"])
+    )
+    assert rl_kwargs["weight_decay"] == 0.002
+    assert rl_kwargs["dropout_rate"] == 0.35
+    disabled_kwargs = _training_kwargs_from_args(parse_self_play_args([]))
+    assert disabled_kwargs["weight_decay"] == DISABLED_WEIGHT_DECAY
+    assert disabled_kwargs["dropout_rate"] == DISABLED_DROPOUT_RATE
+
+    canonical = parse_canonical_pipeline_args(
+        ["small", "--weight-decay", "0.002", "--dropout", "0.35"]
+    )
+    assert _canonical_rl_config(canonical)["weight_decay"] == 0.002
+    assert _canonical_rl_config(canonical)["dropout_rate"] == 0.35
+
+
+def test_networks_are_unregularized_without_explicit_coefficients():
+    """Construct both networks with regularization off by default."""
+    supervised = SupervisedNeuralNetwork(
+        input_size=4,
+        hidden1_size=5,
+        hidden2_size=3,
+        output_size=2,
+        device="cpu",
+    )
+    assert supervised.weight_decay == DISABLED_WEIGHT_DECAY
+    assert supervised.dropout_rate == DISABLED_DROPOUT_RATE
+
+    policy = PolicyNetwork(
+        input_size=4,
+        hidden1_size=5,
+        hidden2_size=3,
+        output_size=2,
+        random_seed=1,
+        device="cpu",
+    )
+    assert policy.weight_decay == DISABLED_WEIGHT_DECAY
+    assert policy.dropout_rate == DISABLED_DROPOUT_RATE
+
+    # An enabled network keeps both settings through a pool clone.
+    regularized = PolicyNetwork(
+        input_size=4,
+        hidden1_size=5,
+        hidden2_size=3,
+        output_size=2,
+        random_seed=1,
+        device="cpu",
+        weight_decay=0.002,
+        dropout_rate=0.35,
+    )
+    clone = regularized.clone()
+    assert clone.weight_decay == 0.002
+    assert clone.dropout_rate == 0.35
+
+
 def test_supervised_early_stopping_and_lr_decay_use_independent_counters():
     """Early stopping may occur before the independent LR counter reaches five."""
     network = SupervisedNeuralNetwork(
@@ -529,7 +786,8 @@ def test_supervised_early_stopping_and_lr_decay_use_independent_counters():
 def test_supervised_regularization_cli_defaults_and_shortcuts():
     """Enable plateau decay by default while keeping other controls optional."""
     defaults = parse_supervised_args([])
-    assert defaults.weight_decay == 0.0
+    assert defaults.weight_decay == DISABLED_WEIGHT_DECAY
+    assert defaults.dropout == DISABLED_DROPOUT_RATE
     assert defaults.early_stopping is None
     assert defaults.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
     assert defaults.lr_decay_patience == 5
@@ -551,22 +809,27 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
 
     enabled = parse_supervised_args([
         "--weight-decay",
+        "--dropout",
         "--early-stopping",
         "--lr-decay",
     ])
     assert enabled.weight_decay == DEFAULT_WEIGHT_DECAY
+    assert enabled.dropout == DEFAULT_DROPOUT_RATE
     assert enabled.early_stopping == DEFAULT_EARLY_STOPPING_PATIENCE
     assert enabled.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
 
     custom = parse_supervised_args([
         "--weight-decay",
         "0.0005",
+        "--dropout",
+        "0.3",
         "--early-stopping",
         "8",
         "--lr-decay",
         "0.8",
     ])
     assert custom.weight_decay == 0.0005
+    assert custom.dropout == 0.3
     assert custom.early_stopping == 8
     assert custom.lr_decay == 0.8
 
@@ -583,6 +846,8 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     pipeline = parse_pipeline_args([
         "small",
         "--weight-decay",
+        "--dropout",
+        "0.15",
         "--early-stopping",
         "7",
         "--lr-decay",
@@ -590,7 +855,9 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
         "--value-head",
     ])
     assert pipeline.scale == "small"
+    # One flag per regularizer drives both the supervised and the RL network.
     assert pipeline.weight_decay == DEFAULT_WEIGHT_DECAY
+    assert pipeline.dropout == 0.15
     assert pipeline.early_stopping == 7
     assert pipeline.lr_decay == 0.6
     assert pipeline.value_head
@@ -1610,12 +1877,36 @@ def main():
             test_supervised_weight_decay_regularizes_weights_but_not_biases,
         ),
         (
+            "supervised dropout training-only",
+            test_supervised_dropout_applies_only_to_training_forward_passes,
+        ),
+        (
+            "supervised dropout backpropagation",
+            test_supervised_dropout_backpropagates_through_the_forward_mask,
+        ),
+        (
+            "RL decoupled weight decay",
+            test_rl_weight_decay_shrinks_weight_matrices_but_not_biases,
+        ),
+        (
+            "RL dropout excluded from evaluation",
+            test_rl_dropout_is_absent_from_rollout_and_evaluation_forward_passes,
+        ),
+        (
             "supervised early stopping and LR decay",
             test_supervised_early_stopping_and_lr_decay_use_independent_counters,
         ),
         (
             "supervised optional CLI controls",
             test_supervised_regularization_cli_defaults_and_shortcuts,
+        ),
+        (
+            "regularization opt-in defaults",
+            test_regularization_is_disabled_unless_its_flag_is_passed,
+        ),
+        (
+            "unregularized network defaults",
+            test_networks_are_unregularized_without_explicit_coefficients,
         ),
         (
             "supervised checkpoint retention",

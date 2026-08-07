@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from agents.nn import DISABLED_DROPOUT_RATE, DISABLED_WEIGHT_DECAY
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
 from training.ppo import MAX_PPO_EPOCHS
 from training.rl_resume import LEGACY_TRAINING_ALGORITHM, PPO_TRAINING_ALGORITHM
@@ -70,6 +71,8 @@ def resolve_training_options(
     normalize_advantages,
     workers,
     safety_config,
+    weight_decay=DISABLED_WEIGHT_DECAY,
+    dropout_rate=DISABLED_DROPOUT_RATE,
 ):
     """Normalize and validate options that do not require checkpoint I/O."""
     retune_workers = bool(retune_workers)
@@ -117,6 +120,10 @@ def resolve_training_options(
         raise ValueError(f"Unknown reward_schema {reward_schema!r}.")
     if float(value_coef) < 0:
         raise ValueError("value_coef must be non-negative")
+    if float(weight_decay) < 0:
+        raise ValueError("weight_decay must be non-negative")
+    if not 0.0 <= float(dropout_rate) < 1.0:
+        raise ValueError("dropout_rate must be at least 0 and below 1")
     if ppo_enabled:
         if not 0 < float(ppo_clip_epsilon) < 1:
             raise ValueError("ppo_clip_epsilon must be in (0, 1)")

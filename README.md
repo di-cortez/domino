@@ -129,6 +129,22 @@ python -m training.pipeline forever --hidden1-size 512 --hidden2-size 256 \
 
 Value-head state and architecture are immutable resume fields.
 
+Regularization is off by default. `--weight-decay [COEFFICIENT]` and
+`--dropout [RATE]` each enable one regularizer for **both** the supervised and
+the RL network; passing a flag without a value uses its default coefficient
+(`0.0001` and `0.1`):
+
+```bash
+python -m training.pipeline big --weight-decay --dropout
+python -m training.pipeline big --weight-decay 0.00005 --dropout 0.2
+```
+
+Both settings join the run identity, so they are locked for `forever` runs like
+every other hyperparameter. Runs and supervised assets created before these
+controls existed keep working: a missing field is read as the disabled value.
+See [`training/README.md`](training/README.md#shared-regularization) for the
+complete behavior, including the PPO ratio caveat when dropout is enabled.
+
 For `forever`, `run_config.json` records the full locked configuration and its
 SHA-256, the ruleset, optional run name, supervised origin, and the machine on
 which the run started. A checkpoint must carry the same hash. A conflicting

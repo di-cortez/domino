@@ -183,6 +183,7 @@ def _run_supervised_training(config, args):
             quiet=True,
             progress_callback=progress,
             weight_decay=args.weight_decay,
+            dropout_rate=args.dropout,
             early_stopping_patience=args.early_stopping,
             lr_decay_factor=args.lr_decay,
             lr_decay_patience=args.lr_decay_patience,
@@ -244,6 +245,8 @@ def _run_rl_training(config, args):
             training_opponent=args.training_opponent,
             learning_rate=args.learning_rate,
             entropy_coef=args.entropy_coef,
+            weight_decay=args.weight_decay,
+            dropout_rate=args.dropout,
             log_interval=args.log_interval,
             checkpoint_interval=args.checkpoint_interval,
             pool_refresh_games=args.pool_refresh_games,
@@ -388,6 +391,7 @@ def parse_args(argv=None):
         parser,
         fresh_from_sl_default=True,
         expose_gpi=True,
+        include_regularization=False,
     )
     evaluate = _silent_import("diagnostics.evaluate")
     diagnostics = parser.add_argument_group("diagnostic multiprocessing controls")

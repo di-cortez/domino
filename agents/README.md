@@ -21,8 +21,23 @@ of relying on one module-wide array backend. Inference accepts NumPy or CuPy
 inputs and converts them to that network's backend in `float32`. Training may
 use host RAM, disk-backed arrays, full GPU residency, or a reusable rotating GPU
 window; these storage policies live in `training/supervised_runtime.py`.
-Optional supervised weight decay applies only to `W1`, `W2`, and `W3`; bias
-vectors are never regularized.
+Both networks accept the same optional `weight_decay`, which applies only to
+the weight matrices (`W1`, `W2`, `W3`, and the RL critic `Wv`); bias vectors
+are never regularized. The supervised network folds its decay into the
+gradient, while `PolicyNetwork` applies a decoupled shrink after gradient
+clipping so reported RL gradient norms keep describing the policy and value
+gradient alone. Both regularizers default to disabled
+(`DISABLED_WEIGHT_DECAY`, `DISABLED_DROPOUT_RATE`).
+
+Optional dropout is likewise a property of the shared architecture, so both
+`SupervisedNeuralNetwork` and `PolicyNetwork` accept `dropout_rate` and apply
+inverted dropout to both hidden activations. It is active only in a training
+forward pass (`forward(x, training=True)`); the default `training=False` keeps
+gameplay, evaluation, opponent-pool snapshots, and whole-buffer PPO metrics on
+the complete network. The forward pass caches the scale masks as `D1` and `D2`
+only while dropout is active, and backpropagation reuses exactly those masks.
+`PolicyNetwork` draws its masks from the host NumPy generator because that
+state, unlike CuPy's, is part of the exact RL resume pair.
 
 `GPU_ENABLED` becomes true only when CuPy imports, CUDA reports a visible
 device, and a synchronized float32 allocation succeeds. `GPU_UNAVAILABLE_REASON` records why the probe failed,

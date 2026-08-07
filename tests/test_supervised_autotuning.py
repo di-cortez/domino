@@ -496,6 +496,7 @@ class DatasetResidencyTests(unittest.TestCase):
         args = SimpleNamespace(
             sl_batch_size=8192,
             weight_decay=0.0,
+            dropout=0.0,
             early_stopping=None,
             lr_decay=0.5,
             lr_decay_patience=5,

@@ -8,10 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from agents.network_architecture import (
-    DEFAULT_HIDDEN1_SIZE,
-    DEFAULT_HIDDEN2_SIZE,
-)
+from agents.network_architecture import DEFAULT_HIDDEN_SIZES
 from utils.resource_limits import (
     MIB,
     MemorySafetyError,
@@ -51,32 +48,26 @@ def effective_residency_candidates(total_examples):
 def estimate_supervised_workspace_bytes(
     batch_size,
     input_size,
-    hidden1_size,
-    hidden2_size,
+    hidden_sizes,
     output_size,
 ):
     """Conservatively estimate one float32 forward/backward live workspace."""
+    dimensions = (
+        int(input_size),
+        *(int(size) for size in hidden_sizes),
+        int(output_size),
+    )
     # Per-example tensors include inputs/labels, all forward activations,
     # softmax temporaries, backward deltas, and fancy-index materialization.
+    # Every hidden layer contributes one forward and one backward pair.
     per_example_floats = (
-        input_size
-        + output_size
-        + 2 * hidden1_size
-        + 2 * hidden2_size
-        + 2 * output_size
-        + output_size
-        + 2 * hidden2_size
-        + 2 * hidden1_size
-        + input_size
-        + output_size
+        2 * dimensions[0]
+        + 4 * dimensions[-1]
+        + 4 * sum(dimensions[1:-1])
     )
-    parameter_floats = (
-        hidden1_size * input_size
-        + hidden1_size
-        + hidden2_size * hidden1_size
-        + hidden2_size
-        + output_size * hidden2_size
-        + output_size
+    parameter_floats = sum(
+        dimensions[index] * dimensions[index - 1] + dimensions[index]
+        for index in range(1, len(dimensions))
     )
     # Two parameter-sized buffers cover gradients and matrix-library
     # temporaries; 1.25x covers allocator rounding and transient expressions.
@@ -102,8 +93,7 @@ def probe_gpu_residency(
     y_host,
     *,
     reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
-    hidden1_size=DEFAULT_HIDDEN1_SIZE,
-    hidden2_size=DEFAULT_HIDDEN2_SIZE,
+    hidden_sizes=DEFAULT_HIDDEN_SIZES,
 ):
     """Probe dataset residency with temporary arrays and no weight updates."""
     import cupy as cp
@@ -114,8 +104,7 @@ def probe_gpu_residency(
     minimum_workspace = estimate_supervised_workspace_bytes(
         minimum_batch,
         x_host.shape[0],
-        hidden1_size,
-        hidden2_size,
+        hidden_sizes,
         y_host.shape[0],
     )
     attempts = []
@@ -308,9 +297,8 @@ class SupervisedDataPlan:
         workspace = estimate_supervised_workspace_bytes(
             batch_size,
             network.W1.shape[1],
-            network.W1.shape[0],
-            network.W2.shape[0],
-            network.W3.shape[0],
+            network.hidden_sizes,
+            getattr(network, f"W{network.layer_count}").shape[0],
         )
         if self.device == "cpu":
             permutation_bytes = self.train_count * np.dtype(np.int64).itemsize

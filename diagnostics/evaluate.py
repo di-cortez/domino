@@ -24,6 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from agents.network_architecture import (
+    architecture_from_weights,
+    hidden_layer_count_from_weights,
+    policy_layer_names,
+)
 from diagnostics.pairwise import (
     CANONICAL_AGENTS,
     DEFAULT_GAME_COUNT,
@@ -61,7 +66,6 @@ RANDOM_BASELINE_MATCHUPS = tuple(
     for agent in CANONICAL_AGENTS
 )
 DEFAULT_DIAGNOSTIC_WORKERS = "auto"
-POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 VALUE_WEIGHT_NAMES = ("Wv", "bv")
 
 
@@ -138,16 +142,15 @@ def _checkpoint_network_metadata(agent, weights_path):
     """Describe one checkpoint architecture without constructing its agent."""
     path = Path(weights_path)
     with np.load(path, allow_pickle=False) as weights:
-        architecture = [
-            int(weights["W1"].shape[1]),
-            int(weights["W1"].shape[0]),
-            int(weights["W2"].shape[0]),
-            int(weights["W3"].shape[0]),
-        ]
+        # The checkpoint itself defines the hidden-layer count, so a deeper
+        # network is reported without any diagnostic-side configuration.
+        architecture = architecture_from_weights(weights).as_list()
         available_names = set(weights.files)
         policy_parameters = sum(
             int(weights[name].size)
-            for name in POLICY_WEIGHT_NAMES
+            for name in policy_layer_names(
+                hidden_layer_count_from_weights(weights)
+            )
         )
         value_head = all(name in available_names for name in VALUE_WEIGHT_NAMES)
         value_parameters = (

@@ -201,7 +201,7 @@ def _record_value_head_prediction(agent, stats):
     if stats is None:
         return
     network = agent.network
-    hidden = network.cache.get("A2")
+    hidden = network.cache.get(network.last_hidden_activation_key)
     if hidden is None:
         raise RuntimeError("RL value diagnostics require a completed policy forward pass.")
     value = network.xp.dot(network.Wv, hidden) + network.bv

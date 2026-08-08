@@ -119,12 +119,20 @@ python -m training.pipeline forever --value-head --run-name critic
 python -m training.pipeline forever
 ```
 
-The hidden layers default to 256 and 128 neurons. A clean architecture
-experiment can select both widths consistently for supervised and RL stages:
+The network defaults to two hidden layers of 256 and 128 neurons.
+`--hidden-layers N` selects between 1 and 8 hidden layers, and
+`--hidden1-size` through `--hidden8-size` size them individually. An omitted
+width uses the default for that position (256, then 128 for every later layer),
+and sizing a layer the requested depth does not have is an error. The choice
+applies consistently to the supervised and RL stages:
 
 ```bash
 python -m training.pipeline forever --hidden1-size 512 --hidden2-size 256 \
   --retrain-supervised --run-name wider
+
+python -m training.pipeline forever --hidden-layers 4 \
+  --hidden1-size 512 --hidden4-size 64 \
+  --retrain-supervised --run-name deep
 ```
 
 Value-head state and architecture are immutable resume fields.

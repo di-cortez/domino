@@ -506,6 +506,7 @@ class DatasetResidencyTests(unittest.TestCase):
             sl_training_plateau_min_epochs=100,
             sl_training_plateau_min_relative_improvement=0.001,
             sl_device="cpu",
+            hidden_layers=2,
             hidden1_size=256,
             hidden2_size=128,
             sl_memory_reserve_mb=512,

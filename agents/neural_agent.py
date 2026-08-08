@@ -5,6 +5,7 @@ import random
 import numpy as np
 
 from agents.encoder import DominoEncoder
+from agents.network_architecture import architecture_from_weights
 from agents.nn import SupervisedNeuralNetwork
 from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
@@ -32,9 +33,12 @@ class NeuralAgent(Agent):
     ):
         """Build an agent from a NumPy ``.npz`` checkpoint."""
         with np.load(weights_path, allow_pickle=False) as data:
-            hidden1_size, input_size = data["W1"].shape
-            hidden2_size, _ = data["W2"].shape
-            output_size, _ = data["W3"].shape
+            # The checkpoint is the single source of truth for depth and
+            # widths, so a network trained with --hidden-layers loads here
+            # without any agent-side configuration.
+            architecture = architecture_from_weights(data)
+            input_size = architecture.input_size
+            output_size = architecture.output_size
 
             encoder = DominoEncoder()
             if input_size != encoder.VECTOR_SIZE:
@@ -50,9 +54,8 @@ class NeuralAgent(Agent):
 
             network = SupervisedNeuralNetwork(
                 input_size=input_size,
-                hidden1_size=hidden1_size,
-                hidden2_size=hidden2_size,
                 output_size=output_size,
+                hidden_sizes=architecture.hidden_sizes,
                 device=device,
             )
             network.load_policy_weights(data)

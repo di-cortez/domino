@@ -104,8 +104,17 @@ SL_TRAINING_PLATEAU_MIN_EPOCHS=100
 SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT=0.001
 SL_DEVICE="auto"
 SL_BATCH_SIZE=8192
-HIDDEN1_SIZE=256
-HIDDEN2_SIZE=128
+# Empty widths keep training_loop's documented per-layer defaults, so the
+# unchanged architecture stays two hidden layers of 256 and 128 neurons.
+HIDDEN_LAYERS=2
+HIDDEN1_SIZE=""
+HIDDEN2_SIZE=""
+HIDDEN3_SIZE=""
+HIDDEN4_SIZE=""
+HIDDEN5_SIZE=""
+HIDDEN6_SIZE=""
+HIDDEN7_SIZE=""
+HIDDEN8_SIZE=""
 SL_MEMORY_RESERVE_MB=512
 SL_GPU_MEMORY_RESERVE_MB=512
 SL_SEED=""
@@ -194,8 +203,11 @@ SL training controls:
   --sl-batch-size N                Fixed mini-batch size: 1024, 2048, 4096, 8192,
                                    16384, 32768, 65536, 131072, 262144, 524288,
                                    or 1048576 (default: $SL_BATCH_SIZE)
-  --hidden1-size N                 First hidden-layer width (default: $HIDDEN1_SIZE)
-  --hidden2-size N                 Second hidden-layer width (default: $HIDDEN2_SIZE)
+  --hidden-layers N                Hidden policy layers, 1 to 8 (default: $HIDDEN_LAYERS)
+  --hidden1-size N                 Hidden-layer 1 width (default: 256)
+  --hidden2-size N                 Hidden-layer 2 width (default: 128)
+  --hiddenK-size N                 Hidden-layer K width for K in 3..8 (default: 128,
+                                   needs --hidden-layers of at least K)
   --sl-memory-reserve-mb N         Host RAM reserve (default: $SL_MEMORY_RESERVE_MB)
   --sl-gpu-memory-reserve-mb N     GPU VRAM reserve (default: $SL_GPU_MEMORY_RESERVE_MB)
   --sl-seed N                      Fix supervised initialization and shuffling
@@ -272,8 +284,15 @@ while [[ $# -gt 0 ]]; do
         --dropout) DROPOUT="$2"; shift 2 ;;
         --sl-device) SL_DEVICE="$2"; shift 2 ;;
         --sl-batch-size) SL_BATCH_SIZE="$2"; shift 2 ;;
+        --hidden-layers) HIDDEN_LAYERS="$2"; shift 2 ;;
         --hidden1-size) HIDDEN1_SIZE="$2"; shift 2 ;;
         --hidden2-size) HIDDEN2_SIZE="$2"; shift 2 ;;
+        --hidden3-size) HIDDEN3_SIZE="$2"; shift 2 ;;
+        --hidden4-size) HIDDEN4_SIZE="$2"; shift 2 ;;
+        --hidden5-size) HIDDEN5_SIZE="$2"; shift 2 ;;
+        --hidden6-size) HIDDEN6_SIZE="$2"; shift 2 ;;
+        --hidden7-size) HIDDEN7_SIZE="$2"; shift 2 ;;
+        --hidden8-size) HIDDEN8_SIZE="$2"; shift 2 ;;
         --sl-memory-reserve-mb) SL_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --sl-gpu-memory-reserve-mb) SL_GPU_MEMORY_RESERVE_MB="$2"; shift 2 ;;
         --sl-seed) SL_SEED="$2"; shift 2 ;;
@@ -349,9 +368,16 @@ else
         --sl-training-plateau-min-epochs "$SL_TRAINING_PLATEAU_MIN_EPOCHS"
         --sl-training-plateau-min-relative-improvement "$SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT"
         --sl-batch-size "$SL_BATCH_SIZE"
-        --hidden1-size "$HIDDEN1_SIZE"
-        --hidden2-size "$HIDDEN2_SIZE"
+        --hidden-layers "$HIDDEN_LAYERS"
     )
+    for hidden_position in 1 2 3 4 5 6 7 8; do
+        hidden_variable="HIDDEN${hidden_position}_SIZE"
+        if [[ -n "${!hidden_variable}" ]]; then
+            SL_EXTRA_ARGS+=(
+                "--hidden${hidden_position}-size" "${!hidden_variable}"
+            )
+        fi
+    done
     if [[ -n "$SL_EARLY_STOPPING_PATIENCE" ]]; then
         SL_EXTRA_ARGS+=(--early-stopping "$SL_EARLY_STOPPING_PATIENCE")
     fi

@@ -7,6 +7,7 @@ from unittest import mock
 
 import numpy as np
 
+from agents.network_architecture import policy_layer_names
 from agents.rl_nn import PolicyNetwork
 from training.ppo import (
     PPOBuffer,
@@ -60,12 +61,25 @@ class _FakePPONetwork:
         self.eval_calls = 0
         self.optimizer_step_count = 0
         self.cache = {}
+        self.hidden_sizes = (2, 2)
         self.W1 = np.zeros((2, 3), dtype=np.float32)
         self.b1 = np.zeros((2, 1), dtype=np.float32)
         self.W2 = np.zeros((2, 2), dtype=np.float32)
         self.b2 = np.zeros((2, 1), dtype=np.float32)
         self.W3 = np.zeros((4, 2), dtype=np.float32)
         self.b3 = np.zeros((4, 1), dtype=np.float32)
+
+    @property
+    def layer_count(self):
+        return len(self.hidden_sizes) + 1
+
+    @property
+    def weight_names(self):
+        return policy_layer_names(len(self.hidden_sizes))
+
+    @property
+    def last_hidden_activation_key(self):
+        return f"A{len(self.hidden_sizes)}"
 
     def evaluate_actions(self, states, legal_masks, actions):
         self.eval_calls += 1

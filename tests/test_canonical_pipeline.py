@@ -19,6 +19,7 @@ from diagnostics.rl_progress import (
     HISTORY_RECORD_TYPE,
     PERIODIC_SUMMARY_RETENTION,
     _rl_elapsed_hours,
+    _hidden_footer_text,
     _training_footer_line,
     append_periodic_point,
     final_diagnostic_seed,
@@ -50,9 +51,12 @@ from training.canonical_run import (
 )
 from training.rl_resume import (
     NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
+    RESUME_STATE_VERSION,
+    _atomic_resume_state_save,
     _prune_numbered_checkpoint_weights,
     _resume_configuration,
     _validate_resume_configuration,
+    load_resume_state,
 )
 from training.pipeline import (
     PERIODIC_DIAGNOSTIC_TUNING_FILE,
@@ -79,14 +83,18 @@ from utils.artifacts import file_sha256
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _write_test_supervised_checkpoint(path, seed=123):
-    network = PolicyNetwork(random_seed=seed, device="cpu")
+def _write_test_supervised_checkpoint(path, seed=123, hidden_sizes=None):
+    network = PolicyNetwork(
+        random_seed=seed,
+        device="cpu",
+        **({} if hidden_sizes is None else {"hidden_sizes": hidden_sizes}),
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         path,
         **{
             name: np.asarray(getattr(network, name))
-            for name in ("W1", "b1", "W2", "b2", "W3", "b3")
+            for name in network.weight_names
         },
     )
     return path
@@ -714,6 +722,68 @@ def test_resume_state_without_stored_regularizers_is_compatible():
         _validate_resume_configuration({"configuration": legacy}, enabled)
 
 
+def test_hidden_layer_count_joins_the_run_identity_and_is_locked(tmp_path):
+    """Lock depth and every width for a forever run without touching old runs."""
+    defaults = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+        "--run-name",
+        "default_depth",
+    ])
+    deep = parse_args([
+        "forever",
+        "--artifact-root",
+        str(tmp_path),
+        "--run-name",
+        "deep",
+        "--hidden-layers",
+        "4",
+        "--hidden1-size",
+        "512",
+        "--hidden3-size",
+        "96",
+    ])
+
+    assert _network_architecture(defaults).as_list() == [168, 256, 128, 56]
+    assert _network_architecture(deep).as_list() == [168, 512, 128, 96, 128, 56]
+
+    locked = _locked_forever_arguments(deep)
+    assert locked["hidden_layers"] == 4
+    assert locked["hidden1_size"] == 512
+    assert locked["hidden3_size"] == 96
+    assert locked["hidden4_size"] == 128
+    # An unused layer is recorded as absent rather than as a stale width.
+    assert _locked_forever_arguments(defaults)["hidden3_size"] is None
+
+
+def test_deep_opponent_pool_survives_a_resume_state_round_trip(tmp_path):
+    """Save and reload a four-hidden-layer opponent pool without name guesses."""
+    network = PolicyNetwork(
+        random_seed=5,
+        device="cpu",
+        hidden_sizes=(64, 48, 32, 16),
+    )
+    snapshot = {
+        name: np.asarray(getattr(network, name))
+        for name in network.weight_names
+    }
+    weights_path = tmp_path / "deep.npz"
+    network.save(weights_path)
+    state_path = tmp_path / "deep.resume.npz"
+    metadata = {
+        "version": RESUME_STATE_VERSION,
+        "weights_sha256": file_sha256(weights_path),
+    }
+    _atomic_resume_state_save(state_path, metadata, (snapshot,))
+
+    _loaded_metadata, snapshots = load_resume_state(weights_path, state_path)
+    assert len(snapshots) == 1
+    assert sorted(snapshots[0]) == sorted(network.weight_names)
+    for name, value in snapshot.items():
+        assert np.array_equal(snapshots[0][name], value)
+
+
 def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
     supervised = _write_test_supervised_checkpoint(tmp_path / "sl.npz")
     supervised_hash = file_sha256(supervised)
@@ -902,7 +972,8 @@ def test_progress_footer_reports_value_head_hidden_layers_and_regularizers():
             "weight_decay": 0.0001,
         },
     }) == (
-        "Value head on · hidden 512 × 192 · dropout 0.1 · weight decay 0.0001"
+        "Value head on · hidden 2 layers 512x192 · "
+        "dropout 0.1 · weight decay 0.0001"
     )
     assert _training_footer_line({
         "network_architecture": [168, 256, 128, 56],
@@ -911,12 +982,80 @@ def test_progress_footer_reports_value_head_hidden_layers_and_regularizers():
             "dropout_rate": 0.0,
             "weight_decay": 0.0,
         },
-    }) == "Value head off · hidden 256 × 128 · dropout off · weight decay off"
+    }) == (
+        "Value head off · hidden 2 layers 256x128 · "
+        "dropout off · weight decay off"
+    )
     # A run recorded before the regularizers existed stores neither field.
     assert _training_footer_line({
         "network_architecture": [168, 256, 128, 56],
         "rl_config": {"use_value_head": False},
-    }) == "Value head off · hidden 256 × 128 · dropout off · weight decay off"
+    }) == (
+        "Value head off · hidden 2 layers 256x128 · "
+        "dropout off · weight decay off"
+    )
+
+
+def test_progress_footer_lists_every_hidden_layer_at_any_depth():
+    """Report the layer count and each width, not just the first two."""
+    assert _hidden_footer_text([168, 96, 56]) == "1 layer 96"
+    assert _hidden_footer_text([168, 256, 128, 56]) == "2 layers 256x128"
+    assert (
+        _hidden_footer_text([168, 512, 256, 128, 64, 56])
+        == "4 layers 512x256x128x64"
+    )
+    assert (
+        _hidden_footer_text([168, *([128] * 8), 56])
+        == "8 layers 128x128x128x128x128x128x128x128"
+    )
+    # A run configuration without a usable architecture must not invent one.
+    assert _hidden_footer_text([]) == "unknown"
+    assert _hidden_footer_text(None) == "unknown"
+
+
+def test_deep_progress_footer_shrinks_instead_of_overlapping(tmp_path):
+    """Keep the widest supported footer clear of the left-hand block."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    from diagnostics.rl_progress import (
+        FOOTER_FONT_SIZE,
+        FOOTER_MIN_FONT_SIZE,
+        _fitted_footer_fontsize,
+    )
+
+    figure = Figure(figsize=(9.5, 5.5))
+    FigureCanvasAgg(figure)
+    start = figure.text(
+        0.01,
+        0.06,
+        "Start: model_iter000000.npz · sha256 0123456789ab...",
+        fontsize=FOOTER_FONT_SIZE,
+    )
+    reserved = start.get_window_extent(figure.canvas.get_renderer()).width
+
+    default_line = _training_footer_line({
+        "network_architecture": [168, 256, 128, 56],
+        "rl_config": {},
+    })
+    widest_line = _training_footer_line({
+        "network_architecture": [168, 2048, *([1024] * 7), 56],
+        "rl_config": {
+            "use_value_head": True,
+            "dropout_rate": 0.1,
+            "weight_decay": 0.0001,
+        },
+    })
+    # The unchanged default keeps the historical footer size.
+    assert _fitted_footer_fontsize(figure, default_line, reserved) == (
+        FOOTER_FONT_SIZE
+    )
+    widest_size = _fitted_footer_fontsize(figure, widest_line, reserved)
+    assert FOOTER_MIN_FONT_SIZE < widest_size < FOOTER_FONT_SIZE
+
+    probe = figure.text(0.0, 0.0, widest_line, fontsize=widest_size)
+    width = probe.get_window_extent(figure.canvas.get_renderer()).width
+    assert reserved + width <= figure.bbox.width
 
 
 def test_periodic_artifact_retention_drops_games_and_keeps_ten_summaries(tmp_path):

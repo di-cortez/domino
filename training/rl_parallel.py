@@ -26,6 +26,10 @@ from dataclasses import dataclass
 from multiprocessing import shared_memory
 import numpy as np
 
+from agents.network_architecture import (
+    hidden_layer_count_from_weights,
+    policy_layer_names,
+)
 from diagnostics.parallel_runner import (
     DEEP_PROFILE_SAMPLE_INTERVAL,
     MAX_PARALLEL_WORKERS,
@@ -42,7 +46,6 @@ from diagnostics.parallel_runner import (
 
 DEFAULT_RL_WORKERS = "auto"
 DEFAULT_RL_WORKER_CANDIDATES = (1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20)
-POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 
 
 class RLRolloutExecutionError(RuntimeError):
@@ -60,6 +63,7 @@ class SharedPolicyDescriptor:
     """Pickle-friendly description of one policy stored in shared memory."""
 
     name: str
+    weight_names: tuple[str, ...]
     shapes: tuple[tuple[int, ...], ...]
     element_count: int
     dtype: str
@@ -71,11 +75,12 @@ class SharedPolicyBank:
     def __init__(self, network, max_pool_size):
         if max_pool_size < 0:
             raise ValueError("max_pool_size must be non-negative")
+        self.weight_names = tuple(network.weight_names)
         self.shapes = tuple(
             tuple(int(value) for value in getattr(network, name).shape)
-            for name in POLICY_WEIGHT_NAMES
+            for name in self.weight_names
         )
-        first_weight = getattr(network, POLICY_WEIGHT_NAMES[0])
+        first_weight = getattr(network, self.weight_names[0])
         if hasattr(first_weight, "get"):
             first_weight = first_weight.get()
         self.dtype = np.asarray(first_weight).dtype
@@ -92,6 +97,7 @@ class SharedPolicyBank:
                 self._segments.append(segment)
                 self._descriptors.append(SharedPolicyDescriptor(
                     name=segment.name,
+                    weight_names=self.weight_names,
                     shapes=self.shapes,
                     element_count=self.element_count,
                     dtype=self.dtype.str,
@@ -126,7 +132,7 @@ class SharedPolicyBank:
             buffer=self._segments[slot_index].buf,
         )
         offset = 0
-        for name, shape in zip(POLICY_WEIGHT_NAMES, self.shapes):
+        for name, shape in zip(self.weight_names, self.shapes):
             value = getattr(network, name)
             if hasattr(value, "get"):
                 value = value.get()
@@ -174,7 +180,7 @@ class SharedPolicyBank:
             )
             weights = {}
             offset = 0
-            for name, shape in zip(POLICY_WEIGHT_NAMES, self.shapes):
+            for name, shape in zip(self.weight_names, self.shapes):
                 size = math.prod(shape)
                 weights[name] = flat[offset:offset + size].reshape(shape).copy()
                 offset += size
@@ -210,7 +216,7 @@ class SharedPolicyBank:
         self._next_snapshot_id = 0
         self._next_pool_slot = 0
         for weights, snapshot_metadata in zip(snapshots, metadata):
-            missing = [name for name in POLICY_WEIGHT_NAMES if name not in weights]
+            missing = [name for name in self.weight_names if name not in weights]
             if missing:
                 raise ValueError(
                     "Resume opponent snapshot is missing policy weights: "
@@ -245,18 +251,28 @@ class _CPUInferencePolicy:
     def __init__(self, weights):
         for name, value in weights.items():
             setattr(self, name, value)
+        self.layer_count = hidden_layer_count_from_weights(weights) + 1
+
+    @property
+    def weight_names(self):
+        return policy_layer_names(self.layer_count - 1)
 
     def forward(self, x):
         # The encoder emits float64, so cast to match the float32 weights.
         # Without it NumPy promotes every weight matrix per call, which is both
         # far slower and inconsistent with PolicyNetwork.forward.
-        x = np.asarray(x, dtype=np.float32)
-        z1 = np.dot(self.W1, x) + self.b1
-        a1 = np.maximum(0, z1)
-        z2 = np.dot(self.W2, a1) + self.b2
-        a2 = np.maximum(0, z2)
-        z3 = np.dot(self.W3, a2) + self.b3
-        exp_z = np.exp(z3 - np.max(z3, axis=0, keepdims=True))
+        activation = np.asarray(x, dtype=np.float32)
+        for index in range(1, self.layer_count):
+            activation = np.maximum(
+                0,
+                np.dot(getattr(self, f"W{index}"), activation)
+                + getattr(self, f"b{index}"),
+            )
+        logits = (
+            np.dot(getattr(self, f"W{self.layer_count}"), activation)
+            + getattr(self, f"b{self.layer_count}")
+        )
+        exp_z = np.exp(logits - np.max(logits, axis=0, keepdims=True))
         return exp_z / np.sum(exp_z, axis=0, keepdims=True)
 
 
@@ -278,7 +294,7 @@ def _attach_policy(descriptor):
     )
     weights = {}
     offset = 0
-    for name, shape in zip(POLICY_WEIGHT_NAMES, descriptor.shapes):
+    for name, shape in zip(descriptor.weight_names, descriptor.shapes):
         size = math.prod(shape)
         weights[name] = flat[offset:offset + size].reshape(shape)
         offset += size

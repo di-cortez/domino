@@ -5,6 +5,7 @@ import time
 
 import numpy as np
 
+from agents.network_architecture import architecture_from_weights
 from agents.nn import (
     DEVICES,
     DISABLED_DROPOUT_RATE,
@@ -12,10 +13,7 @@ from agents.nn import (
     SupervisedNeuralNetwork,
 )
 
-_POLICY_WEIGHTS = ("W1", "b1", "W2", "b2", "W3", "b3")
 _VALUE_WEIGHTS = ("Wv", "bv")
-# Weight decay regularizes trainable weight matrices only; biases stay free.
-_DECAYED_WEIGHTS = ("W1", "W2", "W3", "Wv")
 _OPTIMIZER_STEP_KEY = "optimizer_step_count"
 _ALGORITHM_KEY = "rl_training_algorithm"
 
@@ -24,7 +22,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
     """Supervised policy architecture with masked PPO/REINFORCE gradients.
 
     PPO is the default self-play algorithm. ``use_value_head=True`` adds a
-    linear ``V(s)`` critic shared by PPO and the legacy REINFORCE path.
+    linear ``V(s)`` critic that reads the last hidden activation and is shared
+    by PPO and the legacy REINFORCE path.
+
+    The hidden stack is whatever the parent class was built with, so an RL run
+    always adopts the depth and widths stored in the checkpoint it starts from.
 
     ``device`` selects the array backend independently of the parent class:
     ``"auto"`` (default) matches ``GPU_ENABLED`` exactly, reproducing prior
@@ -45,16 +47,26 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         # metadata and PPO optimizer-step accounting remain exact.
         self.optimizer_step_count = 0
         if use_value_head:
-            hidden2_size = self.W3.shape[1]
             self.Wv = self.xp.zeros(
-                (1, hidden2_size),
+                (1, self.hidden_sizes[-1]),
                 dtype=self.xp.float32,
             )
             self.bv = self.xp.zeros((1, 1), dtype=self.xp.float32)
 
+    @property
+    def decayed_weight_names(self):
+        """Return the arrays weight decay shrinks; bias vectors stay free.
+
+        ``Wv`` is listed unconditionally because ``_apply_gradient_step``
+        shrinks only the names the current update produced a gradient for.
+        """
+        return tuple(
+            f"W{index}" for index in range(1, self.layer_count + 1)
+        ) + ("Wv",)
+
     def _cast_weights_to_device(self):
-        """Move the six policy weights (built by the parent class) to ``self.xp``."""
-        for name in _POLICY_WEIGHTS:
+        """Move the policy weights built by the parent class to ``self.xp``."""
+        for name in self.weight_names:
             value = getattr(self, name, None)
             if value is None:
                 continue
@@ -71,31 +83,6 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         """
         return self.xp.asarray(np.random.random(shape), dtype=self.xp.float32)
 
-    def forward(self, x, training=False):
-        """Same three-layer forward pass as the parent class, pinned to ``self.xp``."""
-        x = self.xp.asarray(x, dtype=self.xp.float32)
-        z1 = self.xp.dot(self.W1, x) + self.b1
-        a1, d1 = self._hidden_dropout(self.xp.maximum(0, z1), training)
-        z2 = self.xp.dot(self.W2, a1) + self.b2
-        a2, d2 = self._hidden_dropout(self.xp.maximum(0, z2), training)
-        z3 = self.xp.dot(self.W3, a2) + self.b3
-        exp_z = self.xp.exp(z3 - self.xp.max(z3, axis=0, keepdims=True))
-        a3 = exp_z / self.xp.sum(exp_z, axis=0, keepdims=True)
-
-        self.cache = {
-            "X": x,
-            "Z1": z1,
-            "A1": a1,
-            "Z2": z2,
-            "A2": a2,
-            "Z3": z3,
-            "A3": a3,
-        }
-        if d1 is not None:
-            self.cache["D1"] = d1
-            self.cache["D2"] = d2
-        return a3
-
     @classmethod
     def _load_npz_weights(
         cls,
@@ -106,24 +93,25 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         weight_decay=DISABLED_WEIGHT_DECAY,
         dropout_rate=DISABLED_DROPOUT_RATE,
     ):
-        """Build a network from an ``.npz`` checkpoint."""
+        """Build a network from an ``.npz`` checkpoint.
+
+        The hidden-layer count and every width are read from the archive, so a
+        checkpoint always restores the architecture it was trained with.
+        """
         with np.load(path, allow_pickle=False) as data:
-            hidden1_size, input_size = data["W1"].shape
-            hidden2_size, _ = data["W2"].shape
-            output_size, _ = data["W3"].shape
+            architecture = architecture_from_weights(data)
 
             network = cls(
-                input_size=input_size,
-                hidden1_size=hidden1_size,
-                hidden2_size=hidden2_size,
-                output_size=output_size,
+                input_size=architecture.input_size,
+                output_size=architecture.output_size,
+                hidden_sizes=architecture.hidden_sizes,
                 learning_rate=learning_rate,
                 use_value_head=use_value_head,
                 device=device,
                 weight_decay=weight_decay,
                 dropout_rate=dropout_rate,
             )
-            for name in _POLICY_WEIGHTS:
+            for name in network.weight_names:
                 setattr(
                     network,
                     name,
@@ -198,7 +186,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         if weights_dir:
             os.makedirs(weights_dir, exist_ok=True)
 
-        weight_names = _POLICY_WEIGHTS
+        weight_names = self.weight_names
         if getattr(self, "use_value_head", False):
             weight_names += _VALUE_WEIGHTS
 
@@ -218,16 +206,15 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         """Return a frozen copy for the self-play opponent pool."""
         clone = PolicyNetwork(
             input_size=self.W1.shape[1],
-            hidden1_size=self.W1.shape[0],
-            hidden2_size=self.W2.shape[0],
-            output_size=self.W3.shape[0],
+            output_size=getattr(self, f"W{self.layer_count}").shape[0],
+            hidden_sizes=self.hidden_sizes,
             learning_rate=self.lr,
             use_value_head=getattr(self, "use_value_head", False),
             device=self.device,
             weight_decay=self.weight_decay,
             dropout_rate=self.dropout_rate,
         )
-        weight_names = _POLICY_WEIGHTS
+        weight_names = clone.weight_names
         if clone.use_value_head:
             weight_names += _VALUE_WEIGHTS
         for name in weight_names:
@@ -265,7 +252,10 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         if not getattr(self, "use_value_head", False):
             raise RuntimeError("The value head is not enabled for this network.")
         self.forward(x, training=training)
-        return self.xp.dot(self.Wv, self.cache["A2"]) + self.bv
+        return self.xp.dot(
+            self.Wv,
+            self.cache[self.last_hidden_activation_key],
+        ) + self.bv
 
     def evaluate_actions(self, x, legal_masks, action_indices, training=False):
         """Evaluate observed actions under the normalized masked policy.
@@ -277,7 +267,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         """
         xp = self.xp
         self.forward(x, training=training)
-        logits = self.cache["Z3"]
+        logits = self.cache[self.logits_key]
         sample_count = logits.shape[1]
         action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
         legal_masks = xp.asarray(legal_masks, dtype=xp.bool_)
@@ -346,7 +336,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
 
     def _ppo_value_update_terms(
         self,
-        a2,
+        last_hidden,
         returns,
         old_values,
         *,
@@ -371,7 +361,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         old_values = xp.asarray(old_values, dtype=dtype).reshape(1, -1)
         if returns.shape[1] != sample_count or old_values.shape[1] != sample_count:
             raise ValueError("PPO returns and old_values must match the batch size.")
-        values = xp.dot(self.Wv, a2) + self.bv
+        values = xp.dot(self.Wv, last_hidden) + self.bv
         losses, value_gradient, value_delta = self.clipped_value_loss_terms(
             values,
             returns,
@@ -389,14 +379,14 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 xp.mean(xp.abs(value_delta) > float(clip_epsilon))
             ),
             "gradients": {
-                "Wv": inverse_count * xp.dot(weighted_gradient, a2.T),
+                "Wv": inverse_count * xp.dot(weighted_gradient, last_hidden.T),
                 "bv": inverse_count * xp.sum(
                     weighted_gradient,
                     axis=1,
                     keepdims=True,
                 ),
             },
-            "shared_a2_gradient": xp.dot(self.Wv.T, weighted_gradient),
+            "shared_hidden_gradient": xp.dot(self.Wv.T, weighted_gradient),
         }
 
     def _apply_gradient_step(self, gradients, grad_norm, clip_grad_norm, dtype):
@@ -425,7 +415,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 1.0 - self.lr * self.weight_decay,
                 dtype=dtype,
             )
-            for name in _DECAYED_WEIGHTS:
+            for name in self.decayed_weight_names:
                 if name in gradients:
                     setattr(self, name, getattr(self, name) * shrink)
         self.optimizer_step_count = int(
@@ -482,11 +472,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
         old_log_probs = xp.asarray(
             old_log_probs,
-            dtype=self.cache["Z3"].dtype,
+            dtype=self.cache[self.logits_key].dtype,
         ).reshape(-1)
         advantages = xp.asarray(
             advantages,
-            dtype=self.cache["Z3"].dtype,
+            dtype=self.cache[self.logits_key].dtype,
         ).reshape(-1)
         if old_log_probs.shape[0] != sample_count or advantages.shape[0] != sample_count:
             raise ValueError("PPO old_log_probs and advantages must match the batch size.")
@@ -518,16 +508,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         dz3_entropy = masked_policy * (log_policy + entropy_row)
         dz3 = dz3_policy + float(entropy_coef) * dz3_entropy
 
-        a2 = self.cache["A2"]
-        a1 = self.cache["A1"]
-        x_cached = self.cache["X"]
+        last_hidden = self.cache[self.last_hidden_activation_key]
         inverse_count = xp.asarray(1.0 / sample_count, dtype=dz3.dtype)
-        dW3 = inverse_count * xp.dot(dz3, a2.T)
-        db3 = inverse_count * xp.sum(dz3, axis=1, keepdims=True)
-        da2 = xp.dot(self.W3.T, dz3)
 
         value_terms = self._ppo_value_update_terms(
-            a2,
+            last_hidden,
             returns,
             old_values,
             sample_count=sample_count,
@@ -535,27 +520,14 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             value_coef=value_coef,
             clip_epsilon=clip_epsilon,
         )
-        if value_terms is not None:
-            da2 = da2 + value_terms["shared_a2_gradient"]
-        dz2 = self._backpropagate_dropout(da2, "D2") * self.relu_derivative(
-            self.cache["Z2"]
+        gradients = self.backpropagate_layers(
+            dz3,
+            inverse_count,
+            hidden_gradient_hook=(
+                None if value_terms is None
+                else lambda gradient: gradient + value_terms["shared_hidden_gradient"]
+            ),
         )
-        dW2 = inverse_count * xp.dot(dz2, a1.T)
-        db2 = inverse_count * xp.sum(dz2, axis=1, keepdims=True)
-        da1 = xp.dot(self.W2.T, dz2)
-        dz1 = self._backpropagate_dropout(da1, "D1") * self.relu_derivative(
-            self.cache["Z1"]
-        )
-        dW1 = inverse_count * xp.dot(dz1, x_cached.T)
-        db1 = inverse_count * xp.sum(dz1, axis=1, keepdims=True)
-        gradients = {
-            "W1": dW1,
-            "b1": db1,
-            "W2": dW2,
-            "b2": db2,
-            "W3": dW3,
-            "b3": db3,
-        }
         if value_terms is not None:
             gradients.update(value_terms["gradients"])
         grad_norm = self._as_float(
@@ -619,10 +591,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
     ):
         """Apply masked REINFORCE, optionally updating a value baseline."""
         xp = self.xp
-        z3 = self.cache["Z3"]
-        a2 = self.cache["A2"]
-        a1 = self.cache["A1"]
-        x = self.cache["X"]
+        z3 = self.cache[self.logits_key]
+        last_hidden = self.cache[self.last_hidden_activation_key]
         m = z3.shape[1]
 
         action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
@@ -672,12 +642,9 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         dz3_entropy = masked_policy * (log_masked_policy + entropy)
         dz3 = dz3_policy + entropy_coef * dz3_entropy
 
-        dW3 = (1.0 / m) * xp.dot(dz3, a2.T)
-        db3 = (1.0 / m) * xp.sum(dz3, axis=1, keepdims=True)
-        da2 = xp.dot(self.W3.T, dz3)
-
         value_loss = None
         value_gradients = {}
+        shared_hidden_gradient = None
         use_value_head = getattr(self, "use_value_head", False)
         if use_value_head:
             if value_returns is None:
@@ -688,42 +655,29 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 value_returns,
                 dtype=z3.dtype,
             ).reshape(1, m)
-            values = xp.dot(self.Wv, a2) + self.bv
+            values = xp.dot(self.Wv, last_hidden) + self.bv
             value_error = values - value_returns
             value_loss = float(xp.mean(0.5 * value_error ** 2))
 
             dzv = value_coef * value_error
             value_gradients = {
-                "Wv": (1.0 / m) * xp.dot(dzv, a2.T),
+                "Wv": (1.0 / m) * xp.dot(dzv, last_hidden.T),
                 "bv": (1.0 / m) * xp.sum(dzv, axis=1, keepdims=True),
             }
-            da2 = da2 + xp.dot(self.Wv.T, dzv)
+            shared_hidden_gradient = xp.dot(self.Wv.T, dzv)
         elif value_returns is not None:
             raise ValueError(
                 "value_returns were provided, but the value head is disabled."
             )
 
-        dz2 = self._backpropagate_dropout(da2, "D2") * self.relu_derivative(
-            self.cache["Z2"]
+        gradients = self.backpropagate_layers(
+            dz3,
+            1.0 / m,
+            hidden_gradient_hook=(
+                None if shared_hidden_gradient is None
+                else lambda gradient: gradient + shared_hidden_gradient
+            ),
         )
-        dW2 = (1.0 / m) * xp.dot(dz2, a1.T)
-        db2 = (1.0 / m) * xp.sum(dz2, axis=1, keepdims=True)
-
-        da1 = xp.dot(self.W2.T, dz2)
-        dz1 = self._backpropagate_dropout(da1, "D1") * self.relu_derivative(
-            self.cache["Z1"]
-        )
-        dW1 = (1.0 / m) * xp.dot(dz1, x.T)
-        db1 = (1.0 / m) * xp.sum(dz1, axis=1, keepdims=True)
-
-        gradients = {
-            "W1": dW1,
-            "b1": db1,
-            "W2": dW2,
-            "b2": db2,
-            "W3": dW3,
-            "b3": db3,
-        }
         gradients.update(value_gradients)
 
         grad_norm = float(xp.sqrt(sum(xp.sum(grad ** 2) for grad in gradients.values())))

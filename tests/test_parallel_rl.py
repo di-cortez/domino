@@ -375,6 +375,67 @@ class ParallelRLTests(unittest.TestCase):
             self.assertEqual(full["optimizer_step_count"], resumed["optimizer_step_count"])
             self.assertEqual(resumed["ppo_configuration"]["target_kl"], 0.005)
 
+    def test_four_hidden_layer_run_trains_and_resumes_exactly(self):
+        """Carry a deeper architecture through rollouts, PPO, and exact resume."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            supervised = PolicyNetwork(
+                random_seed=31,
+                device="cpu",
+                hidden_sizes=(64, 48, 32, 16),
+            )
+            sl_path = root / "deep_sl.npz"
+            supervised.save(sl_path)
+
+            full_base = root / "full.npz"
+            resumed_base = root / "resumed.npz"
+            common = {
+                "sl_weights_path": str(sl_path),
+                "gpi": 4,
+                "checkpoint_interval": 2,
+                "pool_refresh_games": 4,
+                "max_pool_size": 2,
+                "seed": 4242,
+                "device": "cpu",
+                "workers": 1,
+                "safety_config": self.safety,
+                "quiet": True,
+                "numbered_checkpoints": True,
+            }
+
+            full = train(iterations=4, rl_weights_path=str(full_base), **common)
+            train(iterations=2, rl_weights_path=str(resumed_base), **common)
+            partial_weights = numbered_checkpoint_path(resumed_base, 2)
+            partial_state = resume_state_path(partial_weights)
+            _metadata, pool = load_resume_state(partial_weights, partial_state)
+            # Opponent snapshots keep all five weight layers of the deeper stack.
+            self.assertEqual(
+                sorted(pool[0]),
+                sorted(supervised.weight_names),
+            )
+
+            resumed = train(
+                iterations=4,
+                rl_weights_path=str(resumed_base),
+                start_iteration=2,
+                resume_weights_path=str(partial_weights),
+                resume_state_file=str(partial_state),
+                **common,
+            )
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
+                    self.assertEqual(left.files, right.files)
+                    self.assertEqual(
+                        [name for name in left.files if name.startswith("W")],
+                        ["W1", "W2", "W3", "W4", "W5"],
+                    )
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
+            self.assertEqual(
+                full["optimizer_step_count"],
+                resumed["optimizer_step_count"],
+            )
+
     def test_exact_game_budget_uses_a_partial_final_iteration(self):
         rows = []
         with tempfile.TemporaryDirectory() as temp_dir:

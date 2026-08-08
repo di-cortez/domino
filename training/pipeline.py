@@ -483,8 +483,7 @@ def _supervised_training_identity(args, max_epochs):
 def _network_architecture(args):
     """Return the one architecture selected for supervised and RL stages."""
     return architecture_from_hidden_sizes(
-        args.hidden1_size,
-        args.hidden2_size,
+        training_loop.hidden_sizes_from_args(args)
     )
 
 
@@ -600,8 +599,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             supervised_summary = training_loop.train_supervised(
                 epochs=max_epochs,
                 batch_size=args.sl_batch_size,
-                hidden1_size=architecture.hidden1_size,
-                hidden2_size=architecture.hidden2_size,
+                hidden_sizes=architecture.hidden_sizes,
                 dataset_file=paths.dataset,
                 weights_file=paths.weights,
                 cache_file=paths.encoded_cache,
@@ -1663,6 +1661,12 @@ def parse_args(argv=None):
     args._explicit_destinations = explicit
     if args.scale == "forever":
         args = _hydrate_forever_arguments(parser, args, explicit)
+    # Resolution runs after forever hydration so a locked run keeps the exact
+    # architecture it was created with.
+    try:
+        training_loop.resolve_architecture_arguments(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     return _resolve_execution_identity(args)
 
 

@@ -75,7 +75,6 @@ from training.rl_rollout import (
 from training.rl_resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
-    RESUME_POLICY_WEIGHT_NAMES,
     RESUME_STATE_VERSION,
     SUPPORTED_RESUME_STATE_VERSIONS,
     _atomic_network_save,
@@ -549,7 +548,7 @@ def train(
     estimated_batch_bytes = min(selected_gpi, remaining_training_games) * 52 * 4096
     policy_bytes = sum(
         int(getattr(network, name).nbytes)
-        for name in RESUME_POLICY_WEIGHT_NAMES
+        for name in network.weight_names
     )
     shared_pool_size = max_pool_size if training_opponent == "self_play" else 0
     estimated_shared_bytes = (1 + shared_pool_size) * policy_bytes

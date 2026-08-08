@@ -21,6 +21,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.encoder import DominoEncoder
+from agents.network_architecture import (
+    MAX_HIDDEN_LAYER_COUNT,
+    architecture_from_hidden_sizes,
+)
 from agents.heuristic_agent import StrategicAgent
 from agents.neural_agent import NeuralAgent
 from agents.nn import (
@@ -89,6 +93,7 @@ from training.training_loop import (
     DEFAULT_WEIGHT_DECAY,
     MAX_SUPERVISED_CHECKPOINTS,
     _prune_supervised_checkpoints,
+    hidden_sizes_from_args,
     parse_args as parse_supervised_args,
 )
 from train_script.run_pipeline import _build_config, parse_args as parse_pipeline_args
@@ -165,23 +170,30 @@ def _small_policy_network(
     output_size=56,
     learning_rate=0.1,
     use_value_head=False,
+    hidden_sizes=None,
 ):
     """Build a deterministic tiny policy network without invoking backend RNG."""
+    if hidden_sizes is None:
+        hidden_sizes = (hidden1_size, hidden2_size)
+    hidden_sizes = tuple(int(size) for size in hidden_sizes)
     network = PolicyNetwork.__new__(PolicyNetwork)
     network.xp = xp
     network.device = "gpu" if GPU_ENABLED else "cpu"
     network.lr = learning_rate
     network.weight_decay = 0.0
     network.dropout_rate = 0.0
-    network.W1 = xp.zeros((hidden1_size, input_size))
-    network.b1 = xp.zeros((hidden1_size, 1))
-    network.W2 = xp.zeros((hidden2_size, hidden1_size))
-    network.b2 = xp.zeros((hidden2_size, 1))
-    network.W3 = xp.zeros((output_size, hidden2_size))
-    network.b3 = xp.zeros((output_size, 1))
+    network.hidden_sizes = hidden_sizes
+    dimensions = (input_size, *hidden_sizes, output_size)
+    for index in range(1, len(dimensions)):
+        setattr(
+            network,
+            f"W{index}",
+            xp.zeros((dimensions[index], dimensions[index - 1])),
+        )
+        setattr(network, f"b{index}", xp.zeros((dimensions[index], 1)))
     network.use_value_head = use_value_head
     if use_value_head:
-        network.Wv = xp.zeros((1, hidden2_size))
+        network.Wv = xp.zeros((1, hidden_sizes[-1]))
         network.bv = xp.zeros((1, 1))
     network.cache = {}
     return network
@@ -749,6 +761,197 @@ def test_networks_are_unregularized_without_explicit_coefficients():
     clone = regularized.clone()
     assert clone.weight_decay == 0.002
     assert clone.dropout_rate == 0.35
+
+
+def test_hidden_layer_flags_keep_the_default_and_size_deeper_stacks():
+    """Resolve --hidden-layers and every --hiddenN-size on every entry point."""
+    parsers = (
+        (parse_supervised_args, []),
+        (parse_pipeline_args, []),
+        (parse_canonical_pipeline_args, ["small"]),
+    )
+    for parse, base in parsers:
+        # The unchanged default architecture stays two layers of 256 and 128.
+        defaults = parse(list(base))
+        assert defaults.hidden_layers == 2
+        assert hidden_sizes_from_args(defaults) == (256, 128)
+        assert defaults.hidden3_size is None
+        assert defaults.hidden4_size is None
+
+        # An omitted width falls back to its documented default: the historical
+        # 256 and 128 for the first two layers and 128 for every deeper one.
+        deep = parse(base + ["--hidden-layers", "4"])
+        assert hidden_sizes_from_args(deep) == (256, 128, 128, 128)
+
+        # Explicit widths win, and an omitted one still falls back to 128.
+        selected = parse(base + [
+            "--hidden-layers", "4",
+            "--hidden1-size", "512",
+            "--hidden2-size", "256",
+            "--hidden4-size", "64",
+        ])
+        assert hidden_sizes_from_args(selected) == (512, 256, 128, 64)
+
+        # Every layer up to the command-line maximum has its own width flag.
+        deepest = parse(base + [
+            "--hidden-layers", str(MAX_HIDDEN_LAYER_COUNT),
+        ] + [
+            argument
+            for position in range(1, MAX_HIDDEN_LAYER_COUNT + 1)
+            for argument in (f"--hidden{position}-size", str(32 * position))
+        ])
+        assert hidden_sizes_from_args(deepest) == tuple(
+            32 * position
+            for position in range(1, MAX_HIDDEN_LAYER_COUNT + 1)
+        )
+
+        # Depth beyond the available width flags is refused on the CLI.
+        try:
+            parse(base + ["--hidden-layers", str(MAX_HIDDEN_LAYER_COUNT + 1)])
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError(
+                f"--hidden-layers must stop at {MAX_HIDDEN_LAYER_COUNT}"
+            )
+
+        # A single hidden layer is supported and drops the unused widths.
+        shallow = parse(base + ["--hidden-layers", "1", "--hidden1-size", "96"])
+        assert hidden_sizes_from_args(shallow) == (96,)
+        assert shallow.hidden2_size is None
+
+        # Sizing a layer the architecture does not have is refused rather than
+        # silently ignored.
+        try:
+            parse(base + ["--hidden-layers", "2", "--hidden3-size", "64"])
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("--hidden3-size must require --hidden-layers 3")
+
+    architecture = architecture_from_hidden_sizes(512, 256, 128, 64)
+    assert architecture.hidden_layer_count == 4
+    assert architecture.as_list() == [168, 512, 256, 128, 64, 56]
+    assert architecture.as_dict()["hidden4_size"] == 64
+    assert list(architecture.policy_weight_shapes()) == [
+        "W1", "b1", "W2", "b2", "W3", "b3", "W4", "b4", "W5", "b5",
+    ]
+    # The two-layer metadata representation is unchanged, so existing seed-addressed
+    # supervised assets keep matching without a rebuild.
+    assert architecture_from_hidden_sizes(256, 128).as_dict() == {
+        "input_size": 168,
+        "hidden1_size": 256,
+        "hidden2_size": 128,
+        "output_size": 56,
+        "dtype": "float32",
+    }
+
+
+def test_networks_accept_any_depth_beyond_the_command_line_maximum():
+    """Build, train, and reload a network deeper than the CLI can express.
+
+    Depth is bounded only by the number of ``--hidden<n>-size`` options, so a
+    programmatic caller may use any ``n >= 1``.
+    """
+    hidden_sizes = tuple(range(12, 0, -1))
+    assert len(hidden_sizes) > MAX_HIDDEN_LAYER_COUNT
+    network = SupervisedNeuralNetwork(
+        input_size=6,
+        output_size=4,
+        hidden_sizes=hidden_sizes,
+        learning_rate=0.05,
+        random_seed=19,
+        dropout_rate=0.2,
+        device="cpu",
+    )
+    assert network.layer_count == len(hidden_sizes) + 1
+    assert network.weight_names[-2:] == (
+        f"W{len(hidden_sizes) + 1}",
+        f"b{len(hidden_sizes) + 1}",
+    )
+
+    x = host_np.asarray(
+        host_np.random.RandomState(8).rand(6, 16),
+        dtype=host_np.float32,
+    )
+    y = host_np.zeros((4, 16), dtype=host_np.float32)
+    y[0] = 1.0
+    losses = network.train(
+        x,
+        y,
+        epochs=5,
+        batch_size=8,
+        quiet=True,
+        validation_interval=100,
+    )
+    assert len(losses) == 5
+    assert all(host_np.isfinite(float(loss)) for loss in losses)
+
+    architecture = architecture_from_hidden_sizes(hidden_sizes)
+    assert architecture.hidden_layer_count == len(hidden_sizes)
+    assert architecture.as_list() == [168, *hidden_sizes, 56]
+
+
+def test_deep_networks_train_and_survive_a_checkpoint_round_trip():
+    """Train, save, and reload several supported hidden-layer counts."""
+    for hidden_sizes in ((7,), (7, 5), (7, 5, 4), (7, 5, 4, 3), (8, 7, 6, 5, 4, 3, 3, 2)):
+        layer_count = len(hidden_sizes) + 1
+        network = PolicyNetwork(
+            input_size=6,
+            output_size=5,
+            hidden_sizes=hidden_sizes,
+            learning_rate=0.05,
+            random_seed=21,
+            use_value_head=True,
+            device="cpu",
+        )
+        assert network.layer_count == layer_count
+        assert network.weight_names == tuple(
+            name
+            for index in range(1, layer_count + 1)
+            for name in (f"W{index}", f"b{index}")
+        )
+        # The critic reads the last hidden activation whatever the depth.
+        assert network.last_hidden_activation_key == f"A{len(hidden_sizes)}"
+        assert network.Wv.shape == (1, hidden_sizes[-1])
+
+        x = host_np.asarray(
+            host_np.random.RandomState(4).rand(6, 12),
+            dtype=host_np.float32,
+        )
+        legal_masks = host_np.zeros((5, 12), dtype=bool)
+        legal_masks[1] = True
+        legal_masks[3] = True
+        actions = host_np.full(12, 1)
+        network.backward_ppo(
+            x,
+            actions,
+            legal_masks,
+            host_np.zeros(12, dtype=host_np.float32),
+            host_np.ones(12, dtype=host_np.float32),
+            returns=host_np.zeros(12, dtype=host_np.float32),
+            old_values=host_np.zeros(12, dtype=host_np.float32),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "deep.npz")
+            network.save(path)
+            reloaded = PolicyNetwork.load(
+                path,
+                learning_rate=0.05,
+                use_value_head=True,
+                device="cpu",
+            )
+        assert reloaded.hidden_sizes == hidden_sizes
+        for name in network.weight_names + ("Wv", "bv"):
+            assert host_np.array_equal(
+                _to_numpy(getattr(reloaded, name)),
+                _to_numpy(getattr(network, name)),
+            )
+        assert host_np.allclose(
+            _to_numpy(reloaded.forward(x)),
+            _to_numpy(network.forward(x)),
+        )
 
 
 def test_supervised_early_stopping_and_lr_decay_use_independent_counters():
@@ -1907,6 +2110,18 @@ def main():
         (
             "unregularized network defaults",
             test_networks_are_unregularized_without_explicit_coefficients,
+        ),
+        (
+            "hidden-layer depth and width flags",
+            test_hidden_layer_flags_keep_the_default_and_size_deeper_stacks,
+        ),
+        (
+            "deep network checkpoint round trip",
+            test_deep_networks_train_and_survive_a_checkpoint_round_trip,
+        ),
+        (
+            "unbounded network depth",
+            test_networks_accept_any_depth_beyond_the_command_line_maximum,
         ),
         (
             "supervised checkpoint retention",

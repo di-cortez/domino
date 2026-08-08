@@ -11,6 +11,10 @@ import secrets
 import numpy as np
 
 from agents.encoder import DominoEncoder
+from agents.network_architecture import (
+    hidden_layer_count_from_weights,
+    policy_layer_names,
+)
 from agents.nn import DISABLED_DROPOUT_RATE
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import RULESET_VERSION
@@ -30,18 +34,24 @@ DEFAULTED_CONFIGURATION_KEYS = {
     "weight_decay": 0.0,
     "dropout_rate": 0.0,
 }
-RESUME_POLICY_WEIGHT_NAMES = ("W1", "b1", "W2", "b2", "W3", "b3")
 PPO_TRAINING_ALGORITHM = "ppo_v1"
 LEGACY_TRAINING_ALGORITHM = "reinforce_v1"
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
 
+def _checkpoint_shape(network):
+    """Return the encoder-facing input and output widths of one network."""
+    output_layer = getattr(network, f"W{network.layer_count}")
+    return int(network.W1.shape[1]), int(output_layer.shape[0])
+
+
 def _checkpoint_matches_encoder(network):
     """Return True when a loaded checkpoint matches the current encoder shape."""
     encoder = DominoEncoder()
+    input_size, output_size = _checkpoint_shape(network)
     return (
-        network.W1.shape[1] == encoder.VECTOR_SIZE
-        and network.W3.shape[0] == len(encoder.all_actions)
+        input_size == encoder.VECTOR_SIZE
+        and output_size == len(encoder.all_actions)
     )
 
 
@@ -74,9 +84,10 @@ def _load_initial_network(
                 dropout_rate=dropout_rate,
             )
             if not _checkpoint_matches_encoder(network):
+                input_size, output_size = _checkpoint_shape(network)
                 raise ValueError(
                     f"RL checkpoint {rl_weights_path} has shape "
-                    f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
+                    f"input={input_size}, output={output_size}, "
                     "but the current encoder expects input=168, output=56."
                 )
             saved_algorithm = getattr(network, "rl_training_algorithm", None)
@@ -111,9 +122,10 @@ def _load_initial_network(
         dropout_rate=dropout_rate,
     )
     if not _checkpoint_matches_encoder(network):
+        input_size, output_size = _checkpoint_shape(network)
         raise ValueError(
             f"SL checkpoint {sl_weights_path} has shape "
-            f"input={network.W1.shape[1]}, output={network.W3.shape[0]}, "
+            f"input={input_size}, output={output_size}, "
             "but the current encoder expects input=168, output=56. "
             "Regenerate the supervised dataset and retrain SL first."
         )
@@ -213,7 +225,11 @@ def _atomic_resume_state_save(path, metadata, pool_snapshots):
         "pool_count": np.asarray(len(pool_snapshots), dtype=np.int64),
     }
     for snapshot_index, snapshot in enumerate(pool_snapshots):
-        for name in RESUME_POLICY_WEIGHT_NAMES:
+        # The snapshot itself carries the layer count, so a deeper policy is
+        # stored under the same pool_<index>_<name> convention.
+        for name in policy_layer_names(
+            hidden_layer_count_from_weights(snapshot)
+        ):
             arrays[f"pool_{snapshot_index:03d}_{name}"] = np.asarray(snapshot[name])
     temporary = path.with_name(
         f".{path.stem}.tmp-{os.getpid()}-{secrets.token_hex(4)}.npz"
@@ -247,14 +263,22 @@ def load_resume_state(weights_path, state_path):
         pool_count = int(state["pool_count"])
         snapshots = []
         for snapshot_index in range(pool_count):
+            prefix = f"pool_{snapshot_index:03d}_"
+            stored = {
+                key[len(prefix):] for key in state.files if key.startswith(prefix)
+            }
+            try:
+                names = policy_layer_names(
+                    hidden_layer_count_from_weights(stored)
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"RL resume state {state_path} has no usable policy "
+                    f"weights for opponent snapshot {snapshot_index}."
+                ) from exc
             weights = {}
-            for name in RESUME_POLICY_WEIGHT_NAMES:
-                key = f"pool_{snapshot_index:03d}_{name}"
-                if key not in state:
-                    raise ValueError(
-                        f"RL resume state {state_path} is missing {key}."
-                    )
-                weights[name] = np.asarray(state[key]).copy()
+            for name in names:
+                weights[name] = np.asarray(state[prefix + name]).copy()
             snapshots.append(weights)
     return metadata, tuple(snapshots)
 

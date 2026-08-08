@@ -57,7 +57,8 @@ Important RL options are:
 | `--weight-decay` | L2 decay forwarded to both the SL and the RL stage | off |
 | `--dropout` | Hidden-layer dropout forwarded to both the SL and the RL stage | off |
 | `--rl-ppo` / `--rl-no-ppo` | PPO or one-update REINFORCE | PPO |
-| `--hidden1-size` / `--hidden2-size` | Hidden policy widths used by supervised training | `256` / `128` |
+| `--hidden-layers` | Hidden policy layers, 1 to 8, used by supervised training | `2` |
+| `--hidden1-size` ... `--hidden8-size` | Hidden policy widths used by supervised training | `256`, then `128` |
 | `--rl-seed` | Fixed training seed | unset |
 | `--rl-device` | `auto`, `cpu`, or `gpu` | `auto` |
 

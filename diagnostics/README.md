@@ -118,7 +118,7 @@ rollout workers. The RL run directory receives:
 |---|---|
 | `periodic_diagnostics.jsonl` | Atomic compact source of truth: one static header followed by deduplicated data arrays. |
 | `rl_vs_random_progress.csv` | Six-column derived learning curve with cumulative RL-plus-diagnostic hours, win rate, and 95% interval. |
-| `rl_vs_random_progress.png` | Linear cumulative RL-plus-diagnostic-hours curve with point zero and 95% intervals. |
+| `rl_vs_random_progress.png` | Linear cumulative RL-plus-diagnostic-hours curve with point zero and 95% intervals. Its footer reports the value head, the hidden-layer count with every width (`4 layers 512x256x128x64`), and both regularizers. |
 | `rl_vs_random_progress_logx.png` | Optional separate symlog time rendering. |
 | `best_checkpoint.json` | Highest periodic win rate; never used implicitly for resume. |
 | `periodic_diagnostic_tuning.json` | Forever's one-time diagnostic-worker selection, reused after resume. |

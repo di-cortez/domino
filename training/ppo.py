@@ -413,13 +413,14 @@ def _validate_first_minibatch(network, storage, indices):
     # first minibatch, so a GPU OOM can safely switch to RAM streaming.
     xp = network.xp
     workspace = [
-        xp.empty_like(network.cache["Z3"]),
-        xp.empty_like(network.cache["A2"]),
-        xp.empty_like(network.cache["Z2"]),
-        xp.empty_like(network.cache["A1"]),
-        xp.empty_like(network.cache["Z1"]),
+        xp.empty_like(network.cache[f"Z{index}"])
+        for index in range(1, network.layer_count + 1)
     ]
-    parameter_names = ["W1", "b1", "W2", "b2", "W3", "b3"]
+    workspace.extend(
+        xp.empty_like(network.cache[f"A{index}"])
+        for index in range(1, network.layer_count)
+    )
+    parameter_names = list(network.weight_names)
     if getattr(network, "use_value_head", False):
         parameter_names.extend(("Wv", "bv"))
         workspace.append(xp.empty((1, batch["states"].shape[1]), dtype=xp.float32))
@@ -512,7 +513,10 @@ def evaluate_full_buffer(
         value_losses = None
         value_delta = None
         if getattr(network, "use_value_head", False):
-            values = xp.dot(network.Wv, network.cache["A2"]) + network.bv
+            values = xp.dot(
+                network.Wv,
+                network.cache[network.last_hidden_activation_key],
+            ) + network.bv
             value_losses, _value_gradient, value_delta = (
                 network.clipped_value_loss_terms(
                     values,

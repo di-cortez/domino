@@ -8,6 +8,7 @@ All playable agents expose the same `choose_move(state, legal_actions)` shape so
 | `agent.py` | Uniform-random `RandomAgent` baseline. |
 | `encoder.py` | Single source of truth for state-to-vector and tile-play action encoding. |
 | `heuristic_agent.py` | `StrategicAgent`, the exact-probability rule-based teacher used for supervised labels and benchmarks. |
+| `network_architecture.py` | Hidden-layer depth/width resolution and the serializable policy dimensions. |
 | `nn.py` | Per-network NumPy/CuPy float32 MLP backend with explicit `auto`/`cpu`/`gpu` selection. |
 | `neural_agent.py` | Loads `models/domino_sl_weights.npz` and plays the supervised policy. |
 | `rl_nn.py` | Masked PPO/REINFORCE network with entropy regularization and an optional legacy value head. |
@@ -22,7 +23,7 @@ inputs and converts them to that network's backend in `float32`. Training may
 use host RAM, disk-backed arrays, full GPU residency, or a reusable rotating GPU
 window; these storage policies live in `training/supervised_runtime.py`.
 Both networks accept the same optional `weight_decay`, which applies only to
-the weight matrices (`W1`, `W2`, `W3`, and the RL critic `Wv`); bias vectors
+the weight matrices (`W1` through the output layer, and the RL critic `Wv`); bias vectors
 are never regularized. The supervised network folds its decay into the
 gradient, while `PolicyNetwork` applies a decoupled shrink after gradient
 clipping so reported RL gradient norms keep describing the policy and value
@@ -31,10 +32,10 @@ gradient alone. Both regularizers default to disabled
 
 Optional dropout is likewise a property of the shared architecture, so both
 `SupervisedNeuralNetwork` and `PolicyNetwork` accept `dropout_rate` and apply
-inverted dropout to both hidden activations. It is active only in a training
+inverted dropout to every hidden activation. It is active only in a training
 forward pass (`forward(x, training=True)`); the default `training=False` keeps
 gameplay, evaluation, opponent-pool snapshots, and whole-buffer PPO metrics on
-the complete network. The forward pass caches the scale masks as `D1` and `D2`
+the complete network. The forward pass caches one scale mask per hidden layer as `D1..D{H}`
 only while dropout is active, and backpropagation reuses exactly those masks.
 `PolicyNetwork` draws its masks from the host NumPy generator because that
 state, unlike CuPy's, is part of the exact RL resume pair.
@@ -45,6 +46,19 @@ allowing pipeline and standalone logs to explain a NumPy/CPU fallback instead
 of claiming that an importable but unusable CuPy installation is active. See
 the root README for the complete Linux driver, CuPy `[ctk]`, verification, and
 troubleshooting procedure.
+
+The hidden stack is configurable. `hidden_sizes` selects any number of hidden
+layers from one upwards, of any width; `agents/network_architecture.py` owns
+the defaults (256 then 128, with 128 for any deeper layer) and the CLI
+resolution used by `training/training_loop.py`. Only the command line is
+bounded, at `MAX_HIDDEN_LAYER_COUNT` (8), because one `--hidden<n>-size` option
+has to exist per layer. Weights are named `W1..W{L}`/`b1..b{L}` for `L`
+layers including the output layer, so a two-layer network keeps exactly the
+historical `W1, b1, W2, b2, W3, b3` checkpoint keys and every existing
+checkpoint loads unchanged. Loaders read the depth and widths back out of the
+archive, so `NeuralAgent`, `PolicyNetwork`, the rollout workers, the opponent
+pool, resume state, and diagnostics all follow the checkpoint instead of a
+configured shape.
 
 `rl_nn.py::PolicyNetwork` uses the same per-network resolver via a `device`
 parameter (`"auto"` follows usable CuPy; `"cpu"`/`"gpu"` are explicit), so an RL run
@@ -123,7 +137,8 @@ gradient. A decision's reward is not weighted by its number of legal choices.
 
 `PolicyNetwork` is policy-only by default and self-play updates it with PPO.
 Optional value-head training is retained only for explicit `--no-ppo`
-regression runs; it adds `Wv`/`bv` next to the six policy arrays.
+regression runs; it adds `Wv`/`bv`, reading the last hidden activation, next to
+the policy arrays.
 Diagnostics detect those two arrays, load the optional head without changing
 the policy decision, and obtain `V(s)` from the hidden activation already
 computed for each real decision.

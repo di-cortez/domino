@@ -84,12 +84,17 @@ tiles times two board ends. Draw, pass, and single-option tile plays are forced
 by the engine and bypass neural inference and policy-gradient sampling.
 
 `SupervisedNeuralNetwork` is a float32 MLP whose default policy shape is
-`168 -> 256 -> 128 -> 56`. The hidden widths have a single source of truth in
-`agents/network_architecture.py` and are configurable from supervised and
-canonical pipeline CLIs. `PolicyNetwork` extends it with masked
-policy-gradient updates and an optional training-only value head. Policy
-checkpoints store `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`; critic-enabled
-checkpoints also store `Wv` and `bv`. Current code still loads compatible
+`168 -> 256 -> 128 -> 56`. The hidden-layer count and every width have a single
+source of truth in `agents/network_architecture.py` and are configurable from
+the supervised and canonical pipeline CLIs with `--hidden-layers` and
+`--hidden1-size` through `--hidden8-size`; the networks themselves accept any
+depth, and only the command line is bounded. `PolicyNetwork` extends it with
+masked policy-gradient updates and an optional training-only value head over
+the last hidden activation. Policy checkpoints store `W1`, `b1`, ..., `W{L}`,
+`b{L}` for `L` layers including the output layer, so the default two-layer
+network still stores exactly `W1`, `b1`, `W2`, `b2`, `W3`, and `b3`;
+critic-enabled checkpoints also store `Wv` and `bv`. Every loader reads the
+architecture back out of the checkpoint. Current code still loads compatible
 float64 arrays by casting them to float32.
 
 ## Training data flow

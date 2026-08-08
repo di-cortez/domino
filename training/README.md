@@ -348,7 +348,7 @@ The supervised controls use these defaults:
 | Flag | Behavior | Default |
 |---|---|---:|
 | `--weight-decay [COEFFICIENT]` | Adds L2 decay to the weight matrices, but not biases | off (`0.0001`) |
-| `--dropout [RATE]` | Inverted dropout on both hidden layers | off (`0.1`) |
+| `--dropout [RATE]` | Inverted dropout on every hidden layer | off (`0.1`) |
 | `--early-stopping [PATIENCE]` | Stops after this many validation checks without improvement | `5` |
 | `--lr-decay [FACTOR]` | Multiplies LR after the configured consecutive failed checks | `0.5` (on) |
 | `--lr-decay-patience N` | Consecutive failed validation checks before each reduction | `5` |
@@ -360,8 +360,8 @@ The supervised controls use these defaults:
 | `--sl-training-plateau-min-relative-improvement F` | Block improvement below this fraction counts as saturated | `0.001` |
 | `--sl-device` / standalone `--device` | `auto`, forced `cpu`, or required `gpu` | `auto` |
 | `--sl-batch-size N` | Fixed safe batch; power of two from 1,024 through 1,048,576 | `8,192` |
-| `--hidden1-size N` | First hidden policy-layer width | `256` |
-| `--hidden2-size N` | Second hidden policy-layer width | `128` |
+| `--hidden-layers N` | Number of hidden policy layers, 1 to 8 | `2` |
+| `--hidden1-size N` ... `--hidden8-size N` | Width of one hidden layer | `256`, then `128` |
 | `--sl-memory-reserve-mb N` | Free host RAM retained | `512` |
 | `--sl-gpu-memory-reserve-mb N` | Effective free VRAM retained | `512` |
 | `--sl-seed N` | Reproducible initialization and epoch permutations | unset |
@@ -398,7 +398,7 @@ are equivalent.
 |---|---:|---|---|
 | *(omitted)* | `0.0` | — | No regularization |
 | `--weight-decay [COEFFICIENT]` | `0.0001` | supervised **and** RL | L2 decay on the weight matrices; biases are never decayed |
-| `--dropout [RATE]` | `0.1` | supervised **and** RL | Inverted dropout on both hidden layers |
+| `--dropout [RATE]` | `0.1` | supervised **and** RL | Inverted dropout on every hidden layer |
 
 Each regularizer is one flag for both stages: the supervised policy and the RL
 policy are the same architecture, and the RL run starts from the supervised
@@ -650,7 +650,7 @@ python -m training.pipeline forever --value-head --run-name critic
 python -m training.self_play --value-head
 ```
 
-This adds a linear `V(s)` head over the second hidden layer. The current
+This adds a linear `V(s)` head over the last hidden layer. The current
 finalized policy reward is the value target, and the masked policy update uses
 `reward - V(s)` as its advantage. PPO saves the collection-time values, uses a
 clipped value loss, and evaluates value loss, clipping, prediction moments, and
@@ -677,7 +677,7 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 | `--clip-grad-norm` | Gradient-norm clipping threshold for the policy-gradient update | `5.0` |
 | `--ppo` / `--no-ppo` | Masked PPO or historical one-update REINFORCE regression | PPO |
 | `--value-head` | Train a linear critic with PPO or REINFORCE | off |
-| `--weight-decay [COEFFICIENT]` | Decoupled L2 shrink on `W1`, `W2`, `W3`, and `Wv` after clipping; shared with supervised training | off (`0.0001`) |
+| `--weight-decay [COEFFICIENT]` | Decoupled L2 shrink on every weight matrix and `Wv` after clipping; shared with supervised training | off (`0.0001`) |
 | `--dropout [RATE]` | Hidden-layer dropout shared with supervised training | off (`0.1`) |
 | `--value-coef` | Critic loss coefficient when the value head is enabled | `0.5` |
 | `--normalize-advantages` / `--no-normalize-advantages` | Standardize once over the complete iteration buffer | on for PPO |
@@ -700,18 +700,59 @@ mean/std/min/max of the pre-update `V(s)` predictions for every displayed
 iteration. These are the same predictions used in `reward - V(s)`; the report
 reuses that forward pass rather than evaluating the buffer again.
 
-The policy architecture defaults to `168 -> 256 -> 128 -> 56`. Its two hidden
-widths come from `agents/network_architecture.py` and can be changed consistently
-for supervised training and a canonical pipeline with `--hidden1-size` and
-`--hidden2-size`, for example:
+### Hidden-layer depth and width
+
+The policy architecture defaults to `168 -> 256 -> 128 -> 56`. Both the number
+of hidden layers and each width come from `agents/network_architecture.py` and
+are selected once for supervised training and the canonical pipeline:
+
+| Flag | Meaning | Default |
+|---|---|---:|
+| `--hidden-layers N` | Hidden layers, from 1 to 8 | `2` |
+| `--hidden1-size N` | Width of hidden layer 1 | `256` |
+| `--hidden2-size N` | Width of hidden layer 2 | `128` |
+| `--hidden3-size N` ... `--hidden8-size N` | Width of hidden layer 3 through 8 | `128` |
+
+An omitted width falls back to the default for that position, which keeps the
+historical 256 and 128 for the first two layers and uses 128 for every deeper
+layer. Sizing a layer the requested depth does not have is rejected instead of
+silently ignored, so `--hidden-layers 2 --hidden3-size 64` is an error.
 
 ```bash
-python -m training.pipeline forever --hidden1-size 512 --hidden2-size 256 \
-  --retrain-supervised --run-name wider
+# Unchanged default: two layers, 168 -> 256 -> 128 -> 56.
+python -m training.pipeline forever --run-name baseline
+
+# Four layers, sized 512, 256, 128 (defaulted), and 64.
+python -m training.pipeline forever --hidden-layers 4 \
+  --hidden1-size 512 --hidden2-size 256 --hidden4-size 64 \
+  --retrain-supervised --run-name deep
 ```
 
+The RL stage has no separate architecture flags: it adopts whatever depth and
+widths the supervised checkpoint stores. Weight arrays stay named `W1..W{L}`
+and `b1..b{L}` for `L` layers including the output layer, so a two-layer
+checkpoint keeps exactly its historical `W1, b1, W2, b2, W3, b3` keys and every
+pre-existing artifact loads unchanged.
+
 Architecture is part of supervised compatibility metadata and the immutable
-RL resume identity. A run cannot resume with different dimensions.
+RL resume identity. A run cannot resume with different dimensions, and changing
+depth or width against reusable assets requires `--retrain-supervised`.
+
+Only the command line stops at eight layers, because one `--hidden<n>-size`
+option has to exist per layer. Nothing in the networks, checkpoints, resume
+state, or metadata is limited to that depth, so a programmatic experiment can
+build any `n >= 1`:
+
+```python
+from agents.rl_nn import PolicyNetwork
+
+network = PolicyNetwork(hidden_sizes=(512, 384, 256, 192, 128, 96, 64, 48, 32))
+```
+
+The learning-curve footer in `rl_vs_random_progress.png` reports the depth and
+every width of the run it plots, for example
+`hidden 4 layers 512x256x128x64`. That row shrinks its font when a deep
+architecture would otherwise collide with the checkpoint block on its left.
 
 ### Device selection (`--device`)
 

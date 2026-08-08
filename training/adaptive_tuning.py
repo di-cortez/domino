@@ -14,6 +14,10 @@ import time
 
 import numpy as np
 
+from agents.network_architecture import (
+    hidden_layer_count_from_weights,
+    policy_layer_names,
+)
 from training.ppo import PPOBuffer, stable_seed
 from training.rl_constants import (
     RL_WORKER_AUTOTUNE_FRACTION,
@@ -37,7 +41,7 @@ TUNING_VERSION = 4
 
 def _policy_arrays(network):
     arrays = {}
-    names = ["W1", "b1", "W2", "b2", "W3", "b3"]
+    names = list(network.weight_names)
     if hasattr(network, "Wv") and hasattr(network, "bv"):
         names.extend(("Wv", "bv"))
     for name in names:
@@ -63,7 +67,9 @@ def pool_sha256(pool_snapshots):
     digest = hashlib.sha256()
     for snapshot_index, snapshot in enumerate(pool_snapshots):
         digest.update(str(snapshot_index).encode("ascii"))
-        for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
+        for name in policy_layer_names(
+            hidden_layer_count_from_weights(snapshot)
+        ):
             value = np.asarray(snapshot[name])
             digest.update(name.encode("ascii"))
             digest.update(value.tobytes(order="C"))

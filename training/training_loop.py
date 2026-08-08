@@ -19,10 +19,13 @@ import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.network_architecture import (
-    DEFAULT_HIDDEN1_SIZE,
-    DEFAULT_HIDDEN2_SIZE,
+    DEFAULT_HIDDEN_LAYER_COUNT,
+    DEFAULT_HIDDEN_SIZES,
     DEFAULT_NETWORK_ARCHITECTURE,
+    MAX_HIDDEN_LAYER_COUNT,
     architecture_from_hidden_sizes,
+    default_hidden_size,
+    resolve_hidden_sizes,
 )
 from agents.nn import (
     DISABLED_DROPOUT_RATE,
@@ -360,8 +363,7 @@ def _host_dataset_working_set_bytes(
         + estimate_supervised_workspace_bytes(
             min(DEFAULT_SUPERVISED_BATCH_SIZE, train_count),
             encoder.VECTOR_SIZE,
-            architecture.hidden1_size,
-            architecture.hidden2_size,
+            architecture.hidden_sizes,
             len(encoder.all_actions),
         )
     )
@@ -613,9 +615,8 @@ def _load_existing_weights(network, weights_file):
 def _create_network(*, device, weight_decay, dropout_rate, seed, architecture):
     return SupervisedNeuralNetwork(
         input_size=architecture.input_size,
-        hidden1_size=architecture.hidden1_size,
-        hidden2_size=architecture.hidden2_size,
         output_size=architecture.output_size,
+        hidden_sizes=architecture.hidden_sizes,
         learning_rate=INITIAL_SUPERVISED_LEARNING_RATE,
         weight_decay=weight_decay,
         dropout_rate=dropout_rate,
@@ -635,8 +636,7 @@ def _is_gpu_startup_failure(exc):
 def train_supervised(
     epochs=EPOCHS,
     batch_size=DEFAULT_SUPERVISED_BATCH_SIZE,
-    hidden1_size=DEFAULT_HIDDEN1_SIZE,
-    hidden2_size=DEFAULT_HIDDEN2_SIZE,
+    hidden_sizes=DEFAULT_HIDDEN_SIZES,
     dataset_file="dataset/supervised_dataset.jsonl",
     weights_file="models/domino_sl_weights.npz",
     cache_file=ENCODED_CACHE_FILE,
@@ -663,7 +663,7 @@ def train_supervised(
     """Train the policy and return scheduler, storage, batch, and memory data."""
     if epochs < 1:
         raise ValueError("epochs must be positive")
-    architecture = architecture_from_hidden_sizes(hidden1_size, hidden2_size)
+    architecture = architecture_from_hidden_sizes(hidden_sizes)
     started = time.time()
     if seed is not None:
         np.random.seed(seed)
@@ -728,8 +728,7 @@ def train_supervised(
             dataset.x,
             dataset.y,
             reserve_mb=gpu_memory_reserve_mb,
-            hidden1_size=architecture.hidden1_size,
-            hidden2_size=architecture.hidden2_size,
+            hidden_sizes=architecture.hidden_sizes,
         )
         if residency_probe.capacity_examples < 1:
             reason = (
@@ -1170,12 +1169,87 @@ def add_regularization_arguments(group):
         default=DISABLED_DROPOUT_RATE,
         metavar="RATE",
         help=(
-            "Enable inverted dropout on both hidden layers of the supervised "
+            "Enable inverted dropout on every hidden layer of the supervised "
             "and RL networks during training updates only. Pass a rate or "
             f"omit it for {DEFAULT_DROPOUT_RATE}."
         ),
     )
     return group
+
+
+def add_architecture_arguments(group):
+    """Add the hidden-layer depth and width controls.
+
+    ``--hidden-layers`` selects the depth and each ``--hidden<n>-size``
+    selects one width. Widths default to :func:`default_hidden_size`, so the
+    unchanged default architecture is still two layers of 256 and 128 neurons
+    and any deeper layer that is not sized explicitly uses 128. The RL stage
+    has no separate flags: it adopts the architecture of the supervised
+    checkpoint it starts from.
+
+    The command line stops at ``MAX_HIDDEN_LAYER_COUNT`` because one width
+    option has to exist per layer. The networks themselves accept any depth,
+    so a deeper experiment can still build one directly from ``hidden_sizes``.
+    """
+    group.add_argument(
+        "--hidden-layers",
+        type=_positive_int,
+        choices=range(1, MAX_HIDDEN_LAYER_COUNT + 1),
+        default=DEFAULT_HIDDEN_LAYER_COUNT,
+        metavar="N",
+        help=(
+            "Number of hidden policy layers, from 1 to "
+            f"{MAX_HIDDEN_LAYER_COUNT} (default: %(default)s)."
+        ),
+    )
+    for position in range(1, MAX_HIDDEN_LAYER_COUNT + 1):
+        # SUPPRESS keeps an unset width out of the namespace until
+        # resolve_architecture_arguments fills in the documented fallback.
+        group.add_argument(
+            f"--hidden{position}-size",
+            type=_positive_int,
+            default=argparse.SUPPRESS,
+            metavar="N",
+            help=(
+                f"Neurons in hidden layer {position} "
+                f"(default: {default_hidden_size(position)}). Requires "
+                f"--hidden-layers of at least {position}."
+            ),
+        )
+    return group
+
+
+def resolve_architecture_arguments(args):
+    """Resolve ``--hidden-layers``/``--hidden<n>-size`` in place on ``args``.
+
+    Every entry point calls this once after parsing, so each
+    ``args.hidden<n>_size`` afterwards holds a concrete width for a layer the
+    architecture has and ``None`` for one it does not. The namespace stays free
+    of derived values; :func:`hidden_sizes_from_args` recomposes the tuple.
+    """
+    hidden_sizes = resolve_hidden_sizes(
+        args.hidden_layers,
+        [
+            getattr(args, f"hidden{position}_size", None)
+            for position in range(1, MAX_HIDDEN_LAYER_COUNT + 1)
+        ],
+        maximum=MAX_HIDDEN_LAYER_COUNT,
+    )
+    for position in range(1, MAX_HIDDEN_LAYER_COUNT + 1):
+        setattr(
+            args,
+            f"hidden{position}_size",
+            hidden_sizes[position - 1] if position <= len(hidden_sizes) else None,
+        )
+    return args
+
+
+def hidden_sizes_from_args(args):
+    """Return the resolved hidden widths recorded on a parsed namespace."""
+    return tuple(
+        getattr(args, f"hidden{position}_size")
+        for position in range(1, int(args.hidden_layers) + 1)
+    )
 
 
 def add_optional_training_arguments(parser, *, include_device_alias=False):
@@ -1269,18 +1343,7 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
         default=DEFAULT_SUPERVISED_BATCH_SIZE,
         help="Fixed supervised mini-batch size.",
     )
-    group.add_argument(
-        "--hidden1-size",
-        type=_positive_int,
-        default=DEFAULT_HIDDEN1_SIZE,
-        help="Number of neurons in the first hidden policy layer.",
-    )
-    group.add_argument(
-        "--hidden2-size",
-        type=_positive_int,
-        default=DEFAULT_HIDDEN2_SIZE,
-        help="Number of neurons in the second hidden policy layer.",
-    )
+    add_architecture_arguments(group)
     group.add_argument(
         "--sl-memory-reserve-mb",
         type=_nonnegative_int,
@@ -1308,15 +1371,19 @@ def parse_args(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     add_optional_training_arguments(parser, include_device_alias=True)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    try:
+        return resolve_architecture_arguments(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+        raise
 
 
 def main(argv=None):
     args = parse_args(argv)
     train_supervised(
         batch_size=args.sl_batch_size,
-        hidden1_size=args.hidden1_size,
-        hidden2_size=args.hidden2_size,
+        hidden_sizes=hidden_sizes_from_args(args),
         weight_decay=args.weight_decay,
         dropout_rate=args.dropout,
         early_stopping_patience=args.early_stopping,

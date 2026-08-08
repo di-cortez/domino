@@ -11,6 +11,7 @@ from agents.network_architecture import (
     DEFAULT_HIDDEN1_SIZE,
     DEFAULT_HIDDEN2_SIZE,
     DEFAULT_NETWORK_ARCHITECTURE,
+    policy_layer_names,
 )
 
 
@@ -43,6 +44,17 @@ except Exception as exc:
     GPU_ENABLED = False
 
 
+def validated_hidden_sizes(hidden_sizes):
+    """Return one tuple of hidden-layer widths of any depth from one upwards."""
+    sizes = tuple(int(size) for size in hidden_sizes)
+    if not sizes:
+        raise ValueError("hidden_sizes must describe at least one layer.")
+    for position, size in enumerate(sizes, start=1):
+        if size < 1:
+            raise ValueError(f"hidden{position}_size must be positive.")
+    return sizes
+
+
 def validated_dropout_rate(value):
     """Return one hidden-layer dropout probability inside ``[0, 1)``."""
     rate = float(value)
@@ -70,9 +82,16 @@ def resolve_device(device="auto"):
 
 
 class SupervisedNeuralNetwork:
-    """Three-layer float32 MLP with configurable hidden dimensions.
+    """Float32 MLP with a configurable number of hidden layers.
 
-    ``dropout_rate`` enables inverted dropout on both hidden activations. It is
+    ``hidden_sizes`` selects both the depth and the width of the hidden stack
+    and supersedes the two historical ``hidden1_size``/``hidden2_size``
+    arguments, which remain the default 256x128 architecture. Weights are named
+    ``W1..W{L}``/``b1..b{L}`` where ``L`` is the hidden-layer count plus the
+    output layer, so a two-layer network keeps exactly the historical
+    ``W1, b1, W2, b2, W3, b3`` checkpoint keys.
+
+    ``dropout_rate`` enables inverted dropout on every hidden activation. It is
     applied only inside training forward passes (``forward(..., training=True)``);
     validation, diagnostics, and gameplay always evaluate the complete network.
     """
@@ -88,11 +107,16 @@ class SupervisedNeuralNetwork:
         weight_decay=DISABLED_WEIGHT_DECAY,
         dropout_rate=DISABLED_DROPOUT_RATE,
         device="auto",
+        hidden_sizes=None,
     ):
         self.xp, self.device = resolve_device(device)
         self.lr = float(learning_rate)
         self.weight_decay = float(weight_decay)
         self.dropout_rate = validated_dropout_rate(dropout_rate)
+        self.hidden_sizes = validated_hidden_sizes(
+            (hidden1_size, hidden2_size) if hidden_sizes is None
+            else hidden_sizes
+        )
         random_source = (
             self.xp.random
             if random_seed is None
@@ -106,28 +130,46 @@ class SupervisedNeuralNetwork:
             )
             return values * self.xp.asarray(scale, dtype=self.xp.float32)
 
-        self.W1 = initialized(
-            (hidden1_size, input_size),
-            host_np.sqrt(2.0 / input_size),
-        )
-        self.b1 = self.xp.zeros((hidden1_size, 1), dtype=self.xp.float32)
-        self.W2 = initialized(
-            (hidden2_size, hidden1_size),
-            host_np.sqrt(2.0 / hidden1_size),
-        )
-        self.b2 = self.xp.zeros((hidden2_size, 1), dtype=self.xp.float32)
-        self.W3 = initialized(
-            (output_size, hidden2_size),
-            host_np.sqrt(1.0 / hidden2_size),
-        )
-        self.b3 = self.xp.zeros((output_size, 1), dtype=self.xp.float32)
+        # Hidden layers keep He initialization and the output layer keeps its
+        # smaller Xavier-style scale, drawn in forward order so a fixed seed
+        # reproduces the historical two-layer network exactly.
+        dimensions = (input_size, *self.hidden_sizes, output_size)
+        for index in range(1, len(dimensions)):
+            fan_in = dimensions[index - 1]
+            fan_out = dimensions[index]
+            gain = 1.0 if index == self.layer_count else 2.0
+            setattr(
+                self,
+                f"W{index}",
+                initialized((fan_out, fan_in), host_np.sqrt(gain / fan_in)),
+            )
+            setattr(
+                self,
+                f"b{index}",
+                self.xp.zeros((fan_out, 1), dtype=self.xp.float32),
+            )
         self.cache = {}
         self.last_gradient_dtypes = {}
         self.last_training_summary = {}
 
     @property
+    def layer_count(self):
+        """Return the number of weight layers, hidden stack plus output."""
+        return len(self.hidden_sizes) + 1
+
+    @property
     def weight_names(self):
-        return ("W1", "b1", "W2", "b2", "W3", "b3")
+        return policy_layer_names(len(self.hidden_sizes))
+
+    @property
+    def last_hidden_activation_key(self):
+        """Return the cache key of the activation feeding the output layer."""
+        return f"A{len(self.hidden_sizes)}"
+
+    @property
+    def logits_key(self):
+        """Return the cache key of the pre-softmax output-layer activation."""
+        return f"Z{self.layer_count}"
 
     def relu(self, z):
         return self.xp.maximum(self.xp.asarray(0, dtype=z.dtype), z)
@@ -185,84 +227,97 @@ class SupervisedNeuralNetwork:
 
     def forward(self, x, training=False):
         x = self._to_backend(x)
-        z1 = self.xp.dot(self.W1, x) + self.b1
-        a1, d1 = self._hidden_dropout(self.relu(z1), training)
-        z2 = self.xp.dot(self.W2, a1) + self.b2
-        a2, d2 = self._hidden_dropout(self.relu(z2), training)
-        z3 = self.xp.dot(self.W3, a2) + self.b3
-        a3 = self.softmax(z3)
+        last = self.layer_count
+        cache = {"X": x}
+        activation = x
+        for index in range(1, last):
+            pre_activation = self.xp.dot(
+                getattr(self, f"W{index}"),
+                activation,
+            ) + getattr(self, f"b{index}")
+            activation, mask = self._hidden_dropout(
+                self.relu(pre_activation),
+                training,
+            )
+            cache[f"Z{index}"] = pre_activation
+            cache[f"A{index}"] = activation
+            # Mask entries exist only while dropout is active, so every cached
+            # value stays a float32 activation array for the disabled default.
+            if mask is not None:
+                cache[f"D{index}"] = mask
+        logits = self.xp.dot(
+            getattr(self, f"W{last}"),
+            activation,
+        ) + getattr(self, f"b{last}")
+        probabilities = self.softmax(logits)
+        cache[f"Z{last}"] = logits
+        cache[f"A{last}"] = probabilities
+        self.cache = cache
+        return probabilities
 
-        self.cache = {
-            "X": x,
-            "Z1": z1,
-            "A1": a1,
-            "Z2": z2,
-            "A2": a2,
-            "Z3": z3,
-            "A3": a3,
-        }
-        # Mask entries exist only while dropout is active, so every cached
-        # value stays a float32 activation array for the disabled default.
-        if d1 is not None:
-            self.cache["D1"] = d1
-            self.cache["D2"] = d2
-        return a3
+    def backpropagate_layers(self, delta, inverse_count, hidden_gradient_hook=None):
+        """Return every weight and bias gradient from the cached forward pass.
+
+        ``delta`` is the gradient with respect to the output-layer logits.
+        ``hidden_gradient_hook`` receives the gradient with respect to the last
+        hidden activation before dropout is reapplied, which is how the RL
+        value head folds its shared contribution into the policy trunk. The
+        returned mapping is ordered ``W1, b1, ..., W{L}, b{L}`` so
+        gradient-norm accumulation stays independent of the layer count.
+        """
+        computed = {}
+        for index in range(self.layer_count, 0, -1):
+            previous = (
+                self.cache[f"A{index - 1}"] if index > 1 else self.cache["X"]
+            )
+            computed[f"W{index}"] = inverse_count * self.xp.dot(delta, previous.T)
+            computed[f"b{index}"] = inverse_count * self.xp.sum(
+                delta,
+                axis=1,
+                keepdims=True,
+            )
+            if index == 1:
+                break
+            propagated = self.xp.dot(getattr(self, f"W{index}").T, delta)
+            if index == self.layer_count and hidden_gradient_hook is not None:
+                propagated = hidden_gradient_hook(propagated)
+            propagated = self._backpropagate_dropout(propagated, f"D{index - 1}")
+            delta = propagated * self.relu_derivative(self.cache[f"Z{index - 1}"])
+        gradients = {}
+        for index in range(1, self.layer_count + 1):
+            gradients[f"W{index}"] = computed[f"W{index}"]
+            gradients[f"b{index}"] = computed[f"b{index}"]
+        return gradients
 
     def backward(self, y_target):
         y_target = self._to_backend(y_target)
         sample_count = y_target.shape[1]
-        a3 = self.cache["A3"]
-        a2 = self.cache["A2"]
-        a1 = self.cache["A1"]
+        last = self.layer_count
+        probabilities = self.cache[f"A{last}"]
         x = self.cache["X"]
         inverse_count = self.xp.asarray(
             1.0 / sample_count,
             dtype=x.dtype,
         )
 
-        dz3 = a3 - y_target
-        dW3 = inverse_count * self.xp.dot(dz3, a2.T)
-        db3 = inverse_count * self.xp.sum(dz3, axis=1, keepdims=True)
-
-        da2 = self._backpropagate_dropout(
-            self.xp.dot(self.W3.T, dz3),
-            "D2",
+        gradients = self.backpropagate_layers(
+            probabilities - y_target,
+            inverse_count,
         )
-        dz2 = da2 * self.relu_derivative(self.cache["Z2"])
-        dW2 = inverse_count * self.xp.dot(dz2, a1.T)
-        db2 = inverse_count * self.xp.sum(dz2, axis=1, keepdims=True)
-
-        da1 = self._backpropagate_dropout(
-            self.xp.dot(self.W2.T, dz2),
-            "D1",
-        )
-        dz1 = da1 * self.relu_derivative(self.cache["Z1"])
-        dW1 = inverse_count * self.xp.dot(dz1, x.T)
-        db1 = inverse_count * self.xp.sum(dz1, axis=1, keepdims=True)
-
-        gradients = {
-            "W1": dW1,
-            "b1": db1,
-            "W2": dW2,
-            "b2": db2,
-            "W3": dW3,
-            "b3": db3,
-        }
         self.last_gradient_dtypes = {
             name: gradient.dtype for name, gradient in gradients.items()
         }
         decay = self.xp.asarray(self.weight_decay, dtype=x.dtype)
         learning_rate = self.xp.asarray(self.lr, dtype=x.dtype)
-        self.W3 -= learning_rate * (dW3 + decay * self.W3)
-        self.b3 -= learning_rate * db3
-        self.W2 -= learning_rate * (dW2 + decay * self.W2)
-        self.b2 -= learning_rate * db2
-        self.W1 -= learning_rate * (dW1 + decay * self.W1)
-        self.b1 -= learning_rate * db1
+        for index in range(last, 0, -1):
+            weight = getattr(self, f"W{index}")
+            bias = getattr(self, f"b{index}")
+            weight -= learning_rate * (gradients[f"W{index}"] + decay * weight)
+            bias -= learning_rate * gradients[f"b{index}"]
 
         epsilon = self.xp.asarray(1e-8, dtype=x.dtype)
         return -inverse_count * self.xp.sum(
-            y_target * self.xp.log(a3 + epsilon)
+            y_target * self.xp.log(probabilities + epsilon)
         )
 
     def _as_float(self, value):

@@ -42,6 +42,10 @@ CSV_FIELDS = (
     "ci95_low_percent",
     "ci95_high_percent",
 )
+FOOTER_FONT_SIZE = 8.0
+FOOTER_MIN_FONT_SIZE = 5.0
+# Left and right footer margins plus the gap kept between the two blocks.
+FOOTER_ROW_MARGIN_FRACTION = 0.05
 HISTORY_RECORD_TYPE = "periodic_rl_vs_random_history"
 HISTORY_CHECKPOINT_BASE = "checkpoints"
 HISTORY_STATIC_FIELDS = (
@@ -108,16 +112,27 @@ def _regularizer_footer_text(coefficient):
     return f"{value:g}" if value > 0.0 else "off"
 
 
+def _hidden_footer_text(network_architecture):
+    """Return the hidden-layer count and every width, at any depth.
+
+    ``network_architecture`` is the stored ``[input, *hidden, output]`` list,
+    so the hidden stack is whatever sits between the encoder and action
+    dimensions. The result reads ``4 layers 512x256x128x64``.
+    """
+    architecture = tuple(network_architecture or ())
+    if len(architecture) < 3:
+        return "unknown"
+    hidden_sizes = [int(size) for size in architecture[1:-1]]
+    layer_word = "layer" if len(hidden_sizes) == 1 else "layers"
+    widths = "x".join(str(size) for size in hidden_sizes)
+    return f"{len(hidden_sizes)} {layer_word} {widths}"
+
+
 def _training_footer_line(run_config):
     """Return critic, hidden-layer, and regularization settings for the footer."""
     run_config = dict(run_config or {})
     rl_config = dict(run_config.get("rl_config", {}))
-    architecture = run_config.get("network_architecture", ())
-    hidden_text = (
-        f"{int(architecture[1]):,} × {int(architecture[2]):,}"
-        if len(architecture) >= 3
-        else "unknown"
-    )
+    hidden_text = _hidden_footer_text(run_config.get("network_architecture", ()))
     value_head_text = (
         "on" if bool(rl_config.get("use_value_head", False)) else "off"
     )
@@ -127,6 +142,30 @@ def _training_footer_line(run_config):
         f"Value head {value_head_text} · hidden {hidden_text} · "
         f"dropout {dropout_text} · weight decay {decay_text}"
     )
+
+
+def _fitted_footer_fontsize(figure, text, reserved_width):
+    """Return the largest footer size at which ``text`` clears the left block.
+
+    The architecture summary grows with the hidden-layer count, so this row is
+    measured rather than assumed to fit. ``reserved_width`` is the width the
+    already-placed left-hand footer occupies, in display units.
+    """
+    renderer = figure.canvas.get_renderer()
+    available = (
+        figure.bbox.width * (1.0 - FOOTER_ROW_MARGIN_FRACTION) - reserved_width
+    )
+    probe = figure.text(0.0, 0.0, text, fontsize=FOOTER_FONT_SIZE)
+    size = FOOTER_FONT_SIZE
+    try:
+        while size > FOOTER_MIN_FONT_SIZE:
+            probe.set_fontsize(size)
+            if probe.get_window_extent(renderer).width <= available:
+                break
+            size -= 0.5
+    finally:
+        probe.remove()
+    return size
 
 
 def _rl_elapsed_hours(row):
@@ -583,13 +622,13 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
         if learning_rate is not None else "lr unknown"
     )
     cpu_text, gpu_text = _machine_footer_lines(run_config.get("machine", {}))
-    figure.text(
+    start_footer = figure.text(
         0.01,
         0.06,
         f"Start: {start_name} · sha256 {start_hash}...",
         ha="left",
         va="bottom",
-        fontsize=8,
+        fontsize=FOOTER_FONT_SIZE,
     )
     figure.text(
         0.01,
@@ -607,13 +646,20 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
         va="bottom",
         fontsize=7,
     )
+    training_footer = _training_footer_line(run_config)
     figure.text(
         0.99,
         0.06,
-        _training_footer_line(run_config),
+        training_footer,
         ha="right",
         va="bottom",
-        fontsize=8,
+        fontsize=_fitted_footer_fontsize(
+            figure,
+            training_footer,
+            start_footer.get_window_extent(
+                figure.canvas.get_renderer()
+            ).width,
+        ),
     )
     figure.text(
         0.99,

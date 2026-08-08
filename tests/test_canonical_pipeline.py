@@ -893,15 +893,30 @@ def test_jsonl_repairs_partial_tail_deduplicates_and_rebuilds_reports(tmp_path):
         assert removed not in csv_rows[0]
 
 
-def test_progress_footer_reports_value_head_and_hidden_layers():
+def test_progress_footer_reports_value_head_hidden_layers_and_regularizers():
     assert _training_footer_line({
         "network_architecture": [168, 512, 192, 56],
-        "rl_config": {"use_value_head": True},
-    }) == "Value head on · hidden 512 × 192"
+        "rl_config": {
+            "use_value_head": True,
+            "dropout_rate": 0.1,
+            "weight_decay": 0.0001,
+        },
+    }) == (
+        "Value head on · hidden 512 × 192 · dropout 0.1 · weight decay 0.0001"
+    )
+    assert _training_footer_line({
+        "network_architecture": [168, 256, 128, 56],
+        "rl_config": {
+            "use_value_head": False,
+            "dropout_rate": 0.0,
+            "weight_decay": 0.0,
+        },
+    }) == "Value head off · hidden 256 × 128 · dropout off · weight decay off"
+    # A run recorded before the regularizers existed stores neither field.
     assert _training_footer_line({
         "network_architecture": [168, 256, 128, 56],
         "rl_config": {"use_value_head": False},
-    }) == "Value head off · hidden 256 × 128"
+    }) == "Value head off · hidden 256 × 128 · dropout off · weight decay off"
 
 
 def test_periodic_artifact_retention_drops_games_and_keeps_ten_summaries(tmp_path):

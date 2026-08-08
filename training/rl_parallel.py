@@ -247,7 +247,10 @@ class _CPUInferencePolicy:
             setattr(self, name, value)
 
     def forward(self, x):
-        x = np.asarray(x)
+        # The encoder emits float64, so cast to match the float32 weights.
+        # Without it NumPy promotes every weight matrix per call, which is both
+        # far slower and inconsistent with PolicyNetwork.forward.
+        x = np.asarray(x, dtype=np.float32)
         z1 = np.dot(self.W1, x) + self.b1
         a1 = np.maximum(0, z1)
         z2 = np.dot(self.W2, a1) + self.b2

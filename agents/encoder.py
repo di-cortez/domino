@@ -69,7 +69,9 @@ class DominoEncoder:
 
     def encode_state(self, state):
         """Convert a game state dictionary into a ``(168, 1)`` feature vector."""
-        vector = np.zeros((self.VECTOR_SIZE, 1), dtype=float)
+        # float32 matches the network weights and the supervised dataset, so no
+        # consumer has to re-cast and no matrix is promoted during inference.
+        vector = np.zeros((self.VECTOR_SIZE, 1), dtype=np.float32)
         current_player = state.get("current_player", 0)
 
         for tile in state.get("current_player_hand", []):
@@ -148,7 +150,7 @@ class DominoEncoder:
 
     def policy_action_mask(self, legal_actions):
         """Return a ``(56, 1)`` mask marking legal neural-policy actions."""
-        mask = np.zeros((self.ACTION_SIZE, 1), dtype=float)
+        mask = np.zeros((self.ACTION_SIZE, 1), dtype=np.float32)
 
         for move in legal_actions:
             if self.is_policy_action(move):

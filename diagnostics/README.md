@@ -129,7 +129,8 @@ all later monitor points. Existing runs without the tuning file recover the
 most recent compatible selection from the JSONL history. The progress plot
 footer records the exact point-zero checkpoint name and SHA-256 prefix, the
 machine captured when the run began, seed, fixed GPI, PPO epoch budget,
-learning rate, value-head state, hidden-layer widths, and canonical
+learning rate, value-head state, hidden-layer widths, the dropout rate and
+weight-decay coefficient (each `off` when disabled), and canonical
 configuration-hash prefix. Its horizontal axis
 uses cumulative RL training time plus every completed periodic diagnostic. It
 therefore remains monotonic across resume sessions without counting time while

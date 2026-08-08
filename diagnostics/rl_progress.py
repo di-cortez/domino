@@ -94,8 +94,22 @@ def _machine_footer_lines(metadata):
     return f"CPU: {cpu_text} · {ram_text}", f"GPU: {gpu} · {vram_text}"
 
 
+def _regularizer_footer_text(coefficient):
+    """Return one optional regularization coefficient for the plot footer.
+
+    A run created before these controls existed stores no field at all; that
+    absence is exactly the disabled value, so it reads as ``off`` instead of
+    as an unknown setting.
+    """
+    try:
+        value = float(coefficient)
+    except (TypeError, ValueError):
+        return "off"
+    return f"{value:g}" if value > 0.0 else "off"
+
+
 def _training_footer_line(run_config):
-    """Return critic and hidden-layer configuration for the plot footer."""
+    """Return critic, hidden-layer, and regularization settings for the footer."""
     run_config = dict(run_config or {})
     rl_config = dict(run_config.get("rl_config", {}))
     architecture = run_config.get("network_architecture", ())
@@ -107,7 +121,12 @@ def _training_footer_line(run_config):
     value_head_text = (
         "on" if bool(rl_config.get("use_value_head", False)) else "off"
     )
-    return f"Value head {value_head_text} · hidden {hidden_text}"
+    dropout_text = _regularizer_footer_text(rl_config.get("dropout_rate"))
+    decay_text = _regularizer_footer_text(rl_config.get("weight_decay"))
+    return (
+        f"Value head {value_head_text} · hidden {hidden_text} · "
+        f"dropout {dropout_text} · weight decay {decay_text}"
+    )
 
 
 def _rl_elapsed_hours(row):

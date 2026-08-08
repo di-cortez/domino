@@ -248,7 +248,6 @@ def _run_rl_training(config, args):
             dropout_rate=args.dropout,
             log_interval=args.log_interval,
             checkpoint_interval=args.checkpoint_interval,
-            pool_refresh_games=args.pool_refresh_games,
             max_pool_size=args.max_pool_size,
             sl_weights_path=args.sl_weights_path,
             rl_weights_path=args.rl_weights_path,

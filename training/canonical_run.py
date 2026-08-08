@@ -131,14 +131,20 @@ def _ppo_resume_identity(configuration):
 
 
 def _rl_config_identity(configuration):
-    """Return one rl_config with disabled defaults for later optional fields.
+    """Return one rl_config normalized for comparison across CLI generations.
 
     Runs created before the opt-in dropout and RL weight-decay controls stored
     no such keys. Their absence is exactly the disabled value, so filling it in
     lets those runs continue against the current CLI without rewriting the
     stored configuration hash.
+
+    ``pool_refresh_games`` is dropped for the same reason: runs created while it
+    existed stored a cadence setting that no longer affects computation, because
+    the opponent pool now takes exactly one snapshot per iteration.
     """
-    return {**DEFAULTED_RL_CONFIG_FIELDS, **dict(configuration or {})}
+    identity = {**DEFAULTED_RL_CONFIG_FIELDS, **dict(configuration or {})}
+    identity.pop("pool_refresh_games", None)
+    return identity
 
 
 def configuration_sha256(configuration):

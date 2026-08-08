@@ -706,7 +706,6 @@ def _rl_config(args):
         "dropout_rate": float(args.dropout),
         "log_interval": int(args.log_interval),
         "checkpoint_interval": int(args.checkpoint_interval),
-        "pool_refresh_games": int(args.pool_refresh_games),
         "max_pool_size": int(args.max_pool_size),
         "use_value_head": bool(args.value_head),
         "value_coef": float(args.value_coef),

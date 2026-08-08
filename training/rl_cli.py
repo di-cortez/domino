@@ -20,7 +20,6 @@ from training.rl_config import (
     DEFAULT_ITERATIONS,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
-    DEFAULT_POOL_REFRESH_GAMES,
     DEFAULT_PPO_ENABLED,
     DEFAULT_TOTAL_TRAINING_GAMES,
     COMMON_GPI_VALUES,
@@ -105,15 +104,6 @@ def add_optional_rl_arguments(
         add_regularization_arguments(group)
     group.add_argument("--log-interval", type=int, default=10)
     group.add_argument("--checkpoint-interval", type=int, default=50)
-    group.add_argument(
-        "--pool-refresh-games",
-        type=int,
-        default=DEFAULT_POOL_REFRESH_GAMES,
-        help=(
-            "Cumulative training-game interval between opponent-pool snapshots; "
-            "a threshold crossed inside a batch refreshes once after that batch."
-        ),
-    )
     group.add_argument("--max-pool-size", type=int, default=50)
     group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
     group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
@@ -343,7 +333,6 @@ def _training_kwargs_from_args(args):
         "dropout_rate": args.dropout,
         "log_interval": args.log_interval,
         "checkpoint_interval": args.checkpoint_interval,
-        "pool_refresh_games": args.pool_refresh_games,
         "max_pool_size": args.max_pool_size,
         "sl_weights_path": args.sl_weights_path,
         "rl_weights_path": args.rl_weights_path,

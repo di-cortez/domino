@@ -59,7 +59,6 @@ RL_LEARNING_RATE=0.001
 RL_ENTROPY_COEF=0.01
 RL_LOG_INTERVAL=10
 RL_CHECKPOINT_INTERVAL=50
-RL_POOL_REFRESH_GAMES=400
 RL_MAX_POOL_SIZE=50
 RL_VALUE_HEAD=0
 RL_VALUE_COEF=0.5
@@ -164,7 +163,6 @@ training.self_play):
   --rl-entropy-coef F          Entropy bonus coefficient (default: $RL_ENTROPY_COEF)
   --rl-log-interval N          Iterations between log lines (default: $RL_LOG_INTERVAL)
   --rl-checkpoint-interval N   Iterations between checkpoints (default: $RL_CHECKPOINT_INTERVAL)
-  --rl-pool-refresh-games N    Training games between self-play pool snapshots (default: $RL_POOL_REFRESH_GAMES)
   --rl-max-pool-size N         Max frozen snapshots kept in the pool (default: $RL_MAX_POOL_SIZE)
   --rl-value-head              Turn the critic ON for PPO or --rl-no-ppo
   --rl-value-coef F            Value-loss coefficient, only used when --rl-value-head is set (default: $RL_VALUE_COEF)
@@ -253,7 +251,6 @@ while [[ $# -gt 0 ]]; do
         --rl-entropy-coef) RL_ENTROPY_COEF="$2"; shift 2 ;;
         --rl-log-interval) RL_LOG_INTERVAL="$2"; shift 2 ;;
         --rl-checkpoint-interval) RL_CHECKPOINT_INTERVAL="$2"; shift 2 ;;
-        --rl-pool-refresh-games) RL_POOL_REFRESH_GAMES="$2"; shift 2 ;;
         --rl-max-pool-size) RL_MAX_POOL_SIZE="$2"; shift 2 ;;
         --rl-value-head) RL_VALUE_HEAD=1; shift ;;
         --rl-value-coef) RL_VALUE_COEF="$2"; shift 2 ;;
@@ -443,7 +440,6 @@ else
         --entropy-coef "$RL_ENTROPY_COEF" \
         --log-interval "$RL_LOG_INTERVAL" \
         --checkpoint-interval "$RL_CHECKPOINT_INTERVAL" \
-        --pool-refresh-games "$RL_POOL_REFRESH_GAMES" \
         --max-pool-size "$RL_MAX_POOL_SIZE" \
         --sl-weights-path "$RL_SL_WEIGHTS_PATH" \
         --rl-weights-path "$RL_WEIGHTS_FILE" \

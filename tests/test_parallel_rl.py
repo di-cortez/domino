@@ -132,7 +132,6 @@ class ParallelRLTests(unittest.TestCase):
                     iterations=3,
                     gpi=6,
                     checkpoint_interval=100,
-                    pool_refresh_games=6,
                     max_pool_size=3,
                     seed=987,
                     device="cpu",
@@ -156,7 +155,6 @@ class ParallelRLTests(unittest.TestCase):
                 iterations=NUMBERED_CHECKPOINT_WEIGHT_RETENTION + 2,
                 gpi=1,
                 checkpoint_interval=1,
-                pool_refresh_games=1,
                 max_pool_size=1,
                 seed=230723,
                 device="cpu",
@@ -188,7 +186,13 @@ class ParallelRLTests(unittest.TestCase):
             NUMBERED_CHECKPOINT_WEIGHT_RETENTION + 2,
         )
 
-    def test_pool_refresh_uses_cumulative_training_games(self):
+    def test_pool_refresh_follows_gpi(self):
+        """One frozen snapshot per iteration, so the cadence is exactly gpi.
+
+        Both runs play the same 12 real games. The smaller gpi runs more
+        iterations and therefore stores more snapshots; each pool also holds the
+        initial policy appended when the runner is built.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             rows = []
@@ -196,7 +200,6 @@ class ParallelRLTests(unittest.TestCase):
                 iterations=6,
                 gpi=2,
                 checkpoint_interval=2,
-                pool_refresh_games=4,
                 max_pool_size=10,
                 seed=321,
                 device="cpu",
@@ -210,7 +213,6 @@ class ParallelRLTests(unittest.TestCase):
                 iterations=4,
                 gpi=3,
                 checkpoint_interval=2,
-                pool_refresh_games=4,
                 max_pool_size=10,
                 seed=321,
                 device="cpu",
@@ -222,9 +224,8 @@ class ParallelRLTests(unittest.TestCase):
 
         self.assertEqual(first["total_training_games"], 12)
         self.assertEqual(second["total_training_games"], 12)
-        self.assertEqual(first["pool_snapshot_count"], 4)
-        self.assertEqual(second["pool_snapshot_count"], 4)
-        self.assertEqual(first["pool_refresh_games"], 4)
+        self.assertEqual(first["pool_snapshot_count"], 7)
+        self.assertEqual(second["pool_snapshot_count"], 5)
         self.assertEqual(first["parallel"]["rollout_batches"], 6)
         self.assertNotIn("evaluation_batches", first["parallel"])
         self.assertTrue(all("checkpoint_eval_games" not in row for row in rows))
@@ -288,7 +289,6 @@ class ParallelRLTests(unittest.TestCase):
             common = {
                 "gpi": 4,
                 "checkpoint_interval": 2,
-                "pool_refresh_games": 4,
                 "max_pool_size": 3,
                 "seed": 987,
                 "device": "cpu",
@@ -393,7 +393,6 @@ class ParallelRLTests(unittest.TestCase):
                 "sl_weights_path": str(sl_path),
                 "gpi": 4,
                 "checkpoint_interval": 2,
-                "pool_refresh_games": 4,
                 "max_pool_size": 2,
                 "seed": 4242,
                 "device": "cpu",
@@ -443,7 +442,6 @@ class ParallelRLTests(unittest.TestCase):
                 total_training_games=5,
                 gpi=2,
                 checkpoint_interval=10,
-                pool_refresh_games=2,
                 max_pool_size=2,
                 seed=123,
                 device="cpu",
@@ -468,7 +466,6 @@ class ParallelRLTests(unittest.TestCase):
             common = {
                 "gpi": 4,
                 "checkpoint_interval": 1,
-                "pool_refresh_games": 4,
                 "max_pool_size": 2,
                 "use_value_head": True,
                 "ppo_enabled": False,
@@ -506,7 +503,6 @@ class ParallelRLTests(unittest.TestCase):
             common = {
                 "gpi": 4,
                 "checkpoint_interval": 1,
-                "pool_refresh_games": 4,
                 "max_pool_size": 2,
                 "use_value_head": True,
                 "ppo_enabled": True,

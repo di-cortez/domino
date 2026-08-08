@@ -36,7 +36,6 @@ from training.rl_config import (
     DEFAULT_ITERATIONS,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
-    DEFAULT_POOL_REFRESH_GAMES,
     DEFAULT_PPO_ENABLED,
     DEFAULT_TOTAL_TRAINING_GAMES,
     RL_WEIGHTS,
@@ -223,7 +222,6 @@ def train(
     dropout_rate=DISABLED_DROPOUT_RATE,
     log_interval=10,
     checkpoint_interval=50,
-    pool_refresh_games=DEFAULT_POOL_REFRESH_GAMES,
     max_pool_size=50,
     sl_weights_path=SL_WEIGHTS,
     rl_weights_path=RL_WEIGHTS,
@@ -284,7 +282,6 @@ def train(
         retune_workers=retune_workers,
         checkpoint_interval=checkpoint_interval,
         log_interval=log_interval,
-        pool_refresh_games=pool_refresh_games,
         max_pool_size=max_pool_size,
         moving_average_window=moving_average_window,
         training_opponent=training_opponent,
@@ -497,7 +494,6 @@ def train(
         training_opponent=training_opponent,
         learning_rate=learning_rate,
         entropy_coef=entropy_coef,
-        pool_refresh_games=pool_refresh_games,
         max_pool_size=max_pool_size,
         use_value_head=use_value_head,
         value_coef=value_coef,
@@ -630,7 +626,6 @@ def train(
             "training_opponent": training_opponent,
             "learning_rate": float(learning_rate),
             "entropy_coef": float(entropy_coef),
-            "pool_refresh_games": int(pool_refresh_games),
             "max_pool_size": int(max_pool_size),
             "use_value_head": bool(use_value_head),
             "value_coef": float(value_coef),
@@ -866,12 +861,11 @@ def train(
             completed_training_games += games_this_iteration
             completed_this_invocation += games_this_iteration
             completed_iterations_this_invocation += 1
-            crossed_pool_refresh = (
-                previous_training_games // pool_refresh_games
-                < completed_training_games // pool_refresh_games
-            )
             section_started = time.perf_counter()
-            if batch and training_opponent == "self_play" and crossed_pool_refresh:
+            # One frozen snapshot per iteration: the whole iteration shares a
+            # single immutable learner policy, so the snapshot cadence is
+            # exactly the iteration size selected by --gpi.
+            if batch and training_opponent == "self_play":
                 runner.append_pool_snapshot(network, metadata={
                     "origin": "training_update",
                     "introduced_at_rl_games": int(completed_training_games),
@@ -1248,7 +1242,6 @@ def train(
         "initialization_source": initialization_source,
         "fresh_from_sl": bool(fresh_from_sl),
         "numbered_checkpoints": bool(numbered_checkpoints),
-        "pool_refresh_games": int(pool_refresh_games),
         "total_decision_samples": int(total_decision_samples),
         "trainable_decisions_seen": int(total_decision_samples),
         "ppo_updates_completed": int(ppo_updates_completed),

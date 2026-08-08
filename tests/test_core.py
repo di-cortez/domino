@@ -1815,9 +1815,9 @@ def test_rl_workload_and_pool_defaults_use_games():
     assert standalone.total_training_games is None
     assert standalone.gpi == DEFAULT_GPI
     assert standalone.ppo_enabled
-    assert standalone.pool_refresh_games == 400
     assert not hasattr(standalone, "evaluation_games")
     assert not hasattr(standalone, "pool_interval")
+    assert not hasattr(standalone, "pool_refresh_games")
     assert pipeline.total_rl_games == 500_000
     assert pipeline.rl_iterations * pipeline.rl_games_per_iteration == 500_000
 

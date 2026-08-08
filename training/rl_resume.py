@@ -328,7 +328,6 @@ def _resume_configuration(
     training_opponent,
     learning_rate,
     entropy_coef,
-    pool_refresh_games,
     max_pool_size,
     use_value_head,
     value_coef,
@@ -358,7 +357,6 @@ def _resume_configuration(
         "training_opponent": training_opponent,
         "learning_rate": float(learning_rate),
         "entropy_coef": float(entropy_coef),
-        "pool_refresh_games": int(pool_refresh_games),
         "max_pool_size": int(max_pool_size),
         "use_value_head": bool(use_value_head),
         "value_coef": float(value_coef),
@@ -392,9 +390,12 @@ def _validate_resume_configuration(metadata, expected, *, ignored_keys=()):
     saved = dict(metadata.get("configuration") or {})
     for key, disabled_value in DEFAULTED_CONFIGURATION_KEYS.items():
         saved.setdefault(key, disabled_value)
-    # This legacy key was informational: PPO reports target KL, but only stop
-    # KL controls early stopping. It must never reject an otherwise exact run.
-    ignored_keys = {"ppo_target_kl", *ignored_keys}
+    # These legacy keys no longer affect computation. ``ppo_target_kl`` was
+    # informational: PPO reports target KL, but only stop KL controls early
+    # stopping. ``pool_refresh_games`` configured an opponent-snapshot cadence
+    # that is now always one snapshot per iteration, controlled by gpi. Neither
+    # must ever reject an otherwise exact run.
+    ignored_keys = {"ppo_target_kl", "pool_refresh_games", *ignored_keys}
     comparable_saved = {
         key: value
         for key, value in saved.items()

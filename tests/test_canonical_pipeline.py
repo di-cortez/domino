@@ -690,7 +690,6 @@ def test_resume_state_without_stored_regularizers_is_compatible():
         training_opponent="self_play",
         learning_rate=0.001,
         entropy_coef=0.01,
-        pool_refresh_games=400,
         max_pool_size=5,
         use_value_head=False,
         value_coef=0.5,
@@ -720,6 +719,90 @@ def test_resume_state_without_stored_regularizers_is_compatible():
     enabled = {**expected, "dropout_rate": 0.2}
     with pytest.raises(ValueError, match="dropout_rate"):
         _validate_resume_configuration({"configuration": legacy}, enabled)
+
+
+def test_runs_with_stored_pool_refresh_games_still_resume(tmp_path):
+    """Ignore the retired opponent-cadence field stored by older runs.
+
+    The cadence is now one snapshot per iteration, controlled by gpi, so a
+    stored ``pool_refresh_games`` no longer affects computation and must not
+    make an existing run refuse to continue.
+    """
+    run_dir = canonical_run_dir(tmp_path, "big", 42)
+    legacy_rl_config = {
+        "gamma": 1.0,
+        "learning_rate": 0.001,
+        "pool_refresh_games": 400,
+    }
+    values = {
+        "root": ROOT,
+        "pipeline_level": "big",
+        "seed": 42,
+        "target_rl_games": 2_000_000,
+        "supervised_weights_path": "models/sl.npz",
+        "supervised_weights_sha256": "abc",
+        "ppo_config": {"clip_epsilon": 0.2, "target_kl": 0.01},
+        "rl_config": legacy_rl_config,
+    }
+    published = create_run_config(run_dir, **values)
+    assert published["rl_config"]["pool_refresh_games"] == 400
+
+    current = dict(values)
+    current["rl_config"] = {"gamma": 1.0, "learning_rate": 0.001}
+    reused = create_run_config(run_dir, **current)
+    assert reused["configuration_sha256"] == published["configuration_sha256"]
+    # The stored configuration is never rewritten by the removal.
+    assert reused["rl_config"]["pool_refresh_games"] == 400
+
+    # A field that still affects computation must keep rejecting the resume.
+    conflicting = dict(values)
+    conflicting["rl_config"] = {"gamma": 0.97, "learning_rate": 0.001}
+    with pytest.raises(ValueError, match="rl_config"):
+        create_run_config(run_dir, **conflicting)
+
+
+def test_resume_state_with_stored_pool_refresh_games_is_compatible():
+    """Continue an exact resume pair saved while the cadence flag existed."""
+    expected = _resume_configuration(
+        total_training_games=1000,
+        selected_gpi=100,
+        selected_workers=1,
+        rl_training_algorithm=PPO_TRAINING_ALGORITHM,
+        training_opponent="self_play",
+        learning_rate=0.001,
+        entropy_coef=0.01,
+        max_pool_size=5,
+        use_value_head=False,
+        value_coef=0.5,
+        gamma=1.0,
+        reward_schema="default",
+        clip_grad_norm=5.0,
+        normalize_advantages=True,
+        weight_decay=0.0,
+        dropout_rate=0.0,
+        effective_seed=3,
+        device="cpu",
+        sl_weights_sha256="abc",
+        ppo_clip_epsilon=0.2,
+        ppo_stop_kl=0.015,
+        ppo_max_epochs=4,
+        ppo_games_per_minibatch_scale=1,
+        ppo_min_decisions_per_minibatch=1,
+        prefer_gpu_buffer=False,
+    )
+    assert "pool_refresh_games" not in expected
+
+    legacy = {**expected, "pool_refresh_games": 400}
+    _validate_resume_configuration({"configuration": legacy}, expected)
+
+    # Any stored value is ignored, not merely the historical default.
+    other = {**expected, "pool_refresh_games": 1}
+    _validate_resume_configuration({"configuration": other}, expected)
+
+    # A field that still affects computation must keep rejecting the resume.
+    conflicting = {**legacy, "selected_gpi": 200}
+    with pytest.raises(ValueError, match="selected_gpi"):
+        _validate_resume_configuration({"configuration": conflicting}, expected)
 
 
 def test_hidden_layer_count_joins_the_run_identity_and_is_locked(tmp_path):
@@ -796,7 +879,6 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         "total_training_games": 4,
         "gpi": 2,
         "checkpoint_interval": 1,
-        "pool_refresh_games": 2,
         "max_pool_size": 2,
         "sl_weights_path": str(supervised),
         "seed": 321,
@@ -1128,7 +1210,6 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
         stop_after_training_games=2,
         gpi=2,
         checkpoint_interval=1,
-        pool_refresh_games=2,
         max_pool_size=2,
         sl_weights_path=str(supervised),
         rl_weights_path=str(tmp_path / "raw" / "training.npz"),
@@ -1162,7 +1243,6 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
         stop_after_training_games=2,
         gpi=2,
         checkpoint_interval=1,
-        pool_refresh_games=2,
         max_pool_size=2,
         sl_weights_path=str(supervised),
         rl_weights_path=str(tmp_path / "canonical" / "training.npz"),
@@ -1226,7 +1306,6 @@ def test_shutdown_before_first_iteration_still_creates_a_resumable_pair(tmp_path
         "total_training_games": 2,
         "gpi": 2,
         "checkpoint_interval": 1,
-        "pool_refresh_games": 2,
         "max_pool_size": 1,
         "sl_weights_path": str(ROOT / "models" / "domino_sl_weights.npz"),
         "rl_weights_path": str(base),
@@ -1282,7 +1361,6 @@ def test_numbered_checkpoint_callback_advances_by_committed_games(tmp_path):
         total_training_games=5,
         gpi=1,
         checkpoint_interval=2,
-        pool_refresh_games=2,
         max_pool_size=1,
         sl_weights_path=str(ROOT / "models" / "domino_sl_weights.npz"),
         rl_weights_path=str(tmp_path / "callback" / "training.npz"),

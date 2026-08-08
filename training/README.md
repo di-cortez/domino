@@ -488,11 +488,11 @@ and return finalized trajectories through a bounded dynamic queue. The parent
 sorts results by game id and remains solely responsible for the gradient,
 checkpoint writes, logging, and GPU allocations.
 
-Opponent snapshots are scheduled by cumulative training games, not by
-iteration count. `--pool-refresh-games` defaults to 400. A threshold crossed
-inside an iteration publishes the newly updated policy after that batch; if a
-single large batch crosses multiple thresholds, it publishes only one snapshot
-instead of storing duplicate copies of the same weights.
+Opponent snapshots are published once per iteration, after the batch has been
+played and the policy updated. Every iteration shares one immutable learner
+policy, so the snapshot cadence is exactly the iteration size: `--gpi` sets it,
+and the pool therefore spans `max_pool_size * gpi` training games. At the
+defaults that is 50 snapshots covering 100,000 games.
 
 GPI is never autotuned. Canonical pipelines and direct self-play accept
 `--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000`, defaulting to
@@ -770,7 +770,7 @@ parameter updates, and metric transfers.
 
 `training.self_play` also accepts `--iterations`, `--total-training-games`,
 `--gpi`, `--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
-`--checkpoint-interval`, `--pool-refresh-games`, `--max-pool-size`,
+`--checkpoint-interval`, `--max-pool-size`,
 `--sl-weights-path`, and `--rl-weights-path`; see
 `training/rl_cli.py:add_optional_rl_arguments` for the authoritative
 definitions, or run `python -m training.self_play --help`.
@@ -779,9 +779,19 @@ The former GPI-autotune options (`--games-per-iteration`, `--adaptive-gpi`,
 `--no-adaptive-gpi`, `--gpi-candidates`, `--gpi-benchmark-games-target`,
 `--retune-gpi`, and `--retune-all`) were removed. The former iteration-based
 `--pool-interval` and auxiliary `--evaluation-games` options were also removed.
-Existing numbered resume states
-that contain `pool_interval` are rejected rather than silently reinterpreted
-as a game count; start a new run with `--pool-refresh-games`.
+Existing numbered resume states that contain `pool_interval` are rejected rather
+than silently reinterpreted as a game count; start a new run instead.
+
+`--pool-refresh-games` was removed as well, with no replacement flag: it set a
+cumulative-game threshold that was tested once per iteration, so every `--gpi`
+at or above it produced exactly one snapshot per iteration and the option had no
+effect. The cadence is now that behavior, stated directly. Unlike
+`pool_interval`, a stored `pool_refresh_games` never rejects a resume: existing
+runs and numbered resume states keep the field, it is ignored when comparing
+configurations, and they continue with the current cadence. Snapshot timing is
+unchanged for every `--gpi` of 400 or more, including the default 2,000;
+`--gpi 100` and `--gpi 200` now snapshot every 100 or 200 games instead of
+every 400.
 
 `TRAINING_OPPONENT` at the top of `self_play.py` controls the training opponent:
 

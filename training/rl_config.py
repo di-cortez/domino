@@ -16,7 +16,6 @@ DEFAULT_ITERATIONS = 1000
 COMMON_GPI_VALUES = (100, 200, 400, 600, 800, 1000, 2000)
 DEFAULT_GPI = 2000
 DEFAULT_TOTAL_TRAINING_GAMES = 100_000
-DEFAULT_POOL_REFRESH_GAMES = 400
 DEFAULT_PPO_ENABLED = True
 
 SL_WEIGHTS = "models/domino_sl_weights.npz"
@@ -55,7 +54,6 @@ def resolve_training_options(
     retune_workers,
     checkpoint_interval,
     log_interval,
-    pool_refresh_games,
     max_pool_size,
     moving_average_window,
     training_opponent,
@@ -108,8 +106,6 @@ def resolve_training_options(
         raise ValueError("adaptive_tuning_training_games must be positive")
     if checkpoint_interval < 1 or log_interval < 1:
         raise ValueError("checkpoint_interval and log_interval must be positive")
-    if pool_refresh_games < 1:
-        raise ValueError("pool_refresh_games must be positive")
     if max_pool_size < 0:
         raise ValueError("max_pool_size must be non-negative")
     if moving_average_window < 1:

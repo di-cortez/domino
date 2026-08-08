@@ -82,9 +82,9 @@ epoch, a whole-buffer KL check stops the update before the next epoch when its
 hard `0.015` limit is exceeded. Pass `--no-ppo` to use one
 full-buffer REINFORCE update per iteration instead; that path does not build a
 PPO buffer or calculate ratios, clipping, KL control, minibatches, or the
-post-update full-buffer PPO evaluation. Opponent snapshots refresh every 400
-cumulative real games, and checkpoint saves do not run an extra evaluation
-matchup.
+post-update full-buffer PPO evaluation. Opponent snapshots refresh once per
+iteration, so `--gpi` also sets the snapshot cadence, and checkpoint saves do
+not run an extra evaluation matchup.
 
 `big`, `huge`, and `forever` persist weights, optimizer, RNGs, counters, and
 the opponent pool. Continue finite cumulative targets with `--resume`, or

@@ -38,8 +38,8 @@ default. The `forever` PPO profile uses a maximum budget of 16 epochs per
 on-policy buffer; its unchanged whole-buffer KL guard can finish each update
 earlier. The first `forever` invocation locks the complete run configuration.
 Later invocations reload it automatically, so the epoch budget and other
-training arguments do not need to be repeated and conflicting explicit values
-are rejected.
+training arguments do not need to be repeated. Conflicting explicit values are
+reported in one warning, ignored, and replaced from `run_config.json`.
 
 The reusable standard assets are built from 100,000 heuristic games with a
 maximum supervised budget of 5,000 epochs (the convergence/plateau stopping
@@ -79,7 +79,7 @@ the complete diagnostic history and best-checkpoint pointer.
 ```bash
 python -m training.pipeline big --resume
 python -m training.pipeline huge \
-  --resume-from models/rl/domino_rl_big_seed42
+  --resume models/rl/domino_rl_huge_seed42
 
 # First start: choose and lock the forever configuration.
 python -m training.pipeline forever --seed 42 --gpi 2000 \
@@ -101,8 +101,8 @@ python -m training.pipeline forever
 not construct a PPO buffer or calculate PPO ratios, clipping, KL control,
 minibatches, or the post-update full-buffer evaluation. The algorithm is an
 immutable resume field and is reloaded from the saved run configuration;
-changing between `ppo_v1` and `reinforce_v1` is rejected before training. Both
-algorithms support the optional value head, which remains off by default. A
+an attempted algorithm override during resume is warned about and ignored.
+Both algorithms support the optional value head, which remains off by default. A
 canonical PPO actor-critic run can be started and resumed with:
 
 ```bash
@@ -114,7 +114,7 @@ The optional value accepted by `--resume` is a convenience alias for
 `--resume-from`. In `forever`, diagnostic-worker autotuning is performed once,
 persisted in `periodic_diagnostic_tuning.json`, and reused at subsequent
 100,000-game monitors and after resume. Progress exposes a single cumulative
-`avg_games_s` rate across the persisted RL training lineage.
+`avg_games_s` rate across the persisted history of that run.
 
 `forever` has no percentage or target. SIGINT/SIGTERM stops admission of a new
 iteration, lets an in-flight iteration finish, atomically publishes state, and
@@ -130,7 +130,10 @@ name, supervised origin, and start-machine metadata. The active-run pointer
 lets a later bare `python -m training.pipeline forever` find that run. Supply a
 new `--run-name` (or use `--restart-rl`) when intentionally starting a distinct
 configuration. A checkpoint is accepted only when its configuration hash
-matches the run configuration.
+matches the run configuration. Resume never accepts training or asset
+overrides: explicit values are listed in a warning and replaced by the saved
+ones. A repository commit mismatch is also warned about but does not block the
+continuation, and the run keeps its original commit as provenance.
 
 | File | Purpose |
 |---|---|
@@ -147,7 +150,7 @@ matches the run configuration.
 | `adaptive_tuning.py` | Selects rollout workers with isolated seed streams, state restoration, safety checks, and `adaptive_tuning.json`. |
 | `rl_parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed real games across memory fallback. |
 | `canonical_assets.py` | Names, validates, hashes, and records reusable standard dataset/SL assets. |
-| `canonical_run.py` | Publishes and validates complete atomic RL generations and lineage. |
+| `canonical_run.py` | Publishes and validates complete atomic RL generations against their immutable run configuration. |
 | `pipeline.py` | Owns canonical levels, exact game boundaries, periodic diagnostics, resume, and safe shutdown. |
 
 ## Important Shape Change
@@ -207,7 +210,10 @@ from `(root seed, DATASET_GAME, absolute game id)`.
 Workers serialize one compact payload per game. Only the parent writes those
 payloads to a disposable SQLite database, keeping RAM bounded while results
 arrive out of order. Final rows are emitted in game-id order, and the existing
-JSONL is replaced atomically only after every requested game succeeds.
+JSONL is replaced atomically only after every requested game succeeds. Dataset
+generation has no partial-resume mode: an interrupted temporary database is
+discarded, and the next invocation either reuses a previously complete
+metadata-validated dataset or generates the requested dataset from the start.
 
 Automatic dataset and RL game loops use the engine's trusted headless step
 path. They reuse the unchanged legal-action collection already shown to the
@@ -291,12 +297,13 @@ fixed batch, and memory high/low watermarks. `train_script/run_pipeline.py` uses
 `quiet=True`, so it continues suppressing per-epoch, checkpoint, scheduler, and
 memory-detail chatter.
 
-All supervised inputs, targets, weights, activations, gradients, and new
-checkpoints are `float32`. Legacy `float64` checkpoints remain loadable and are
-cast on input. Archival files in `models/supervised_checkpoints/` are pruned
-after every save, so repeated or large runs retain at most 10 of them.
-Archival files in `models/supervised_checkpoints/` are pruned after every save,
-so repeated or large training runs retain at most 10 of them.
+All supervised inputs, targets, weights, activations, gradients, and published
+weights are `float32`. Legacy `float64` checkpoints remain loadable and are
+cast on input. Supervised training has no resume mode: it starts from fresh
+random weights, keeps its best state in memory, and atomically publishes the
+weights only after the complete invocation succeeds. If it is interrupted, the
+already completed dataset remains reusable and the next supervised invocation
+starts from the beginning; no partial supervised checkpoint is selected.
 
 CuPy import alone is not treated as proof of a working GPU. At startup,
 `agents/nn.py` also asks the CUDA runtime for a visible device; a missing driver,

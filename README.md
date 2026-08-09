@@ -87,14 +87,15 @@ iteration, so `--gpi` also sets the snapshot cadence, and checkpoint saves do
 not run an extra evaluation matchup.
 
 `big`, `huge`, and `forever` persist weights, optimizer, RNGs, counters, and
-the opponent pool. Continue finite cumulative targets with `--resume`, or
-extend a lineage with `--resume-from`. A first `forever` start accepts and
-locks its complete configuration:
+the opponent pool. `--resume` continues that exact saved run;
+`--resume RUN_DIR` (or `--resume-from RUN_DIR`) selects the same run explicitly
+without creating a fork or extending its target. A first `forever` start
+accepts and locks its complete configuration:
 
 ```bash
 python -m training.pipeline big --resume
 python -m training.pipeline huge \
-  --resume-from models/rl/domino_rl_big_seed42
+  --resume models/rl/domino_rl_huge_seed42
 
 python -m training.pipeline forever --seed 42 --gpi 2000 \
   --ppo-max-epochs 16 --run-name baseline
@@ -110,8 +111,9 @@ python -m training.pipeline forever
 ```
 
 The algorithm is part of the exact resume identity and is reloaded
-automatically; a `reinforce_v1` run cannot be resumed as `ppo_v1`, or vice
-versa. The optional critic is off by default and works with both algorithms.
+automatically. A conflicting `--ppo` or `--no-ppo` supplied with resume is
+warned about and ignored. The optional critic is off by default and works with
+both algorithms.
 For PPO actor-critic training:
 
 ```bash
@@ -156,14 +158,17 @@ complete behavior, including the PPO ratio caveat when dropout is enabled.
 For `forever`, `run_config.json` records the full locked configuration and its
 SHA-256, the ruleset, optional run name, supervised origin, and the machine on
 which the run started. A checkpoint must carry the same hash. A conflicting
-argument on a later invocation is rejected; use a new `--run-name` or
-`--restart-rl` for a distinct experiment. `--resume RUN_DIR` remains an explicit
-alias for `--resume-from RUN_DIR`.
+training or asset argument on a resume invocation produces a warning, is
+ignored, and the value in `run_config.json` is used. Use a new `--run-name` or
+`--restart-rl` for a distinct experiment. A Git commit change also produces a
+warning but never blocks resume; the original commit remains recorded as the
+run's provenance. `--resume RUN_DIR` is an explicit alias for
+`--resume-from RUN_DIR`.
 
 The `forever` periodic RL-vs-random worker autotune runs once. Its selection is
 stored in `periodic_diagnostic_tuning.json` and reused at every later milestone
 and after resume. The RL progress bar reports one `avg_games_s` value computed
-over the full persisted RL training lineage.
+over the full persisted history of the run.
 
 The first SIGINT/SIGTERM finishes the current iteration, publishes a safe
 checkpoint, and exits; `forever` never launches the final all-pairs diagnostic.

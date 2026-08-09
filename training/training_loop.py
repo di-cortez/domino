@@ -67,9 +67,6 @@ DEFAULT_TRAINING_PLATEAU_PATIENCE = 4
 DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS = 100
 DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT = 0.001
 
-CHECKPOINT_EVERY = SUPERVISED_VALIDATION_INTERVAL_EPOCHS
-CHECKPOINT_DIR = "models/supervised_checkpoints"
-MAX_SUPERVISED_CHECKPOINTS = 10
 ENCODED_CACHE_FILE = "dataset/supervised_dataset_encoded.npz"
 ENCODED_FEATURE_VERSION = "opponent_suit_presence_float32_v2"
 DATASET_DTYPE = np.float32
@@ -201,24 +198,6 @@ class EncodedDataset:
     y: np.ndarray
     storage_mode: str
     metadata: dict
-
-
-def _prune_supervised_checkpoints(
-    checkpoint_dir=CHECKPOINT_DIR,
-    keep_count=MAX_SUPERVISED_CHECKPOINTS,
-):
-    """Delete older archival checkpoints and return the removed paths."""
-    if keep_count < 1:
-        raise ValueError("keep_count must be at least one.")
-    checkpoint_paths = list(Path(checkpoint_dir).glob("domino_sl_epoch_*.npz"))
-    checkpoint_paths.sort(
-        key=lambda path: (path.stat().st_mtime_ns, path.name),
-        reverse=True,
-    )
-    removed_paths = checkpoint_paths[keep_count:]
-    for path in removed_paths:
-        path.unlink()
-    return removed_paths
 
 
 def _normalize_action(action):
@@ -598,20 +577,6 @@ def _network_weight_payload(network, weights=None):
     }
 
 
-def _load_existing_weights(network, weights_file):
-    """Validate and load a legacy or current supervised checkpoint."""
-    with np.load(weights_file, allow_pickle=False) as weights:
-        for name in network.weight_names:
-            expected_shape = getattr(network, name).shape
-            if weights[name].shape != expected_shape:
-                raise ValueError(
-                    f"Cannot resume from {weights_file}: {name} has shape "
-                    f"{weights[name].shape}, but expected {expected_shape}. "
-                    "Delete or move the old checkpoint and retrain from scratch."
-                )
-        network.load_policy_weights(weights)
-
-
 def _create_network(*, device, weight_decay, dropout_rate, seed, architecture):
     return SupervisedNeuralNetwork(
         input_size=architecture.input_size,
@@ -658,9 +623,8 @@ def train_supervised(
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
     gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
     seed=None,
-    resume_existing_weights=True,
 ):
-    """Train the policy and return scheduler, storage, batch, and memory data."""
+    """Train a fresh policy and return scheduler, storage, batch, and memory data."""
     if epochs < 1:
         raise ValueError("epochs must be positive")
     architecture = architecture_from_hidden_sizes(hidden_sizes)
@@ -815,12 +779,8 @@ def train_supervised(
             f"{validation_count} validation"
         )
 
-    if resume_existing_weights and os.path.exists(weights_file):
-        _load_existing_weights(network, weights_file)
-        if not quiet:
-            print(f"Existing supervised model found at {weights_file}. Resuming training.")
-    elif not quiet:
-        print("No existing supervised model found. Training from scratch.")
+    if not quiet:
+        print("Supervised training starts from fresh random weights.")
 
     requested_batch_size = int(batch_size)
     if requested_batch_size < 1:
@@ -861,40 +821,7 @@ def train_supervised(
         "epoch": None,
         "weights": None,
     }
-    last_checkpoint_time = {"value": started}
-
-    def save_checkpoint(current_network, epoch, validation_loss):
-        checkpoint_dir = Path(CHECKPOINT_DIR)
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        weights_path = Path(weights_file)
-        weights_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_file = checkpoint_dir / (
-            f"domino_sl_epoch_{epoch:04d}_val_{validation_loss:.4f}.npz"
-        )
-        payload = _network_weight_payload(current_network)
-        atomic_savez(checkpoint_file, **payload)
-        atomic_savez(weights_path, **payload)
-        removed = _prune_supervised_checkpoints(checkpoint_dir)
-        now = time.time()
-        checkpoint_elapsed = now - last_checkpoint_time["value"]
-        last_checkpoint_time["value"] = now
-        if not quiet:
-            print(
-                f"  -> Checkpoint saved to {checkpoint_file} "
-                f"(time since previous checkpoint: "
-                f"{format_duration(checkpoint_elapsed)})."
-            )
-            if removed:
-                print(
-                    f"  -> Removed {len(removed)} older supervised "
-                    f"checkpoint(s); keeping the latest "
-                    f"{MAX_SUPERVISED_CHECKPOINTS}."
-                )
-            print(f"  -> Active supervised model updated at {weights_file}.")
-
     def save_if_best(epoch, validation_loss, current_network):
-        if epoch % CHECKPOINT_EVERY == 0:
-            save_checkpoint(current_network, epoch, validation_loss)
         if validation_loss < best_state["validation_loss"]:
             best_state["validation_loss"] = validation_loss
             best_state["epoch"] = int(epoch) + 1

@@ -50,6 +50,7 @@ def add_optional_rl_arguments(
     ppo_max_epochs_default=DEFAULT_MAX_EPOCHS,
     expose_gpi=True,
     include_regularization=True,
+    expose_resume_pair=True,
 ):
     """Add self-play hyperparameter and rollout-resource flags to ``parser``.
 
@@ -135,30 +136,41 @@ def add_optional_rl_arguments(
         default=argparse.SUPPRESS,
         help="Continue from --rl-weights-path when it exists.",
     )
-    group.add_argument(
-        "--numbered-checkpoints",
-        action="store_true",
-        help=(
-            "Write iteration-suffixed weights and an atomic opponent-pool state "
-            "for safe interruption recovery."
-        ),
-    )
-    group.add_argument(
-        "--start-iteration",
-        type=int,
-        default=0,
-        help="Absolute completed iteration when continuing a numbered checkpoint.",
-    )
-    group.add_argument(
-        "--resume-weights-path",
-        default=None,
-        help="Iteration-suffixed weights file from a complete resume pair.",
-    )
-    group.add_argument(
-        "--resume-state-file",
-        default=None,
-        help="Auxiliary .resume.npz file paired with --resume-weights-path.",
-    )
+    if expose_resume_pair:
+        group.add_argument(
+            "--numbered-checkpoints",
+            action="store_true",
+            help=(
+                "Write iteration-suffixed weights and an atomic opponent-pool "
+                "state for safe interruption recovery."
+            ),
+        )
+        group.add_argument(
+            "--start-iteration",
+            type=int,
+            default=0,
+            help=(
+                "Absolute completed iteration when continuing a numbered "
+                "checkpoint."
+            ),
+        )
+        group.add_argument(
+            "--resume-weights-path",
+            default=None,
+            help="Iteration-suffixed weights file from a complete resume pair.",
+        )
+        group.add_argument(
+            "--resume-state-file",
+            default=None,
+            help="Auxiliary .resume.npz file paired with --resume-weights-path.",
+        )
+    else:
+        parser.set_defaults(
+            numbered_checkpoints=False,
+            start_iteration=0,
+            resume_weights_path=None,
+            resume_state_file=None,
+        )
     group.add_argument(
         "--value-head",
         action="store_true",

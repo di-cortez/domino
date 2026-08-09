@@ -40,6 +40,7 @@ from diagnostics.parallel_runner import (
     cpu_only_worker_environment,
     executor_memory_snapshot,
     game_seed,
+    ignore_parent_shutdown_signals,
     terminate_executor,
 )
 
@@ -313,6 +314,7 @@ def _worker_initializer(
     global _WORKER_CURRENT_POLICY, _WORKER_POOL_POLICIES
     global _WORKER_TRAINING_OPPONENT, _WORKER_SCHEMA, _WORKER_GAMMA
 
+    ignore_parent_shutdown_signals()
     # The environment is already set before spawn; repeating it here protects
     # direct initializer use and documents the invariant at the worker boundary.
     os.environ["DOMINO_FORCE_CPU"] = "1"

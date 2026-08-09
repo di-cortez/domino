@@ -13,6 +13,7 @@ import math
 import multiprocessing as mp
 import os
 import random
+import signal
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
@@ -148,6 +149,12 @@ def _force_cpu_environment() -> None:
         os.environ[name] = "1"
 
 
+def ignore_parent_shutdown_signals() -> None:
+    """Let the parent coordinate graceful SIGINT/SIGTERM boundaries."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
 @contextlib.contextmanager
 def cpu_only_worker_environment():
     """Set CPU-only environment before spawn imports any project module."""
@@ -182,6 +189,7 @@ def _worker_initializer(
 ) -> None:
     """Construct one reusable agent pair inside each diagnostic worker."""
     global _WORKER_AGENT, _WORKER_OPPONENT, _WORKER_SUPPRESS_OUTPUT
+    ignore_parent_shutdown_signals()
     _force_cpu_environment()
     _WORKER_AGENT = create_agent(agent_name, weights)
     _WORKER_OPPONENT = create_agent(opponent_name, opponent_weights)
@@ -322,6 +330,9 @@ def terminate_executor(executor: ProcessPoolExecutor) -> None:
             process.terminate()
     for process in processes:
         process.join(timeout=1.0)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1.0)
     executor.shutdown(wait=False, cancel_futures=True)
 
 

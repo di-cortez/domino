@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import subprocess
 
 import numpy as np
 
@@ -15,6 +14,7 @@ from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from training.training_loop import ENCODED_FEATURE_VERSION
 from utils.artifacts import atomic_write_json, file_sha256
 from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
+from utils.repository import current_git_commit
 
 
 FORMAT_VERSION = 1
@@ -93,22 +93,6 @@ def run_scoped_asset_paths(run_dir):
         weights_meta=weights.with_suffix(".meta.json"),
         loss_plot=weights.with_name("domino_sl_loss.png"),
     )
-
-
-def _git_commit(root):
-    for candidate in (Path(root), Path(__file__).resolve().parents[1]):
-        try:
-            return subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=candidate,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).stdout.strip()
-        except Exception:
-            continue
-    return None
 
 
 def _created_at():
@@ -238,7 +222,7 @@ def write_dataset_metadata(
         "ruleset_version": RULESET_VERSION,
         "heuristic_version": HEURISTIC_VERSION,
         "encoded_feature_version": ENCODED_FEATURE_VERSION,
-        "git_commit": _git_commit(root),
+        "git_commit": current_git_commit(root),
         "created_at": _created_at(),
         "dataset_sha256": digest,
         "generation_config": _json_value(generation_config),
@@ -360,7 +344,7 @@ def write_weights_metadata(
         "stopping_reason": training_summary.get("stopping_reason"),
         "final_training_loss": training_summary.get("final_training_loss"),
         "final_validation_loss": training_summary.get("final_validation_loss"),
-        "git_commit": _git_commit(root),
+        "git_commit": current_git_commit(root),
         "created_at": _created_at(),
     }
     atomic_write_json(paths.weights_meta, metadata)

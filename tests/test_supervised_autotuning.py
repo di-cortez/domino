@@ -408,10 +408,7 @@ class DatasetResidencyTests(unittest.TestCase):
             dataset_path = root / "examples.jsonl"
             _write_dataset(dataset_path, count=20)
             output = io.StringIO()
-            with mock.patch(
-                "training.training_loop.CHECKPOINT_DIR",
-                str(root / "checkpoints"),
-            ), redirect_stdout(output):
+            with redirect_stdout(output):
                 summary = train_supervised(
                     epochs=2,
                     batch_size=8,
@@ -452,25 +449,21 @@ class DatasetResidencyTests(unittest.TestCase):
             dataset_path = root / "examples.jsonl"
             _write_dataset(dataset_path, count=20)
 
-            with mock.patch(
-                "training.training_loop.CHECKPOINT_DIR",
-                str(root / "checkpoints"),
-            ):
-                summary = train_supervised(
-                    epochs=20,
-                    batch_size=8,
-                    dataset_file=dataset_path,
-                    cache_file=root / "cache.npz",
-                    weights_file=root / "weights.npz",
-                    quiet=True,
-                    device="cpu",
-                    seed=7,
-                    memory_reserve_mb=0,
-                    training_plateau_window=2,
-                    training_plateau_patience=2,
-                    training_plateau_min_epochs=4,
-                    training_plateau_min_relative_improvement=1.0,
-                )
+            summary = train_supervised(
+                epochs=20,
+                batch_size=8,
+                dataset_file=dataset_path,
+                cache_file=root / "cache.npz",
+                weights_file=root / "weights.npz",
+                quiet=True,
+                device="cpu",
+                seed=7,
+                memory_reserve_mb=0,
+                training_plateau_window=2,
+                training_plateau_patience=2,
+                training_plateau_min_epochs=4,
+                training_plateau_min_relative_improvement=1.0,
+            )
 
             self.assertEqual(summary["epochs"], 6)
             self.assertTrue(summary["training_plateau_stopped"])
@@ -478,6 +471,34 @@ class DatasetResidencyTests(unittest.TestCase):
             self.assertEqual(summary["training_plateau_loss_start_epoch"], 1)
             self.assertTrue((root / "weights.npz").is_file())
             self.assertTrue((root / "weights_loss.png").is_file())
+
+    def test_interrupted_supervised_run_never_publishes_partial_weights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset_path = root / "examples.jsonl"
+            weights_path = root / "weights.npz"
+            _write_dataset(dataset_path, count=20)
+            weights_path.write_bytes(b"previous complete model")
+
+            with mock.patch.object(
+                SupervisedNeuralNetwork,
+                "train",
+                side_effect=RuntimeError("simulated interruption"),
+            ), self.assertRaisesRegex(RuntimeError, "simulated interruption"):
+                train_supervised(
+                    epochs=2,
+                    batch_size=8,
+                    dataset_file=dataset_path,
+                    cache_file=root / "cache.npz",
+                    weights_file=weights_path,
+                    quiet=True,
+                    device="cpu",
+                    seed=8,
+                    memory_reserve_mb=0,
+                )
+
+            self.assertEqual(weights_path.read_bytes(), b"previous complete model")
+            self.assertFalse((root / "weights_loss.png").exists())
 
     def test_compact_pipeline_uses_fixed_batch_without_epoch_chatter(self):
         captured_kwargs = {}

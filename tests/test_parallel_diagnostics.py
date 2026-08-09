@@ -346,10 +346,17 @@ class ParallelDiagnosticsTests(unittest.TestCase):
     def test_all_pairs_autotunes_each_matchup_independently(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "all_pairs"
+            network = PolicyNetwork(random_seed=88, device="cpu")
+            rl_weights = Path(temp_dir) / "rl.npz"
+            neural_weights = Path(temp_dir) / "neural.npz"
+            network.save(rl_weights)
+            network.save(neural_weights)
             report = run_all_pairs(
                 game_count=4,
                 output_dir=output_dir,
                 seed=88,
+                rl_weights=rl_weights,
+                neural_weights=neural_weights,
                 generate_pair_plots=False,
                 quiet=True,
                 workers="auto",

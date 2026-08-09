@@ -91,8 +91,6 @@ from training.training_loop import (
     DEFAULT_TRAINING_PLATEAU_PATIENCE,
     DEFAULT_TRAINING_PLATEAU_WINDOW,
     DEFAULT_WEIGHT_DECAY,
-    MAX_SUPERVISED_CHECKPOINTS,
-    _prune_supervised_checkpoints,
     hidden_sizes_from_args,
     parse_args as parse_supervised_args,
 )
@@ -242,27 +240,6 @@ def test_neural_agent_skips_network_for_single_option_tile_play():
 
     agent = NeuralAgent(NetworkThatMustNotRun())
     assert agent.choose_move({}, [only_action]) == only_action
-
-
-def test_supervised_checkpoint_retention_keeps_latest_ten():
-    """Archival checkpoint pruning must preserve only the newest ten files."""
-    with tempfile.TemporaryDirectory() as folder:
-        checkpoint_dir = Path(folder)
-        for index in range(MAX_SUPERVISED_CHECKPOINTS + 3):
-            path = checkpoint_dir / f"domino_sl_epoch_{index:04d}_val_1.0000.npz"
-            path.write_bytes(b"checkpoint")
-            os.utime(path, (index + 1, index + 1))
-
-        unrelated = checkpoint_dir / "notes.txt"
-        unrelated.write_text("keep", encoding="utf-8")
-
-        removed = _prune_supervised_checkpoints(checkpoint_dir)
-        remaining = sorted(checkpoint_dir.glob("domino_sl_epoch_*.npz"))
-
-        assert len(removed) == 3
-        assert len(remaining) == MAX_SUPERVISED_CHECKPOINTS
-        assert remaining[0].name.startswith("domino_sl_epoch_0003_")
-        assert unrelated.exists()
 
 
 def test_engine_requires_highest_opening_double_when_present():
@@ -2122,10 +2099,6 @@ def main():
         (
             "unbounded network depth",
             test_networks_accept_any_depth_beyond_the_command_line_maximum,
-        ),
-        (
-            "supervised checkpoint retention",
-            test_supervised_checkpoint_retention_keeps_latest_ten,
         ),
         (
             "exact probability initialization",

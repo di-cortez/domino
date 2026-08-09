@@ -70,13 +70,13 @@ random baseline are separated from calls that consume entropy.
 
 Current counts overlap by design:
 
-- 51 Python modules contain `random` in source, identifiers, strings, comments,
+- 50 Python modules contain `random` in source, identifiers, strings, comments,
   or docstrings.
 - 16 modules import the standard-library `random` package directly.
 - 23 modules access `numpy.random`, `cupy.random`, `xp.random`, or their legacy
   global state APIs.
 - 10 modules import `secrets`.
-- Including the two `secrets`-only modules, the broad inventory covers 53
+- Including the two `secrets`-only modules, the broad inventory covers 52
   Python files.
 
 The dataset migration deliberately leaves old APIs elsewhere. A file importing
@@ -184,8 +184,6 @@ The following modules mainly carry agent names, matchup names, report keys,
 paths, CLI text, or test expectations. The actual draw occurs in another
 module:
 
-- `diagnostics/hyperparameter_sweep.py`: legacy heuristic/neural/RL-vs-random
-  experiment names and evaluations.
 - `diagnostics/plots.py`: random-baseline filters, labels, and plot text.
 - `tests/test_canonical_pipeline.py`: configuration, namespace, and mocked
   fallback-seed expectations.

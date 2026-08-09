@@ -22,6 +22,7 @@ from typing import Callable, Iterable
 
 import numpy as np
 
+from diagnostics.gameplay import create_agent, play_game
 from utils.resource_limits import MIB, available_ram_mb, process_rss_bytes
 
 
@@ -182,8 +183,6 @@ def _worker_initializer(
     """Construct one reusable agent pair inside each diagnostic worker."""
     global _WORKER_AGENT, _WORKER_OPPONENT, _WORKER_SUPPRESS_OUTPUT
     _force_cpu_environment()
-    from diagnostics.pairwise import create_agent
-
     _WORKER_AGENT = create_agent(agent_name, weights)
     _WORKER_OPPONENT = create_agent(opponent_name, opponent_weights)
     _WORKER_SUPPRESS_OUTPUT = suppress_agent_output
@@ -200,8 +199,6 @@ def _add_numeric_tree(target: dict, source: dict) -> None:
 
 def _worker_play_games(jobs: tuple[tuple[int, int], ...]) -> dict:
     """Play one scheduled game block with stable absolute game seeds."""
-    from diagnostics.pairwise import play_game
-
     profile_started = time.perf_counter()
     runtime_profile = {
         "games": 0,

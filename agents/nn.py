@@ -13,6 +13,7 @@ from agents.network_architecture import (
     DEFAULT_NETWORK_ARCHITECTURE,
     policy_layer_names,
 )
+from utils.myrandom import RandomNamespace, SeedPlan
 
 
 DEVICES = ("auto", "cpu", "gpu")
@@ -108,6 +109,7 @@ class SupervisedNeuralNetwork:
         dropout_rate=DISABLED_DROPOUT_RATE,
         device="auto",
         hidden_sizes=None,
+        seed_plan=None,
     ):
         self.xp, self.device = resolve_device(device)
         self.lr = float(learning_rate)
@@ -117,17 +119,41 @@ class SupervisedNeuralNetwork:
             (hidden1_size, hidden2_size) if hidden_sizes is None
             else hidden_sizes
         )
-        random_source = (
-            self.xp.random
-            if random_seed is None
-            else self.xp.random.RandomState(random_seed)
+        if seed_plan is not None and not isinstance(seed_plan, SeedPlan):
+            raise TypeError("seed_plan must be a utils.myrandom.SeedPlan")
+        if seed_plan is not None and random_seed is not None:
+            raise ValueError("pass either seed_plan or random_seed, not both")
+        self.seed_plan = seed_plan
+        self._dropout_generator = (
+            None
+            if seed_plan is None
+            else seed_plan.generator(RandomNamespace.SUPERVISED_DROPOUT)
         )
+        random_source = None
+        if seed_plan is None:
+            random_source = (
+                self.xp.random
+                if random_seed is None
+                else self.xp.random.RandomState(random_seed)
+            )
+        else:
+            initialization_generator = seed_plan.generator(
+                RandomNamespace.SUPERVISED_INITIALIZATION
+            )
 
         def initialized(shape, scale):
-            values = random_source.randn(*shape).astype(
-                self.xp.float32,
-                copy=False,
-            )
+            if seed_plan is None:
+                values = random_source.randn(*shape).astype(
+                    self.xp.float32,
+                    copy=False,
+                )
+            else:
+                host_values = initialization_generator.standard_normal(
+                    shape
+                ).astype(host_np.float32, copy=False)
+                host_values *= host_np.asarray(scale, dtype=host_np.float32)
+                values = self.xp.asarray(host_values, dtype=self.xp.float32)
+                return values
             return values * self.xp.asarray(scale, dtype=self.xp.float32)
 
         # Hidden layers keep He initialization and the output layer keeps its
@@ -183,6 +209,12 @@ class SupervisedNeuralNetwork:
 
     def _dropout_uniform(self, shape):
         """Return uniform samples used to build one dropout mask."""
+        if self._dropout_generator is not None:
+            values = self._dropout_generator.random(
+                shape,
+                dtype=host_np.float32,
+            )
+            return self.xp.asarray(values, dtype=self.xp.float32)
         return self.xp.random.random(shape)
 
     def _hidden_dropout(self, activations, training):
@@ -349,10 +381,22 @@ class SupervisedNeuralNetwork:
         if self.device == "gpu":
             self.xp.get_default_memory_pool().free_all_blocks()
 
-    def _run_array_training_epoch(self, x_train, y_train, batch_size):
+    def _run_array_training_epoch(
+        self,
+        x_train,
+        y_train,
+        batch_size,
+        epoch_index,
+    ):
         """Train one complete shuffled epoch from host or backend arrays."""
         sample_count = x_train.shape[1]
-        permutation = host_np.random.permutation(sample_count)
+        if self.seed_plan is None:
+            permutation = host_np.random.permutation(sample_count)
+        else:
+            permutation = self.seed_plan.generator(
+                RandomNamespace.SUPERVISED_SHUFFLE,
+                epoch_index,
+            ).permutation(sample_count)
         weighted_loss = 0.0
         update_count = 0
         for start in range(0, sample_count, batch_size):
@@ -458,6 +502,7 @@ class SupervisedNeuralNetwork:
                             x_train,
                             y_train,
                             current_batch_size,
+                            epoch,
                         )
                     )
                 else:

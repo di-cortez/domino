@@ -235,6 +235,7 @@ locations are:
 | `dataset/supervised_dataset_standard_seed42.random_manifest.json` | Root seed and NumPy stream-derivation contract for the canonical dataset. |
 | `models/domino_sl_standard_seed42.npz` | Canonical supervised policy. |
 | `models/domino_sl_standard_seed42.meta.json` | Supervised origin, configuration, convergence, and SHA-256. |
+| `models/domino_sl_standard_seed42.random_manifest.json` | Supervised root seed and NumPy stream-derivation contract. |
 | `models/domino_sl_standard_seed42_loss.png` | Canonical training and validation loss curves. |
 | `models/rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Non-reused dataset, cache, supervised checkpoint, metadata, and loss plot for one quick run. |
 | `models/rl/domino_rl_<level>_seed42/` | Complete RL state, milestones, diagnostics, and progress curve. |

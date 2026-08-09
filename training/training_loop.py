@@ -50,6 +50,12 @@ from utils.resource_limits import (
     host_allocation_status,
 )
 from utils.artifacts import atomic_savez
+from utils.myrandom import (
+    DEFAULT_BIT_GENERATOR,
+    DERIVATION_SCHEME,
+    SeedPlan,
+    fresh_root_seed,
+)
 from utils.runtime_status import format_duration, memory_report
 
 
@@ -87,6 +93,14 @@ def supervised_loss_plot_path(weights_file):
     if stem.endswith("_weights"):
         stem = stem.removesuffix("_weights")
     return weights_path.with_name(f"{stem}_loss.png")
+
+
+def supervised_random_manifest_path(weights_file):
+    """Return the seed-plan manifest path paired with supervised weights."""
+    weights_path = Path(weights_file)
+    return weights_path.with_name(
+        f"{weights_path.stem}.random_manifest.json"
+    )
 
 
 def _supervised_loss_axis_limits(loss_history, validation_points):
@@ -577,7 +591,14 @@ def _network_weight_payload(network, weights=None):
     }
 
 
-def _create_network(*, device, weight_decay, dropout_rate, seed, architecture):
+def _create_network(
+    *,
+    device,
+    weight_decay,
+    dropout_rate,
+    seed,
+    architecture,
+):
     return SupervisedNeuralNetwork(
         input_size=architecture.input_size,
         output_size=architecture.output_size,
@@ -585,7 +606,7 @@ def _create_network(*, device, weight_decay, dropout_rate, seed, architecture):
         learning_rate=INITIAL_SUPERVISED_LEARNING_RATE,
         weight_decay=weight_decay,
         dropout_rate=dropout_rate,
-        random_seed=seed,
+        seed_plan=SeedPlan(seed),
         device=device,
     )
 
@@ -629,8 +650,7 @@ def train_supervised(
         raise ValueError("epochs must be positive")
     architecture = architecture_from_hidden_sizes(hidden_sizes)
     started = time.time()
-    if seed is not None:
-        np.random.seed(seed)
+    seed = int(seed) if seed is not None else fresh_root_seed()
     if not quiet:
         print(f"Supervised training startup memory: {memory_report()}")
 
@@ -686,8 +706,6 @@ def train_supervised(
     resident_capacity = None
 
     if selected_device == "gpu":
-        if seed is not None:
-            network.xp.random.seed(seed)
         residency_probe = probe_gpu_residency(
             dataset.x,
             dataset.y,
@@ -721,6 +739,7 @@ def train_supervised(
             train_count=train_count,
             host_storage_mode=dataset.storage_mode,
             device=selected_device,
+            seed_plan=network.seed_plan,
             resident_capacity=resident_capacity,
         )
     except MemorySafetyError:
@@ -742,6 +761,7 @@ def train_supervised(
             train_count=train_count,
             host_storage_mode=dataset.storage_mode,
             device="cpu",
+            seed_plan=network.seed_plan,
         )
 
     if not quiet:
@@ -881,6 +901,9 @@ def train_supervised(
             weights_path,
             **_network_weight_payload(network, best_state["weights"]),
         )
+        network.seed_plan.write_manifest(
+            supervised_random_manifest_path(weights_path)
+        )
     finally:
         tracker.observe()
         data_plan.close()
@@ -922,6 +945,10 @@ def train_supervised(
             else f"{best_state['validation_loss']:.4f}"
         )
         print(f"Model saved to {weights_file} (best validation loss: {best_text}).")
+        print(
+            "Random manifest saved to "
+            f"{supervised_random_manifest_path(weights_file)}."
+        )
         print(f"Loss graph saved to {loss_plot_path}.")
         if data_plan.storage_mode == "gpu_windowed":
             rotations = [
@@ -958,6 +985,13 @@ def train_supervised(
         "requested_batch_size": requested_batch_size,
         "selected_batch_size": selected_batch_size,
         "network_architecture": architecture.as_dict(),
+        "effective_seed": seed,
+        "random_bit_generator": DEFAULT_BIT_GENERATOR,
+        "random_derivation_scheme": DERIVATION_SCHEME,
+        "random_manifest_path": str(
+            supervised_random_manifest_path(weights_file)
+        ),
+        "random_manifest": network.seed_plan.to_manifest(),
         "total_examples": total_examples,
         "train_examples": train_count,
         "validation_examples": validation_count,
@@ -1287,7 +1321,10 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
         "--sl-seed",
         type=int,
         default=None,
-        help="Fix supervised initialization and shuffle randomness.",
+        help=(
+            "Fix the supervised root seed for initialization, epoch shuffles, "
+            "and dropout."
+        ),
     )
     return parser
 

@@ -6,10 +6,12 @@ by Git and can be regenerated through the training pipeline.
 | File | Contents |
 |---|---|
 | `domino_sl_weights.npz` | Supervised MLP weights trained from heuristic labels. Used by `NeuralAgent`. |
+| `domino_sl_weights.random_manifest.json` | Effective supervised root seed and PCG64 namespace-derivation contract. |
 | `domino_sl_loss.png` | Training and validation loss curves from the latest supervised run. |
 | `domino_rl_weights.npz` | RL policy weights refined by self-play. Used by `RLAgent`. |
 | `domino_sl_standard_seed<seed>.npz` | Canonical supervised policy shared by long-run pipeline levels. |
 | `domino_sl_standard_seed<seed>.meta.json` | Dataset origin/hash, architecture, training configuration, convergence, and weights hash. |
+| `domino_sl_standard_seed<seed>.random_manifest.json` | Canonical supervised root seed and PCG64 namespace-derivation contract. |
 | `rl/domino_rl_<level>_seed<seed>/` | Canonical RL run state, checkpoints, pool, and diagnostics. |
 | `rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Run-local quick-profile dataset, cache, SL checkpoint, metadata, and loss plot; never reused by another invocation. |
 

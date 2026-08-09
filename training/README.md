@@ -264,11 +264,14 @@ The loop:
 - uses a fixed mini-batch of 8,192 examples by default;
 - keeps the complete dataset in GPU memory when safe, or rotates one reusable
   GPU window through a global per-epoch permutation when it is not;
+- derives independent PCG64 streams for initialization, per-epoch shuffling,
+  and dropout from one run-level `utils.myrandom.SeedPlan`;
 - keeps the best validation checkpoint in memory;
 - stops automatically after conservative repeated blocks confirm that
   training loss has saturated;
-- keeps only the 10 most recent archival checkpoints;
 - saves `models/domino_sl_weights.npz`;
+- writes `models/domino_sl_weights.random_manifest.json` with the effective
+  root seed and derivation contract;
 - writes `models/domino_sl_loss.png`, with one training-loss value per epoch
   and the validation-loss values already computed at validation intervals.
 
@@ -304,6 +307,16 @@ random weights, keeps its best state in memory, and atomically publishes the
 weights only after the complete invocation succeeds. If it is interrupted, the
 already completed dataset remains reusable and the next supervised invocation
 starts from the beginning; no partial supervised checkpoint is selected.
+
+`--sl-seed N` fixes one immutable root seed. Without it, the command obtains a
+fresh root seed from operating-system entropy and reports it in the returned
+summary and manifest. Initialization uses `SUPERVISED_INITIALIZATION`, every
+epoch permutation uses `SUPERVISED_SHUFFLE/<epoch>`, and dropout uses its own
+sequential `SUPERVISED_DROPOUT` generator. All draws are made by NumPy PCG64;
+GPU runs transfer weights, masks, and permutation indices to CuPy instead of
+creating backend-specific random streams. This keeps the random inputs to CPU
+and GPU training aligned and leaves module-global NumPy/CuPy state untouched.
+Changing this derivation contract invalidates canonical supervised reuse.
 
 CuPy import alone is not treated as proof of a working GPU. At startup,
 `agents/nn.py` also asks the CUDA runtime for a visible device; a missing driver,

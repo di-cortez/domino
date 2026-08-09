@@ -59,6 +59,7 @@ from training.rl_constants import (
 )
 from training.ppo import DEFAULT_MAX_EPOCHS, MAX_PPO_EPOCHS
 from utils.artifacts import atomic_write_json, file_sha256
+from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
 from utils.resource_limits import choose_safe_rl_device
 from utils.runtime_status import (
     format_duration,
@@ -502,6 +503,8 @@ def _supervised_training_identity(args, max_epochs):
         gpu_memory_reserve_mb=int(args.sl_gpu_memory_reserve_mb),
         validation_split=0.15,
         initial_learning_rate=training_loop.INITIAL_SUPERVISED_LEARNING_RATE,
+        random_bit_generator=DEFAULT_BIT_GENERATOR,
+        random_derivation_scheme=DERIVATION_SCHEME,
     )
 
 

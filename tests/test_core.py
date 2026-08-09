@@ -95,6 +95,7 @@ from training.training_loop import (
     parse_args as parse_supervised_args,
 )
 from train_script.run_pipeline import _build_config, parse_args as parse_pipeline_args
+from utils.myrandom import SeedPlan
 from utils.runtime_status import pipeline_compute_report
 
 from math import comb, factorial
@@ -505,13 +506,12 @@ def test_supervised_dropout_applies_only_to_training_forward_passes():
         "hidden2_size": 48,
         "output_size": 2,
         "learning_rate": 0.01,
-        "random_seed": 5,
+        "seed_plan": SeedPlan(5),
         "device": "cpu",
     }
     network = SupervisedNeuralNetwork(**common_args, dropout_rate=0.5)
     x_batch = host_np.ones((4, 6), dtype=float)
 
-    host_np.random.seed(3)
     network.forward(x_batch, training=True)
     for activation, mask in (("A1", "D1"), ("A2", "D2")):
         scale = _to_numpy(network.cache[mask])
@@ -539,7 +539,7 @@ def test_supervised_dropout_backpropagates_through_the_forward_mask():
         hidden2_size=16,
         output_size=2,
         learning_rate=0.05,
-        random_seed=7,
+        seed_plan=SeedPlan(7),
         device="cpu",
         dropout_rate=0.5,
     )
@@ -550,7 +550,6 @@ def test_supervised_dropout_backpropagates_through_the_forward_mask():
     y_batch[0, :] = 1.0
 
     w2_before = _to_numpy(network.W2).copy()
-    host_np.random.seed(11)
     network.forward(x_batch, training=True)
     dropped_first_layer = _to_numpy(network.cache["D1"])[:, 0] == 0.0
     assert dropped_first_layer.any()

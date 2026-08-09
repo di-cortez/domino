@@ -1,8 +1,8 @@
 # Central randomness package
 
-`utils.myrandom` is the future single authority for randomness in the Domino
-project. Supervised dataset generation is its first integrated consumer. RL,
-supervised optimization, diagnostics, general agents, and UI code have not yet
+`utils.myrandom` is the single authority being adopted for randomness in the
+Domino project. Supervised dataset generation and supervised optimization are
+integrated consumers. RL, diagnostics, general agents, and UI code have not yet
 been migrated.
 
 ## Contract
@@ -55,25 +55,25 @@ restored = generator_from_state(saved)
 ## Current migration boundary
 
 Dataset games derive `RandomNamespace.DATASET_GAME` streams from their absolute
-game IDs. No per-game seed file is stored. The root plan is written beside the
-JSONL as `<dataset-stem>.random_manifest.json`, and workers reconstruct streams
-on demand. Other project areas continue using their historical randomness until
-their own migration is performed.
+game IDs. Supervised optimization derives independent initialization, epoch
+shuffle, and dropout streams. Both stages write a root manifest beside their
+primary artifact. Other project areas continue using their historical
+randomness until their own migration is performed.
 
 ## Repository migration inventory
 
-This inventory was refreshed by static inspection on 2026-08-09, after dataset
-generation became the first `utils.myrandom` consumer. It covers every Python
-module containing `random`, every direct standard-library `random` import,
-NumPy/CuPy/backend random APIs, and `secrets`. String-only references to the
-random baseline are separated from calls that consume entropy.
+This inventory was refreshed by static inspection on 2026-08-09, after
+supervised optimization became the second `utils.myrandom` consumer. It covers
+every Python module containing `random`, every direct standard-library `random`
+import, NumPy/CuPy/backend random APIs, and `secrets`. String-only references to
+the random baseline are separated from calls that consume entropy.
 
 Current counts overlap by design:
 
 - 51 Python modules contain `random` in source, identifiers, strings, comments,
   or docstrings.
 - 16 modules import the standard-library `random` package directly.
-- 23 modules access `numpy.random`, `cupy.random`, `xp.random`, or their legacy
+- 21 modules access `numpy.random`, `cupy.random`, `xp.random`, or their legacy
   global state APIs.
 - 10 modules import `secrets`.
 - Including the two `secrets`-only modules, the broad inventory covers 53
@@ -96,6 +96,21 @@ The root manifest is static. Per-game streams are calculated on demand, and
 the temporary SQLite aggregation stores no per-game seed column. Consequently,
 worker count, scheduling, autotuning retention, and memory fallback cannot
 change a game's deal.
+
+### Completed: supervised optimization
+
+| Module | Current behavior |
+|---|---|
+| `training/training_loop.py` | Creates one `SeedPlan` from `--sl-seed` or `fresh_root_seed()`, injects it into the network and data plan, writes `<weights-stem>.random_manifest.json`, and reports the effective root seed. It no longer seeds NumPy or CuPy globals. |
+| `training/supervised_runtime.py` | Derives `SUPERVISED_SHUFFLE/<epoch>` on the host for every storage mode. A fully GPU-resident run transfers those indices to CuPy instead of drawing a second backend-specific permutation. |
+| `agents/nn.py` | The injected-plan path derives initialization and sequential dropout generators from separate namespaces, produces their random arrays with NumPy `Generator`, and transfers arrays to the selected backend. The legacy no-plan path remains for non-migrated RL and inference construction. |
+| `training/pipeline.py` | Includes the bit generator and derivation scheme in canonical supervised identity, so legacy globally-seeded weights are not silently reused under the new seed meaning. |
+
+The shuffle stream is coordinate-derived, so generating epoch 10 never depends
+on whether an earlier epoch generator was constructed. Initialization and
+dropout are separate streams, so changing one responsibility cannot perturb the
+other. Dropout is sequential within a complete supervised invocation; partial
+supervised resume is intentionally unsupported.
 
 ### Standard-library `random` imports still to migrate
 
@@ -131,7 +146,7 @@ callers are migration work:
 |---|---|
 | `agents/encoder.py` | `np.random.choice` samples a legal policy action. Pass an explicit policy generator. |
 | `agents/neural_agent.py` | `np.random.rand` controls epsilon exploration. Share the explicit stream used for the exploratory choice. |
-| `agents/nn.py` | `xp.random.RandomState/randn` initializes weights, `xp.random.random` builds supervised dropout masks, and `host_np.random.permutation` shuffles examples. Split initialization, dropout, and epoch-shuffle namespaces. |
+| `agents/nn.py` | The non-migrated fallback still exposes `xp.random.RandomState/randn`, `xp.random.random`, and `host_np.random.permutation` to RL/inference and low-level callers that do not inject a `SeedPlan`. The supervised entry point always injects one. |
 | `agents/rl_nn.py` | Generates RL dropout masks with host `np.random.random` and copies them to the selected backend. An explicit resumable RL-dropout generator should replace the global host state. |
 | `benchmarks/headless_step_benchmark.py` | Calls `np.random.seed` beside Python seeding; derive each benchmark game instead. |
 | `diagnostics/parallel_runner.py` | Calls `np.random.seed` per game; derive each diagnostic game instead. |
@@ -141,8 +156,6 @@ callers are migration work:
 | `training/rl_parallel.py` | Calls `np.random.seed` in rollout workers; use per-game RL streams. |
 | `training/rl_resume.py` | Serializes the legacy NumPy global state; replace with named sequential generator snapshots only where coordinate derivation is insufficient. |
 | `training/self_play.py` | Seeds the NumPy global state at startup; construct and distribute an RL seed plan instead. |
-| `training/supervised_runtime.py` | Uses NumPy permutations on CPU/host-window paths and CuPy permutations for fully GPU-resident data. The unified design will generate NumPy permutations explicitly and transfer indices when needed. |
-| `training/training_loop.py` | Seeds NumPy and `network.xp.random`, and passes `random_seed` into network initialization. It should create supervised initialization, shuffle, and dropout streams centrally. |
 
 Tests with direct legacy NumPy state are
 `tests/test_adaptive_tuning.py`, `tests/test_core.py`,
@@ -231,14 +244,15 @@ pipeline/self_play fallback or explicit seed
     -> global Python/NumPy state persisted by resume
 ```
 
-Supervised optimization, not yet migrated:
+Supervised optimization, now migrated:
 
 ```text
-training seed
-    -> global NumPy/backend seeding
-    -> xp.random weight initialization
-    -> NumPy/CuPy epoch permutations
-    -> xp.random dropout masks
+explicit/fresh root seed
+    -> SeedPlan
+    +-> SUPERVISED_INITIALIZATION -> host PCG64 weights -> CPU/GPU backend
+    +-> SUPERVISED_SHUFFLE + epoch -> host permutation -> CPU/GPU indices
+    +-> SUPERVISED_DROPOUT -> sequential host masks -> CPU/GPU backend
+    -> supervised random manifest beside final weights
 ```
 
 Diagnostics, not yet migrated:

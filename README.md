@@ -259,8 +259,17 @@ python -m compileall -q agents diagnostics middleware training ui utils \
 ```
 
 Pylint is required after every modification and currently reports without
-blocking. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the staged
-[`Pylint roadmap`](docs/PYLINT_ROADMAP.md).
+blocking:
+
+```bash
+python -m pylint agents benchmarks diagnostics middleware tests train_script \
+  training ui utils
+```
+
+Do not use `python -m pylint .`: recursive discovery would also traverse the
+local `.venv` and report on third-party packages, making the check much slower
+and obscuring project findings. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+the staged [`Pylint roadmap`](docs/PYLINT_ROADMAP.md).
 
 The headless benchmark verifies both fixed-seed equivalence and throughput:
 

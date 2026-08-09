@@ -56,8 +56,9 @@ class DominoEngine:
 
     _next_game_id = 0
 
-    def __init__(self, player_count=2):
+    def __init__(self, player_count=2, rng=None):
         self.player_count = player_count
+        self.rng = rng
         self.all_tiles = [(i, j) for i in range(7) for j in range(i, 7)]
         self.reset()
 
@@ -75,7 +76,10 @@ class DominoEngine:
         """Start a new game, shuffle, deal, and choose the opening player."""
         self.game_id = self._allocate_game_id()
         shuffled_tiles = self.all_tiles.copy()
-        random.shuffle(shuffled_tiles)
+        if self.rng is None:
+            random.shuffle(shuffled_tiles)
+        else:
+            self.rng.shuffle(shuffled_tiles)
 
         self.hands = [
             shuffled_tiles[i * 7:(i + 1) * 7]

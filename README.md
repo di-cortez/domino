@@ -227,6 +227,7 @@ locations are:
 |---|---|
 | `dataset/supervised_dataset_standard_seed42.jsonl` | Canonical heuristic-labelled real decisions for seed 42. |
 | `dataset/supervised_dataset_standard_seed42.meta.json` | Dataset identity, provenance, and SHA-256. |
+| `dataset/supervised_dataset_standard_seed42.random_manifest.json` | Root seed and NumPy stream-derivation contract for the canonical dataset. |
 | `models/domino_sl_standard_seed42.npz` | Canonical supervised policy. |
 | `models/domino_sl_standard_seed42.meta.json` | Supervised origin, configuration, convergence, and SHA-256. |
 | `models/domino_sl_standard_seed42_loss.png` | Canonical training and validation loss curves. |

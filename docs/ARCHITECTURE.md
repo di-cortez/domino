@@ -124,6 +124,11 @@ encoded float32 cache -> supervised MLP -> run-local or standard SL + metadata
 Dataset generation retains only real policy decisions and writes deterministic
 game-id order through a bounded SQLite aggregation stage. The encoded cache is
 rebuilt when the dataset metadata or encoder contract changes.
+Each absolute dataset game derives its own NumPy `PCG64` stream from the root
+`SeedPlan`; worker scheduling, autotuning, and fallback therefore cannot change
+the deal. The small seed-plan manifest is persisted beside the JSONL, while
+per-game streams are calculated on demand instead of being stored in a seed
+table.
 
 Supervised training can keep encoded arrays in host RAM, use atomic disk-backed
 memory maps, and place all or rotating windows of data on the GPU. It saves the

@@ -190,10 +190,19 @@ command defaults to 30,000 games; the canonical pipeline requests 100,000.
 Automatic mode benchmarks 1, 2, 4, 6, ... CPU-only workers, capped at 20.
 Every attempt generates and retains 1% of the requested games. Testing stops on
 a memory/error guard or below 10% marginal gain, then the remaining absolute
-game ids run with the selected count. Per-game seeds make fixed-worker and
-automatic runs identical for the same `--seed`, regardless of scheduling or a
-runtime fallback. Use `--help` for benchmark fractions, RAM reserve, per-worker
-RSS, and estimated-worker-memory controls.
+game ids run with the selected count. A central `utils.myrandom.SeedPlan`
+derives one NumPy `PCG64` stream from the root seed and absolute game id. The
+worker receives the plan and reconstructs that game's generator on demand; it
+does not seed process-global Python, NumPy, or CuPy state. Fixed-worker and
+automatic runs therefore produce byte-identical JSONL for the same `--seed`,
+regardless of scheduling or a runtime fallback. Use `--help` for benchmark
+fractions, RAM reserve, per-worker RSS, and estimated-worker-memory controls.
+
+Each successful generation also writes
+`<dataset-stem>.random_manifest.json` beside the JSONL. It records the root
+seed, NumPy bit generator, derivation scheme, and registered namespaces. There
+is no large per-game seed file: every game stream is reproducibly calculated
+from `(root seed, DATASET_GAME, absolute game id)`.
 
 Workers serialize one compact payload per game. Only the parent writes those
 payloads to a disposable SQLite database, keeping RAM bounded while results

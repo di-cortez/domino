@@ -14,11 +14,12 @@ from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from training.training_loop import ENCODED_FEATURE_VERSION
 from utils.artifacts import atomic_write_json, file_sha256
+from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
 
 
 FORMAT_VERSION = 1
 DATASET_FORMAT = "jsonl_state_action_v1"
-DATASET_GENERATOR_VERSION = "canonical_real_decisions_v1"
+DATASET_GENERATOR_VERSION = "canonical_real_decisions_numpy_seed_plan_v2"
 RULESET_VERSION = "two_player_domino_v1"
 HEURISTIC_VERSION = "strategic_exact_belief_v1"
 EXPECTED_WEIGHT_SHAPES = DEFAULT_NETWORK_ARCHITECTURE.policy_weight_shapes()
@@ -131,6 +132,8 @@ def canonical_generation_config(*, dataset_games, workers, tuning, safety):
         "max_worker_rss_mb": int(safety["max_worker_rss_mb"]),
         "teacher": "StrategicAgent_vs_StrategicAgent",
         "real_decisions_only": True,
+        "random_bit_generator": DEFAULT_BIT_GENERATOR,
+        "random_derivation_scheme": DERIVATION_SCHEME,
     })
 
 

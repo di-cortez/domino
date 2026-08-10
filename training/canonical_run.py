@@ -7,21 +7,17 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-import subprocess
 
 import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from middleware.domino_engine import RULESET_VERSION
-from training.rl_constants import (
-    PPO_GPU_BUFFER_SAFETY_FRACTION,
-    PPO_MAX_MINIBATCHES,
-    PPO_MIN_MINIBATCHES,
-)
 from training.rl_resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
+    RLTrainingConfiguration,
+    _validate_resume_configuration,
     load_resume_state,
 )
 from utils.artifacts import (
@@ -30,6 +26,7 @@ from utils.artifacts import (
     atomic_write_json,
     file_sha256,
 )
+from utils.repository import current_git_commit
 
 
 RUN_FORMAT_VERSION = 2
@@ -85,22 +82,6 @@ def canonical_run_dir(root, level, seed, execution_id=None, run_name=None):
 
 def _utc_now():
     return datetime.now(timezone.utc).isoformat()
-
-
-def _git_commit(root):
-    for candidate in (Path(root), Path(__file__).resolve().parents[1]):
-        try:
-            return subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=candidate,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).stdout.strip()
-        except Exception:
-            continue
-    return None
 
 
 def _relative(run_dir, path):
@@ -305,8 +286,6 @@ def create_run_config(
     rl_config,
     algorithm=PPO_TRAINING_ALGORITHM,
     diagnostic_config=None,
-    lineage=None,
-    allow_target_extension=False,
     run_name=None,
     locked_arguments=None,
     machine=None,
@@ -340,8 +319,7 @@ def create_run_config(
         "diagnostic_config": dict(diagnostic_config or {}),
         "locked_arguments": dict(locked_arguments or {}),
         "machine": dict(machine or {}),
-        "lineage": list(lineage or ()),
-        "git_commit": _git_commit(root),
+        "git_commit": current_git_commit(root),
         "created_at": _utc_now(),
     }
     value["configuration_sha256"] = configuration_sha256(value)
@@ -379,9 +357,7 @@ def create_run_config(
                 differences.append(key)
         target_changed = existing.get("target_rl_games") != value["target_rl_games"]
         level_changed = existing.get("pipeline_level") != value["pipeline_level"]
-        if differences or (
-            (target_changed or level_changed) and not allow_target_extension
-        ):
+        if differences or target_changed or level_changed:
             fields = ", ".join(
                 differences
                 + (["target_rl_games"] if target_changed else [])
@@ -390,43 +366,16 @@ def create_run_config(
             raise ValueError(
                 "Existing canonical run_config.json is incompatible in: " + fields
             )
-        if target_changed or level_changed or lineage:
-            existing.update({
-                "pipeline_level": pipeline_level,
-                "target_rl_games": value["target_rl_games"],
-                "unbounded": value["unbounded"],
-                "lineage": list(lineage or existing.get("lineage", ())),
-                "updated_at": _utc_now(),
-            })
-            existing["configuration_sha256"] = configuration_sha256(existing)
-            atomic_write_json(config_path, existing)
         return existing
     atomic_write_json(config_path, value)
     return value
 
 
-def load_resume_point(
-    run_dir,
-    *,
-    seed,
-    supervised_weights_sha256,
-    ppo_config,
-    algorithm=PPO_TRAINING_ALGORITHM,
-    force_incompatible=False,
-    expected_configuration_sha256=None,
-):
-    """Validate the latest marker and exact weights/resume pair."""
-    algorithm = _validated_algorithm(algorithm)
+def load_resume_point(run_dir):
+    """Validate the latest marker against its immutable run configuration."""
     run_dir = Path(run_dir)
     run_config = load_run_config(run_dir)
     configuration_hash = run_config["configuration_sha256"]
-    if (
-        expected_configuration_sha256 is not None
-        and expected_configuration_sha256 != configuration_hash
-    ):
-        raise ValueError(
-            "Requested run configuration hash does not match run_config.json."
-        )
     state_path = run_dir / "training_state.json"
     try:
         with open(state_path, "r", encoding="utf-8") as stream:
@@ -441,13 +390,13 @@ def load_resume_point(
         )
     differences = []
     expected = {
-        "seed": int(seed),
+        "seed": int(run_config["seed"]),
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
         "network_architecture": run_config["network_architecture"],
-        "algorithm": algorithm,
-        "supervised_weights_sha256": supervised_weights_sha256,
-        "ppo_config": dict(ppo_config),
+        "algorithm": run_config["algorithm"],
+        "supervised_weights_sha256": run_config["supervised_weights_sha256"],
+        "ppo_config": dict(run_config["ppo_config"]),
         "configuration_sha256": configuration_hash,
     }
     for key, expected_value in expected.items():
@@ -460,7 +409,7 @@ def load_resume_point(
                 f"{key}: checkpoint={checkpoint_value!r}, "
                 f"requested={expected_value!r}"
             )
-    if differences and not force_incompatible:
+    if differences:
         raise ValueError(
             "Canonical RL resume is incompatible: " + "; ".join(differences)
         )
@@ -488,35 +437,20 @@ def load_resume_point(
         raise ValueError(
             "Canonical state and exact resume pair disagree on RL iterations."
         )
-    pair_config = metadata.get("configuration", {})
-    pair_expected = {
-        "effective_seed": int(seed),
-        "rl_training_algorithm": algorithm,
-        "sl_weights_sha256": supervised_weights_sha256,
-        "ppo_clip_epsilon": float(ppo_config["clip_epsilon"]),
-        "ppo_stop_kl": float(ppo_config["stop_kl"]),
-        "ppo_max_epochs": int(ppo_config["max_epochs"]),
-        "ppo_min_minibatches": PPO_MIN_MINIBATCHES,
-        "ppo_max_minibatches": PPO_MAX_MINIBATCHES,
-        "ppo_games_per_minibatch_scale": int(
-            ppo_config["games_per_minibatch_scale"]
-        ),
-        "ppo_min_decisions_per_minibatch": int(
-            ppo_config["min_decisions_per_minibatch"]
-        ),
-        "prefer_gpu_buffer": bool(ppo_config["prefer_gpu_buffer"]),
-        "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
-        "run_configuration_sha256": configuration_hash,
-    }
-    pair_differences = [
-        key
-        for key, expected_value in pair_expected.items()
-        if pair_config.get(key) != expected_value
-    ]
-    if pair_differences and not force_incompatible:
+    pair_config = metadata.get("configuration") or {}
+    expected_pair_config = RLTrainingConfiguration.from_run_config(
+        run_config,
+        total_training_games=pair_config["total_training_games"],
+        selected_workers=pair_config["selected_workers"],
+        device=pair_config["device"],
+    )
+    _validate_resume_configuration(
+        metadata,
+        expected_pair_config,
+    )
+    if pair_config.get("run_configuration_sha256") != configuration_hash:
         raise ValueError(
-            "Canonical exact resume pair is incompatible in: "
-            + ", ".join(pair_differences)
+            "Canonical exact resume pair has the wrong run configuration hash."
         )
     resume_hash = file_sha256(resume_state)
     if resume_hash != state.get("latest_resume_state_sha256"):
@@ -812,7 +746,7 @@ def publish_checkpoint(
         ),
         "checkpoint_reason": reason,
         "shutdown_requested": reason == "shutdown",
-        "git_commit": _git_commit(root),
+        "git_commit": run_config.get("git_commit"),
         "updated_at": _utc_now(),
     }
     # This is the commit marker: every path/hash referenced above already exists.

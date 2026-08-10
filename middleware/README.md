@@ -9,6 +9,12 @@ belongs to `agents/`.
 | `middleware.py` | `Agent` protocol and `GameManager`, which asks agents for moves and records supervised-training history. |
 | `opponent_model.py` | Exact two-player opponent inference using temporal slots and integer hand weights. |
 
+`DominoEngine` accepts an optional NumPy-style generator exposing `shuffle`.
+Supervised dataset workers pass their per-game `utils.myrandom` generator so
+deals do not consume process-global random state. Callers not yet migrated omit
+the generator and retain the historical standard-library shuffle during the
+staged repository-wide migration.
+
 ## Opponent Suit Probabilities
 
 `opponent_model.py` exports `compute_opponent_suit_probabilities(state)`, which

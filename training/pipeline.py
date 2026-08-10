@@ -58,7 +58,8 @@ from training.rl_constants import (
     RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
 )
 from training.ppo import DEFAULT_MAX_EPOCHS, MAX_PPO_EPOCHS
-from utils.artifacts import atomic_copy, atomic_write_json, file_sha256
+from utils.artifacts import atomic_write_json, file_sha256
+from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
 from utils.resource_limits import choose_safe_rl_device
 from utils.runtime_status import (
     format_duration,
@@ -85,19 +86,25 @@ PERIODIC_DIAGNOSTIC_TUNING_FORMAT_VERSION = 1
 PERIODIC_DIAGNOSTIC_TUNING_FILE = "periodic_diagnostic_tuning.json"
 FOREVER_ACTIVE_RUN_FORMAT_VERSION = 1
 FOREVER_ACTIVE_RUN_FILE = "active_forever_run.json"
-_FOREVER_OPERATIONAL_ARGUMENTS = frozenset({
+_RESUME_OPERATIONAL_ARGUMENTS = frozenset({
+    "adaptive_tuning_path",
     "artifact_root",
     "execution_id",
-    "force_resume_incompatible",
-    "ppo_target_kl",
+    "metrics_output_path",
+    "numbered_checkpoints",
     "rebuild_dataset",
     "rebuild_supervised_assets",
     "restart_rl",
     "resume",
     "resume_from",
+    "resume_state_file",
+    "resume_weights_path",
     "retrain_supervised",
+    "rl_weights_path",
     "run_name",
     "scale",
+    "sl_weights_path",
+    "start_iteration",
 })
 
 
@@ -280,13 +287,13 @@ def _json_safe_argument(value):
     return value
 
 
-def _locked_forever_arguments(args):
-    """Return every non-operational CLI setting frozen for a forever run."""
+def _locked_run_arguments(args):
+    """Return every non-operational CLI setting frozen for a resumable run."""
     return {
         name: _json_safe_argument(value)
         for name, value in sorted(vars(args).items())
         if not name.startswith("_")
-        and name not in _FOREVER_OPERATIONAL_ARGUMENTS
+        and name not in _RESUME_OPERATIONAL_ARGUMENTS
     }
 
 
@@ -327,6 +334,60 @@ def _write_forever_active_run(root, run_dir, run_config):
         "configuration_sha256": run_config["configuration_sha256"],
         "updated_at": run_config.get("created_at"),
     })
+
+
+def _apply_saved_run_arguments(parser, args, explicit, selected_run):
+    """Replace resume-time CLI settings with one run's immutable arguments."""
+    run_config = load_run_config(selected_run)
+    if run_config.get("pipeline_level") != args.scale:
+        parser.error(
+            f"Selected run is {run_config.get('pipeline_level')!r}, not "
+            f"{args.scale!r}: {selected_run}"
+        )
+    locked = run_config.get("locked_arguments")
+    if not isinstance(locked, dict) or not locked:
+        parser.error(f"Run has no locked argument set: {selected_run}")
+    has_training_state = (Path(selected_run) / "training_state.json").is_file()
+    ignored_options = []
+    for name, saved_value in locked.items():
+        if name in _RESUME_OPERATIONAL_ARGUMENTS:
+            continue
+        if name in explicit:
+            requested = _json_safe_argument(getattr(args, name, None))
+            if not has_training_state and requested != saved_value:
+                parser.error(
+                    f"--{name.replace('_', '-')} conflicts with the existing "
+                    f"run configuration (saved {saved_value!r}, requested "
+                    f"{requested!r})."
+                )
+            ignored_options.append(
+                f"--{name.replace('_', '-')}={requested!r} "
+                f"(saved {saved_value!r})"
+            )
+        setattr(args, name, saved_value)
+    args.seed = int(run_config["seed"])
+    args.run_name = run_config.get("run_name")
+    args.execution_id = None
+    args._selected_run_dir = Path(selected_run)
+    args._locked_run_config = run_config
+    args.resume_from = None
+    args.resume = has_training_state
+    if args.resume:
+        for name in (
+            "rebuild_dataset",
+            "rebuild_supervised_assets",
+            "retrain_supervised",
+        ):
+            if name in explicit:
+                ignored_options.append(f"--{name.replace('_', '-')} (disabled)")
+            setattr(args, name, False)
+    if ignored_options:
+        print(
+            "Warning: resume accepts no training or asset overrides; ignoring "
+            + ", ".join(ignored_options)
+            + ". Continuing with run_config.json."
+        )
+    return args
 
 
 def _hydrate_forever_arguments(parser, args, explicit):
@@ -372,42 +433,7 @@ def _hydrate_forever_arguments(parser, args, explicit):
 
     if not (selected_run / "run_config.json").is_file():
         return args
-    run_config = load_run_config(selected_run)
-    if run_config.get("pipeline_level") != "forever":
-        parser.error(f"Selected run is not a forever run: {selected_run}")
-    locked = run_config.get("locked_arguments")
-    if not isinstance(locked, dict) or not locked:
-        parser.error(
-            f"Forever run has no locked argument set: {selected_run}"
-        )
-    for name, saved_value in locked.items():
-        if name in _FOREVER_OPERATIONAL_ARGUMENTS:
-            continue
-        if name in explicit:
-            requested = _json_safe_argument(getattr(args, name, None))
-            if requested != saved_value:
-                parser.error(
-                    f"--{name.replace('_', '-')} is locked by the existing "
-                    f"forever run (saved {saved_value!r}, requested "
-                    f"{requested!r}). Start a different --run-name or use "
-                    "--restart-rl for a clean experiment."
-                )
-        setattr(args, name, saved_value)
-    if "seed" in explicit and int(args.seed) != int(run_config["seed"]):
-        parser.error("The requested seed does not match the selected forever run.")
-    if (
-        "run_name" in explicit
-        and args.run_name != run_config.get("run_name")
-    ):
-        parser.error("The requested run name does not match the selected forever run.")
-    args.seed = int(run_config["seed"])
-    args.run_name = run_config.get("run_name")
-    args.execution_id = None
-    args._selected_run_dir = selected_run
-    args._locked_run_config = run_config
-    args.resume_from = None
-    args.resume = (selected_run / "training_state.json").is_file()
-    return args
+    return _apply_saved_run_arguments(parser, args, explicit, selected_run)
 
 
 def _resolved_rl_device(requested_device):
@@ -477,6 +503,8 @@ def _supervised_training_identity(args, max_epochs):
         gpu_memory_reserve_mb=int(args.sl_gpu_memory_reserve_mb),
         validation_split=0.15,
         initial_learning_rate=training_loop.INITIAL_SUPERVISED_LEARNING_RATE,
+        random_bit_generator=DEFAULT_BIT_GENERATOR,
+        random_derivation_scheme=DERIVATION_SCHEME,
     )
 
 
@@ -621,7 +649,6 @@ def ensure_canonical_supervised_assets(root, config, args):
                 memory_reserve_mb=args.sl_memory_reserve_mb,
                 gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
                 seed=seed,
-                resume_existing_weights=False,
             )
         weights_metadata = write_weights_metadata(
             paths,
@@ -739,25 +766,6 @@ def _archive_run_dir(run_dir):
     return archive
 
 
-def _copy_lineage_reports(source_dir, destination_dir):
-    source_dir = Path(source_dir)
-    destination_dir = Path(destination_dir)
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    for name in (
-        "periodic_diagnostics.jsonl",
-        "rl_vs_random_progress.csv",
-        "rl_vs_random_progress.png",
-        "rl_vs_random_progress_logx.png",
-        "best_checkpoint.json",
-        "training_metrics.jsonl",
-        "adaptive_tuning.json",
-    ):
-        source = source_dir / name
-        destination = destination_dir / name
-        if source.is_file() and not destination.exists():
-            atomic_copy(source, destination)
-
-
 class ShutdownFlag:
     """Signal handler that requests a boundary checkpoint on first signal."""
 
@@ -805,7 +813,7 @@ def next_training_stop(completed_games, target_games, milestone_every, periodic)
 
 
 def _cumulative_rl_games_per_second(completed_games, prior_seconds, invocation_seconds):
-    """Return throughput across the complete persisted RL training lineage."""
+    """Return throughput across the complete persisted history of one RL run."""
     elapsed = float(prior_seconds) + float(invocation_seconds)
     return float(completed_games) / elapsed if elapsed > 0.0 else 0.0
 
@@ -1029,7 +1037,11 @@ def run_rl_pipeline(root, config, args, assets):
         if args.total_training_games is not None and not config.unbounded
         else config.total_rl_games
     )
-    run_dir = _pipeline_run_dir(root, config, args)
+    run_dir = (
+        Path(args.resume_from).resolve()
+        if args.resume_from is not None
+        else _pipeline_run_dir(root, config, args)
+    )
     if args.restart_rl:
         archive = _archive_run_dir(run_dir)
         if archive is not None:
@@ -1045,7 +1057,6 @@ def run_rl_pipeline(root, config, args, assets):
         else None
     )
 
-    source_run_dir = Path(args.resume_from) if args.resume_from else run_dir
     resuming = bool(args.resume or args.resume_from)
     if args.resume and not config.resume_supported:
         raise ValueError(f"--resume is not supported for pipeline level {config.scale_name}.")
@@ -1054,41 +1065,8 @@ def run_rl_pipeline(root, config, args, assets):
             f"RL run {run_dir} already exists. Use --resume or --restart-rl explicitly."
         )
     resume_point = None
-    lineage = []
     if resuming:
-        resume_point = load_resume_point(
-            source_run_dir,
-            seed=seed,
-            supervised_weights_sha256=supervised_hash,
-            ppo_config=ppo_config,
-            algorithm=algorithm,
-            force_incompatible=args.force_resume_incompatible,
-        )
-        if args.resume_from and source_run_dir.resolve() != run_dir.resolve():
-            if (run_dir / "training_state.json").exists():
-                raise FileExistsError(
-                    f"Destination run {run_dir} already contains training state."
-                )
-            source_lineage = []
-            source_config_path = source_run_dir / "run_config.json"
-            if source_config_path.is_file():
-                try:
-                    source_lineage = list(json.loads(
-                        source_config_path.read_text(encoding="utf-8")
-                    ).get("lineage", ()))
-                except (OSError, json.JSONDecodeError, TypeError) as exc:
-                    raise ValueError(
-                        f"Source lineage config cannot be read: "
-                        f"{source_config_path}."
-                    ) from exc
-            lineage = source_lineage + [{
-                "source_run_dir": str(source_run_dir),
-                "source_rl_games": resume_point.completed_games,
-                "source_latest_weights_sha256": resume_point.training_state[
-                    "latest_weights_sha256"
-                ],
-            }]
-            _copy_lineage_reports(source_run_dir, run_dir)
+        resume_point = load_resume_point(run_dir)
     recorded_machine = (
         dict(existing_run_config.get("machine", {}))
         if existing_run_config is not None
@@ -1097,7 +1075,7 @@ def run_rl_pipeline(root, config, args, assets):
     locked_arguments = (
         dict(existing_run_config.get("locked_arguments", {}))
         if existing_run_config is not None
-        else _locked_forever_arguments(args)
+        else _locked_run_arguments(args)
     )
     run_configuration = create_run_config(
         run_dir,
@@ -1123,8 +1101,6 @@ def run_rl_pipeline(root, config, args, assets):
                 args.final_diagnostic_games or config.diagnostic_games
             ) if config.final_all_pairs else None,
         },
-        lineage=lineage,
-        allow_target_extension=bool(args.resume_from),
         run_name=args.run_name,
         locked_arguments=locked_arguments,
         machine=recorded_machine,
@@ -1248,14 +1224,7 @@ def run_rl_pipeline(root, config, args, assets):
             last_periodic_diagnostic_game=last_periodic,
             next_periodic_diagnostic_game=next_periodic,
         )
-        resume_point = load_resume_point(
-            run_dir,
-            seed=seed,
-            supervised_weights_sha256=supervised_hash,
-            ppo_config=ppo_config,
-            algorithm=algorithm,
-            force_incompatible=args.force_resume_incompatible,
-        )
+        resume_point = load_resume_point(run_dir)
 
     internal_target = FOREVER_INTERNAL_TARGET if target is None else int(target)
     periodic_boundaries = config.periodic_diagnostics
@@ -1295,15 +1264,10 @@ def run_rl_pipeline(root, config, args, assets):
                     None if resume_point is None else str(resume_point.resume_state_path)
                 ),
                 "fresh_from_sl": resume_point is None,
-                "allow_total_training_games_extension": bool(args.resume_from),
-                "force_resume_incompatible": bool(args.force_resume_incompatible),
                 "shutdown_requested": shutdown,
                 "quiet": True,
                 "status_callback": _status,
-                "run_configuration_sha256": run_configuration[
-                    "configuration_sha256"
-                ],
-                "metrics_metadata": run_configuration,
+                "run_configuration": run_configuration,
             })
 
             def progress(done, _reported_total):
@@ -1417,14 +1381,7 @@ def run_rl_pipeline(root, config, args, assets):
                     "periodic_milestone" if milestone else "target_complete"
                 ),
             )
-            resume_point = load_resume_point(
-                run_dir,
-                seed=seed,
-                supervised_weights_sha256=supervised_hash,
-                ppo_config=ppo_config,
-                algorithm=algorithm,
-                force_incompatible=args.force_resume_incompatible,
-            )
+            resume_point = load_resume_point(run_dir)
             latest_weights = resume_point.weights_path
             pipeline_checkpoint_seconds = (
                 time.perf_counter() - pipeline_checkpoint_started
@@ -1587,6 +1544,7 @@ def parse_args(argv=None):
         ppo_max_epochs_default=argparse.SUPPRESS,
         expose_gpi=True,
         include_regularization=False,
+        expose_resume_pair=False,
     )
     diagnostics = parser.add_argument_group("diagnostic controls")
     diagnostics.add_argument(
@@ -1616,11 +1574,17 @@ def parse_args(argv=None):
         type=Path,
         metavar="RUN_DIR",
         help=(
-            "Resume the canonical run. With no value, use the default run "
-            "directory; with RUN_DIR, behave like --resume-from RUN_DIR."
+            "Resume the exact saved canonical run. Training and asset "
+            "overrides are ignored in favor of run_config.json. With no "
+            "value, use the default run directory; with RUN_DIR, select it "
+            "explicitly."
         ),
     )
-    canonical.add_argument("--resume-from", type=Path)
+    canonical.add_argument(
+        "--resume-from",
+        type=Path,
+        help="Compatibility alias for --resume RUN_DIR; it never forks a run.",
+    )
     canonical.add_argument(
         "--run-name",
         default=None,
@@ -1630,7 +1594,6 @@ def parse_args(argv=None):
         ),
     )
     canonical.add_argument("--restart-rl", action="store_true")
-    canonical.add_argument("--force-resume-incompatible", action="store_true")
     canonical.add_argument("--rebuild-dataset", action="store_true")
     canonical.add_argument("--retrain-supervised", action="store_true")
     canonical.add_argument("--rebuild-supervised-assets", action="store_true")
@@ -1660,7 +1623,31 @@ def parse_args(argv=None):
     args._explicit_destinations = explicit
     if args.scale == "forever":
         args = _hydrate_forever_arguments(parser, args, explicit)
-    # Resolution runs after forever hydration so a locked run keeps the exact
+    elif args.resume or args.resume_from is not None:
+        selected_seed = (
+            int(args.seed)
+            if args.seed is not None
+            else int(PIPELINE_LEVELS[args.scale].default_seed)
+        )
+        selected_run = (
+            Path(args.resume_from).resolve()
+            if args.resume_from is not None
+            else canonical_run_dir(
+                Path(args.artifact_root).resolve(),
+                args.scale,
+                selected_seed,
+                run_name=args.run_name,
+            )
+        )
+        if not (selected_run / "run_config.json").is_file():
+            parser.error(f"No run configuration exists at {selected_run}.")
+        args = _apply_saved_run_arguments(
+            parser,
+            args,
+            explicit,
+            selected_run,
+        )
+    # Resolution runs after resume hydration so a locked run keeps the exact
     # architecture it was created with.
     try:
         training_loop.resolve_architecture_arguments(args)
@@ -1678,11 +1665,6 @@ def validate_args(args, config):
         raise ValueError(
             "RL resume is not supported for pipeline level "
             f"{config.scale_name}."
-        )
-    if config.unbounded and args.force_resume_incompatible:
-        raise ValueError(
-            "Forever configurations are immutable; "
-            "--force-resume-incompatible is not supported."
         )
     if args.iterations is not None:
         raise ValueError(

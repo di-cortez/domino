@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import random
 import secrets
-import subprocess
 import time
 
 import numpy as np
@@ -34,6 +33,7 @@ from utils.resource_limits import (
     gpu_memory_info,
     process_rss_bytes,
 )
+from utils.repository import current_git_commit
 
 
 TUNING_VERSION = 4
@@ -424,19 +424,6 @@ def _gpu_name():
         return None
 
 
-def _git_commit():
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-    except Exception:
-        return None
-
-
 def hardware_metadata(device):
     return {
         "device": str(device),
@@ -569,7 +556,7 @@ def run_worker_tuning(
             "worker_source": worker_source,
             **current_hardware,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "git_commit": _git_commit(),
+            "git_commit": current_git_commit(),
             "initial_weights_sha256": snapshot["weights_sha256"],
             "isolation_verified": True,
         }

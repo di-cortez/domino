@@ -68,10 +68,27 @@ class ParallelRLTests(unittest.TestCase):
             estimated_worker_mb=1,
             max_worker_rss_mb=1024,
         )
+        self._temporary_assets = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temporary_assets.cleanup)
+        self.sl_weights_path = (
+            Path(self._temporary_assets.name) / "supervised.npz"
+        )
+        network = PolicyNetwork(random_seed=19, device="cpu")
+        np.savez(
+            self.sl_weights_path,
+            **{
+                name: np.asarray(getattr(network, name))
+                for name in network.weight_names
+            },
+        )
+
+    def _train(self, **kwargs):
+        kwargs.setdefault("sl_weights_path", str(self.sl_weights_path))
+        return train(**kwargs)
 
     def _network(self):
         return PolicyNetwork.load_from_sl(
-            ROOT / "models" / "domino_sl_weights.npz",
+            self.sl_weights_path,
             device="cpu",
         )
 
@@ -128,7 +145,7 @@ class ParallelRLTests(unittest.TestCase):
             paths = [Path(temp_dir) / "one.npz", Path(temp_dir) / "two.npz"]
             summaries = []
             for workers, path in zip((1, 2), paths):
-                summaries.append(train(
+                summaries.append(self._train(
                     iterations=3,
                     gpi=6,
                     checkpoint_interval=100,
@@ -151,7 +168,7 @@ class ParallelRLTests(unittest.TestCase):
     def test_numbered_policy_checkpoint_history_is_bounded(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            summary = train(
+            summary = self._train(
                 iterations=NUMBERED_CHECKPOINT_WEIGHT_RETENTION + 2,
                 gpi=1,
                 checkpoint_interval=1,
@@ -196,7 +213,7 @@ class ParallelRLTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             rows = []
-            first = train(
+            first = self._train(
                 iterations=6,
                 gpi=2,
                 checkpoint_interval=2,
@@ -209,7 +226,7 @@ class ParallelRLTests(unittest.TestCase):
                 metrics_callback=rows.append,
                 quiet=True,
             )
-            second = train(
+            second = self._train(
                 iterations=4,
                 gpi=3,
                 checkpoint_interval=2,
@@ -236,10 +253,7 @@ class ParallelRLTests(unittest.TestCase):
             root = Path(temp_dir)
             sl_path = root / "sl.npz"
             rl_path = root / "rl.npz"
-            with np.load(
-                ROOT / "models" / "domino_sl_weights.npz",
-                allow_pickle=False,
-            ) as source:
+            with np.load(self.sl_weights_path, allow_pickle=False) as source:
                 np.savez(sl_path, **{name: source[name] for name in source.files})
 
             existing_rl = PolicyNetwork.load_from_sl(sl_path, device="cpu")
@@ -264,7 +278,7 @@ class ParallelRLTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "predates algorithm metadata"):
-                train(
+                self._train(
                     iterations=1,
                     gpi=2,
                     sl_weights_path=str(sl_path),
@@ -298,13 +312,14 @@ class ParallelRLTests(unittest.TestCase):
                 "numbered_checkpoints": True,
             }
 
-            full = train(
+            full = self._train(
                 iterations=4,
                 rl_weights_path=str(full_base),
                 **common,
             )
-            train(
-                iterations=2,
+            self._train(
+                iterations=4,
+                stop_after_training_games=8,
                 rl_weights_path=str(resumed_base),
                 **common,
             )
@@ -330,7 +345,7 @@ class ParallelRLTests(unittest.TestCase):
                 load_resume_state(full["rl_weights_path"], partial_state)
 
             with self.assertRaisesRegex(ValueError, "gamma"):
-                train(
+                self._train(
                     iterations=4,
                     rl_weights_path=str(resumed_base),
                     start_iteration=2,
@@ -341,7 +356,7 @@ class ParallelRLTests(unittest.TestCase):
                 )
 
             with self.assertRaisesRegex(ValueError, "rl_training_algorithm"):
-                train(
+                self._train(
                     iterations=4,
                     rl_weights_path=str(resumed_base),
                     start_iteration=2,
@@ -351,7 +366,7 @@ class ParallelRLTests(unittest.TestCase):
                     **common,
                 )
 
-            resumed = train(
+            resumed = self._train(
                 iterations=4,
                 rl_weights_path=str(resumed_base),
                 start_iteration=2,
@@ -402,8 +417,15 @@ class ParallelRLTests(unittest.TestCase):
                 "numbered_checkpoints": True,
             }
 
-            full = train(iterations=4, rl_weights_path=str(full_base), **common)
-            train(iterations=2, rl_weights_path=str(resumed_base), **common)
+            full = self._train(
+                iterations=4, rl_weights_path=str(full_base), **common
+            )
+            self._train(
+                iterations=4,
+                stop_after_training_games=8,
+                rl_weights_path=str(resumed_base),
+                **common,
+            )
             partial_weights = numbered_checkpoint_path(resumed_base, 2)
             partial_state = resume_state_path(partial_weights)
             _metadata, pool = load_resume_state(partial_weights, partial_state)
@@ -413,7 +435,7 @@ class ParallelRLTests(unittest.TestCase):
                 sorted(supervised.weight_names),
             )
 
-            resumed = train(
+            resumed = self._train(
                 iterations=4,
                 rl_weights_path=str(resumed_base),
                 start_iteration=2,
@@ -438,7 +460,7 @@ class ParallelRLTests(unittest.TestCase):
     def test_exact_game_budget_uses_a_partial_final_iteration(self):
         rows = []
         with tempfile.TemporaryDirectory() as temp_dir:
-            summary = train(
+            summary = self._train(
                 total_training_games=5,
                 gpi=2,
                 checkpoint_interval=10,
@@ -478,10 +500,17 @@ class ParallelRLTests(unittest.TestCase):
             }
             full_base = root / "full_critic.npz"
             resumed_base = root / "resumed_critic.npz"
-            full = train(iterations=3, rl_weights_path=str(full_base), **common)
-            train(iterations=1, rl_weights_path=str(resumed_base), **common)
+            full = self._train(
+                iterations=3, rl_weights_path=str(full_base), **common
+            )
+            self._train(
+                iterations=3,
+                stop_after_training_games=4,
+                rl_weights_path=str(resumed_base),
+                **common,
+            )
             partial_weights = numbered_checkpoint_path(resumed_base, 1)
-            resumed = train(
+            resumed = self._train(
                 iterations=3,
                 rl_weights_path=str(resumed_base),
                 start_iteration=1,
@@ -516,10 +545,17 @@ class ParallelRLTests(unittest.TestCase):
             }
             full_base = root / "full_ppo_critic.npz"
             resumed_base = root / "resumed_ppo_critic.npz"
-            full = train(iterations=3, rl_weights_path=str(full_base), **common)
-            train(iterations=1, rl_weights_path=str(resumed_base), **common)
+            full = self._train(
+                iterations=3, rl_weights_path=str(full_base), **common
+            )
+            self._train(
+                iterations=3,
+                stop_after_training_games=4,
+                rl_weights_path=str(resumed_base),
+                **common,
+            )
             partial_weights = numbered_checkpoint_path(resumed_base, 1)
-            resumed = train(
+            resumed = self._train(
                 iterations=3,
                 rl_weights_path=str(resumed_base),
                 start_iteration=1,
@@ -538,7 +574,7 @@ class ParallelRLTests(unittest.TestCase):
     def test_autotuning_discards_benchmark_games(self):
         messages = []
         with tempfile.TemporaryDirectory() as temp_dir:
-            summary = train(
+            summary = self._train(
                 iterations=4,
                 gpi=4,
                 checkpoint_interval=100,
@@ -576,7 +612,7 @@ class ParallelRLTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             with mock.patch.dict(os.environ, constrained_memory, clear=False):
-                summary = train(
+                summary = self._train(
                     iterations=4,
                     gpi=4,
                     checkpoint_interval=100,
@@ -682,7 +718,7 @@ class ParallelRLTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             cpu_fallback_path = Path(temp_dir) / "cpu_fallback.npz"
             with mock.patch.dict(os.environ, low_gpu, clear=False):
-                summary = train(
+                summary = self._train(
                     iterations=1,
                     gpi=2,
                     checkpoint_interval=100,
@@ -704,7 +740,7 @@ class ParallelRLTests(unittest.TestCase):
             rejected_path = Path(temp_dir) / "must_not_exist.npz"
             with mock.patch.dict(os.environ, low_ram, clear=False):
                 with self.assertRaises(MemorySafetyError):
-                    train(
+                    self._train(
                         iterations=1,
                         gpi=40,
                         checkpoint_interval=100,

@@ -91,12 +91,11 @@ from training.training_loop import (
     DEFAULT_TRAINING_PLATEAU_PATIENCE,
     DEFAULT_TRAINING_PLATEAU_WINDOW,
     DEFAULT_WEIGHT_DECAY,
-    MAX_SUPERVISED_CHECKPOINTS,
-    _prune_supervised_checkpoints,
     hidden_sizes_from_args,
     parse_args as parse_supervised_args,
 )
 from train_script.run_pipeline import _build_config, parse_args as parse_pipeline_args
+from utils.myrandom import SeedPlan
 from utils.runtime_status import pipeline_compute_report
 
 from math import comb, factorial
@@ -242,27 +241,6 @@ def test_neural_agent_skips_network_for_single_option_tile_play():
 
     agent = NeuralAgent(NetworkThatMustNotRun())
     assert agent.choose_move({}, [only_action]) == only_action
-
-
-def test_supervised_checkpoint_retention_keeps_latest_ten():
-    """Archival checkpoint pruning must preserve only the newest ten files."""
-    with tempfile.TemporaryDirectory() as folder:
-        checkpoint_dir = Path(folder)
-        for index in range(MAX_SUPERVISED_CHECKPOINTS + 3):
-            path = checkpoint_dir / f"domino_sl_epoch_{index:04d}_val_1.0000.npz"
-            path.write_bytes(b"checkpoint")
-            os.utime(path, (index + 1, index + 1))
-
-        unrelated = checkpoint_dir / "notes.txt"
-        unrelated.write_text("keep", encoding="utf-8")
-
-        removed = _prune_supervised_checkpoints(checkpoint_dir)
-        remaining = sorted(checkpoint_dir.glob("domino_sl_epoch_*.npz"))
-
-        assert len(removed) == 3
-        assert len(remaining) == MAX_SUPERVISED_CHECKPOINTS
-        assert remaining[0].name.startswith("domino_sl_epoch_0003_")
-        assert unrelated.exists()
 
 
 def test_engine_requires_highest_opening_double_when_present():
@@ -528,13 +506,12 @@ def test_supervised_dropout_applies_only_to_training_forward_passes():
         "hidden2_size": 48,
         "output_size": 2,
         "learning_rate": 0.01,
-        "random_seed": 5,
+        "seed_plan": SeedPlan(5),
         "device": "cpu",
     }
     network = SupervisedNeuralNetwork(**common_args, dropout_rate=0.5)
     x_batch = host_np.ones((4, 6), dtype=float)
 
-    host_np.random.seed(3)
     network.forward(x_batch, training=True)
     for activation, mask in (("A1", "D1"), ("A2", "D2")):
         scale = _to_numpy(network.cache[mask])
@@ -562,7 +539,7 @@ def test_supervised_dropout_backpropagates_through_the_forward_mask():
         hidden2_size=16,
         output_size=2,
         learning_rate=0.05,
-        random_seed=7,
+        seed_plan=SeedPlan(7),
         device="cpu",
         dropout_rate=0.5,
     )
@@ -573,7 +550,6 @@ def test_supervised_dropout_backpropagates_through_the_forward_mask():
     y_batch[0, :] = 1.0
 
     w2_before = _to_numpy(network.W2).copy()
-    host_np.random.seed(11)
     network.forward(x_batch, training=True)
     dropped_first_layer = _to_numpy(network.cache["D1"])[:, 0] == 0.0
     assert dropped_first_layer.any()
@@ -2122,10 +2098,6 @@ def main():
         (
             "unbounded network depth",
             test_networks_accept_any_depth_beyond_the_command_line_maximum,
-        ),
-        (
-            "supervised checkpoint retention",
-            test_supervised_checkpoint_retention_keeps_latest_ten,
         ),
         (
             "exact probability initialization",

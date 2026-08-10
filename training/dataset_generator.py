@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import secrets
 import sqlite3
 import tempfile
 import time
@@ -19,7 +18,6 @@ from diagnostics.parallel_runner import (
     MAX_PARALLEL_WORKERS,
     ParallelSafetyConfig,
     cap_parallel_workers,
-    game_seed,
 )
 from training.dataset_parallel import (
     DEFAULT_DATASET_AUTOTUNE_FRACTION,
@@ -28,8 +26,9 @@ from training.dataset_parallel import (
     _legal_tile_actions_from_state,
     _normalize_action,
     autotune_dataset_workers,
-    evaluate_dataset_game_specs,
+    evaluate_dataset_games,
 )
+from utils.myrandom import SeedPlan, fresh_root_seed
 from utils.runtime_status import format_duration, print_memory_report
 
 try:
@@ -42,6 +41,12 @@ DEFAULT_GAME_COUNT = 30000
 DEFAULT_OUTPUT_FILE = "dataset/supervised_dataset.jsonl"
 DEFAULT_DATASET_WORKERS = "auto"
 DEFAULT_DATASET_SEED = None
+
+
+def dataset_random_manifest_path(output_file):
+    """Return the seed-plan manifest path paired with one dataset JSONL."""
+    output_path = Path(output_file)
+    return output_path.with_name(f"{output_path.stem}.random_manifest.json")
 
 
 def _worker_count(value):
@@ -103,9 +108,11 @@ def generate_dataset(
                 f"workers must be 'auto' or between 1 and {MAX_PARALLEL_WORKERS}"
             )
     safety_config = safety_config or ParallelSafetyConfig()
-    effective_seed = int(seed) if seed is not None else secrets.randbits(63)
+    effective_seed = int(seed) if seed is not None else fresh_root_seed()
+    seed_plan = SeedPlan(effective_seed)
 
     output_path = Path(output_file)
+    random_manifest_path = dataset_random_manifest_path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     start_time = time.time()
     if not quiet:
@@ -158,7 +165,6 @@ def generate_dataset(
             """
             CREATE TABLE games (
                 game_index INTEGER PRIMARY KEY,
-                game_seed TEXT NOT NULL,
                 jsonl_payload TEXT NOT NULL,
                 saved_turn_count INTEGER NOT NULL,
                 skipped_turn_count INTEGER NOT NULL
@@ -172,15 +178,13 @@ def generate_dataset(
                 """
                 INSERT OR IGNORE INTO games (
                     game_index,
-                    game_seed,
                     jsonl_payload,
                     saved_turn_count,
                     skipped_turn_count
-                ) VALUES (?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?)
                 """,
                 (
                     int(result["game_index"]),
-                    str(result["game_seed"]),
                     result["jsonl_payload"],
                     int(result["saved_turn_count"]),
                     int(result["skipped_turn_count"]),
@@ -194,7 +198,7 @@ def generate_dataset(
         if workers == "auto":
             tuning = autotune_dataset_workers(
                 game_count=game_count,
-                base_seed=effective_seed,
+                seed_plan=seed_plan,
                 safety=safety_config,
                 result_callback=store_result,
                 benchmark_fraction=autotune_fraction,
@@ -225,13 +229,14 @@ def generate_dataset(
                 "attempts": [],
             }
 
-        missing_specs = (
-            (game_index, game_seed(effective_seed, game_index))
+        missing_game_indices = (
+            game_index
             for game_index in range(game_count)
             if game_index not in completed_ids
         )
-        _results, execution_info = evaluate_dataset_game_specs(
-            game_specs=missing_specs,
+        _results, execution_info = evaluate_dataset_games(
+            game_indices=missing_game_indices,
+            seed_plan=seed_plan,
             requested_workers=selected_workers,
             result_callback=store_result,
             safety=safety_config,
@@ -266,6 +271,7 @@ def generate_dataset(
             os.fsync(stream.fileno())
         os.replace(staging_name, output_path)
         staging_name = None
+        seed_plan.write_manifest(random_manifest_path)
     finally:
         if connection is not None:
             connection.close()
@@ -285,6 +291,7 @@ def generate_dataset(
         print(f"Forced turns skipped: {skipped_turn_count}")
         print(f"Selected workers: {selected_workers}")
         print(f"Output file: {output_path}")
+        print(f"Random manifest: {random_manifest_path}")
         print(f"Elapsed time: {format_duration(elapsed_time)}")
 
     return {
@@ -292,6 +299,8 @@ def generate_dataset(
         "saved_turn_count": saved_turn_count,
         "skipped_turn_count": skipped_turn_count,
         "output_file": str(output_path),
+        "random_manifest_path": str(random_manifest_path),
+        "random_manifest": seed_plan.to_manifest(),
         "requested_workers": workers,
         "selected_workers": selected_workers,
         "effective_seed": effective_seed,

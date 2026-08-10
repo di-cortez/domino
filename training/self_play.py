@@ -15,6 +15,7 @@ uses the GPU.
 """
 
 import math
+from dataclasses import replace
 from pathlib import Path
 import random
 import secrets
@@ -74,6 +75,7 @@ from training.rl_rollout import (
 from training.rl_resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
+    RLTrainingConfiguration,
     RESUME_STATE_VERSION,
     SUPPORTED_RESUME_STATE_VERSIONS,
     _atomic_network_save,
@@ -84,7 +86,6 @@ from training.rl_resume import (
     _nested_tuple,
     _restore_rng_state,
     _restore_training_windows,
-    _resume_configuration,
     _rng_state_metadata,
     _save_numbered_resume_checkpoint,
     _sl_checkpoint_sha256,
@@ -94,6 +95,7 @@ from training.rl_resume import (
     numbered_checkpoint_path,
     resume_state_path,
 )
+from utils.repository import current_git_commit
 from training.rl_reporting import (
     RLRuntimeProfile,
     _gradient_log_text,
@@ -258,12 +260,9 @@ def train(
     prefer_gpu_buffer=True,
     stop_after_training_games=None,
     shutdown_requested=None,
-    allow_total_training_games_extension=False,
     adaptive_tuning_training_games=None,
-    force_resume_incompatible=False,
     checkpoint_callback=None,
-    run_configuration_sha256=None,
-    metrics_metadata=None,
+    run_configuration=None,
 ):
     """Train an exact game budget with the selected on-policy update rule.
 
@@ -486,57 +485,55 @@ def train(
         )
     emit_status("-" * 70)
 
-    resume_configuration = _resume_configuration(
-        total_training_games=total_training_games,
-        selected_gpi=selected_gpi,
-        selected_workers=selected_workers,
-        rl_training_algorithm=algorithm,
-        training_opponent=training_opponent,
-        learning_rate=learning_rate,
-        entropy_coef=entropy_coef,
-        max_pool_size=max_pool_size,
-        use_value_head=use_value_head,
-        value_coef=value_coef,
-        gamma=gamma,
-        reward_schema=reward_schema,
-        clip_grad_norm=clip_grad_norm,
-        normalize_advantages=normalize_advantages,
-        weight_decay=weight_decay,
-        dropout_rate=dropout_rate,
-        effective_seed=effective_seed,
-        device=network.device,
-        sl_weights_sha256=sl_weights_sha256,
-        ppo_clip_epsilon=ppo_clip_epsilon,
-        ppo_stop_kl=ppo_stop_kl,
-        ppo_max_epochs=ppo_max_epochs,
-        ppo_games_per_minibatch_scale=ppo_games_per_minibatch_scale,
-        ppo_min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
-        prefer_gpu_buffer=prefer_gpu_buffer,
-        run_configuration_sha256=run_configuration_sha256,
-    )
+    if run_configuration is None:
+        resume_configuration = RLTrainingConfiguration.from_mapping({
+            "total_training_games": int(total_training_games),
+            "selected_gpi": int(selected_gpi),
+            "selected_workers": int(selected_workers),
+            "rl_training_algorithm": algorithm,
+            "training_opponent": training_opponent,
+            "learning_rate": float(learning_rate),
+            "entropy_coef": float(entropy_coef),
+            "max_pool_size": int(max_pool_size),
+            "use_value_head": bool(use_value_head),
+            "value_coef": float(value_coef),
+            "gamma": float(gamma),
+            "reward_schema": reward_schema,
+            "clip_grad_norm": clip_grad_norm,
+            "normalize_advantages": bool(normalize_advantages),
+            "weight_decay": float(weight_decay),
+            "dropout_rate": float(dropout_rate),
+            "effective_seed": int(effective_seed),
+            "device": network.device,
+            "sl_weights_sha256": sl_weights_sha256,
+            "ppo_clip_epsilon": float(ppo_clip_epsilon),
+            "ppo_target_kl": float(ppo_target_kl),
+            "ppo_stop_kl": float(ppo_stop_kl),
+            "ppo_max_epochs": int(ppo_max_epochs),
+            "ppo_games_per_minibatch_scale": int(
+                ppo_games_per_minibatch_scale
+            ),
+            "ppo_min_decisions_per_minibatch": int(
+                ppo_min_decisions_per_minibatch
+            ),
+            "prefer_gpu_buffer": bool(prefer_gpu_buffer),
+            "run_configuration_sha256": None,
+            "git_commit": current_git_commit(),
+        })
+    else:
+        resume_configuration = RLTrainingConfiguration.from_run_config(
+            run_configuration,
+            total_training_games=total_training_games,
+            selected_workers=selected_workers,
+            device=network.device,
+        )
     if resume_metadata is not None:
-        ignored = []
-        # Backward-compatible programmatic resume: historical callers used a
-        # short ``iterations`` run to create an interruption checkpoint, then
-        # resumed with a larger final iteration target. The game offset stored
-        # in v2 still makes that extension exact.
-        if iterations is not None:
-            ignored.append("total_training_games")
-        if allow_total_training_games_extension:
-            ignored.append("total_training_games")
-        if retune_workers:
-            ignored.append("selected_workers")
-        if force_resume_incompatible:
-            emit_status(
-                "SEVERE WARNING: exact resume compatibility validation was "
-                "explicitly overridden. Reproducibility is not guaranteed."
-            )
-        else:
-            _validate_resume_configuration(
-                resume_metadata,
-                resume_configuration,
-                ignored_keys=ignored,
-            )
+        _validate_resume_configuration(
+            resume_metadata,
+            resume_configuration,
+            emit_status=emit_status,
+        )
+        resume_configuration.warn_if_commit_changed(emit_status)
 
     remaining_training_games = invocation_target_games - completed_training_games
     iterations_to_run = math.ceil(remaining_training_games / selected_gpi)
@@ -585,7 +582,10 @@ def train(
         adaptive_tuning["selected_workers"] = int(actual_workers)
         adaptive_tuning["worker_source"] += "_safety_capped"
         atomic_write_tuning_json(tuning_path, adaptive_tuning)
-        resume_configuration["selected_workers"] = int(actual_workers)
+        resume_configuration = replace(
+            resume_configuration,
+            selected_workers=int(actual_workers),
+        )
 
     if resume_metadata is not None:
         _restore_rng_state(resume_metadata["rng_state"])
@@ -616,8 +616,10 @@ def train(
         weights = Path(rl_weights_path)
         metrics_output_path = weights.with_name(f"{weights.stem}_training_metrics.jsonl")
     metrics_header = {
-        "run_configuration_sha256": run_configuration_sha256,
-        "run_configuration": dict(metrics_metadata or {}),
+        "run_configuration_sha256": (
+            resume_configuration.run_configuration_sha256
+        ),
+        "run_configuration": dict(run_configuration or {}),
         "training": {
             "effective_seed": int(effective_seed),
             "algorithm": algorithm,
@@ -1264,7 +1266,9 @@ def train(
             if numbered_checkpoints else None
         ),
         "rl_training_algorithm": algorithm,
-        "run_configuration_sha256": run_configuration_sha256,
+        "run_configuration_sha256": (
+            resume_configuration.run_configuration_sha256
+        ),
         "ppo_enabled": bool(ppo_enabled),
         "ppo_configuration": {
             "clip_epsilon": float(ppo_clip_epsilon),

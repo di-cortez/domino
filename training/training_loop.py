@@ -49,7 +49,13 @@ from utils.resource_limits import (
     gpu_memory_info,
     host_allocation_status,
 )
-from utils.artifacts import atomic_savez
+from utils.artifacts import atomic_savez, file_sha256
+from utils.myrandom import (
+    DEFAULT_BIT_GENERATOR,
+    DERIVATION_SCHEME,
+    SeedPlan,
+    fresh_root_seed,
+)
 from utils.runtime_status import format_duration, memory_report
 
 
@@ -67,9 +73,6 @@ DEFAULT_TRAINING_PLATEAU_PATIENCE = 4
 DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS = 100
 DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT = 0.001
 
-CHECKPOINT_EVERY = SUPERVISED_VALIDATION_INTERVAL_EPOCHS
-CHECKPOINT_DIR = "models/supervised_checkpoints"
-MAX_SUPERVISED_CHECKPOINTS = 10
 ENCODED_CACHE_FILE = "dataset/supervised_dataset_encoded.npz"
 ENCODED_FEATURE_VERSION = "opponent_suit_presence_float32_v2"
 DATASET_DTYPE = np.float32
@@ -90,6 +93,14 @@ def supervised_loss_plot_path(weights_file):
     if stem.endswith("_weights"):
         stem = stem.removesuffix("_weights")
     return weights_path.with_name(f"{stem}_loss.png")
+
+
+def supervised_random_manifest_path(weights_file):
+    """Return the seed-plan manifest path paired with supervised weights."""
+    weights_path = Path(weights_file)
+    return weights_path.with_name(
+        f"{weights_path.stem}.random_manifest.json"
+    )
 
 
 def _supervised_loss_axis_limits(loss_history, validation_points):
@@ -203,24 +214,6 @@ class EncodedDataset:
     metadata: dict
 
 
-def _prune_supervised_checkpoints(
-    checkpoint_dir=CHECKPOINT_DIR,
-    keep_count=MAX_SUPERVISED_CHECKPOINTS,
-):
-    """Delete older archival checkpoints and return the removed paths."""
-    if keep_count < 1:
-        raise ValueError("keep_count must be at least one.")
-    checkpoint_paths = list(Path(checkpoint_dir).glob("domino_sl_epoch_*.npz"))
-    checkpoint_paths.sort(
-        key=lambda path: (path.stat().st_mtime_ns, path.name),
-        reverse=True,
-    )
-    removed_paths = checkpoint_paths[keep_count:]
-    for path in removed_paths:
-        path.unlink()
-    return removed_paths
-
-
 def _normalize_action(action):
     """Return a normalized tile-play action or ``None`` for draw/pass."""
     if action is None or action == ["DRAW", None] or action == ("DRAW", None):
@@ -261,8 +254,7 @@ def _dataset_metadata(file_path, encoder):
     """Return source and encoder fields used to validate encoded caches."""
     stat = os.stat(file_path)
     return {
-        "source_path": os.path.abspath(file_path),
-        "source_mtime_ns": stat.st_mtime_ns,
+        "source_sha256": file_sha256(file_path),
         "source_size": stat.st_size,
         "encoder_vector_size": encoder.VECTOR_SIZE,
         "encoder_action_size": len(encoder.all_actions),
@@ -598,21 +590,14 @@ def _network_weight_payload(network, weights=None):
     }
 
 
-def _load_existing_weights(network, weights_file):
-    """Validate and load a legacy or current supervised checkpoint."""
-    with np.load(weights_file, allow_pickle=False) as weights:
-        for name in network.weight_names:
-            expected_shape = getattr(network, name).shape
-            if weights[name].shape != expected_shape:
-                raise ValueError(
-                    f"Cannot resume from {weights_file}: {name} has shape "
-                    f"{weights[name].shape}, but expected {expected_shape}. "
-                    "Delete or move the old checkpoint and retrain from scratch."
-                )
-        network.load_policy_weights(weights)
-
-
-def _create_network(*, device, weight_decay, dropout_rate, seed, architecture):
+def _create_network(
+    *,
+    device,
+    weight_decay,
+    dropout_rate,
+    seed,
+    architecture,
+):
     return SupervisedNeuralNetwork(
         input_size=architecture.input_size,
         output_size=architecture.output_size,
@@ -620,7 +605,7 @@ def _create_network(*, device, weight_decay, dropout_rate, seed, architecture):
         learning_rate=INITIAL_SUPERVISED_LEARNING_RATE,
         weight_decay=weight_decay,
         dropout_rate=dropout_rate,
-        random_seed=seed,
+        seed_plan=SeedPlan(seed),
         device=device,
     )
 
@@ -658,15 +643,13 @@ def train_supervised(
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
     gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
     seed=None,
-    resume_existing_weights=True,
 ):
-    """Train the policy and return scheduler, storage, batch, and memory data."""
+    """Train a fresh policy and return scheduler, storage, batch, and memory data."""
     if epochs < 1:
         raise ValueError("epochs must be positive")
     architecture = architecture_from_hidden_sizes(hidden_sizes)
     started = time.time()
-    if seed is not None:
-        np.random.seed(seed)
+    seed = int(seed) if seed is not None else fresh_root_seed()
     if not quiet:
         print(f"Supervised training startup memory: {memory_report()}")
 
@@ -722,8 +705,6 @@ def train_supervised(
     resident_capacity = None
 
     if selected_device == "gpu":
-        if seed is not None:
-            network.xp.random.seed(seed)
         residency_probe = probe_gpu_residency(
             dataset.x,
             dataset.y,
@@ -757,6 +738,7 @@ def train_supervised(
             train_count=train_count,
             host_storage_mode=dataset.storage_mode,
             device=selected_device,
+            seed_plan=network.seed_plan,
             resident_capacity=resident_capacity,
         )
     except MemorySafetyError:
@@ -778,6 +760,7 @@ def train_supervised(
             train_count=train_count,
             host_storage_mode=dataset.storage_mode,
             device="cpu",
+            seed_plan=network.seed_plan,
         )
 
     if not quiet:
@@ -815,12 +798,8 @@ def train_supervised(
             f"{validation_count} validation"
         )
 
-    if resume_existing_weights and os.path.exists(weights_file):
-        _load_existing_weights(network, weights_file)
-        if not quiet:
-            print(f"Existing supervised model found at {weights_file}. Resuming training.")
-    elif not quiet:
-        print("No existing supervised model found. Training from scratch.")
+    if not quiet:
+        print("Supervised training starts from fresh random weights.")
 
     requested_batch_size = int(batch_size)
     if requested_batch_size < 1:
@@ -861,40 +840,7 @@ def train_supervised(
         "epoch": None,
         "weights": None,
     }
-    last_checkpoint_time = {"value": started}
-
-    def save_checkpoint(current_network, epoch, validation_loss):
-        checkpoint_dir = Path(CHECKPOINT_DIR)
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        weights_path = Path(weights_file)
-        weights_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_file = checkpoint_dir / (
-            f"domino_sl_epoch_{epoch:04d}_val_{validation_loss:.4f}.npz"
-        )
-        payload = _network_weight_payload(current_network)
-        atomic_savez(checkpoint_file, **payload)
-        atomic_savez(weights_path, **payload)
-        removed = _prune_supervised_checkpoints(checkpoint_dir)
-        now = time.time()
-        checkpoint_elapsed = now - last_checkpoint_time["value"]
-        last_checkpoint_time["value"] = now
-        if not quiet:
-            print(
-                f"  -> Checkpoint saved to {checkpoint_file} "
-                f"(time since previous checkpoint: "
-                f"{format_duration(checkpoint_elapsed)})."
-            )
-            if removed:
-                print(
-                    f"  -> Removed {len(removed)} older supervised "
-                    f"checkpoint(s); keeping the latest "
-                    f"{MAX_SUPERVISED_CHECKPOINTS}."
-                )
-            print(f"  -> Active supervised model updated at {weights_file}.")
-
     def save_if_best(epoch, validation_loss, current_network):
-        if epoch % CHECKPOINT_EVERY == 0:
-            save_checkpoint(current_network, epoch, validation_loss)
         if validation_loss < best_state["validation_loss"]:
             best_state["validation_loss"] = validation_loss
             best_state["epoch"] = int(epoch) + 1
@@ -954,6 +900,9 @@ def train_supervised(
             weights_path,
             **_network_weight_payload(network, best_state["weights"]),
         )
+        network.seed_plan.write_manifest(
+            supervised_random_manifest_path(weights_path)
+        )
     finally:
         tracker.observe()
         data_plan.close()
@@ -995,6 +944,10 @@ def train_supervised(
             else f"{best_state['validation_loss']:.4f}"
         )
         print(f"Model saved to {weights_file} (best validation loss: {best_text}).")
+        print(
+            "Random manifest saved to "
+            f"{supervised_random_manifest_path(weights_file)}."
+        )
         print(f"Loss graph saved to {loss_plot_path}.")
         if data_plan.storage_mode == "gpu_windowed":
             rotations = [
@@ -1031,6 +984,13 @@ def train_supervised(
         "requested_batch_size": requested_batch_size,
         "selected_batch_size": selected_batch_size,
         "network_architecture": architecture.as_dict(),
+        "effective_seed": seed,
+        "random_bit_generator": DEFAULT_BIT_GENERATOR,
+        "random_derivation_scheme": DERIVATION_SCHEME,
+        "random_manifest_path": str(
+            supervised_random_manifest_path(weights_file)
+        ),
+        "random_manifest": network.seed_plan.to_manifest(),
         "total_examples": total_examples,
         "train_examples": train_count,
         "validation_examples": validation_count,
@@ -1360,7 +1320,10 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
         "--sl-seed",
         type=int,
         default=None,
-        help="Fix supervised initialization and shuffle randomness.",
+        help=(
+            "Fix the supervised root seed for initialization, epoch shuffles, "
+            "and dropout."
+        ),
     )
     return parser
 

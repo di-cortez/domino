@@ -6,6 +6,12 @@ blocking development. Every repository modification must still run the full
 Pylint command from `CONTRIBUTING.md`; `exit-zero = true` changes the exit code,
 not that contributor requirement.
 
+The baseline scope is the explicit project-directory list from
+`CONTRIBUTING.md`. Never substitute `python -m pylint .`: with recursive
+discovery enabled, that command traverses `.venv` and other non-project trees,
+making the run substantially slower and contaminating the report with
+third-party findings.
+
 Do not refactor code merely to improve the score. Correctness comes first, and
 each limit is tightened only after the repository passes the preceding value.
 This makes quality a ratchet: it can improve gradually but cannot regress.

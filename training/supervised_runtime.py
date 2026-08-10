@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from agents.network_architecture import DEFAULT_HIDDEN_SIZES
+from utils.myrandom import RandomNamespace, SeedPlan
 from utils.resource_limits import (
     MIB,
     MemorySafetyError,
@@ -205,6 +206,7 @@ class SupervisedDataPlan:
         train_count,
         host_storage_mode,
         device,
+        seed_plan,
         resident_capacity=None,
         index_observer=None,
     ):
@@ -215,6 +217,9 @@ class SupervisedDataPlan:
         self.validation_count = self.total_examples - self.train_count
         self.host_storage_mode = host_storage_mode
         self.device = device
+        if not isinstance(seed_plan, SeedPlan):
+            raise TypeError("seed_plan must be a utils.myrandom.SeedPlan")
+        self.seed_plan = seed_plan
         self.index_observer = index_observer
         self.resident_window_examples = None
         self.full_dataset_on_gpu = False
@@ -359,10 +364,13 @@ class SupervisedDataPlan:
         network.forward(x_batch, training=True)
         return network.backward(y_batch)
 
-    def train_epoch(self, network, batch_size, _epoch_index):
+    def train_epoch(self, network, batch_size, epoch_index):
         """Train one epoch and return loss, update count, and window rotations."""
+        permutation = self.seed_plan.generator(
+            RandomNamespace.SUPERVISED_SHUFFLE,
+            epoch_index,
+        ).permutation(self.train_count)
         if self.device == "cpu":
-            permutation = np.random.permutation(self.train_count)
             weighted_loss = 0.0
             updates = 0
             for start in range(0, self.train_count, batch_size):
@@ -379,7 +387,7 @@ class SupervisedDataPlan:
         import cupy as cp
 
         if self.storage_mode == "gpu_full":
-            permutation = cp.random.permutation(self.train_count)
+            permutation = cp.asarray(permutation, dtype=cp.int64)
             weighted_loss = 0.0
             updates = 0
             for start in range(0, self.train_count, batch_size):
@@ -397,7 +405,6 @@ class SupervisedDataPlan:
             self._observe_gpu_memory()
             return weighted_loss / self.train_count, updates, 0
 
-        permutation = np.random.permutation(self.train_count)
         weighted_loss = 0.0
         updates = 0
         rotations = 0

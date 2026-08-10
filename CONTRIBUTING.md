@@ -103,6 +103,13 @@ python -m pylint agents benchmarks diagnostics middleware tests train_script \
   training ui utils
 ```
 
+Do not replace this scoped command with `python -m pylint .`. Because recursive
+discovery is enabled in `pyproject.toml`, linting `.` also descends into the
+local `.venv` and other generated or untracked trees. That needlessly parses
+third-party packages, can take minutes instead of seconds, and mixes their
+findings with the repository report. The explicit directory list above defines
+the supported Pylint scope.
+
 This requirement applies while `exit-zero = true`: Pylint is initially a
 report-only technical-debt inventory, so contributors must review its output
 even though findings do not fail the command. Do not perform unrelated

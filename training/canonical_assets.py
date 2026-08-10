@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 from pathlib import Path
-import subprocess
 
 import numpy as np
 
@@ -14,11 +12,13 @@ from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from training.training_loop import ENCODED_FEATURE_VERSION
 from utils.artifacts import atomic_write_json, file_sha256
+from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
+from utils.repository import current_git_commit
 
 
 FORMAT_VERSION = 1
 DATASET_FORMAT = "jsonl_state_action_v1"
-DATASET_GENERATOR_VERSION = "canonical_real_decisions_v1"
+DATASET_GENERATOR_VERSION = "canonical_real_decisions_numpy_seed_plan_v2"
 RULESET_VERSION = "two_player_domino_v1"
 HEURISTIC_VERSION = "strategic_exact_belief_v1"
 EXPECTED_WEIGHT_SHAPES = DEFAULT_NETWORK_ARCHITECTURE.policy_weight_shapes()
@@ -94,26 +94,6 @@ def run_scoped_asset_paths(run_dir):
     )
 
 
-def _git_commit(root):
-    for candidate in (Path(root), Path(__file__).resolve().parents[1]):
-        try:
-            return subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=candidate,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ).stdout.strip()
-        except Exception:
-            continue
-    return None
-
-
-def _created_at():
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _json_value(value):
     """Normalize tuples and NumPy scalars to their persisted JSON form."""
     return json.loads(json.dumps(value))
@@ -131,6 +111,8 @@ def canonical_generation_config(*, dataset_games, workers, tuning, safety):
         "max_worker_rss_mb": int(safety["max_worker_rss_mb"]),
         "teacher": "StrategicAgent_vs_StrategicAgent",
         "real_decisions_only": True,
+        "random_bit_generator": DEFAULT_BIT_GENERATOR,
+        "random_derivation_scheme": DERIVATION_SCHEME,
     })
 
 
@@ -235,8 +217,7 @@ def write_dataset_metadata(
         "ruleset_version": RULESET_VERSION,
         "heuristic_version": HEURISTIC_VERSION,
         "encoded_feature_version": ENCODED_FEATURE_VERSION,
-        "git_commit": _git_commit(root),
-        "created_at": _created_at(),
+        "git_commit": current_git_commit(root),
         "dataset_sha256": digest,
         "generation_config": _json_value(generation_config),
     }
@@ -337,9 +318,7 @@ def write_weights_metadata(
         "format_version": FORMAT_VERSION,
         "artifact_type": "supervised_weights",
         "seed": int(seed),
-        "dataset_path": str(paths.dataset),
         "dataset_sha256": dataset_sha256,
-        "weights_path": str(paths.weights),
         "weights_sha256": digest,
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
@@ -357,8 +336,7 @@ def write_weights_metadata(
         "stopping_reason": training_summary.get("stopping_reason"),
         "final_training_loss": training_summary.get("final_training_loss"),
         "final_validation_loss": training_summary.get("final_validation_loss"),
-        "git_commit": _git_commit(root),
-        "created_at": _created_at(),
+        "git_commit": current_git_commit(root),
     }
     atomic_write_json(paths.weights_meta, metadata)
     return metadata

@@ -124,6 +124,11 @@ encoded float32 cache -> supervised MLP -> run-local or standard SL + metadata
 Dataset generation retains only real policy decisions and writes deterministic
 game-id order through a bounded SQLite aggregation stage. The encoded cache is
 rebuilt when the dataset metadata or encoder contract changes.
+Each absolute dataset game derives its own NumPy `PCG64` stream from the root
+`SeedPlan`; worker scheduling, autotuning, and fallback therefore cannot change
+the deal. The small seed-plan manifest is persisted beside the JSONL, while
+per-game streams are calculated on demand instead of being stored in a seed
+table.
 
 Supervised training can keep encoded arrays in host RAM, use atomic disk-backed
 memory maps, and place all or rotating windows of data on the GPU. It saves the
@@ -131,7 +136,11 @@ best validation checkpoint atomically and renders the training/validation loss
 history already collected during that run. The epoch count is a maximum
 budget: repeated low-improvement blocks of training loss can stop a saturated
 run early. Supervised optimization uses a fixed, memory-checked batch of 8,192
-examples by default.
+examples by default. One run-level `SeedPlan` owns independent PCG64 streams for
+weight initialization, coordinate-derived epoch permutations, and sequential
+dropout. Random arrays are generated on the host and transferred when the
+selected backend is CuPy, and a manifest beside the final weights records the
+root seed and derivation contract.
 
 RL uses fresh on-policy trajectories: all games in an iteration observe the
 same frozen policy. The default update stores masked collection-time

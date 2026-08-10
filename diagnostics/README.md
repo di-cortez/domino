@@ -220,29 +220,3 @@ treated as inconclusive.
 The `self_play_evaluation/` subfolder contains a helper script for comparing
 two RL training regimes: pure self-play and direct training against the
 heuristic agent.
-
-## RL Hyperparameter Sweep
-
-`hyperparameter_sweep.py` trains a fresh RL checkpoint per sweep point (one
-axis of `training.self_play`'s hyperparameters varied at a time: learning
-rate, reward schema, or gamma, holding the other two at their baseline), runs
-the whole sweep once with the actor-critic value head on and once off, and
-benchmarks `heuristic`, `neural`, and each freshly trained `rl` checkpoint
-against `random` and in self-play:
-
-```bash
-python -m diagnostics.hyperparameter_sweep
-python -m diagnostics.hyperparameter_sweep --rl-iterations 300 --diagnostic-games 1000
-```
-
-Every point loads the same supervised checkpoint and explicitly ignores any
-older RL file at its target path, keeping the comparison centered on the
-tested hyperparameters rather than prior RL history.
-
-Every record — the exact RL hyperparameters used plus every matchup's
-win/loss rates — is appended to a single JSON array on disk
-(`--output`, default `diagnostics/results/hyperparameter_sweep.json`), so
-repeated invocations accumulate a growing log instead of overwriting it.
-Trained checkpoints are written under `--checkpoint-dir` (default
-`models/hyperparameter_sweep/`). Run `python -m diagnostics.hyperparameter_sweep
---help` for the full flag list.

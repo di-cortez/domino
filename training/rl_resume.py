@@ -1,6 +1,7 @@
 """Atomic policy checkpoints and exact RL resume-state compatibility."""
 
 from collections import deque
+from dataclasses import asdict, dataclass, fields
 import hashlib
 import json
 import os
@@ -23,6 +24,8 @@ from training.rl_constants import (
     PPO_MAX_MINIBATCHES,
     PPO_MIN_MINIBATCHES,
 )
+from training.ppo import DEFAULT_TARGET_KL
+from utils.repository import current_git_commit
 
 
 RESUME_STATE_VERSION = 4
@@ -37,6 +40,116 @@ DEFAULTED_CONFIGURATION_KEYS = {
 PPO_TRAINING_ALGORITHM = "ppo_v1"
 LEGACY_TRAINING_ALGORITHM = "reinforce_v1"
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
+
+
+@dataclass(frozen=True)
+class RLTrainingConfiguration:
+    """Typed durable RL resume configuration and source provenance."""
+
+    total_training_games: int
+    selected_gpi: int
+    selected_workers: int
+    rl_training_algorithm: str
+    training_opponent: str
+    learning_rate: float
+    entropy_coef: float
+    max_pool_size: int
+    use_value_head: bool
+    value_coef: float
+    gamma: float
+    reward_schema: str
+    clip_grad_norm: float | None
+    normalize_advantages: bool
+    weight_decay: float
+    dropout_rate: float
+    effective_seed: int
+    device: str
+    sl_weights_sha256: str | None
+    ppo_clip_epsilon: float
+    ppo_target_kl: float
+    ppo_stop_kl: float
+    ppo_max_epochs: int
+    ppo_games_per_minibatch_scale: int
+    ppo_min_decisions_per_minibatch: int
+    prefer_gpu_buffer: bool
+    run_configuration_sha256: str | None = None
+    git_commit: str | None = None
+
+    @classmethod
+    def from_mapping(cls, value):
+        """Build the typed configuration from a runtime/checkpoint mapping."""
+        data = dict(value)
+        data.setdefault("ppo_target_kl", DEFAULT_TARGET_KL)
+        data.setdefault("run_configuration_sha256", None)
+        data.setdefault("git_commit", None)
+        return cls(**{field.name: data[field.name] for field in fields(cls)})
+
+    @classmethod
+    def from_run_config(
+        cls,
+        run_config,
+        *,
+        total_training_games,
+        selected_workers,
+        device,
+    ):
+        """Build the exact RL identity from one immutable canonical run config."""
+        rl = run_config["rl_config"]
+        ppo = run_config["ppo_config"]
+        return cls.from_mapping({
+            "total_training_games": int(total_training_games),
+            "selected_gpi": int(rl["games_per_iteration"]),
+            "selected_workers": int(selected_workers),
+            "rl_training_algorithm": run_config["algorithm"],
+            "training_opponent": rl["training_opponent"],
+            "learning_rate": float(rl["learning_rate"]),
+            "entropy_coef": float(rl["entropy_coef"]),
+            "max_pool_size": int(rl["max_pool_size"]),
+            "use_value_head": bool(rl["use_value_head"]),
+            "value_coef": float(rl["value_coef"]),
+            "gamma": float(rl["gamma"]),
+            "reward_schema": rl["reward_schema"],
+            "clip_grad_norm": rl.get("clip_grad_norm"),
+            "normalize_advantages": bool(rl["normalize_advantages"]),
+            "weight_decay": float(rl.get("weight_decay", 0.0)),
+            "dropout_rate": float(rl.get("dropout_rate", 0.0)),
+            "effective_seed": int(run_config["seed"]),
+            "device": device,
+            "sl_weights_sha256": run_config["supervised_weights_sha256"],
+            "ppo_clip_epsilon": float(ppo["clip_epsilon"]),
+            "ppo_target_kl": float(ppo.get("target_kl", DEFAULT_TARGET_KL)),
+            "ppo_stop_kl": float(ppo["stop_kl"]),
+            "ppo_max_epochs": int(ppo["max_epochs"]),
+            "ppo_games_per_minibatch_scale": int(
+                ppo["games_per_minibatch_scale"]
+            ),
+            "ppo_min_decisions_per_minibatch": int(
+                ppo["min_decisions_per_minibatch"]
+            ),
+            "prefer_gpu_buffer": bool(ppo["prefer_gpu_buffer"]),
+            "run_configuration_sha256": run_config["configuration_sha256"],
+            "git_commit": run_config.get("git_commit"),
+        })
+
+    def to_dict(self):
+        """Return the durable checkpoint representation, including constants."""
+        return {
+            **asdict(self),
+            "ruleset_version": RULESET_VERSION,
+            "ppo_min_minibatches": PPO_MIN_MINIBATCHES,
+            "ppo_max_minibatches": PPO_MAX_MINIBATCHES,
+            "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
+        }
+
+    def warn_if_commit_changed(self, emit_status):
+        """Warn, but never reject, when code changed since the run began."""
+        current = current_git_commit()
+        if self.git_commit and current and self.git_commit != current:
+            emit_status(
+                "Warning: the repository commit changed since this RL run "
+                f"started ({self.git_commit[:12]} -> {current[:12]}). "
+                "Resume will continue with the original saved configuration."
+            )
 
 
 def _checkpoint_shape(network):
@@ -319,83 +432,36 @@ def _restore_rng_state(metadata):
     ))
 
 
-def _resume_configuration(
+def _validate_resume_configuration(
+    metadata,
+    expected,
     *,
-    total_training_games,
-    selected_gpi,
-    selected_workers,
-    rl_training_algorithm,
-    training_opponent,
-    learning_rate,
-    entropy_coef,
-    max_pool_size,
-    use_value_head,
-    value_coef,
-    gamma,
-    reward_schema,
-    clip_grad_norm,
-    normalize_advantages,
-    weight_decay,
-    dropout_rate,
-    effective_seed,
-    device,
-    sl_weights_sha256,
-    ppo_clip_epsilon,
-    ppo_stop_kl,
-    ppo_max_epochs,
-    ppo_games_per_minibatch_scale,
-    ppo_min_decisions_per_minibatch,
-    prefer_gpu_buffer,
-    run_configuration_sha256=None,
+    ignored_keys=(),
+    emit_status=lambda _message: None,
 ):
-    """Return every setting that can affect post-checkpoint RL computation."""
-    return {
-        "total_training_games": int(total_training_games),
-        "selected_gpi": int(selected_gpi),
-        "selected_workers": int(selected_workers),
-        "rl_training_algorithm": rl_training_algorithm,
-        "training_opponent": training_opponent,
-        "learning_rate": float(learning_rate),
-        "entropy_coef": float(entropy_coef),
-        "max_pool_size": int(max_pool_size),
-        "use_value_head": bool(use_value_head),
-        "value_coef": float(value_coef),
-        "gamma": float(gamma),
-        "reward_schema": reward_schema,
-        "clip_grad_norm": (
-            None if clip_grad_norm is None else float(clip_grad_norm)
-        ),
-        "normalize_advantages": bool(normalize_advantages),
-        "weight_decay": float(weight_decay),
-        "dropout_rate": float(dropout_rate),
-        "effective_seed": int(effective_seed),
-        "device": device,
-        "sl_weights_sha256": sl_weights_sha256,
-        "ruleset_version": RULESET_VERSION,
-        "run_configuration_sha256": run_configuration_sha256,
-        "ppo_clip_epsilon": float(ppo_clip_epsilon),
-        "ppo_stop_kl": float(ppo_stop_kl),
-        "ppo_max_epochs": int(ppo_max_epochs),
-        "ppo_min_minibatches": PPO_MIN_MINIBATCHES,
-        "ppo_max_minibatches": PPO_MAX_MINIBATCHES,
-        "ppo_games_per_minibatch_scale": int(ppo_games_per_minibatch_scale),
-        "ppo_min_decisions_per_minibatch": int(ppo_min_decisions_per_minibatch),
-        "prefer_gpu_buffer": bool(prefer_gpu_buffer),
-        "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
-    }
-
-
-def _validate_resume_configuration(metadata, expected, *, ignored_keys=()):
     """Reject a resume that would silently continue a different experiment."""
     saved = dict(metadata.get("configuration") or {})
     for key, disabled_value in DEFAULTED_CONFIGURATION_KEYS.items():
         saved.setdefault(key, disabled_value)
+    saved.setdefault("ppo_target_kl", DEFAULT_TARGET_KL)
+    saved.setdefault("git_commit", None)
+    expected = expected.to_dict()
+    if saved.get("git_commit") != expected.get("git_commit"):
+        emit_status(
+            "Warning: the checkpoint commit differs from the run's initial "
+            "commit. Resume will continue with the saved training parameters."
+        )
     # These legacy keys no longer affect computation. ``ppo_target_kl`` was
     # informational: PPO reports target KL, but only stop KL controls early
     # stopping. ``pool_refresh_games`` configured an opponent-snapshot cadence
     # that is now always one snapshot per iteration, controlled by gpi. Neither
     # must ever reject an otherwise exact run.
-    ignored_keys = {"ppo_target_kl", "pool_refresh_games", *ignored_keys}
+    ignored_keys = {
+        "git_commit",
+        "ppo_target_kl",
+        "pool_refresh_games",
+        *ignored_keys,
+    }
     comparable_saved = {
         key: value
         for key, value in saved.items()
@@ -447,7 +513,7 @@ def _save_numbered_resume_checkpoint(
         "weights_sha256": _file_sha256(weights_path),
         "runtime_workers": int(runtime_workers),
         "completed_training_games": int(completed_training_games),
-        "configuration": configuration,
+        "configuration": configuration.to_dict(),
         "optimizer_state": network.optimizer_state_dict(),
         "rng_state": _rng_state_metadata(),
         "adaptive_tuning": adaptive_tuning,

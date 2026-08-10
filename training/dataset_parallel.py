@@ -11,13 +11,10 @@ from __future__ import annotations
 import math
 import multiprocessing as mp
 import os
-import random
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from typing import Callable, Iterable
-
-import numpy as np
 
 from diagnostics.parallel_runner import (
     MAX_PARALLEL_WORKERS,
@@ -27,9 +24,9 @@ from diagnostics.parallel_runner import (
     cap_parallel_workers,
     cpu_only_worker_environment,
     executor_memory_snapshot,
-    game_seed,
     terminate_executor,
 )
+from utils.myrandom import RandomNamespace, SeedPlan
 from utils.runtime_status import format_duration
 
 
@@ -86,22 +83,21 @@ def _is_real_decision_state(state):
     return len(_legal_tile_actions_from_state(state)) >= 2
 
 
-def generate_dataset_game(game_index: int, seed: int) -> dict:
+def generate_dataset_game(game_index: int, seed_plan: SeedPlan) -> dict:
     """Play and serialize one deterministic heuristic training game."""
-    # Seed both random APIs even though the current heuristic only needs the
-    # standard-library shuffle. This protects determinism if agents later use
-    # NumPy without changing the dataset scheduling contract.
-    random.seed(seed)
-    np.random.seed(seed & 0xFFFFFFFF)
+    if not isinstance(seed_plan, SeedPlan):
+        raise TypeError("seed_plan must be utils.myrandom.SeedPlan")
+    game_index = int(game_index)
+    game_rng = seed_plan.generator(RandomNamespace.DATASET_GAME, game_index)
 
     from agents.heuristic_agent import StrategicAgent
     from middleware.domino_engine import DominoEngine
     from middleware.middleware import GameManager
 
-    engine = DominoEngine(player_count=2)
+    engine = DominoEngine(player_count=2, rng=game_rng)
     # Engine counters are process-local. Replacing the id before the first
     # observed state gives every dataset game a globally stable absolute id.
-    engine.game_id = int(game_index) + 1
+    engine.game_id = game_index + 1
     manager = GameManager(engine, [StrategicAgent(), StrategicAgent()])
     _, game_history = manager.play_full_game()
 
@@ -123,37 +119,43 @@ def generate_dataset_game(game_index: int, seed: int) -> dict:
         for record in saved_records
     )
     return {
-        "game_index": int(game_index),
-        "game_seed": int(seed),
+        "game_index": game_index,
         "jsonl_payload": payload,
         "saved_turn_count": len(saved_records),
         "skipped_turn_count": skipped_turn_count,
     }
 
 
-def _dataset_worker_play_games(jobs: tuple[tuple[int, int], ...]) -> list[dict]:
+def _dataset_worker_play_games(
+    game_indices: tuple[int, ...],
+    seed_plan: SeedPlan,
+) -> list[dict]:
     """Execute one dynamically scheduled block inside a CPU-only worker."""
-    return [generate_dataset_game(game_index, seed) for game_index, seed in jobs]
+    return [
+        generate_dataset_game(game_index, seed_plan)
+        for game_index in game_indices
+    ]
 
 
 def _chunk_pending_jobs(
-    pending_specs: list[tuple[int, int]],
+    pending_game_indices: list[int],
     worker_count: int,
     safety: ParallelSafetyConfig,
-) -> list[tuple[tuple[int, int], ...]]:
+) -> list[tuple[int, ...]]:
     """Create enough small blocks for dynamic load balancing."""
     target_jobs = max(1, worker_count * safety.target_jobs_per_worker)
-    chunk_size = max(1, math.ceil(len(pending_specs) / target_jobs))
+    chunk_size = max(1, math.ceil(len(pending_game_indices) / target_jobs))
     chunk_size = min(chunk_size, safety.max_games_per_job)
     return [
-        tuple(pending_specs[index:index + chunk_size])
-        for index in range(0, len(pending_specs), chunk_size)
+        tuple(pending_game_indices[index:index + chunk_size])
+        for index in range(0, len(pending_game_indices), chunk_size)
     ]
 
 
 def _run_pending_jobs(
-    queued_jobs: list[tuple[tuple[int, int], ...]],
+    queued_jobs: list[tuple[int, ...]],
     worker_count: int,
+    seed_plan: SeedPlan,
     safety: ParallelSafetyConfig,
     on_result: Callable[[dict], None],
     run_info: ParallelRunInfo,
@@ -182,7 +184,11 @@ def _run_pending_jobs(
                     job = next(jobs_iter)
                 except StopIteration:
                     return False
-                future = executor.submit(_dataset_worker_play_games, job)
+                future = executor.submit(
+                    _dataset_worker_play_games,
+                    job,
+                    seed_plan,
+                )
                 in_flight[future] = job
                 return True
 
@@ -258,9 +264,10 @@ def _run_pending_jobs(
         raise
 
 
-def evaluate_dataset_game_specs(
+def evaluate_dataset_games(
     *,
-    game_specs: Iterable[tuple[int, int]],
+    game_indices: Iterable[int],
+    seed_plan: SeedPlan,
     requested_workers: int,
     result_callback: Callable[[dict], None] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
@@ -268,11 +275,15 @@ def evaluate_dataset_game_specs(
     retain_results: bool = True,
 ) -> tuple[list[dict], ParallelRunInfo]:
     """Execute absolute game ids and retain completed work across fallbacks."""
+    if not isinstance(seed_plan, SeedPlan):
+        raise TypeError("seed_plan must be utils.myrandom.SeedPlan")
     safety = safety or ParallelSafetyConfig()
-    specs = sorted((int(index), int(seed)) for index, seed in game_specs)
-    if len({index for index, _seed in specs}) != len(specs):
-        raise ValueError("game_specs contains duplicate game ids")
-    if not specs:
+    indices = sorted(int(index) for index in game_indices)
+    if len(set(indices)) != len(indices):
+        raise ValueError("game_indices contains duplicate game ids")
+    if any(index < 0 for index in indices):
+        raise ValueError("game_indices must be non-negative")
+    if not indices:
         return [], ParallelRunInfo(requested_workers, 1, 1)
 
     worker_count, was_capped, cap_reason = cap_parallel_workers(
@@ -307,16 +318,17 @@ def evaluate_dataset_game_specs(
         if retain_results:
             retained_by_index[game_index] = result
         if progress_callback is not None:
-            progress_callback(len(completed_ids), len(specs))
+            progress_callback(len(completed_ids), len(indices))
 
     recoverable = (MemoryError, DiagnosticMemoryPressure, BrokenProcessPool, OSError)
-    while len(completed_ids) < len(specs):
-        pending = [spec for spec in specs if spec[0] not in completed_ids]
+    while len(completed_ids) < len(indices):
+        pending = [index for index in indices if index not in completed_ids]
         run_info.attempted_worker_counts.append(worker_count)
         try:
             _run_pending_jobs(
                 _chunk_pending_jobs(pending, worker_count, safety),
                 worker_count,
+                seed_plan,
                 safety,
                 store,
                 run_info,
@@ -351,7 +363,7 @@ def evaluate_dataset_game_specs(
                 exc,
             ) from exc
 
-    results = [retained_by_index[index] for index, _seed in specs] if retain_results else []
+    results = [retained_by_index[index] for index in indices] if retain_results else []
     return results, run_info
 
 
@@ -369,7 +381,7 @@ def _candidate_counts(candidates, safety):
 def autotune_dataset_workers(
     *,
     game_count: int,
-    base_seed: int,
+    seed_plan: SeedPlan,
     safety: ParallelSafetyConfig,
     result_callback: Callable[[dict], None],
     benchmark_fraction: float = DEFAULT_DATASET_AUTOTUNE_FRACTION,
@@ -379,6 +391,8 @@ def autotune_dataset_workers(
     status_callback: Callable[[str], None] | None = None,
 ) -> dict:
     """Benchmark dataset workers on unique games retained by the caller."""
+    if not isinstance(seed_plan, SeedPlan):
+        raise TypeError("seed_plan must be utils.myrandom.SeedPlan")
     if game_count < 1:
         raise ValueError("game_count must be positive")
     if not 0 < benchmark_fraction <= 1:
@@ -430,11 +444,9 @@ def autotune_dataset_workers(
         attempt_failed = False
         failure_reason = None
         try:
-            _results, run_info = evaluate_dataset_game_specs(
-                game_specs=[
-                    (game_index, game_seed(base_seed, game_index))
-                    for game_index in planned
-                ],
+            _results, run_info = evaluate_dataset_games(
+                game_indices=planned,
+                seed_plan=seed_plan,
                 requested_workers=workers,
                 result_callback=store,
                 safety=safety,

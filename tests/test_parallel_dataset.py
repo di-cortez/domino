@@ -7,43 +7,93 @@ Run from the repository root with::
 
 import json
 import os
+import random
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from diagnostics.parallel_runner import ParallelSafetyConfig, game_seed
-from training.dataset_generator import generate_dataset
+from diagnostics.parallel_runner import ParallelSafetyConfig
+from training.dataset_generator import (
+    dataset_random_manifest_path,
+    generate_dataset,
+)
 from training.dataset_parallel import (
     DatasetExecutionError,
-    evaluate_dataset_game_specs,
+    evaluate_dataset_games,
+    generate_dataset_game,
 )
+from utils.myrandom import SeedPlan
 
 
-def _game_specs(count, seed):
-    return [(index, game_seed(seed, index)) for index in range(count)]
+def _numpy_rng_states_equal(left, right):
+    return (
+        left[0] == right[0]
+        and np.array_equal(left[1], right[1])
+        and left[2:] == right[2:]
+    )
 
 
 class ParallelDatasetTests(unittest.TestCase):
     def test_parallel_payloads_equal_single_worker_payloads(self):
         safety = ParallelSafetyConfig(memory_reserve_mb=0, estimated_worker_mb=1)
-        single, _single_info = evaluate_dataset_game_specs(
-            game_specs=_game_specs(8, 111),
+        seed_plan = SeedPlan(111)
+        single, _single_info = evaluate_dataset_games(
+            game_indices=range(8),
+            seed_plan=seed_plan,
             requested_workers=1,
             safety=safety,
         )
-        parallel, parallel_info = evaluate_dataset_game_specs(
-            game_specs=_game_specs(8, 111),
+        parallel, parallel_info = evaluate_dataset_games(
+            game_indices=reversed(range(8)),
+            seed_plan=seed_plan,
             requested_workers=2,
             safety=safety,
         )
         self.assertEqual(single, parallel)
         self.assertTrue(parallel_info.workers_cpu_only)
+
+    def test_dataset_jsonl_is_byte_identical_across_repeats_and_workers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = [
+                Path(temp_dir) / "single.jsonl",
+                Path(temp_dir) / "parallel.jsonl",
+                Path(temp_dir) / "repeat.jsonl",
+            ]
+            safety = ParallelSafetyConfig(memory_reserve_mb=0, estimated_worker_mb=1)
+            for path, workers in zip(paths, (1, 3, 1)):
+                generate_dataset(
+                    16,
+                    path,
+                    quiet=True,
+                    workers=workers,
+                    seed=20260808,
+                    safety_config=safety,
+                )
+
+            expected = paths[0].read_bytes()
+            self.assertGreater(len(expected), 0)
+            self.assertEqual(paths[1].read_bytes(), expected)
+            self.assertEqual(paths[2].read_bytes(), expected)
+
+    def test_one_game_does_not_consume_process_global_rng_state(self):
+        random.seed(12345)
+        np.random.seed(54321)
+        python_state = random.getstate()
+        numpy_state = np.random.get_state()
+
+        result = generate_dataset_game(7, SeedPlan(222))
+
+        self.assertEqual(random.getstate(), python_state)
+        self.assertTrue(_numpy_rng_states_equal(np.random.get_state(), numpy_state))
+        self.assertEqual(result, generate_dataset_game(7, SeedPlan(222)))
 
     def test_autotune_games_are_retained_and_output_is_ordered(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -73,6 +123,12 @@ class ParallelDatasetTests(unittest.TestCase):
             self.assertEqual(game_ids, sorted(game_ids))
             self.assertGreater(summary["saved_turn_count"], 0)
             self.assertFalse(any(output.parent.glob(f".{output.name}.games-*.sqlite3")))
+            manifest_path = dataset_random_manifest_path(output)
+            self.assertEqual(Path(summary["random_manifest_path"]), manifest_path)
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8")),
+                SeedPlan(222).to_manifest(),
+            )
 
     def test_low_ram_caps_workers_without_changing_dataset(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -135,14 +191,17 @@ class ParallelDatasetTests(unittest.TestCase):
             "training.dataset_parallel.executor_memory_snapshot",
             side_effect=pressure_after_progress,
         ):
-            recovered, run_info = evaluate_dataset_game_specs(
-                game_specs=_game_specs(8, 444),
+            seed_plan = SeedPlan(444)
+            recovered, run_info = evaluate_dataset_games(
+                game_indices=range(8),
+                seed_plan=seed_plan,
                 requested_workers=4,
                 result_callback=store,
                 safety=safety,
             )
-        baseline, _baseline_info = evaluate_dataset_game_specs(
-            game_specs=_game_specs(8, 444),
+        baseline, _baseline_info = evaluate_dataset_games(
+            game_indices=range(8),
+            seed_plan=seed_plan,
             requested_workers=1,
             safety=ParallelSafetyConfig(
                 memory_reserve_mb=0,
@@ -159,7 +218,9 @@ class ParallelDatasetTests(unittest.TestCase):
     def test_failed_generation_preserves_previous_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "dataset.jsonl"
+            manifest = dataset_random_manifest_path(output)
             output.write_text("previous valid dataset\n", encoding="utf-8")
+            manifest.write_text("previous valid manifest\n", encoding="utf-8")
             with mock.patch.dict(
                 os.environ,
                 {
@@ -183,6 +244,10 @@ class ParallelDatasetTests(unittest.TestCase):
             self.assertEqual(
                 output.read_text(encoding="utf-8"),
                 "previous valid dataset\n",
+            )
+            self.assertEqual(
+                manifest.read_text(encoding="utf-8"),
+                "previous valid manifest\n",
             )
 
 

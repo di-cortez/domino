@@ -36,8 +36,10 @@ from training.training_loop import (
     load_dataset,
     load_or_build_dataset,
     supervised_loss_plot_path,
+    supervised_random_manifest_path,
     train_supervised,
 )
+from utils.myrandom import RandomNamespace, SeedPlan
 from utils.resource_limits import (
     MemorySafetyError,
     choose_safe_supervised_device,
@@ -233,13 +235,12 @@ class SchedulerAndNumericTests(unittest.TestCase):
 
         final_weights = []
         for _run in range(2):
-            np.random.seed(77)
             network = SupervisedNeuralNetwork(
                 input_size=4,
                 hidden1_size=5,
                 hidden2_size=3,
                 output_size=2,
-                random_seed=77,
+                seed_plan=SeedPlan(77),
                 device="cpu",
             )
             network.train(x, y, epochs=3, batch_size=2, quiet=True)
@@ -249,6 +250,37 @@ class SchedulerAndNumericTests(unittest.TestCase):
 
 
 class DatasetResidencyTests(unittest.TestCase):
+    def test_encoded_cache_is_independent_of_source_path_and_mtime(self):
+        encoder = DominoEncoder()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_paths = []
+            for name, modified_time in (("first", 1_700_000_000),
+                                        ("second", 1_800_000_000)):
+                run_root = root / name
+                run_root.mkdir()
+                dataset_path = run_root / "examples.jsonl"
+                cache_path = run_root / "cache.npz"
+                _write_dataset(dataset_path)
+                os.utime(dataset_path, (modified_time, modified_time))
+                load_or_build_dataset(
+                    dataset_path,
+                    encoder,
+                    cache_path,
+                    quiet=True,
+                    memory_reserve_mb=0,
+                )
+                cache_paths.append(cache_path)
+
+            self.assertEqual(
+                cache_paths[0].read_bytes(),
+                cache_paths[1].read_bytes(),
+            )
+            with np.load(cache_paths[0], allow_pickle=False) as archive:
+                self.assertIn("source_sha256", archive.files)
+                self.assertNotIn("source_path", archive.files)
+                self.assertNotIn("source_mtime_ns", archive.files)
+
     def test_ram_and_mmap_caches_have_identical_values_and_atomic_rebuild(self):
         encoder = DominoEncoder()
         with tempfile.TemporaryDirectory() as directory:
@@ -342,6 +374,7 @@ class DatasetResidencyTests(unittest.TestCase):
                 train_count=10,
                 host_storage_mode="mmap",
                 device="cpu",
+                seed_plan=SeedPlan(12),
                 index_observer=lambda indices: observed.extend(indices.tolist()),
             )
             network = SupervisedNeuralNetwork(
@@ -408,10 +441,7 @@ class DatasetResidencyTests(unittest.TestCase):
             dataset_path = root / "examples.jsonl"
             _write_dataset(dataset_path, count=20)
             output = io.StringIO()
-            with mock.patch(
-                "training.training_loop.CHECKPOINT_DIR",
-                str(root / "checkpoints"),
-            ), redirect_stdout(output):
+            with redirect_stdout(output):
                 summary = train_supervised(
                     epochs=2,
                     batch_size=8,
@@ -430,6 +460,11 @@ class DatasetResidencyTests(unittest.TestCase):
             self.assertEqual(summary["stopping_reason"], "epoch_limit")
             self.assertEqual(summary["selected_device"], "cpu")
             self.assertEqual(summary["selected_batch_size"], 8)
+            self.assertEqual(summary["effective_seed"], 5)
+            self.assertEqual(summary["random_bit_generator"], "PCG64")
+            manifest_path = supervised_random_manifest_path(root / "weights.npz")
+            self.assertEqual(summary["random_manifest_path"], str(manifest_path))
+            self.assertEqual(SeedPlan.from_manifest_file(manifest_path), SeedPlan(5))
             loss_plot = root / "weights_loss.png"
             self.assertEqual(summary["loss_plot_file"], str(loss_plot))
             self.assertEqual(loss_plot.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
@@ -452,25 +487,21 @@ class DatasetResidencyTests(unittest.TestCase):
             dataset_path = root / "examples.jsonl"
             _write_dataset(dataset_path, count=20)
 
-            with mock.patch(
-                "training.training_loop.CHECKPOINT_DIR",
-                str(root / "checkpoints"),
-            ):
-                summary = train_supervised(
-                    epochs=20,
-                    batch_size=8,
-                    dataset_file=dataset_path,
-                    cache_file=root / "cache.npz",
-                    weights_file=root / "weights.npz",
-                    quiet=True,
-                    device="cpu",
-                    seed=7,
-                    memory_reserve_mb=0,
-                    training_plateau_window=2,
-                    training_plateau_patience=2,
-                    training_plateau_min_epochs=4,
-                    training_plateau_min_relative_improvement=1.0,
-                )
+            summary = train_supervised(
+                epochs=20,
+                batch_size=8,
+                dataset_file=dataset_path,
+                cache_file=root / "cache.npz",
+                weights_file=root / "weights.npz",
+                quiet=True,
+                device="cpu",
+                seed=7,
+                memory_reserve_mb=0,
+                training_plateau_window=2,
+                training_plateau_patience=2,
+                training_plateau_min_epochs=4,
+                training_plateau_min_relative_improvement=1.0,
+            )
 
             self.assertEqual(summary["epochs"], 6)
             self.assertTrue(summary["training_plateau_stopped"])
@@ -478,6 +509,103 @@ class DatasetResidencyTests(unittest.TestCase):
             self.assertEqual(summary["training_plateau_loss_start_epoch"], 1)
             self.assertTrue((root / "weights.npz").is_file())
             self.assertTrue((root / "weights_loss.png").is_file())
+
+    def test_interrupted_supervised_run_never_publishes_partial_weights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset_path = root / "examples.jsonl"
+            weights_path = root / "weights.npz"
+            _write_dataset(dataset_path, count=20)
+            weights_path.write_bytes(b"previous complete model")
+
+            with mock.patch.object(
+                SupervisedNeuralNetwork,
+                "train",
+                side_effect=RuntimeError("simulated interruption"),
+            ), self.assertRaisesRegex(RuntimeError, "simulated interruption"):
+                train_supervised(
+                    epochs=2,
+                    batch_size=8,
+                    dataset_file=dataset_path,
+                    cache_file=root / "cache.npz",
+                    weights_file=weights_path,
+                    quiet=True,
+                    device="cpu",
+                    seed=8,
+                    memory_reserve_mb=0,
+                )
+
+            self.assertEqual(weights_path.read_bytes(), b"previous complete model")
+            self.assertFalse((root / "weights_loss.png").exists())
+            self.assertFalse(supervised_random_manifest_path(weights_path).exists())
+
+    def test_supervised_seed_plan_is_reproducible_and_ignores_global_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset_path = root / "examples.jsonl"
+            _write_dataset(dataset_path, count=24)
+            weight_payloads = []
+            loss_histories = []
+
+            for run_index, global_seed in enumerate((11, 999)):
+                np.random.seed(global_seed)
+                before = np.random.get_state()
+                summary = train_supervised(
+                    epochs=3,
+                    batch_size=5,
+                    dataset_file=dataset_path,
+                    cache_file=root / "cache.npz",
+                    weights_file=root / f"weights_{run_index}.npz",
+                    quiet=True,
+                    dropout_rate=0.25,
+                    device="cpu",
+                    seed=42,
+                    memory_reserve_mb=0,
+                )
+                after = np.random.get_state()
+                self.assertEqual(before[0], after[0])
+                np.testing.assert_array_equal(before[1], after[1])
+                self.assertEqual(before[2:], after[2:])
+                loss_histories.append([
+                    row["training_loss"] for row in summary["epoch_metrics"]
+                ])
+                with np.load(root / f"weights_{run_index}.npz") as archive:
+                    weight_payloads.append({
+                        name: archive[name].copy() for name in archive.files
+                    })
+
+            self.assertEqual(loss_histories[0], loss_histories[1])
+            for name in weight_payloads[0]:
+                np.testing.assert_array_equal(
+                    weight_payloads[0][name],
+                    weight_payloads[1][name],
+                )
+
+    def test_supervised_namespaces_are_independent(self):
+        plan = SeedPlan(42)
+        expected = SupervisedNeuralNetwork(
+            input_size=4,
+            hidden1_size=5,
+            hidden2_size=3,
+            output_size=2,
+            seed_plan=plan,
+            device="cpu",
+        )
+        plan.generator(RandomNamespace.SUPERVISED_SHUFFLE, 0).permutation(100)
+        plan.generator(RandomNamespace.SUPERVISED_DROPOUT).random(100)
+        observed = SupervisedNeuralNetwork(
+            input_size=4,
+            hidden1_size=5,
+            hidden2_size=3,
+            output_size=2,
+            seed_plan=plan,
+            device="cpu",
+        )
+        for name in expected.weight_names:
+            np.testing.assert_array_equal(
+                getattr(expected, name),
+                getattr(observed, name),
+            )
 
     def test_compact_pipeline_uses_fixed_batch_without_epoch_chatter(self):
         captured_kwargs = {}
@@ -553,6 +681,7 @@ class RealGPUResidencyTests(unittest.TestCase):
         x = np.arange(48, dtype=np.float32).reshape(4, 12)
         y = np.zeros((2, 12), dtype=np.float32)
         y[0] = 1
+        observed = []
         try:
             with mock.patch("cupy.asarray", wraps=cp.asarray) as upload:
                 plan = SupervisedDataPlan(
@@ -561,7 +690,11 @@ class RealGPUResidencyTests(unittest.TestCase):
                     train_count=10,
                     host_storage_mode="ram",
                     device="gpu",
+                    seed_plan=SeedPlan(3),
                     resident_capacity=12,
+                    index_observer=lambda indices: observed.extend(
+                        indices.tolist()
+                    ),
                 )
                 initial_upload_calls = upload.call_count
         except MemorySafetyError as exc:
@@ -576,15 +709,59 @@ class RealGPUResidencyTests(unittest.TestCase):
         )
         try:
             x_gpu_identity = id(plan.x_gpu)
-            _loss, updates, rotations = plan.train_epoch(network, 4, 0)
+            with mock.patch("cupy.random.permutation") as gpu_permutation:
+                _loss, updates, rotations = plan.train_epoch(network, 4, 0)
+            gpu_permutation.assert_not_called()
             self.assertEqual(id(plan.x_gpu), x_gpu_identity)
             self.assertEqual(updates, 3)
             self.assertEqual(rotations, 0)
             self.assertTrue(plan.full_dataset_on_gpu)
             self.assertEqual(initial_upload_calls, 2)
             self.assertEqual(network.cache["A3"].dtype, cp.float32)
+            expected = SeedPlan(3).generator(
+                RandomNamespace.SUPERVISED_SHUFFLE,
+                0,
+            ).permutation(10)
+            np.testing.assert_array_equal(observed, expected)
         finally:
             plan.close()
+
+    def test_seed_plan_initialization_and_dropout_match_cpu_and_gpu(self):
+        cpu = SupervisedNeuralNetwork(
+            input_size=4,
+            hidden1_size=32,
+            hidden2_size=16,
+            output_size=2,
+            dropout_rate=0.25,
+            seed_plan=SeedPlan(71),
+            device="cpu",
+        )
+        gpu = SupervisedNeuralNetwork(
+            input_size=4,
+            hidden1_size=32,
+            hidden2_size=16,
+            output_size=2,
+            dropout_rate=0.25,
+            seed_plan=SeedPlan(71),
+            device="gpu",
+        )
+        try:
+            for name in cpu.weight_names:
+                np.testing.assert_array_equal(
+                    getattr(cpu, name),
+                    gpu.to_host(getattr(gpu, name)),
+                )
+
+            batch = np.ones((4, 7), dtype=np.float32)
+            cpu.forward(batch, training=True)
+            gpu.forward(batch, training=True)
+            for mask_name in ("D1", "D2"):
+                np.testing.assert_array_equal(
+                    cpu.cache[mask_name],
+                    gpu.to_host(gpu.cache[mask_name]),
+                )
+        finally:
+            gpu.release_disposable_cache()
 
     def test_windowed_gpu_epoch_uses_every_index_once(self):
         x = np.arange(48, dtype=np.float32).reshape(4, 12)
@@ -598,6 +775,7 @@ class RealGPUResidencyTests(unittest.TestCase):
                 train_count=10,
                 host_storage_mode="ram",
                 device="gpu",
+                seed_plan=SeedPlan(2),
                 resident_capacity=4,
                 index_observer=lambda indices: observed.extend(indices.tolist()),
             )

@@ -32,6 +32,7 @@ from training.self_play import (
     REWARD_SCHEMAS,
     _collect_self_play_steps,
 )
+from utils.myrandom import SeedPlan
 
 
 class FirstLegalAgent:
@@ -264,9 +265,10 @@ class HeadlessEngineStepTests(unittest.TestCase):
 
     def test_fixed_seed_dataset_payload_matches_legacy_equivalent_path(self):
         """The optimized manager preserves serialized supervised examples."""
+        seed_plan = SeedPlan(20260719)
         with self._legacy_step_patch():
-            baseline = generate_dataset_game(game_index=0, seed=20260719)
-        optimized = generate_dataset_game(game_index=0, seed=20260719)
+            baseline = generate_dataset_game(game_index=0, seed_plan=seed_plan)
+        optimized = generate_dataset_game(game_index=0, seed_plan=seed_plan)
 
         self.assertEqual(baseline, optimized)
 

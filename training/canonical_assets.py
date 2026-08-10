@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -93,10 +92,6 @@ def run_scoped_asset_paths(run_dir):
         weights_meta=weights.with_suffix(".meta.json"),
         loss_plot=weights.with_name("domino_sl_loss.png"),
     )
-
-
-def _created_at():
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _json_value(value):
@@ -223,7 +218,6 @@ def write_dataset_metadata(
         "heuristic_version": HEURISTIC_VERSION,
         "encoded_feature_version": ENCODED_FEATURE_VERSION,
         "git_commit": current_git_commit(root),
-        "created_at": _created_at(),
         "dataset_sha256": digest,
         "generation_config": _json_value(generation_config),
     }
@@ -324,9 +318,7 @@ def write_weights_metadata(
         "format_version": FORMAT_VERSION,
         "artifact_type": "supervised_weights",
         "seed": int(seed),
-        "dataset_path": str(paths.dataset),
         "dataset_sha256": dataset_sha256,
-        "weights_path": str(paths.weights),
         "weights_sha256": digest,
         "encoder_size": DominoEncoder.VECTOR_SIZE,
         "action_count": DominoEncoder.ACTION_SIZE,
@@ -345,7 +337,6 @@ def write_weights_metadata(
         "final_training_loss": training_summary.get("final_training_loss"),
         "final_validation_loss": training_summary.get("final_validation_loss"),
         "git_commit": current_git_commit(root),
-        "created_at": _created_at(),
     }
     atomic_write_json(paths.weights_meta, metadata)
     return metadata

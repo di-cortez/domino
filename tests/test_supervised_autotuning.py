@@ -250,6 +250,37 @@ class SchedulerAndNumericTests(unittest.TestCase):
 
 
 class DatasetResidencyTests(unittest.TestCase):
+    def test_encoded_cache_is_independent_of_source_path_and_mtime(self):
+        encoder = DominoEncoder()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_paths = []
+            for name, modified_time in (("first", 1_700_000_000),
+                                        ("second", 1_800_000_000)):
+                run_root = root / name
+                run_root.mkdir()
+                dataset_path = run_root / "examples.jsonl"
+                cache_path = run_root / "cache.npz"
+                _write_dataset(dataset_path)
+                os.utime(dataset_path, (modified_time, modified_time))
+                load_or_build_dataset(
+                    dataset_path,
+                    encoder,
+                    cache_path,
+                    quiet=True,
+                    memory_reserve_mb=0,
+                )
+                cache_paths.append(cache_path)
+
+            self.assertEqual(
+                cache_paths[0].read_bytes(),
+                cache_paths[1].read_bytes(),
+            )
+            with np.load(cache_paths[0], allow_pickle=False) as archive:
+                self.assertIn("source_sha256", archive.files)
+                self.assertNotIn("source_path", archive.files)
+                self.assertNotIn("source_mtime_ns", archive.files)
+
     def test_ram_and_mmap_caches_have_identical_values_and_atomic_rebuild(self):
         encoder = DominoEncoder()
         with tempfile.TemporaryDirectory() as directory:

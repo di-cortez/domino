@@ -598,7 +598,7 @@ def test_canonical_asset_hashes_and_metadata_control_reuse(tmp_path):
         },
     )
     training = _training_config()
-    write_weights_metadata(
+    weights_meta = write_weights_metadata(
         paths,
         root=tmp_path,
         seed=42,
@@ -615,6 +615,10 @@ def test_canonical_asset_hashes_and_metadata_control_reuse(tmp_path):
             "final_validation_loss": 0.6,
         },
     )
+    assert "created_at" not in dataset_meta
+    assert "created_at" not in weights_meta
+    assert "dataset_path" not in weights_meta
+    assert "weights_path" not in weights_meta
     assert inspect_canonical_weights(
         paths,
         seed=42,
@@ -651,6 +655,54 @@ def test_canonical_asset_hashes_and_metadata_control_reuse(tmp_path):
         rebuild=True,
         label="supervised dataset",
     )
+
+
+def test_canonical_supervised_metadata_is_location_independent(tmp_path):
+    metadata_pairs = []
+    for directory_name in ("desktop", "notebook"):
+        root = tmp_path / directory_name
+        paths = canonical_asset_paths(root, 42)
+        paths.dataset.parent.mkdir(parents=True)
+        paths.weights.parent.mkdir(parents=True)
+        paths.dataset.write_text(
+            '{"state": {}, "action": [[0, 0], 0]}\n',
+            encoding="utf-8",
+        )
+        dataset_meta = write_dataset_metadata(
+            paths,
+            root=root,
+            seed=42,
+            dataset_games=3,
+            dataset_summary={"saved_turn_count": 1},
+            generation_config=_generation_config(),
+        )
+        np.savez(
+            paths.weights,
+            **{
+                name: np.zeros(shape, dtype=np.float32)
+                for name, shape in EXPECTED_WEIGHT_SHAPES.items()
+            },
+        )
+        weights_meta = write_weights_metadata(
+            paths,
+            root=root,
+            seed=42,
+            dataset_sha256=dataset_meta["dataset_sha256"],
+            training_config=_training_config(),
+            training_summary={
+                "requested_epochs": 10,
+                "epochs": 4,
+                "best_epoch": 3,
+                "best_validation_loss": 0.5,
+                "early_stopping_triggered": True,
+                "stopping_reason": "training_loss_plateau",
+                "final_training_loss": 0.4,
+                "final_validation_loss": 0.6,
+            },
+        )
+        metadata_pairs.append((dataset_meta, weights_meta))
+
+    assert metadata_pairs[0] == metadata_pairs[1]
 
 
 def test_exact_milestone_boundary_never_rounds_up():

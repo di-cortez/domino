@@ -49,7 +49,7 @@ from utils.resource_limits import (
     gpu_memory_info,
     host_allocation_status,
 )
-from utils.artifacts import atomic_savez
+from utils.artifacts import atomic_savez, file_sha256
 from utils.myrandom import (
     DEFAULT_BIT_GENERATOR,
     DERIVATION_SCHEME,
@@ -254,8 +254,7 @@ def _dataset_metadata(file_path, encoder):
     """Return source and encoder fields used to validate encoded caches."""
     stat = os.stat(file_path)
     return {
-        "source_path": os.path.abspath(file_path),
-        "source_mtime_ns": stat.st_mtime_ns,
+        "source_sha256": file_sha256(file_path),
         "source_size": stat.st_size,
         "encoder_vector_size": encoder.VECTOR_SIZE,
         "encoder_action_size": len(encoder.all_actions),

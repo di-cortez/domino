@@ -47,8 +47,10 @@ rules can finish earlier). They are
 `dataset/supervised_dataset_standard_seed<seed>.jsonl` and
 `models/domino_sl_standard_seed<seed>.npz`. Their sibling `meta.json` files
 record structural versions, configuration, provenance, convergence fields,
-and SHA-256. Presence alone is never enough for reuse. An incompatible asset
-stops the run unless one of these explicit replacement controls is supplied:
+and SHA-256. They deliberately omit creation timestamps and machine-local
+paths, so equal runs can publish equal metadata in different checkouts.
+Presence alone is never enough for reuse. An incompatible asset stops the run
+unless one of these explicit replacement controls is supplied:
 
 ```bash
 python -m training.pipeline big --rebuild-dataset
@@ -327,8 +329,11 @@ test, and troubleshooting steps. `train_script/run_pipeline.py` prints the selec
 supervised and RL-parent backends plus free/total RAM and VRAM before dataset
 generation starts.
 
-The encoded cache is rebuilt automatically when the source JSONL file changes,
-the encoder input/output dimensions change, or the feature-version tag changes.
+The encoded cache stores the source JSONL SHA-256 rather than its path or
+modification time. It is rebuilt automatically when that content hash, the
+encoder input/output dimensions, or the feature-version tag changes. Identical
+JSONL copies therefore produce identical cache metadata in different paths and
+at different times.
 
 RL self-play performs a host-memory preflight for the shared snapshot bank and
 expected batch, then checks the actual workspace before each `hstack`. With

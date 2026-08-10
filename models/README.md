@@ -10,7 +10,7 @@ by Git and can be regenerated through the training pipeline.
 | `domino_sl_loss.png` | Training and validation loss curves from the latest supervised run. |
 | `domino_rl_weights.npz` | RL policy weights refined by self-play. Used by `RLAgent`. |
 | `domino_sl_standard_seed<seed>.npz` | Canonical supervised policy shared by long-run pipeline levels. |
-| `domino_sl_standard_seed<seed>.meta.json` | Dataset origin/hash, architecture, training configuration, convergence, and weights hash. |
+| `domino_sl_standard_seed<seed>.meta.json` | Dataset hash, architecture, training configuration, convergence, commit, and weights hash; no machine-local path or creation time. |
 | `domino_sl_standard_seed<seed>.random_manifest.json` | Canonical supervised root seed and PCG64 namespace-derivation contract. |
 | `rl/domino_rl_<level>_seed<seed>/` | Canonical RL run state, checkpoints, pool, and diagnostics. |
 | `rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Run-local quick-profile dataset, cache, SL checkpoint, metadata, and loss plot; never reused by another invocation. |

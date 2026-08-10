@@ -59,5 +59,8 @@ them in a temporary SQLite database rather than holding the dataset in RAM.
 The final file is written in absolute game-id order and atomically replaces an
 existing JSONL only after all games complete successfully.
 
-The encoded cache is rebuilt automatically when the JSONL source file changes,
-the encoder dimensions change, or the feature-version tag changes.
+The encoded cache records the JSONL content SHA-256, not its path or filesystem
+modification time. It is rebuilt automatically when that hash, the encoder
+dimensions, or the feature-version tag changes. The canonical dataset and
+supervised metadata likewise omit creation timestamps and machine-local paths,
+so identical generation in different checkouts has identical metadata.

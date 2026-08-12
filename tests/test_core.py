@@ -62,7 +62,7 @@ from middleware.opponent_model import (
     mask_from_tiles,
     reconstruct_public_actions,
 )
-from training.self_play import (
+from training.rl.self_play import (
     DEFAULT_GPI,
     EVENT_REWARD_DECAY,
     LEARNER_DRAW_PENALTY,
@@ -81,19 +81,18 @@ from training.pipeline import (
     _rl_config as _canonical_rl_config,
     parse_args as parse_canonical_pipeline_args,
 )
-from training.rl_cli import _training_kwargs_from_args
-from training.training_loop import (
-    DEFAULT_DROPOUT_RATE,
+from training.rl.cli import _training_kwargs_from_args
+from training.supervised.training_loop import (
     DEFAULT_EARLY_STOPPING_PATIENCE,
     DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
     DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
     DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
     DEFAULT_TRAINING_PLATEAU_PATIENCE,
     DEFAULT_TRAINING_PLATEAU_WINDOW,
-    DEFAULT_WEIGHT_DECAY,
     hidden_sizes_from_args,
     parse_args as parse_supervised_args,
 )
+from training.utils.cli_args import DEFAULT_DROPOUT_RATE, DEFAULT_WEIGHT_DECAY
 from train_script.run_pipeline import _build_config, parse_args as parse_pipeline_args
 from utils.myrandom import SeedPlan
 from utils.runtime_status import pipeline_compute_report

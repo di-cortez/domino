@@ -71,7 +71,7 @@ Pipeline levels differ primarily in exact cumulative RL games:
 | `forever` | 100,000 | 42, reusable | No limit | None automatically | Every 100,000 games |
 
 GPI is never autotuned. Canonical pipelines and direct
-`training.self_play` runs accept `--gpi` from
+`training.rl.self_play` runs accept `--gpi` from
 `100, 200, 400, 600, 800, 1000, 2000`, defaulting to 2,000; sweeps keep it
 fixed rather than using it as a tuning axis. Before real games begin, an
 isolated benchmark selects the rollout-worker count and discards its games.
@@ -152,7 +152,7 @@ python -m training.pipeline big --weight-decay 0.00005 --dropout 0.2
 Both settings join the run identity, so they are locked for `forever` runs like
 every other hyperparameter. Runs and supervised assets created before these
 controls existed keep working: a missing field is read as the disabled value.
-See [`training/README.md`](training/README.md#shared-regularization) for the
+See [`training/utils/README.md`](training/utils/README.md#shared-regularization) for the
 complete behavior, including the PPO ratio caveat when dropout is enabled.
 
 For `forever`, `run_config.json` records the full locked configuration and its
@@ -188,10 +188,10 @@ PPO, and diagnostic controls.
 Run stages directly when iterating on one component:
 
 ```bash
-python -m training.dataset_generator --workers auto --seed 123
-python -m training.training_loop --sl-device auto --sl-seed 123
-python -m training.self_play --rl-workers auto --seed 123
-python -m training.self_play --fresh-from-sl --rl-workers auto --seed 123
+python -m training.datagen.generator --workers auto --seed 123
+python -m training.supervised.training_loop --sl-device auto --sl-seed 123
+python -m training.rl.self_play --rl-workers auto --seed 123
+python -m training.rl.self_play --fresh-from-sl --rl-workers auto --seed 123
 python -m diagnostics.evaluate --games 10000 --seed 123
 ```
 

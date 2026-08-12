@@ -18,16 +18,16 @@
 # scheduler, backend, batch, seed, and memory controls while retaining the
 # training module's dataset/epoch/output defaults:
 #
-#   python -m training.dataset_generator
-#   python -m training.training_loop
+#   python -m training.datagen.generator
+#   python -m training.supervised.training_loop
 #
-# Stage 3 wraps `python -m training.self_play`, which does accept CLI flags
+# Stage 3 wraps `python -m training.rl.self_play`, which does accept CLI flags
 # (exact games, learning rate, reward schema, gamma,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
 # passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
 # default paths. This script only chains the four stages and forwards flags
-# through; see `training/self_play.py add_optional_rl_arguments` and
+# through; see `training/rl/self_play.py add_optional_rl_arguments` and
 # `diagnostics/evaluate.py` for the authoritative flag definitions.
 #
 # Usage:
@@ -153,7 +153,7 @@ of the SL convergence flags below is passed.
 
 Self-play reinforcement learning ($RL_TOTAL_TRAINING_GAMES exact real games by
 default; the self-play default GPI and discarded worker tuning; all forwarded to
-training.self_play):
+training.rl.self_play):
   --rl-weights-file PATH       Output RL weights path (default: $RL_WEIGHTS_FILE)
   --rl-sl-weights-path PATH    Input SL weights used to initialize a fresh RL run (default: $RL_SL_WEIGHTS_PATH)
   --rl-total-training-games N  Exact real-game budget (default: $RL_TOTAL_TRAINING_GAMES)
@@ -349,7 +349,7 @@ if [[ "$SKIP_DATASET" -eq 1 ]]; then
     section "Step 1/4: dataset generation (skipped)"
 else
     section "Step 1/4: generating supervised dataset (README defaults -> dataset/supervised_dataset.jsonl)"
-    "$PYTHON_BIN" -u -m training.dataset_generator
+    "$PYTHON_BIN" -u -m training.datagen.generator
 fi
 
 if [[ "$SKIP_SL" -eq 1 ]]; then
@@ -397,7 +397,7 @@ else
     fi
 
     section "Step 2/4: training supervised policy (${SL_EXTRA_ARGS[*]} -> models/domino_sl_weights.npz)"
-    "$PYTHON_BIN" -u -m training.training_loop "${SL_EXTRA_ARGS[@]}"
+    "$PYTHON_BIN" -u -m training.supervised.training_loop "${SL_EXTRA_ARGS[@]}"
 fi
 
 if [[ "$SKIP_RL" -eq 1 ]]; then
@@ -433,7 +433,7 @@ else
     if [[ -n "$DROPOUT" ]]; then
         RL_REGULARIZATION_ARGS+=(--dropout "$DROPOUT")
     fi
-    "$PYTHON_BIN" -u -m training.self_play \
+    "$PYTHON_BIN" -u -m training.rl.self_play \
         "${BUDGET_ARGS[@]}" \
         --training-opponent "$RL_TRAINING_OPPONENT" \
         --learning-rate "$RL_LEARNING_RATE" \

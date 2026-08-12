@@ -19,12 +19,12 @@ from agents.network_architecture import (
 from agents.nn import DISABLED_DROPOUT_RATE
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import RULESET_VERSION
-from training.rl_constants import (
+from training.rl.constants import (
     PPO_GPU_BUFFER_SAFETY_FRACTION,
     PPO_MAX_MINIBATCHES,
     PPO_MIN_MINIBATCHES,
 )
-from training.ppo import DEFAULT_TARGET_KL
+from training.rl.ppo import DEFAULT_TARGET_KL
 from utils.repository import current_git_commit
 
 

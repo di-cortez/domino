@@ -21,7 +21,7 @@ Each supervised network owns an exact `network.device` and `network.xp` instead
 of relying on one module-wide array backend. Inference accepts NumPy or CuPy
 inputs and converts them to that network's backend in `float32`. Training may
 use host RAM, disk-backed arrays, full GPU residency, or a reusable rotating GPU
-window; these storage policies live in `training/supervised_runtime.py`.
+window; these storage policies live in `training/supervised/runtime.py`.
 Both networks accept the same optional `weight_decay`, which applies only to
 the weight matrices (`W1` through the output layer, and the RL critic `Wv`); bias vectors
 are never regularized. The supervised network folds its decay into the
@@ -50,7 +50,7 @@ troubleshooting procedure.
 The hidden stack is configurable. `hidden_sizes` selects any number of hidden
 layers from one upwards, of any width; `agents/network_architecture.py` owns
 the defaults (256 then 128, with 128 for any deeper layer) and the CLI
-resolution used by `training/training_loop.py`. Only the command line is
+resolution used by `training/supervised/training_loop.py`. Only the command line is
 bounded, at `MAX_HIDDEN_LAYER_COUNT` (8), because one `--hidden<n>-size` option
 has to exist per layer. Weights are named `W1..W{L}`/`b1..b{L}` for `L`
 layers including the output layer, so a two-layer network keeps exactly the

@@ -131,7 +131,7 @@ def _diagnostic_summary_text(summary):
 
 def _run_dataset(config, args):
     """Generate the supervised JSONL dataset."""
-    dataset_generator = importlib.import_module("training.dataset_generator")
+    dataset_generator = importlib.import_module("training.datagen.generator")
 
     def dataset_status(message):
         if tqdm is not None:
@@ -169,7 +169,7 @@ def _run_dataset(config, args):
 
 def _run_supervised_training(config, args):
     """Train the supervised policy with compact epoch progress."""
-    training_loop = _silent_import("training.training_loop")
+    training_loop = _silent_import("training.supervised.training_loop")
 
     return _run_stage(
         "Supervised training",
@@ -209,7 +209,7 @@ def _run_supervised_training(config, args):
 
 def _run_rl_training(config, args):
     """Run reinforcement-learning self-play with compact iteration progress."""
-    self_play = importlib.import_module("training.self_play")
+    self_play = importlib.import_module("training.rl.self_play")
 
     def rl_status(message):
         if tqdm is not None:
@@ -357,7 +357,7 @@ def parse_args(argv=None):
             "and 'huge' is 20x larger than the defaults."
         ),
     )
-    dataset_generator = importlib.import_module("training.dataset_generator")
+    dataset_generator = importlib.import_module("training.datagen.generator")
     dataset = parser.add_argument_group("dataset multiprocessing controls")
     dataset.add_argument(
         "--dataset-workers",
@@ -382,9 +382,9 @@ def parse_args(argv=None):
     dataset.add_argument("--dataset-max-worker-rss-mb", type=int, default=1024)
     dataset.add_argument("--dataset-seed", type=int, default=None)
 
-    training_loop = _silent_import("training.training_loop")
+    training_loop = _silent_import("training.supervised.training_loop")
     training_loop.add_optional_training_arguments(parser)
-    self_play = importlib.import_module("training.self_play")
+    self_play = importlib.import_module("training.rl.self_play")
     self_play.add_optional_rl_arguments(
         parser,
         fresh_from_sl_default=True,

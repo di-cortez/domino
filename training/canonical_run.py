@@ -13,7 +13,7 @@ import numpy as np
 from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from middleware.domino_engine import RULESET_VERSION
-from training.rl_resume import (
+from training.rl.resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
     RLTrainingConfiguration,

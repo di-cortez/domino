@@ -28,7 +28,7 @@ from diagnostics.rl_progress import (
     read_periodic_history,
     rebuild_progress_reports,
 )
-from training import self_play
+from training.rl import self_play
 from training.canonical_assets import (
     ArtifactCompatibilityError,
     EXPECTED_WEIGHT_SHAPES,
@@ -49,7 +49,7 @@ from training.canonical_run import (
     load_resume_point,
     publish_checkpoint,
 )
-from training.rl_resume import (
+from training.rl.resume import (
     NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
     RESUME_STATE_VERSION,
     RLTrainingConfiguration,
@@ -73,7 +73,7 @@ from training.pipeline import (
     parse_args,
     validate_args,
 )
-from training.rl_resume import (
+from training.rl.resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
 )
@@ -806,7 +806,7 @@ def test_commit_change_warns_but_never_blocks_exact_resume(monkeypatch):
     expected = _test_resume_configuration(git_commit=initial_commit)
     messages = []
     monkeypatch.setattr(
-        "training.rl_resume.current_git_commit",
+        "training.rl.resume.current_git_commit",
         lambda: current_commit,
     )
 

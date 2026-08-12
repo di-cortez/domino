@@ -9,7 +9,7 @@ import numpy as np
 
 from agents.network_architecture import policy_layer_names
 from agents.rl_nn import PolicyNetwork
-from training.ppo import (
+from training.rl.ppo import (
     PPOBuffer,
     PPOBufferStorage,
     clipped_surrogate,
@@ -434,7 +434,7 @@ def test_complete_gpu_copy_and_ram_batches_are_equivalent():
     cpu_network = _FakePPONetwork(device="cpu")
     indices = np.asarray([1, 5, 9, 15], dtype=np.int64)
 
-    with mock.patch("training.ppo.effective_gpu_available_bytes", return_value=10**9):
+    with mock.patch("training.rl.ppo.effective_gpu_available_bytes", return_value=10**9):
         gpu = PPOBufferStorage(gpu_network, buffer, prefer_gpu=True)
     ram = PPOBufferStorage(cpu_network, buffer, prefer_gpu=True)
     try:
@@ -453,7 +453,7 @@ def test_simulated_gpu_workspace_oom_falls_back_before_any_optimizer_step():
         device="gpu",
         fail_first_eval=True,
     )
-    with mock.patch("training.ppo.effective_gpu_available_bytes", return_value=10**9):
+    with mock.patch("training.rl.ppo.effective_gpu_available_bytes", return_value=10**9):
         metrics = ppo_update(
             network,
             _buffer(),

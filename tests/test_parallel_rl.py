@@ -19,9 +19,9 @@ from diagnostics.parallel_runner import (
     DiagnosticMemoryPressure,
     ParallelSafetyConfig,
 )
-from training.rl_parallel import RLRolloutRunner, worker_count
-from training.rl_resume import NUMBERED_CHECKPOINT_WEIGHT_RETENTION
-from training.self_play import (
+from training.rl.parallel import RLRolloutRunner, worker_count
+from training.rl.resume import NUMBERED_CHECKPOINT_WEIGHT_RETENTION
+from training.rl.self_play import (
     REWARD_SCHEMAS,
     _load_initial_network,
     load_resume_state,

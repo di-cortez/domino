@@ -17,12 +17,13 @@ from agents.network_architecture import (
     hidden_layer_count_from_weights,
     policy_layer_names,
 )
-from training.ppo import PPOBuffer, stable_seed
-from training.rl_constants import (
+from training.rl.ppo import PPOBuffer
+from training.utils.seeding import stable_seed
+from training.rl.constants import (
     RL_WORKER_AUTOTUNE_FRACTION,
     RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
 )
-from training.rl_parallel import (
+from training.rl.parallel import (
     DEFAULT_RL_WORKER_CANDIDATES,
     RLRolloutRunner,
     _candidate_counts,

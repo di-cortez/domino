@@ -19,7 +19,7 @@ from diagnostics.parallel_runner import (
     ParallelSafetyConfig,
     cap_parallel_workers,
 )
-from training.dataset_parallel import (
+from training.datagen.parallel import (
     DEFAULT_DATASET_AUTOTUNE_FRACTION,
     DEFAULT_DATASET_MINIMUM_GAIN,
     _is_real_decision_state,

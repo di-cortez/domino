@@ -30,9 +30,10 @@ change crosses multiple areas.
 |---|---|---|
 | Rules, state, or actions | Core tests, headless regression tests, fixed-seed smoke | `middleware/README.md` |
 | Opponent inference | Exact-model tests, cache/trace tests, agent regressions | `middleware/README.md` and architecture |
-| Encoder or checkpoint shape | Core, supervised, RL, load/save compatibility | `agents/README.md`, `training/README.md`, `models/README.md` |
-| Supervised training | Supervised autotuning tests, CPU smoke, compile | `training/README.md` |
-| RL or resume | Core/parallel RL tests, checkpoint/resume smoke, seed comparison | `training/README.md` |
+| Encoder or checkpoint shape | Core, supervised, RL, load/save compatibility | `agents/README.md`, `training/supervised/README.md`, `training/rl/README.md`, `models/README.md` |
+| Dataset generation | Parallel dataset tests, fixed-seed JSONL comparison | `training/datagen/README.md` |
+| Supervised training | Supervised autotuning tests, CPU smoke, compile | `training/supervised/README.md` |
+| RL or resume | Core/parallel RL tests, checkpoint/resume smoke, seed comparison | `training/rl/README.md` |
 | Diagnostics | Diagnostic tests, CLI help, four-game temporary pairwise smoke | `diagnostics/README.md` |
 | Shell pipeline | `bash -n`, help, parser tests, dry-run/report-only | `train_script/README.md` |
 | UI/controller | UI controller tests; visual run when rendering changed | `ui/README.md` or `ui/ui_workflow.md` |

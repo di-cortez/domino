@@ -76,7 +76,7 @@ def create_agent_by_type(agent_type):
         from agents.rl_nn import PolicyNetwork
 
         # The UI uses greedy evaluation mode. Stochastic exploration belongs to
-        # self-play training in `training/self_play.py`.
+        # self-play training in `training/rl/self_play.py`.
         try:
             network = PolicyNetwork.load("models/domino_rl_weights.npz")
         except FileNotFoundError:

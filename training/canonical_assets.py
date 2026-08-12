@@ -10,7 +10,7 @@ import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
-from training.training_loop import ENCODED_FEATURE_VERSION
+from training.utils.encoding import ENCODED_FEATURE_VERSION
 from utils.artifacts import atomic_write_json, file_sha256
 from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
 from utils.repository import current_git_commit

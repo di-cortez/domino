@@ -13,7 +13,7 @@ import pytest
 
 from agents.rl_nn import PolicyNetwork
 from diagnostics.parallel_runner import ParallelSafetyConfig
-from training.adaptive_tuning import (
+from training.rl.adaptive_tuning import (
     benchmark_worker_candidates,
     capture_isolation_state,
     hardware_warning,
@@ -22,7 +22,7 @@ from training.adaptive_tuning import (
     run_worker_tuning,
     selected_worker_candidate,
 )
-from training.self_play import REWARD_SCHEMAS
+from training.rl.self_play import REWARD_SCHEMAS
 
 
 class _RunInfo:
@@ -122,7 +122,7 @@ def _tuning_kwargs(network, **overrides):
 
 def test_worker_benchmark_uses_exact_one_percent_with_partial_final_block():
     runner = _Runner()
-    with mock.patch("training.adaptive_tuning._new_runner", return_value=runner):
+    with mock.patch("training.rl.adaptive_tuning._new_runner", return_value=runner):
         test_games, rows = benchmark_worker_candidates(
             _FrozenNetwork(),
             gpi=600,
@@ -149,9 +149,9 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
     runner = _Runner()
     messages = []
     with (
-        mock.patch("training.adaptive_tuning._new_runner", return_value=runner),
+        mock.patch("training.rl.adaptive_tuning._new_runner", return_value=runner),
         mock.patch(
-            "training.adaptive_tuning.time.perf_counter",
+            "training.rl.adaptive_tuning.time.perf_counter",
             side_effect=(0.0, 1.0, 2.0, 2.8, 4.0, 4.75),
         ),
     ):
@@ -228,7 +228,7 @@ def test_worker_tuning_restores_state_and_writes_fixed_gpi_metadata():
     with tempfile.TemporaryDirectory() as temporary:
         path = Path(temporary) / "adaptive_tuning.json"
         with mock.patch(
-            "training.adaptive_tuning.benchmark_worker_candidates",
+            "training.rl.adaptive_tuning.benchmark_worker_candidates",
             side_effect=fake_workers,
         ):
             metadata = _tuning_kwargs(
@@ -260,7 +260,7 @@ def test_saved_worker_tuning_is_reused_for_the_same_fixed_gpi():
         "worker_test_games": 1000,
     }
     with mock.patch(
-        "training.adaptive_tuning.benchmark_worker_candidates"
+        "training.rl.adaptive_tuning.benchmark_worker_candidates"
     ) as benchmark:
         result = _tuning_kwargs(network, gpi=800, saved_tuning=saved)
 
@@ -282,7 +282,7 @@ def test_changing_fixed_gpi_repeats_worker_tuning():
         }
     ]
     with mock.patch(
-        "training.adaptive_tuning.benchmark_worker_candidates",
+        "training.rl.adaptive_tuning.benchmark_worker_candidates",
         return_value=(1000, rows),
     ) as benchmark:
         result = _tuning_kwargs(network, gpi=200, saved_tuning=saved)

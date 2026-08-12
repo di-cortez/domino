@@ -9,18 +9,18 @@ immutable host buffer is streamed one minibatch at a time.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import math
 import time
 from typing import Iterable
 
 import numpy as np
 
-from training.rl_constants import (
+from training.rl.constants import (
     PPO_GPU_BUFFER_SAFETY_FRACTION,
     PPO_MAX_MINIBATCHES,
     PPO_MIN_MINIBATCHES,
 )
+from training.utils.seeding import stable_seed
 from utils.resource_limits import effective_gpu_available_bytes
 
 
@@ -32,16 +32,6 @@ MAX_PPO_EPOCHS = 16
 DEFAULT_GAMES_PER_MINIBATCH_SCALE = 125
 DEFAULT_MIN_DECISIONS_PER_MINIBATCH = 128
 ADVANTAGE_EPSILON = 1e-8
-
-
-def stable_seed(base_seed: int, *parts: object) -> int:
-    """Return a process-independent 64-bit seed for a labeled operation."""
-    digest = hashlib.sha256()
-    digest.update(str(int(base_seed)).encode("ascii"))
-    for part in parts:
-        digest.update(b"\0")
-        digest.update(str(part).encode("utf-8"))
-    return int.from_bytes(digest.digest()[:8], "little", signed=False)
 
 
 def _to_numpy(value, *, dtype=None):

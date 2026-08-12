@@ -21,11 +21,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diagnostics.parallel_runner import ParallelSafetyConfig
-from training.dataset_generator import (
+from training.datagen.generator import (
     dataset_random_manifest_path,
     generate_dataset,
 )
-from training.dataset_parallel import (
+from training.datagen.parallel import (
     DatasetExecutionError,
     evaluate_dataset_games,
     generate_dataset_game,
@@ -188,7 +188,7 @@ class ParallelDatasetTests(unittest.TestCase):
             memory_check_interval_s=0.0,
         )
         with mock.patch(
-            "training.dataset_parallel.executor_memory_snapshot",
+            "training.datagen.parallel.executor_memory_snapshot",
             side_effect=pressure_after_progress,
         ):
             seed_plan = SeedPlan(444)

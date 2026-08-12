@@ -25,8 +25,8 @@ from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import play_game
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
-from training.dataset_parallel import generate_dataset_game
-from training.self_play import (
+from training.datagen.parallel import generate_dataset_game
+from training.rl.self_play import (
     DEFAULT_GAMMA,
     DEFAULT_REWARD_SCHEMA,
     REWARD_SCHEMAS,

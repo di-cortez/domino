@@ -4,7 +4,7 @@ These wrappers compose the training modules documented in
 [`training/README.md`](../training/README.md). The canonical Python wrapper
 `python -m train_script.run_pipeline` mirrors
 `python -m training.pipeline`, including `--gpi` with the supported fixed
-choices. The older shell batch wrapper retains `training.self_play`'s default
+choices. The older shell batch wrapper retains `training.rl.self_play`'s default
 of 2,000 games per iteration.
 
 ## Full batch wrapper

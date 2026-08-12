@@ -23,13 +23,13 @@ from agents.encoder import DominoEncoder
 from agents.neural_agent import NeuralAgent
 from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
 from agents.rl_nn import PolicyNetwork
-from training.supervised_runtime import (
+from training.supervised.runtime import (
     DEFAULT_SUPERVISED_BATCH_SIZE,
     SUPERVISED_BATCH_SIZE_CHOICES,
     SupervisedDataPlan,
     probe_gpu_residency,
 )
-from training.training_loop import (
+from training.supervised.training_loop import (
     _save_supervised_loss_plot,
     _mmap_cache_paths,
     _supervised_loss_axis_limits,
@@ -643,7 +643,7 @@ class DatasetResidencyTests(unittest.TestCase):
         )
         output = io.StringIO()
         with mock.patch(
-            "training.training_loop.train_supervised",
+            "training.supervised.training_loop.train_supervised",
             side_effect=fake_train_supervised,
         ), mock.patch.object(run_pipeline, "tqdm", None), redirect_stdout(output):
             run_pipeline._run_supervised_training(

@@ -24,13 +24,13 @@ import time
 import numpy as np
 
 from agents.nn import DISABLED_DROPOUT_RATE, DISABLED_WEIGHT_DECAY
-from training.rl_cli import (
+from training.rl.cli import (
     _training_kwargs_from_args,
     add_optional_rl_arguments,
     parse_args,
     parse_rl_worker_count,
 )
-from training.rl_config import (
+from training.rl.config import (
     DEFAULT_CLIP_GRAD_NORM,
     DEFAULT_DEVICE,
     DEFAULT_GPI,
@@ -45,7 +45,7 @@ from training.rl_config import (
     VALUE_COEF,
     resolve_training_options,
 )
-from training.rl_rollout import (
+from training.rl.rollout import (
     DEFAULT_GAMMA,
     DEFAULT_REWARD_SCHEMA,
     EVENT_REWARD_DECAY,
@@ -72,7 +72,7 @@ from training.rl_rollout import (
     _terminal_reward,
     _tile_play_actions,
 )
-from training.rl_resume import (
+from training.rl.resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
     RLTrainingConfiguration,
@@ -96,7 +96,7 @@ from training.rl_resume import (
     resume_state_path,
 )
 from utils.repository import current_git_commit
-from training.rl_reporting import (
+from training.rl.reporting import (
     RLRuntimeProfile,
     _gradient_log_text,
     _merge_parallel_summary,
@@ -106,18 +106,18 @@ from training.rl_reporting import (
     _reward_signal_summary,
     _write_metrics_row,
 )
-from training.rl_parallel import (
+from training.rl.parallel import (
     DEFAULT_RL_WORKER_CANDIDATES,
     DEFAULT_RL_WORKERS,
     RLRolloutRunner,
 )
-from training.adaptive_tuning import (
+from training.rl.adaptive_tuning import (
     atomic_write_json as atomic_write_tuning_json,
     hardware_metadata,
     hardware_warning,
     run_worker_tuning,
 )
-from training.ppo import (
+from training.rl.ppo import (
     DEFAULT_CLIP_EPSILON,
     DEFAULT_GAMES_PER_MINIBATCH_SCALE,
     DEFAULT_MAX_EPOCHS,
@@ -127,7 +127,7 @@ from training.ppo import (
     PPOBuffer,
     ppo_update,
 )
-from training.rl_constants import (
+from training.rl.constants import (
     PPO_GPU_BUFFER_SAFETY_FRACTION,
     PPO_MAX_MINIBATCHES,
     PPO_MIN_MINIBATCHES,

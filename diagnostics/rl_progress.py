@@ -25,7 +25,7 @@ from diagnostics.worker_autotune import (
     autotune_diagnostic_workers,
 )
 from training.canonical_run import load_run_config
-from training.ppo import stable_seed
+from training.utils.seeding import stable_seed
 from utils.artifacts import atomic_write_json, atomic_write_text, file_sha256
 
 

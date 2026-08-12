@@ -4,7 +4,7 @@ import argparse
 
 from agents.rl_nn import DEVICES
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
-from training.ppo import (
+from training.rl.ppo import (
     DEFAULT_CLIP_EPSILON,
     DEFAULT_GAMES_PER_MINIBATCH_SCALE,
     DEFAULT_MAX_EPOCHS,
@@ -13,7 +13,7 @@ from training.ppo import (
     DEFAULT_TARGET_KL,
     MAX_PPO_EPOCHS,
 )
-from training.rl_config import (
+from training.rl.config import (
     DEFAULT_CLIP_GRAD_NORM,
     DEFAULT_DEVICE,
     DEFAULT_GPI,
@@ -28,19 +28,12 @@ from training.rl_config import (
     TRAINING_OPPONENT,
     VALUE_COEF,
 )
-from training.rl_parallel import (
+from training.rl.parallel import (
     DEFAULT_RL_WORKERS,
     worker_count as parse_rl_worker_count,
 )
-from training.rl_rollout import DEFAULT_GAMMA, DEFAULT_REWARD_SCHEMA, REWARD_SCHEMAS
-from training.training_loop import add_regularization_arguments
-
-
-def _positive_int(value):
-    parsed = int(value)
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("value must be greater than zero")
-    return parsed
+from training.rl.rollout import DEFAULT_GAMMA, DEFAULT_REWARD_SCHEMA, REWARD_SCHEMAS
+from training.utils.cli_args import add_regularization_arguments, positive_int
 
 
 def add_optional_rl_arguments(
@@ -56,7 +49,7 @@ def add_optional_rl_arguments(
 
     ``include_regularization=False`` is for combined parsers that already
     installed the shared ``--weight-decay``/``--dropout`` controls through
-    :func:`training.training_loop.add_optional_training_arguments`.
+    :func:`training.supervised.training_loop.add_optional_training_arguments`.
     """
     group = parser.add_argument_group("optional reinforcement-learning controls")
     group.add_argument(
@@ -80,7 +73,7 @@ def add_optional_rl_arguments(
     if expose_gpi:
         group.add_argument(
             "--gpi",
-            type=_positive_int,
+            type=positive_int,
             choices=COMMON_GPI_VALUES,
             default=DEFAULT_GPI,
             help=(

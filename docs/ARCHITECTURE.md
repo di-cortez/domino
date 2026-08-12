@@ -209,7 +209,7 @@ and never mutates the checkpoint or training schedule.
 Every new canonical pipeline initializes RL from its selected supervised
 checkpoint, independent of an older RL output. Canonical
 `--resume`/`--resume-from` restores exact numbered state.
-Direct `training.self_play` calls continue an existing compatible RL checkpoint
+Direct `training.rl.self_play` calls continue an existing compatible RL checkpoint
 by default, with `--fresh-from-sl` available for controlled new runs.
 
 ## UI

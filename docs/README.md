@@ -20,7 +20,11 @@ commands; put deeper material in the owner listed below.
 |---|---|
 | [`../middleware/README.md`](../middleware/README.md) | Rules, game state, action format, headless step contract, and exact opponent inference. |
 | [`../agents/README.md`](../agents/README.md) | Agent implementations, 168-feature encoder, 56 policy actions, and checkpoint shapes. |
-| [`../training/README.md`](../training/README.md) | Dataset loading, supervised training, RL algorithm, devices, parallel rollout, checkpointing, and resume. |
+| [`../training/README.md`](../training/README.md) | Training package layout, import layering, canonical pipeline levels, and stage entry points. |
+| [`../training/datagen/README.md`](../training/datagen/README.md) | Supervised dataset generation, worker autotuning, and deterministic JSONL output. |
+| [`../training/supervised/README.md`](../training/supervised/README.md) | Supervised training loop, scheduler and controls, devices, and hidden-layer architecture. |
+| [`../training/rl/README.md`](../training/rl/README.md) | RL algorithm, PPO, parallel rollout, rewards, checkpointing, and exact resume. |
+| [`../training/utils/README.md`](../training/utils/README.md) | Seed derivation, shared regularization flags, and the encoded-feature contract. |
 | [`../diagnostics/README.md`](../diagnostics/README.md) | Supported agents, evaluation commands, output schemas, plots, statistics, and report interpretation. |
 | [`../train_script/README.md`](../train_script/README.md) | Python and shell pipeline wrappers, budgets, and report locations. |
 | [`../ui/README.md`](../ui/README.md) | Simulator startup, controls, HUD, agent menu, and UI tests. |

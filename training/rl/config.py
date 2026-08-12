@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 from agents.nn import DISABLED_DROPOUT_RATE, DISABLED_WEIGHT_DECAY
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
-from training.ppo import MAX_PPO_EPOCHS
-from training.rl_resume import LEGACY_TRAINING_ALGORITHM, PPO_TRAINING_ALGORITHM
-from training.rl_rollout import REWARD_SCHEMAS
+from training.rl.ppo import MAX_PPO_EPOCHS
+from training.rl.resume import LEGACY_TRAINING_ALGORITHM, PPO_TRAINING_ALGORITHM
+from training.rl.rollout import REWARD_SCHEMAS
 
 
 # The array backend is resolved once inside train() and always matches the

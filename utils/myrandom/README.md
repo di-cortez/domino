@@ -87,8 +87,8 @@ callers receive explicit `numpy.random.Generator` instances from `SeedPlan`.
 
 | Module | Current behavior |
 |---|---|
-| `training/dataset_generator.py` | Creates one `SeedPlan` from the explicit seed or `fresh_root_seed()`, writes the root manifest, and sends the plan plus absolute game IDs to workers. |
-| `training/dataset_parallel.py` | Reconstructs `RandomNamespace.DATASET_GAME/<game_id>` for each game. It no longer imports or seeds standard-library `random`, NumPy globals, or CuPy. |
+| `training/datagen/generator.py` | Creates one `SeedPlan` from the explicit seed or `fresh_root_seed()`, writes the root manifest, and sends the plan plus absolute game IDs to workers. |
+| `training/datagen/parallel.py` | Reconstructs `RandomNamespace.DATASET_GAME/<game_id>` for each game. It no longer imports or seeds standard-library `random`, NumPy globals, or CuPy. |
 | `middleware/domino_engine.py` | Accepts an optional generator exposing `shuffle`; dataset games pass their explicit NumPy generator. The non-migrated default path still calls `random.shuffle`. |
 | `training/canonical_assets.py` | Records `PCG64` and the namespace/coordinate derivation scheme in canonical dataset identity. |
 
@@ -101,8 +101,8 @@ change a game's deal.
 
 | Module | Current behavior |
 |---|---|
-| `training/training_loop.py` | Creates one `SeedPlan` from `--sl-seed` or `fresh_root_seed()`, injects it into the network and data plan, writes `<weights-stem>.random_manifest.json`, and reports the effective root seed. It no longer seeds NumPy or CuPy globals. |
-| `training/supervised_runtime.py` | Derives `SUPERVISED_SHUFFLE/<epoch>` on the host for every storage mode. A fully GPU-resident run transfers those indices to CuPy instead of drawing a second backend-specific permutation. |
+| `training/supervised/training_loop.py` | Creates one `SeedPlan` from `--sl-seed` or `fresh_root_seed()`, injects it into the network and data plan, writes `<weights-stem>.random_manifest.json`, and reports the effective root seed. It no longer seeds NumPy or CuPy globals. |
+| `training/supervised/runtime.py` | Derives `SUPERVISED_SHUFFLE/<epoch>` on the host for every storage mode. A fully GPU-resident run transfers those indices to CuPy instead of drawing a second backend-specific permutation. |
 | `agents/nn.py` | The injected-plan path derives initialization and sequential dropout generators from separate namespaces, produces their random arrays with NumPy `Generator`, and transfers arrays to the selected backend. The legacy no-plan path remains for non-migrated RL and inference construction. |
 | `training/pipeline.py` | Includes the bit generator and derivation scheme in canonical supervised identity, so legacy globally-seeded weights are not silently reused under the new seed meaning. |
 
@@ -125,11 +125,11 @@ There are no `from random import ...` statements. Every remaining case uses
 | `diagnostics/parallel_runner.py` | Reseeds Python and NumPy globals once per diagnostic game; this is the central diagnostics migration point. |
 | `diagnostics/rl_progress.py` | Saves and restores both global RNG states around periodic evaluation; explicit diagnostic streams should make this unnecessary. |
 | `middleware/domino_engine.py` | The compatibility/default deal path still uses `random.shuffle`; dataset calls already bypass it with an injected generator. |
-| `training/adaptive_tuning.py` | Snapshots and restores global Python/NumPy states so benchmarks do not perturb training. Independent namespaces should replace this protection. |
-| `training/rl_parallel.py` | Reseeds Python and NumPy globals inside each rollout worker. Future RL games should derive streams from absolute game identity. |
-| `training/rl_resume.py` | Persists and restores Python and NumPy global states. Future resume should store only genuinely sequential named-generator states. |
-| `training/rl_rollout.py` | Uses `random.randint` for learner position and `random.choice` for the opponent pool. These need separate stable RL namespaces. |
-| `training/self_play.py` | Chooses a fallback root seed with `secrets`, then seeds both Python and NumPy globals. It should construct the RL `SeedPlan` instead. |
+| `training/rl/adaptive_tuning.py` | Snapshots and restores global Python/NumPy states so benchmarks do not perturb training. Independent namespaces should replace this protection. |
+| `training/rl/parallel.py` | Reseeds Python and NumPy globals inside each rollout worker. Future RL games should derive streams from absolute game identity. |
+| `training/rl/resume.py` | Persists and restores Python and NumPy global states. Future resume should store only genuinely sequential named-generator states. |
+| `training/rl/rollout.py` | Uses `random.randint` for learner position and `random.choice` for the opponent pool. These need separate stable RL namespaces. |
+| `training/rl/self_play.py` | Chooses a fallback root seed with `secrets`, then seeds both Python and NumPy globals. It should construct the RL `SeedPlan` instead. |
 | `ui/ui_agents.py` | `RandomUIAgent` uses `random.choice`; interactive runs need a UI-owned explicit generator. |
 | `tests/test_adaptive_tuning.py` | Exercises the old global-state snapshot contract; replace as adaptive tuning migrates. |
 | `tests/test_exact_model_optimization.py` | Uses local/global Python generators to synthesize reproducible test cases and actions. Local explicit NumPy test streams can replace them. |
@@ -151,11 +151,11 @@ callers are migration work:
 | `benchmarks/headless_step_benchmark.py` | Calls `np.random.seed` beside Python seeding; derive each benchmark game instead. |
 | `diagnostics/parallel_runner.py` | Calls `np.random.seed` per game; derive each diagnostic game instead. |
 | `diagnostics/rl_progress.py` | Uses `np.random.get_state/set_state`; separate streams should remove this coupling. |
-| `training/adaptive_tuning.py` | Saves/restores NumPy global state; replace with isolated autotune namespaces. |
-| `training/ppo.py` | A local `np.random.RandomState(seed)` permutes decisions into minibatches. Migrate to `SeedPlan.generator(PPO_MINIBATCH, iteration, epoch)`. |
-| `training/rl_parallel.py` | Calls `np.random.seed` in rollout workers; use per-game RL streams. |
-| `training/rl_resume.py` | Serializes the legacy NumPy global state; replace with named sequential generator snapshots only where coordinate derivation is insufficient. |
-| `training/self_play.py` | Seeds the NumPy global state at startup; construct and distribute an RL seed plan instead. |
+| `training/rl/adaptive_tuning.py` | Saves/restores NumPy global state; replace with isolated autotune namespaces. |
+| `training/rl/ppo.py` | A local `np.random.RandomState(seed)` permutes decisions into minibatches. Migrate to `SeedPlan.generator(PPO_MINIBATCH, iteration, epoch)`. |
+| `training/rl/parallel.py` | Calls `np.random.seed` in rollout workers; use per-game RL streams. |
+| `training/rl/resume.py` | Serializes the legacy NumPy global state; replace with named sequential generator snapshots only where coordinate derivation is insufficient. |
+| `training/rl/self_play.py` | Seeds the NumPy global state at startup; construct and distribute an RL seed plan instead. |
 
 Tests with direct legacy NumPy state are
 `tests/test_adaptive_tuning.py`, `tests/test_core.py`,
@@ -175,15 +175,15 @@ Seed-affecting uses:
   evaluation.
 - `diagnostics/pairwise.py`: fallback 63-bit root seed for one pair.
 - `training/pipeline.py`: fallback seed for ephemeral pipeline levels.
-- `training/self_play.py`: fallback 63-bit RL root seed.
+- `training/rl/self_play.py`: fallback 63-bit RL root seed.
 - `utils/myrandom/entropy.py`: the intended central `fresh_root_seed()` owner.
 
 Technical identifiers only:
 
 - `diagnostics/runtime_profile.py`: collision-resistant temporary profile name.
-- `training/adaptive_tuning.py`: atomic-write temporary name.
-- `training/rl_reporting.py`: atomic-write temporary name.
-- `training/rl_resume.py`: temporary checkpoint names.
+- `training/rl/adaptive_tuning.py`: atomic-write temporary name.
+- `training/rl/reporting.py`: atomic-write temporary name.
+- `training/rl/resume.py`: temporary checkpoint names.
 - `utils/artifacts.py`: shared atomic-write temporary names.
 
 The technical `token_hex` calls do not affect model parameters, games, or
@@ -209,7 +209,7 @@ module:
 - `train_script/run_pipeline.py`: compact random-baseline diagnostic text.
 - `training/canonical_run.py`: persisted `uniform_random`/opponent-selection
   metadata.
-- `training/rl_cli.py`: seed help text.
+- `training/rl/cli.py`: seed help text.
 - `ui/test_ui_controller.py`: verifies that the `random` UI choice constructs
   `RandomUIAgent`.
 

@@ -19,7 +19,7 @@ from diagnostics.rl_progress import (
 )
 from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import ParallelSafetyConfig
-from training import self_play
+from training.rl import self_play
 
 
 def test_runtime_profile_accumulates_sessions_without_estimating_history(tmp_path):

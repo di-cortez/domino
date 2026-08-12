@@ -1,6 +1,6 @@
 """Reporting and cumulative runtime profiling for RL self-play.
 
-This module intentionally has no dependency on :mod:`training.self_play` so
+This module intentionally has no dependency on :mod:`training.rl.self_play` so
 logging, metrics persistence, and profile aggregation remain reusable without
 reintroducing the rollout/orchestrator import cycle.
 """
@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 
-from training.rl_rollout import REWARD_ZERO_EPSILON
+from training.rl.rollout import REWARD_ZERO_EPSILON
 
 
 TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"

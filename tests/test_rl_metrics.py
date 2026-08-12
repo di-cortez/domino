@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from training.rl_reporting import (
+from training.rl.reporting import (
     TRAINING_METRIC_COLUMNS,
     TRAINING_METRICS_VERSION,
     _prepare_metrics_file,

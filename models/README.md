@@ -23,9 +23,9 @@ gameplay uses the policy arrays in either case.
 Regenerate in order:
 
 ```bash
-python -m training.dataset_generator
-python -m training.training_loop
-python -m training.self_play --fresh-from-sl
+python -m training.datagen.generator
+python -m training.supervised.training_loop
+python -m training.rl.self_play --fresh-from-sl
 ```
 
 For normal full training, prefer the canonical command. `default` creates

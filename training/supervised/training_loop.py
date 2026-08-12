@@ -32,7 +32,15 @@ from agents.nn import (
     DISABLED_WEIGHT_DECAY,
     SupervisedNeuralNetwork,
 )
-from training.supervised_runtime import (
+from training.utils.cli_args import (
+    add_regularization_arguments,
+    decay_factor,
+    nonnegative_float,
+    nonnegative_int,
+    positive_int,
+)
+from training.utils.encoding import ENCODED_FEATURE_VERSION
+from training.supervised.runtime import (
     DEFAULT_SUPERVISED_BATCH_SIZE,
     SUPERVISED_BATCH_SIZE_CHOICES,
     SUPERVISED_GPU_MEMORY_RESERVE_MB,
@@ -62,8 +70,6 @@ from utils.runtime_status import format_duration, memory_report
 EPOCHS = 2000
 BATCH_SIZE = DEFAULT_SUPERVISED_BATCH_SIZE
 INITIAL_SUPERVISED_LEARNING_RATE = 0.005
-DEFAULT_WEIGHT_DECAY = 0.0001
-DEFAULT_DROPOUT_RATE = 0.1
 DEFAULT_EARLY_STOPPING_PATIENCE = 5
 DEFAULT_SUPERVISED_LR_DECAY_PATIENCE = 5
 DEFAULT_SUPERVISED_LR_DECAY_FACTOR = 0.5
@@ -74,7 +80,6 @@ DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS = 100
 DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT = 0.001
 
 ENCODED_CACHE_FILE = "dataset/supervised_dataset_encoded.npz"
-ENCODED_FEATURE_VERSION = "opponent_suit_presence_float32_v2"
 DATASET_DTYPE = np.float32
 DATASET_MEMORY_RESERVE_MB = 512
 
@@ -1062,81 +1067,6 @@ def train_supervised(
     }
 
 
-def _nonnegative_float(value):
-    parsed = float(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("value must be non-negative")
-    return parsed
-
-
-def _positive_int(value):
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("value must be greater than zero")
-    return parsed
-
-
-def _nonnegative_int(value):
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("value must be non-negative")
-    return parsed
-
-
-def _decay_factor(value):
-    parsed = float(value)
-    if not 0.0 < parsed < 1.0:
-        raise argparse.ArgumentTypeError("value must be greater than 0 and less than 1")
-    return parsed
-
-
-def _dropout_rate(value):
-    parsed = float(value)
-    if not 0.0 <= parsed < 1.0:
-        raise argparse.ArgumentTypeError(
-            "value must be at least 0 and less than 1"
-        )
-    return parsed
-
-
-def add_regularization_arguments(group):
-    """Add the regularization controls shared by supervised and RL training.
-
-    One flag owns both stages for each regularizer: the supervised policy and
-    the RL policy are the same architecture and the RL run starts from the
-    supervised checkpoint, so a single coefficient keeps the two stages
-    comparable. Both are opt-in and disabled by default; each accepts an
-    explicit coefficient and falls back to its default when passed bare.
-    """
-    group.add_argument(
-        "--weight-decay",
-        nargs="?",
-        type=_nonnegative_float,
-        const=DEFAULT_WEIGHT_DECAY,
-        default=DISABLED_WEIGHT_DECAY,
-        metavar="COEFFICIENT",
-        help=(
-            "Enable L2 weight decay on the weight matrices of both the "
-            "supervised and the RL network; biases are never decayed. Pass a "
-            f"coefficient or omit it for {DEFAULT_WEIGHT_DECAY}."
-        ),
-    )
-    group.add_argument(
-        "--dropout",
-        nargs="?",
-        type=_dropout_rate,
-        const=DEFAULT_DROPOUT_RATE,
-        default=DISABLED_DROPOUT_RATE,
-        metavar="RATE",
-        help=(
-            "Enable inverted dropout on every hidden layer of the supervised "
-            "and RL networks during training updates only. Pass a rate or "
-            f"omit it for {DEFAULT_DROPOUT_RATE}."
-        ),
-    )
-    return group
-
-
 def add_architecture_arguments(group):
     """Add the hidden-layer depth and width controls.
 
@@ -1153,7 +1083,7 @@ def add_architecture_arguments(group):
     """
     group.add_argument(
         "--hidden-layers",
-        type=_positive_int,
+        type=positive_int,
         choices=range(1, MAX_HIDDEN_LAYER_COUNT + 1),
         default=DEFAULT_HIDDEN_LAYER_COUNT,
         metavar="N",
@@ -1167,7 +1097,7 @@ def add_architecture_arguments(group):
         # resolve_architecture_arguments fills in the documented fallback.
         group.add_argument(
             f"--hidden{position}-size",
-            type=_positive_int,
+            type=positive_int,
             default=argparse.SUPPRESS,
             metavar="N",
             help=(
@@ -1219,7 +1149,7 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
     group.add_argument(
         "--early-stopping",
         nargs="?",
-        type=_positive_int,
+        type=positive_int,
         const=DEFAULT_EARLY_STOPPING_PATIENCE,
         default=None,
         metavar="PATIENCE",
@@ -1229,7 +1159,7 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
     decay.add_argument(
         "--lr-decay",
         nargs="?",
-        type=_decay_factor,
+        type=decay_factor,
         const=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
         default=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
         metavar="FACTOR",
@@ -1244,7 +1174,7 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
     )
     group.add_argument(
         "--lr-decay-patience",
-        type=_positive_int,
+        type=positive_int,
         default=DEFAULT_SUPERVISED_LR_DECAY_PATIENCE,
         help="Failed validation checks required before each LR reduction.",
     )
@@ -1257,28 +1187,28 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
     )
     group.add_argument(
         "--sl-training-plateau-window",
-        type=_positive_int,
+        type=positive_int,
         default=DEFAULT_TRAINING_PLATEAU_WINDOW,
         metavar="EPOCHS",
         help="Non-overlapping epoch-block size for training-loss plateau checks.",
     )
     group.add_argument(
         "--sl-training-plateau-patience",
-        type=_positive_int,
+        type=positive_int,
         default=DEFAULT_TRAINING_PLATEAU_PATIENCE,
         metavar="BLOCKS",
         help="Consecutive low-improvement blocks required before stopping.",
     )
     group.add_argument(
         "--sl-training-plateau-min-epochs",
-        type=_positive_int,
+        type=positive_int,
         default=DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
         metavar="EPOCHS",
         help="Minimum total epochs before training-loss stopping is allowed.",
     )
     group.add_argument(
         "--sl-training-plateau-min-relative-improvement",
-        type=_nonnegative_float,
+        type=nonnegative_float,
         default=DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
         metavar="FRACTION",
         help="Minimum median-loss improvement that resets plateau patience.",
@@ -1298,7 +1228,7 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
         )
     group.add_argument(
         "--sl-batch-size",
-        type=_positive_int,
+        type=positive_int,
         choices=SUPERVISED_BATCH_SIZE_CHOICES,
         default=DEFAULT_SUPERVISED_BATCH_SIZE,
         help="Fixed supervised mini-batch size.",
@@ -1306,13 +1236,13 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
     add_architecture_arguments(group)
     group.add_argument(
         "--sl-memory-reserve-mb",
-        type=_nonnegative_int,
+        type=nonnegative_int,
         default=DATASET_MEMORY_RESERVE_MB,
         help="Host RAM reserve for supervised data and CPU training.",
     )
     group.add_argument(
         "--sl-gpu-memory-reserve-mb",
-        type=_nonnegative_int,
+        type=nonnegative_int,
         default=SUPERVISED_GPU_MEMORY_RESERVE_MB,
         help="VRAM reserve for supervised GPU training.",
     )

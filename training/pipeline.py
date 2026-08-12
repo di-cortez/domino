@@ -26,7 +26,9 @@ from diagnostics.rl_progress import (
 )
 from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import MAX_DIAGNOSTIC_WORKERS, ParallelSafetyConfig
-from training import dataset_generator, self_play, training_loop
+from training.datagen import generator as dataset_generator
+from training.rl import self_play
+from training.supervised import training_loop
 from training.canonical_assets import (
     ArtifactCompatibilityError,
     canonical_asset_paths,
@@ -46,18 +48,18 @@ from training.canonical_run import (
     publish_checkpoint,
     update_diagnostic_markers,
 )
-from training.rl_resume import (
+from training.rl.resume import (
     LEGACY_TRAINING_ALGORITHM,
     PPO_TRAINING_ALGORITHM,
 )
-from training.rl_constants import (
+from training.rl.constants import (
     PPO_GPU_BUFFER_SAFETY_FRACTION,
     PPO_MAX_MINIBATCHES,
     PPO_MIN_MINIBATCHES,
     RL_WORKER_AUTOTUNE_FRACTION,
     RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
 )
-from training.ppo import DEFAULT_MAX_EPOCHS, MAX_PPO_EPOCHS
+from training.rl.ppo import DEFAULT_MAX_EPOCHS, MAX_PPO_EPOCHS
 from utils.artifacts import atomic_write_json, file_sha256
 from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
 from utils.resource_limits import choose_safe_rl_device
@@ -1669,7 +1671,7 @@ def validate_args(args, config):
     if args.iterations is not None:
         raise ValueError(
             "Canonical pipelines use RL game budgets; --iterations is available "
-            "only in training.self_play."
+            "only in training.rl.self_play."
         )
     if config.unbounded and args.total_training_games is not None:
         raise ValueError("The forever level cannot have --total-training-games.")

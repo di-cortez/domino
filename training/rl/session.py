@@ -16,6 +16,7 @@ from training.rl.adaptive_tuning import (
     hardware_warning,
     run_worker_tuning,
 )
+from training.rl.checkpoint_archive import CheckpointArchive, archive_policy_manifest
 from training.rl.config import (
     RLExecutionOptions,
     RLResourceOptions,
@@ -24,6 +25,8 @@ from training.rl.config import (
 )
 from training.rl.iteration import IterationContext, IterationState
 from training.rl.parallel import RLRolloutRunner
+from training.rl.matchmaking import matchmaking_policy_manifest
+from training.rl.pool import pool_policy_manifest, unique_neural_capacity
 from training.rl.reporting import (
     RLRuntimeProfile,
     RLTrainingReporter,
@@ -71,7 +74,9 @@ class _ResumeInputs:
     resources: RLResourceOptions
     execution: RLExecutionOptions
     metadata: dict | None
-    pool_snapshots: tuple
+    pool_state: dict | None
+    pool_weights: dict
+    performance_state: dict | None
     saved_configuration: RLTrainingConfiguration | None
     completed_training_games: int
     start_iteration: int
@@ -93,13 +98,15 @@ def _resume_inputs(training, resources, execution, reporter):
             resources=resources,
             execution=execution,
             metadata=None,
-            pool_snapshots=(),
+            pool_state=None,
+            pool_weights={},
+            performance_state=None,
             saved_configuration=None,
             completed_training_games=0,
             start_iteration=0,
         )
 
-    metadata, pool_snapshots = load_resume_state(
+    metadata, pool_weights = load_resume_state(
         execution.resume_weights_path,
         execution.resume_state_file,
     )
@@ -114,12 +121,12 @@ def _resume_inputs(training, resources, execution, reporter):
             iterations=None,
             total_training_games=saved.total_training_games,
             gpi=saved.selected_gpi,
-            training_opponent=saved.training_opponent,
+            opponent_buckets=saved.opponent_buckets,
+            difficulty_weight=saved.difficulty_weight,
             learning_rate=saved.learning_rate,
             entropy_coef=saved.entropy_coef,
             weight_decay=saved.weight_decay,
             dropout_rate=saved.dropout_rate,
-            max_pool_size=saved.max_pool_size,
             use_value_head=saved.use_value_head,
             value_coef=saved.value_coef,
             gamma=saved.gamma,
@@ -149,7 +156,9 @@ def _resume_inputs(training, resources, execution, reporter):
             numbered_checkpoints=True,
         ),
         metadata=metadata,
-        pool_snapshots=pool_snapshots,
+        pool_state=metadata["opponent_pool_state"],
+        pool_weights=pool_weights,
+        performance_state=metadata["opponent_performance_state"],
         saved_configuration=saved,
         completed_training_games=int(metadata["completed_training_games"]),
         start_iteration=int(metadata["completed_iteration"]),
@@ -211,10 +220,10 @@ def _resume_configuration(
         "log_interval": int(execution.log_interval),
         "checkpoint_interval": int(execution.checkpoint_interval),
         "moving_average_window": int(execution.moving_average_window),
-        "training_opponent": training.training_opponent,
+        "opponent_buckets": tuple(training.opponent_buckets),
+        "difficulty_weight": float(training.difficulty_weight),
         "learning_rate": float(training.learning_rate),
         "entropy_coef": float(training.entropy_coef),
-        "max_pool_size": int(training.max_pool_size),
         "use_value_head": bool(training.use_value_head),
         "value_coef": float(training.value_coef),
         "gamma": float(training.gamma),
@@ -235,6 +244,11 @@ def _resume_configuration(
         "worker_max_rss_mb": int(
             resources.safety_config.max_worker_rss_mb
         ),
+        "opponent_system_policy": {
+            "pool": pool_policy_manifest(training.opponent_buckets),
+            "matchmaking": matchmaking_policy_manifest(),
+            "checkpoint_archive": archive_policy_manifest(),
+        },
         "run_configuration_sha256": None,
         "git_commit": current_git_commit(),
     })
@@ -352,12 +366,14 @@ def prepare_training_session(training=None, resources=None, execution=None):
         retune_workers=resources.retune_workers,
         saved_tuning=saved_tuning,
         base_seed=effective_seed,
-        training_opponent=training.training_opponent,
+        opponent_buckets=training.opponent_buckets,
+        difficulty_weight=training.difficulty_weight,
         schema=resolved.schema,
         gamma=training.gamma,
-        max_pool_size=training.max_pool_size,
         safety=resources.safety_config,
-        pool_snapshots=inputs.pool_snapshots,
+        pool_state=inputs.pool_state,
+        pool_weights=inputs.pool_weights,
+        performance_state=inputs.performance_state,
         output_path=resources.adaptive_tuning_path,
         status_callback=reporter.status,
     )
@@ -372,6 +388,8 @@ def prepare_training_session(training=None, resources=None, execution=None):
         weight_decay=training.weight_decay,
         ppo_max_epochs=training.ppo_max_epochs,
         gpi=training.gpi,
+        opponent_buckets=training.opponent_buckets,
+        difficulty_weight=training.difficulty_weight,
     )
     resume_configuration = _resume_configuration(
         inputs,
@@ -390,11 +408,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
     policy_bytes = sum(
         int(getattr(network, name).nbytes) for name in network.weight_names
     )
-    shared_pool_size = (
-        training.max_pool_size
-        if training.training_opponent == "self_play"
-        else 0
-    )
+    shared_pool_size = unique_neural_capacity(training.opponent_buckets)
     estimated_shared_bytes = (1 + shared_pool_size) * policy_bytes
     ensure_ram_available(
         estimated_shared_bytes + estimated_batch_bytes,
@@ -408,17 +422,19 @@ def prepare_training_session(training=None, resources=None, execution=None):
     )
     runner = RLRolloutRunner(
         network,
-        training_opponent=training.training_opponent,
+        opponent_buckets=training.opponent_buckets,
         schema=resolved.schema,
         gamma=training.gamma,
-        max_pool_size=shared_pool_size,
         safety=resources.safety_config,
     )
-    if inputs.pool_snapshots:
+    if inputs.pool_state is not None:
         runner.restore_opponent_pool(
-            inputs.pool_snapshots,
-            metadata=(inputs.metadata or {}).get("opponent_pool_metadata"),
+            inputs.pool_state,
+            inputs.pool_weights,
+            inputs.performance_state,
         )
+    checkpoint_archive = CheckpointArchive(resources.artifact_directory)
+    checkpoint_archive.reconcile(inputs.start_iteration)
     actual_workers, was_capped, cap_reason = runner.set_workers(selected_workers)
     if was_capped:
         reporter.worker_cap(selected_workers, actual_workers, cap_reason)
@@ -436,7 +452,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         reporter.resumed(
             inputs.start_iteration,
             inputs.completed_training_games,
-            len(inputs.pool_snapshots),
+            runner.opponent_pool.size,
         )
 
     windows = _restore_training_windows(
@@ -452,6 +468,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         execution=execution,
         network=network,
         runner=runner,
+        checkpoint_archive=checkpoint_archive,
         reporter=reporter,
         runtime_profile=runtime_profile,
         parallel_summary=parallel_summary,

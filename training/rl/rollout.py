@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import random
 import time
 
+from agents.agent import RandomAgent
 from agents.heuristic_agent import StrategicAgent
 from agents.rl_agent import RLAgent
 from middleware.domino_engine import DominoEngine
@@ -319,13 +320,12 @@ def _play_training_game(
     return engine, event_stats
 
 
-def _collect_self_play_steps(
-    network, pool, schema, gamma, runtime_profile=None
+def _collect_steps_vs_snapshot(
+    network, opponent_network, schema, gamma, runtime_profile=None
 ):
-    """Play one game against a frozen policy snapshot and collect learner samples."""
+    """Play against one already-selected frozen neural opponent."""
     section_started = _profile_worker_start(runtime_profile)
     learner_position = random.randint(0, 1)
-    opponent_network = random.choice(pool) if pool else network
 
     learner_policy_profile = (
         runtime_profile.setdefault("learner_policy", {})
@@ -370,6 +370,46 @@ def _collect_self_play_steps(
     return samples, event_stats, engine.winner, learner_position
 
 
+def collect_steps_for_assignment(
+    learner_network,
+    opponent_kind,
+    opponent_network,
+    schema,
+    gamma,
+    runtime_profile=None,
+):
+    """Dispatch one preselected assignment without knowing pool policy."""
+    if opponent_kind == "policy_snapshot":
+        if opponent_network is None:
+            raise ValueError("A policy-snapshot assignment requires weights")
+        return _collect_steps_vs_snapshot(
+            learner_network,
+            opponent_network,
+            schema,
+            gamma,
+            runtime_profile=runtime_profile,
+        )
+    if opponent_kind == "heuristic":
+        if opponent_network is not None:
+            raise ValueError("A heuristic assignment must not carry neural weights")
+        return _collect_steps_vs_heuristic(
+            learner_network,
+            schema,
+            gamma,
+            runtime_profile=runtime_profile,
+        )
+    if opponent_kind == "random":
+        if opponent_network is not None:
+            raise ValueError("A random assignment must not carry neural weights")
+        return _collect_steps_vs_random(
+            learner_network,
+            schema,
+            gamma,
+            runtime_profile=runtime_profile,
+        )
+    raise ValueError(f"Unknown RL opponent kind: {opponent_kind!r}")
+
+
 def _collect_steps_vs_heuristic(
     network, schema, gamma, runtime_profile=None
 ):
@@ -389,6 +429,45 @@ def _collect_steps_vs_heuristic(
     agents = [None, None]
     agents[learner_position] = learner
     agents[1 - learner_position] = StrategicAgent()
+    _profile_worker_section(runtime_profile, "agent_setup", section_started)
+
+    engine, event_stats = _play_training_game(
+        agents,
+        learner_position,
+        learner,
+        schema,
+        runtime_profile=runtime_profile,
+    )
+    section_started = _profile_worker_start(runtime_profile)
+    reward = _terminal_reward(engine, learner_position, schema)
+    samples = _finish_episode_with_rewards(learner, reward, gamma)
+    _profile_worker_section(
+        runtime_profile,
+        "terminal_reward_and_trajectory_finalization",
+        section_started,
+    )
+    return samples, event_stats, engine.winner, learner_position
+
+
+def _collect_steps_vs_random(
+    network, schema, gamma, runtime_profile=None
+):
+    """Play one training game against the fixed uniform-random agent."""
+    section_started = _profile_worker_start(runtime_profile)
+    learner_position = random.randint(0, 1)
+    learner_policy_profile = (
+        runtime_profile.setdefault("learner_policy", {})
+        if runtime_profile is not None
+        else None
+    )
+    learner = RLAgent(
+        network,
+        mode="training",
+        runtime_profile=learner_policy_profile,
+    )
+    agents = [None, None]
+    agents[learner_position] = learner
+    agents[1 - learner_position] = RandomAgent()
     _profile_worker_section(runtime_profile, "agent_setup", section_started)
 
     engine, event_stats = _play_training_game(

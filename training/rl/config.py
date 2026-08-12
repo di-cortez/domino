@@ -7,6 +7,10 @@ from typing import Any, Callable
 from agents.nn import DISABLED_DROPOUT_RATE, DISABLED_WEIGHT_DECAY
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
 from training.rl.parallel import DEFAULT_RL_WORKERS
+from training.rl.pool import (
+    DEFAULT_OPPONENT_BUCKETS,
+    canonicalize_bucket_names,
+)
 from training.rl.ppo import (
     DEFAULT_PPO_MAX_EPOCHS,
     PPO_TRAINING_ALGORITHM,
@@ -30,7 +34,7 @@ DEFAULT_TOTAL_TRAINING_GAMES = 100_000
 
 SL_WEIGHTS = "models/domino_sl_weights.npz"
 RL_WEIGHTS = "models/domino_rl_weights.npz"
-TRAINING_OPPONENT = "self_play"
+DEFAULT_DIFFICULTY_WEIGHT = 0.5
 VALUE_COEF = 0.5
 DEFAULT_MOVING_AVERAGE_WINDOW = 10
 
@@ -46,12 +50,12 @@ class RLTrainingOptions:
     iterations: int | None = None
     total_training_games: int | None = None
     gpi: int = DEFAULT_GPI
-    training_opponent: str = TRAINING_OPPONENT
+    opponent_buckets: tuple[str, ...] = DEFAULT_OPPONENT_BUCKETS
+    difficulty_weight: float = DEFAULT_DIFFICULTY_WEIGHT
     learning_rate: float = 0.001
     entropy_coef: float = 0.01
     weight_decay: float = DISABLED_WEIGHT_DECAY
     dropout_rate: float = DISABLED_DROPOUT_RATE
-    max_pool_size: int = 50
     use_value_head: bool = False
     value_coef: float = VALUE_COEF
     gamma: float = DEFAULT_GAMMA
@@ -165,12 +169,12 @@ def resolve_training_options(training, resources, execution):
         raise ValueError("adaptive_tuning_training_games must be positive")
     if execution.checkpoint_interval < 1 or execution.log_interval < 1:
         raise ValueError("checkpoint_interval and log_interval must be positive")
-    if training.max_pool_size < 0:
-        raise ValueError("max_pool_size must be non-negative")
     if execution.moving_average_window < 1:
         raise ValueError("moving_average_window must be positive")
-    if training.training_opponent not in ("self_play", "heuristic"):
-        raise ValueError("training_opponent must be 'self_play' or 'heuristic'.")
+    opponent_buckets = canonicalize_bucket_names(training.opponent_buckets)
+    difficulty_weight = float(training.difficulty_weight)
+    if not 0.0 <= difficulty_weight <= 1.0:
+        raise ValueError("difficulty_weight must be between 0 and 1")
     if training.reward_schema not in REWARD_SCHEMAS:
         raise ValueError(f"Unknown reward_schema {training.reward_schema!r}.")
     if float(training.value_coef) < 0:
@@ -202,6 +206,8 @@ def resolve_training_options(training, resources, execution):
         training,
         gpi=gpi,
         total_training_games=total_training_games,
+        opponent_buckets=opponent_buckets,
+        difficulty_weight=difficulty_weight,
         normalize_advantages=normalize_advantages,
         ppo_max_epochs=ppo_max_epochs,
     )

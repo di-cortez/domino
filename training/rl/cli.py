@@ -13,6 +13,7 @@ from training.rl.ppo import (
 )
 from training.rl.config import (
     DEFAULT_DEVICE,
+    DEFAULT_DIFFICULTY_WEIGHT,
     DEFAULT_GPI,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
@@ -23,9 +24,9 @@ from training.rl.config import (
     RLResourceOptions,
     RLTrainingOptions,
     SL_WEIGHTS,
-    TRAINING_OPPONENT,
     VALUE_COEF,
 )
+from training.rl.pool import DEFAULT_OPPONENT_BUCKETS, canonicalize_bucket_names
 from training.rl.parallel import (
     DEFAULT_RL_WORKERS,
     worker_count as parse_rl_worker_count,
@@ -34,6 +35,29 @@ from training.rl.rollout import DEFAULT_GAMMA, DEFAULT_REWARD_SCHEMA, REWARD_SCH
 from training.rl.resume import load_resume_state
 from training.utils.cli_args import add_regularization_arguments, positive_int
 from utils.runtime_status import format_duration
+
+
+def parse_opponent_buckets(value):
+    """Parse one comma-separated bucket selection into canonical registry order."""
+    try:
+        return canonicalize_bucket_names(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def parse_difficulty_weight(value):
+    """Parse the closed unit interval used by deterministic matchmaking."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "difficulty weight must be a number between 0 and 1"
+        ) from exc
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError(
+            "difficulty weight must be between 0 and 1"
+        )
+    return parsed
 
 
 def add_optional_rl_arguments(
@@ -87,10 +111,24 @@ def add_optional_rl_arguments(
         parser.set_defaults(gpi=DEFAULT_GPI)
     group.add_argument("--retune-workers", action="store_true")
     group.add_argument(
-        "--training-opponent",
-        choices=("self_play", "heuristic"),
-        default=TRAINING_OPPONENT,
-        help="Play against a pool of frozen snapshots or the fixed heuristic agent.",
+        "--opponent-buckets",
+        type=parse_opponent_buckets,
+        default=DEFAULT_OPPONENT_BUCKETS,
+        metavar="NAMES",
+        help=(
+            "Comma-separated opponent buckets: heuristic, random, and recent. "
+            "Input order is canonicalized."
+        ),
+    )
+    group.add_argument(
+        "--difficulty-weight",
+        type=parse_difficulty_weight,
+        default=DEFAULT_DIFFICULTY_WEIGHT,
+        help=(
+            "Convex matchmaking mixture: 0 is uniform across buckets/members, "
+            "0.5 is half uniform and half difficulty-based, and 1 is entirely "
+            "difficulty-based."
+        ),
     )
     group.add_argument("--learning-rate", type=float, default=0.001)
     group.add_argument("--entropy-coef", type=float, default=0.01)
@@ -98,7 +136,6 @@ def add_optional_rl_arguments(
         add_regularization_arguments(group)
     group.add_argument("--log-interval", type=int, default=10)
     group.add_argument("--checkpoint-interval", type=int, default=50)
-    group.add_argument("--max-pool-size", type=int, default=50)
     group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
     group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
     initialization = group.add_mutually_exclusive_group()
@@ -261,12 +298,12 @@ def training_options_from_args(args):
             )
         ),
         gpi=args.gpi,
-        training_opponent=args.training_opponent,
+        opponent_buckets=args.opponent_buckets,
+        difficulty_weight=args.difficulty_weight,
         learning_rate=args.learning_rate,
         entropy_coef=args.entropy_coef,
         weight_decay=args.weight_decay,
         dropout_rate=args.dropout,
-        max_pool_size=args.max_pool_size,
         use_value_head=args.value_head,
         value_coef=args.value_coef,
         gamma=args.gamma,

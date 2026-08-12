@@ -24,12 +24,13 @@ from training.rl.ppo import (
     ppo_is_enabled,
 )
 from training.rl.resume import resume_state_path
+from training.rl.matchmaking import matchmaking_policy_manifest
 from utils.resource_limits import MIB
 from utils.runtime_status import format_duration, print_memory_report
 
 
 TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"
-TRAINING_METRICS_VERSION = 2
+TRAINING_METRICS_VERSION = 3
 TRAINING_METRIC_COLUMNS = (
     "iteration",
     "total_iterations",
@@ -66,7 +67,9 @@ TRAINING_METRIC_COLUMNS = (
     "buffer_location",
     "buffer_bytes",
     "selected_workers",
-    "pool_size",
+    "opponent_count",
+    "unique_neural_opponent_count",
+    "matchmaking",
     "rollout_seconds",
     "update_seconds",
     "iteration_seconds",
@@ -96,10 +99,10 @@ def build_training_metrics_header(
             "algorithm": context.algorithm,
             "total_training_games": int(training.total_training_games),
             "games_per_iteration": int(context.selected_gpi),
-            "training_opponent": training.training_opponent,
+            "opponent_buckets": list(training.opponent_buckets),
+            "difficulty_weight": float(training.difficulty_weight),
             "learning_rate": float(training.learning_rate),
             "entropy_coef": float(training.entropy_coef),
-            "max_pool_size": int(training.max_pool_size),
             "use_value_head": bool(training.use_value_head),
             "value_coef": float(training.value_coef),
             "gamma": float(training.gamma),
@@ -117,6 +120,8 @@ def build_training_metrics_header(
             "supervised_weights_sha256": supervised_weights_sha256,
             "ppo_configuration": fixed_ppo_policy(training.ppo_max_epochs),
             "opponent_pool": context.runner.opponent_pool.manifest(),
+            "matchmaking_policy": matchmaking_policy_manifest(),
+            "checkpoint_archive": context.checkpoint_archive.manifest(),
         },
     }
 
@@ -138,6 +143,7 @@ def build_iteration_metrics_row(
     checkpoint_written,
     checkpoint_path,
     iteration_started,
+    matchmaking,
 ):
     """Build the complete in-memory metrics row for one RL iteration."""
     moving_value_loss = (
@@ -189,7 +195,11 @@ def build_iteration_metrics_row(
         "buffer_location": None if ppo_metrics is None else ppo_metrics["buffer_location"],
         "buffer_bytes": 0 if ppo_metrics is None else int(ppo_metrics["buffer_bytes"]),
         "selected_workers": int(context.runner.worker_count),
-        "pool_size": int(context.runner.opponent_pool.size),
+        "opponent_count": int(context.runner.opponent_pool.size),
+        "unique_neural_opponent_count": int(
+            context.runner.opponent_pool.unique_neural_opponent_count
+        ),
+        "matchmaking": matchmaking,
         "rollout_seconds": float(rollout_elapsed),
         "ppo_seconds": float(update_elapsed if ppo_metrics else 0.0),
         "rollout_duration_s": float(rollout_elapsed),
@@ -234,7 +244,9 @@ def build_training_summary(
     actual_final_iteration,
     stopped_by_shutdown,
     final_runtime_workers,
-    pool_snapshot_count,
+    opponent_count,
+    unique_neural_opponent_count,
+    bucket_sizes,
     runtime_profile_delta,
     elapsed_time,
 ):
@@ -260,7 +272,8 @@ def build_training_summary(
         "completed_training_games": int(state.completed_training_games),
         "invocation_target_training_games": int(context.invocation_target_games),
         "shutdown_requested": bool(stopped_by_shutdown),
-        "training_opponent": training.training_opponent,
+        "opponent_buckets": list(training.opponent_buckets),
+        "difficulty_weight": float(training.difficulty_weight),
         "learning_rate": training.learning_rate,
         "entropy_coef": training.entropy_coef,
         "use_value_head": training.use_value_head,
@@ -299,7 +312,9 @@ def build_training_summary(
         "clipped_iteration_rate": float(
             state.clipped_iteration_count / max(1, actual_final_iteration)
         ),
-        "pool_snapshot_count": int(pool_snapshot_count),
+        "opponent_count": int(opponent_count),
+        "unique_neural_opponent_count": int(unique_neural_opponent_count),
+        "opponent_bucket_sizes": dict(bucket_sizes),
         "total_rollout_duration_s": float(state.total_rollout_duration_s),
         "total_update_duration_s": float(state.total_update_duration_s),
         "optimizer_step_count": int(context.network.optimizer_step_count),
@@ -317,6 +332,7 @@ def build_training_summary(
         ),
         "ppo_configuration": fixed_ppo_policy(training.ppo_max_epochs),
         "opponent_pool": context.runner.opponent_pool.manifest(),
+        "checkpoint_archive": context.checkpoint_archive.manifest(),
         "runtime_profile_delta": runtime_profile_delta,
         "duration_s": elapsed_time,
     }
@@ -360,11 +376,17 @@ class RLTrainingReporter:
         weight_decay,
         ppo_max_epochs,
         gpi,
+        opponent_buckets,
+        difficulty_weight,
     ):
         """Describe the selected fixed algorithm policy once per invocation."""
         policy = fixed_ppo_policy(ppo_max_epochs)
         fixed = policy["fixed_policy"]
         self.status(f"Fixed GPI: {int(gpi)}.")
+        self.status(
+            "Opponent buckets: " + ", ".join(opponent_buckets)
+            + f" | difficulty weight: {float(difficulty_weight):g}."
+        )
         self.status("RL update configuration:")
         self.status(
             f"  value head: {'on' if use_value_head else 'off'}"
@@ -458,8 +480,11 @@ class RLTrainingReporter:
         wins,
         moving_win_rate,
         win_window_size,
-        training_opponent,
-        pool_size,
+        opponent_buckets,
+        difficulty_weight,
+        opponent_count,
+        unique_neural_opponent_count,
+        bucket_results,
         gradient_metrics,
         use_value_head,
         value_loss_window,
@@ -471,9 +496,9 @@ class RLTrainingReporter:
         if reward_summary is None:
             print(f"Iteration {iteration} | {games} games | no real policy decisions")
             return
-        win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
-        pool_suffix = (
-            f" | pool: {pool_size}" if training_opponent == "self_play" else ""
+        bucket_text = ", ".join(
+            f"{name} {value['games']} games/{value['wins'] / value['games']:.1%} wins"
+            for name, value in bucket_results.items()
         )
         print(
             f"Iteration {iteration} | games {games} | cumulative "
@@ -484,9 +509,14 @@ class RLTrainingReporter:
             f"{reward_summary['reward_max']:+.2f} | good/neutral/bad: "
             f"{reward_summary['good_pct']:.0f}%/"
             f"{reward_summary['neutral_pct']:.0f}%/"
-            f"{reward_summary['bad_pct']:.0f}% | wins {win_label}: "
+            f"{reward_summary['bad_pct']:.0f}% | aggregate mixture wins: "
             f"{wins}/{games} (avg/{win_window_size}: {moving_win_rate:.1%})"
-            f"{pool_suffix} | grad: {_gradient_log_text(gradient_metrics)}"
+            f" | opponents: {opponent_count} ({unique_neural_opponent_count} "
+            f"neural) | grad: {_gradient_log_text(gradient_metrics)}"
+        )
+        print(
+            "  Matchmaking: buckets " + ",".join(opponent_buckets)
+            + f" | difficulty weight {difficulty_weight:g} | {bucket_text}"
         )
         value_predictions = gradient_metrics.get("value_predictions_before_update")
         if use_value_head and value_predictions is not None:
@@ -755,7 +785,7 @@ def _metrics_header(metadata):
 
 
 def _metric_values(row):
-    """Project one verbose in-memory row onto the compact stable v2 schema."""
+    """Project one verbose in-memory row onto the compact stable schema."""
     values = {
         "iteration": row["iteration"],
         "total_iterations": row["total_iterations"],
@@ -800,7 +830,11 @@ def _metric_values(row):
         "buffer_location": row["buffer_location"],
         "buffer_bytes": row["buffer_bytes"],
         "selected_workers": row["selected_workers"],
-        "pool_size": row["pool_size"],
+        "opponent_count": row["opponent_count"],
+        "unique_neural_opponent_count": row[
+            "unique_neural_opponent_count"
+        ],
+        "matchmaking": row["matchmaking"],
         "rollout_seconds": row["rollout_seconds"],
         "update_seconds": row["update_duration_s"],
         "iteration_seconds": row["iteration_duration_s"],
@@ -812,7 +846,7 @@ def _metric_values(row):
 
 
 def read_training_metrics(path):
-    """Read a v2 metrics header and return decoded per-iteration dictionaries."""
+    """Read the current metrics header and decode per-iteration dictionaries."""
     path = Path(path)
     lines = path.read_text(encoding="utf-8").splitlines()
     if not lines:
@@ -854,7 +888,7 @@ def read_training_metrics(path):
 
 
 def _prepare_metrics_file(path, start_iteration, metadata=None):
-    """Create a v2 trace or truncate it to the exact resumed iteration."""
+    """Create a current trace or truncate it to the exact resumed iteration."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     header = _metrics_header(metadata)

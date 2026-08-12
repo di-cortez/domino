@@ -54,12 +54,12 @@ RL_ITERATIONS=""
 
 RL_WEIGHTS_FILE="models/domino_rl_weights.npz"
 RL_SL_WEIGHTS_PATH="models/domino_sl_weights.npz"
-RL_TRAINING_OPPONENT="self_play"
+RL_OPPONENT_BUCKETS="heuristic,recent"
+RL_DIFFICULTY_WEIGHT=0.5
 RL_LEARNING_RATE=0.001
 RL_ENTROPY_COEF=0.01
 RL_LOG_INTERVAL=10
 RL_CHECKPOINT_INTERVAL=50
-RL_MAX_POOL_SIZE=50
 RL_VALUE_HEAD=0
 RL_VALUE_COEF=0.5
 RL_GAMMA=1.0
@@ -151,12 +151,12 @@ training.rl.cli):
   --rl-sl-weights-path PATH    Input SL weights used to initialize a fresh RL run (default: $RL_SL_WEIGHTS_PATH)
   --rl-total-training-games N  Exact real-game budget (default: $RL_TOTAL_TRAINING_GAMES)
   --rl-iterations N            Legacy fixed iteration budget; uses self-play's fixed default GPI
-  --rl-training-opponent NAME  "self_play" or "heuristic" (default: $RL_TRAINING_OPPONENT)
+  --rl-opponent-buckets NAMES  Comma-separated buckets: heuristic,random,recent (default: $RL_OPPONENT_BUCKETS)
+  --rl-difficulty-weight F     Uniform/difficulty allocation mixture in [0,1] (default: $RL_DIFFICULTY_WEIGHT)
   --rl-learning-rate F         Learning rate (default: $RL_LEARNING_RATE)
   --rl-entropy-coef F          Entropy bonus coefficient (default: $RL_ENTROPY_COEF)
   --rl-log-interval N          Iterations between log lines (default: $RL_LOG_INTERVAL)
   --rl-checkpoint-interval N   Iterations between checkpoints (default: $RL_CHECKPOINT_INTERVAL)
-  --rl-max-pool-size N         Max frozen snapshots kept in the pool (default: $RL_MAX_POOL_SIZE)
   --rl-value-head              Turn the critic ON for PPO or REINFORCE
   --rl-value-coef F            Value-loss coefficient, only used when --rl-value-head is set (default: $RL_VALUE_COEF)
   --rl-gamma F                 Terminal-reward discount per remaining real decision, 1.0 = no discount (default: $RL_GAMMA)
@@ -232,12 +232,12 @@ while [[ $# -gt 0 ]]; do
         --rl-sl-weights-path) RL_SL_WEIGHTS_PATH="$2"; shift 2 ;;
         --rl-total-training-games) RL_TOTAL_TRAINING_GAMES="$2"; shift 2 ;;
         --rl-iterations) RL_ITERATIONS="$2"; shift 2 ;;
-        --rl-training-opponent) RL_TRAINING_OPPONENT="$2"; shift 2 ;;
+        --rl-opponent-buckets) RL_OPPONENT_BUCKETS="$2"; shift 2 ;;
+        --rl-difficulty-weight) RL_DIFFICULTY_WEIGHT="$2"; shift 2 ;;
         --rl-learning-rate) RL_LEARNING_RATE="$2"; shift 2 ;;
         --rl-entropy-coef) RL_ENTROPY_COEF="$2"; shift 2 ;;
         --rl-log-interval) RL_LOG_INTERVAL="$2"; shift 2 ;;
         --rl-checkpoint-interval) RL_CHECKPOINT_INTERVAL="$2"; shift 2 ;;
-        --rl-max-pool-size) RL_MAX_POOL_SIZE="$2"; shift 2 ;;
         --rl-value-head) RL_VALUE_HEAD=1; shift ;;
         --rl-value-coef) RL_VALUE_COEF="$2"; shift 2 ;;
         --rl-gamma) RL_GAMMA="$2"; shift 2 ;;
@@ -403,12 +403,12 @@ else
     fi
     "$PYTHON_BIN" -u -m training.rl.cli \
         "${BUDGET_ARGS[@]}" \
-        --training-opponent "$RL_TRAINING_OPPONENT" \
+        --opponent-buckets "$RL_OPPONENT_BUCKETS" \
+        --difficulty-weight "$RL_DIFFICULTY_WEIGHT" \
         --learning-rate "$RL_LEARNING_RATE" \
         --entropy-coef "$RL_ENTROPY_COEF" \
         --log-interval "$RL_LOG_INTERVAL" \
         --checkpoint-interval "$RL_CHECKPOINT_INTERVAL" \
-        --max-pool-size "$RL_MAX_POOL_SIZE" \
         --sl-weights-path "$RL_SL_WEIGHTS_PATH" \
         --rl-weights-path "$RL_WEIGHTS_FILE" \
         --fresh-from-sl \

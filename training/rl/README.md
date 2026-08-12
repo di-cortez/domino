@@ -9,8 +9,11 @@ Owned by `training/rl/`.
 | `training_loop.py` | Orchestrates the exact-budget on-policy training lifecycle and delegates its specialized phases. |
 | `config.py` / `cli.py` | Validate side-effect-free RL options and own the standalone/canonical shared argument definitions. |
 | `constants.py` | Fixed worker-autotuning implementation invariants shared by RL modules. |
-| `pool.py` | Owns opponent admission, retention, persistence, and rollout eligibility behind an extensible pool boundary. |
+| `pool.py` | Separates durable opponent identities and bucket retention from physical shared-memory slots. |
+| `matchmaking.py` | Tracks smoothed difficulty evidence and builds immutable exact-GPI match plans. |
+| `checkpoint_archive.py` | Stores a bounded, progressively thinned history independently of exact-resume checkpoints. |
 | `rollout.py` | Finalizes rewards and trajectories and plays one CPU-only self-play or heuristic-opponent training game. |
+| `iteration.py` / `session.py` | Run one update and prepare fresh/resumed training state respectively. |
 | `resume.py` | Loads compatible policies and atomically saves, validates, and restores exact numbered RL resume pairs. |
 | `reporting.py` | Owns iteration summaries, durable metrics JSONL writes, worker metadata aggregation, and cumulative RL runtime profiles. |
 | `ppo.py` | Builds immutable decision buffers, selects minibatches, manages GPU/RAM storage, and performs KL-limited PPO epochs. |
@@ -27,6 +30,8 @@ python -m training.rl.cli --rl-workers auto --seed 123
 python -m training.rl.cli --rl-workers 4 --device cpu
 python -m training.rl.cli --gpi 1000
 python -m training.rl.cli --fresh-from-sl
+python -m training.rl.cli --fresh-from-sl --opponent-buckets random --difficulty-weight 0
+python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,random,recent
 python -m training.rl.cli --dropout 0.1 --weight-decay
 ```
 
@@ -34,7 +39,9 @@ Default behavior:
 
 - if a compatible `models/domino_rl_weights.npz` exists, resume from it;
 - otherwise warm-start from a compatible `models/domino_sl_weights.npz`;
-- train against a pool of frozen snapshots of the current policy;
+- train against the fixed heuristic and the 200 most recent frozen learner
+  snapshots, splitting half the games uniformly and half by measured
+  difficulty;
 - use a fixed GPI of 2,000 and select rollout workers with isolated,
   discarded benchmarks;
 - update the policy with masked PPO minibatches for at most four epochs;
@@ -61,18 +68,30 @@ experience.
 ## Parallel rollout generation
 
 All games in an iteration use one immutable learner policy, so rollout work is
-independent until batch aggregation. `training/rl/parallel.py` publishes the
-current policy and at most `max_pool_size` opponent snapshots in a fixed-size
-shared-memory ring. Workers attach NumPy views to that bank, never see the GPU,
-and return finalized trajectories through a bounded dynamic queue. The parent
-sorts results by game id and remains solely responsible for the gradient,
-checkpoint writes, logging, and GPU allocations.
+independent until batch aggregation. Before workers start, `matchmaking.py`
+allocates the exact GPI across selected buckets and members and deterministically
+orders one immutable assignment per absolute game ID. Workers attach NumPy
+views to a physical shared-policy bank, never see the GPU, and execute those
+assignments without selecting opponents. Memory fallback retries each unfinished
+assignment unchanged. The parent sorts results by game ID and remains solely
+responsible for performance evidence, gradients, admission, checkpoints,
+logging, and GPU allocations.
 
-Opponent snapshots are published once per iteration, after the batch has been
-played and the policy updated. Every iteration shares one immutable learner
-policy, so the snapshot cadence is exactly the iteration size: `--gpi` sets it,
-and the pool therefore spans `max_pool_size * gpi` training games. At the
-defaults that is 50 snapshots covering 100,000 games.
+`heuristic` contains only `StrategicAgent` and consumes no policy-bank slot.
+`random` contains only the uniform `RandomAgent`, likewise consumes no
+policy-bank slot, and is available for explicit experiments without joining
+the default bucket selection.
+`recent` begins with a frozen copy of the initial learner, admits every
+non-empty completed update, and retains the latest 200 snapshots with logical
+FIFO eviction. The current mutable learner is never a bucket member.
+
+`--opponent-buckets` accepts any non-empty combination of `heuristic`, `random`,
+and `recent` as a comma-separated selection. Input order is canonicalized,
+while duplicates, unknown names, and an empty selection are rejected.
+`--difficulty-weight` controls the exact
+convex allocation: `0` is entirely uniform, `0.5` is half uniform and half
+difficulty-based, and `1` is entirely difficulty-based. GPI remains the single
+game budget; matchmaking never adds evaluation games.
 
 GPI is never autotuned. Canonical pipelines and direct RL training accept
 `--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000`, defaulting to
@@ -99,6 +118,8 @@ controls are:
 | Flag | Meaning | Default |
 |---|---|---:|
 | `--gpi` | Fixed positive number of games per RL iteration | `2000` |
+| `--opponent-buckets` | Named active bucket selection | `heuristic,recent` |
+| `--difficulty-weight` | Uniform/difficulty allocation mixture in `[0, 1]` | `0.5` |
 | `--rl-workers` | CPU-only rollout workers or `auto` | `auto` |
 | `--retune-workers` | Explicitly rerun saved worker tuning on resume | off |
 | `--rl-memory-reserve-mb` | Host RAM that must remain free | `512` |
@@ -294,8 +315,8 @@ rollout rules, exact-model work, inference, buffer transfer, backpropagation,
 parameter updates, and metric transfers.
 
 `training.rl.cli` also accepts `--iterations`, `--total-training-games`,
-`--gpi`, `--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
-`--checkpoint-interval`, `--max-pool-size`,
+`--gpi`, `--opponent-buckets`, `--difficulty-weight`, `--learning-rate`,
+`--entropy-coef`, `--log-interval`, `--checkpoint-interval`,
 `--sl-weights-path`, and `--rl-weights-path`; see
 `training/rl/cli.py:add_optional_rl_arguments` for the authoritative
 definitions, or run `python -m training.rl.cli --help`.
@@ -307,23 +328,18 @@ The former GPI-autotune options (`--games-per-iteration`, `--adaptive-gpi`,
 Existing numbered resume states that contain `pool_interval` are rejected rather
 than silently reinterpreted as a game count; start a new run instead.
 
-`--pool-refresh-games` was removed as well, with no replacement flag: it set a
-cumulative-game threshold that was tested once per iteration, so every `--gpi`
-at or above it produced exactly one snapshot per iteration and the option had no
-effect. The cadence is now that behavior, stated directly. Unlike
-`pool_interval`, a stored `pool_refresh_games` never rejects a resume: existing
-runs and numbered resume states keep the field, it is ignored when comparing
-configurations, and they continue with the current cadence. Snapshot timing is
-unchanged for every `--gpi` of 400 or more, including the default 2,000;
-`--gpi 100` and `--gpi 200` now snapshot every 100 or 200 games instead of
-every 400.
+The former binary opponent flags (`--training-opponent` and
+`--max-pool-size`) were replaced by named buckets and the one public allocation
+weight. Bucket capacity, difficulty calibration/smoothing, retention, archive
+cadence, and integer tie-breaking are internal versioned policies and appear in
+metrics/resume manifests rather than as flags.
 
-`TRAINING_OPPONENT` at the top of `training_loop.py` controls the training opponent:
-
-| Value | Meaning |
-|---|---|
-| `"self_play"` | Train against a rotating pool of frozen policy snapshots. |
-| `"heuristic"` | Train directly against `StrategicAgent`, useful for controlled comparisons. |
+Every tenth completed update also writes the same admitted policy identity to
+`checkpoint_archive/`. This archive is independent of exact resume: it has a
+1-GiB internal limit and deterministically thins old history in exponentially
+widening tiers while retaining dense recent coverage, its baseline, newest,
+and any pinned entries. Resume reconciles away archive descendants newer than
+the selected exact checkpoint.
 
 The RL reward now uses a uniform terminal reward plus temporally decayed local
 draw/pass shaping. For each real decision at turn `d_i`, a later event at turn

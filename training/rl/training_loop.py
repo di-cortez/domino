@@ -92,7 +92,11 @@ def train(training=None, resources=None, execution=None):
     finally:
         context.metrics_stream.close()
         final_runtime_workers = context.runner.worker_count
-        pool_snapshot_count = context.runner.opponent_pool.size
+        opponent_count = context.runner.opponent_pool.size
+        unique_neural_opponent_count = (
+            context.runner.opponent_pool.unique_neural_opponent_count
+        )
+        bucket_sizes = context.runner.opponent_pool.bucket_sizes()
         context.runner.close()
 
     context.parallel_summary["final_workers"] = final_runtime_workers
@@ -122,7 +126,9 @@ def train(training=None, resources=None, execution=None):
         actual_final_iteration=actual_final_iteration,
         stopped_by_shutdown=stopped_by_shutdown,
         final_runtime_workers=final_runtime_workers,
-        pool_snapshot_count=pool_snapshot_count,
+        opponent_count=opponent_count,
+        unique_neural_opponent_count=unique_neural_opponent_count,
+        bucket_sizes=bucket_sizes,
         runtime_profile_delta=runtime_profile_delta,
         elapsed_time=elapsed_time,
     )

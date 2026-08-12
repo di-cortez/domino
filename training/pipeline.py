@@ -393,9 +393,17 @@ def _hydrate_forever_arguments(parser, args, explicit):
 
     if args.restart_rl:
         if active_run is not None and not ({"seed", "run_name"} & explicit):
-            active_config = load_run_config(active_run)
-            args.seed = int(active_config["seed"])
-            args.run_name = active_config.get("run_name")
+            try:
+                active_config = load_run_config(active_run)
+            except ValueError:
+                # A deliberate run/resume format bump must never make the
+                # explicit fresh-start escape hatch unusable. Defaults are
+                # resolved below and the incompatible directory is archived
+                # before the new run is created.
+                active_config = None
+            if active_config is not None:
+                args.seed = int(active_config["seed"])
+                args.run_name = active_config.get("run_name")
         return args
 
     selected_run = None
@@ -429,7 +437,13 @@ def _hydrate_forever_arguments(parser, args, explicit):
 
     if not (selected_run / "run_config.json").is_file():
         return args
-    return _apply_saved_run_arguments(parser, args, explicit, selected_run)
+    try:
+        return _apply_saved_run_arguments(parser, args, explicit, selected_run)
+    except ValueError as exc:
+        parser.error(
+            f"The selected forever run cannot be resumed: {exc} "
+            "Use --restart-rl to archive it and start the current format."
+        )
 
 
 def _resolved_rl_device(requested_device):
@@ -698,14 +712,14 @@ def _rl_config(args):
     )
     return {
         "games_per_iteration": int(args.gpi),
-        "training_opponent": args.training_opponent,
+        "opponent_buckets": list(args.opponent_buckets),
+        "difficulty_weight": float(args.difficulty_weight),
         "learning_rate": float(args.learning_rate),
         "entropy_coef": float(args.entropy_coef),
         "weight_decay": float(args.weight_decay),
         "dropout_rate": float(args.dropout),
         "log_interval": int(args.log_interval),
         "checkpoint_interval": int(args.checkpoint_interval),
-        "max_pool_size": int(args.max_pool_size),
         "use_value_head": bool(args.value_head),
         "value_coef": float(args.value_coef),
         "reward_schema": args.reward_schema,
@@ -1113,6 +1127,10 @@ def run_rl_pipeline(root, config, args, assets):
     print(f"Run name: {args.run_name or '(none)'}")
     print(f"RL algorithm: {algorithm}")
     print(f"Fixed GPI: {args.gpi:,}")
+    print(
+        "Opponent buckets: " + ", ".join(args.opponent_buckets)
+        + f" | difficulty weight: {args.difficulty_weight:g}"
+    )
     print(
         "Regularization (SL and RL): "
         f"dropout {args.dropout:g} | weight decay {args.weight_decay:g}"

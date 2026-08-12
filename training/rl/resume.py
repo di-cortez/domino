@@ -26,10 +26,13 @@ from training.rl.ppo import (
     fixed_ppo_policy,
     ppo_is_enabled,
 )
+from training.rl.checkpoint_archive import archive_policy_manifest
+from training.rl.matchmaking import matchmaking_policy_manifest
+from training.rl.pool import pool_policy_manifest
 from utils.repository import current_git_commit
 
 
-RESUME_STATE_VERSION = 5
+RESUME_STATE_VERSION = 6
 SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
@@ -44,10 +47,10 @@ class RLTrainingConfiguration:
     log_interval: int
     checkpoint_interval: int
     moving_average_window: int
-    training_opponent: str
+    opponent_buckets: tuple[str, ...]
+    difficulty_weight: float
     learning_rate: float
     entropy_coef: float
-    max_pool_size: int
     use_value_head: bool
     value_coef: float
     gamma: float
@@ -62,6 +65,7 @@ class RLTrainingConfiguration:
     worker_memory_reserve_mb: int
     worker_estimated_mb: int
     worker_max_rss_mb: int
+    opponent_system_policy: dict
     run_configuration_sha256: str | None = None
     git_commit: str | None = None
 
@@ -80,6 +84,7 @@ class RLTrainingConfiguration:
         data = dict(value)
         data.setdefault("run_configuration_sha256", None)
         data.setdefault("git_commit", None)
+        data["opponent_buckets"] = tuple(data["opponent_buckets"])
         configuration = cls(**{
             field.name: data[field.name]
             for field in fields(cls)
@@ -113,10 +118,10 @@ class RLTrainingConfiguration:
             "log_interval": int(rl["log_interval"]),
             "checkpoint_interval": int(rl["checkpoint_interval"]),
             "moving_average_window": int(rl["moving_average_window"]),
-            "training_opponent": rl["training_opponent"],
+            "opponent_buckets": tuple(rl["opponent_buckets"]),
+            "difficulty_weight": float(rl["difficulty_weight"]),
             "learning_rate": float(rl["learning_rate"]),
             "entropy_coef": float(rl["entropy_coef"]),
-            "max_pool_size": int(rl["max_pool_size"]),
             "use_value_head": bool(rl["use_value_head"]),
             "value_coef": float(rl["value_coef"]),
             "gamma": float(rl["gamma"]),
@@ -131,6 +136,11 @@ class RLTrainingConfiguration:
             "worker_memory_reserve_mb": int(rl["worker_memory_reserve_mb"]),
             "worker_estimated_mb": int(rl["worker_estimated_mb"]),
             "worker_max_rss_mb": int(rl["worker_max_rss_mb"]),
+            "opponent_system_policy": {
+                "pool": pool_policy_manifest(rl["opponent_buckets"]),
+                "matchmaking": matchmaking_policy_manifest(),
+                "checkpoint_archive": archive_policy_manifest(),
+            },
             "run_configuration_sha256": run_config["configuration_sha256"],
             "git_commit": run_config.get("git_commit"),
         })
@@ -142,8 +152,10 @@ class RLTrainingConfiguration:
 
     def to_dict(self):
         """Return the durable checkpoint representation, including constants."""
+        value = asdict(self)
+        value["opponent_buckets"] = list(self.opponent_buckets)
         return {
-            **asdict(self),
+            **value,
             "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
             "rl_training_algorithm": self.rl_training_algorithm,
             "ruleset_version": RULESET_VERSION,
@@ -338,21 +350,27 @@ def _atomic_network_save(network, path):
         temporary.unlink(missing_ok=True)
 
 
-def _atomic_resume_state_save(path, metadata, pool_snapshots):
-    """Atomically save metadata and the exact self-play opponent pool."""
+def _atomic_resume_state_save(path, metadata, pool_state, pool_weights):
+    """Atomically save metadata and one weight set per neural opponent."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     arrays = {
         "metadata_json": np.asarray(json.dumps(metadata, sort_keys=True)),
-        "pool_count": np.asarray(len(pool_snapshots), dtype=np.int64),
+        "pool_weight_count": np.asarray(len(pool_weights), dtype=np.int64),
     }
-    for snapshot_index, snapshot in enumerate(pool_snapshots):
-        # The snapshot itself carries the layer count, so a deeper policy is
-        # stored under the same pool_<index>_<name> convention.
+    serialization = pool_state.get("weight_serialization", ())
+    if len(serialization) != len(pool_weights):
+        raise ValueError("Pool weight serialization does not match neural weights")
+    for item in serialization:
+        snapshot_index = int(item["index"])
+        opponent_id = item["opponent_id"]
+        snapshot = pool_weights[opponent_id]
         for name in policy_layer_names(
             hidden_layer_count_from_weights(snapshot)
         ):
-            arrays[f"pool_{snapshot_index:03d}_{name}"] = np.asarray(snapshot[name])
+            arrays[f"opponent_{snapshot_index:03d}_{name}"] = np.asarray(
+                snapshot[name]
+            )
     temporary = path.with_name(
         f".{path.stem}.tmp-{os.getpid()}-{secrets.token_hex(4)}.npz"
     )
@@ -382,10 +400,18 @@ def load_resume_state(weights_path, state_path):
                 f"RL checkpoint pair is inconsistent: {weights_path} does not "
                 f"match {state_path}."
             )
-        pool_count = int(state["pool_count"])
-        snapshots = []
-        for snapshot_index in range(pool_count):
-            prefix = f"pool_{snapshot_index:03d}_"
+        pool_state = metadata.get("opponent_pool_state")
+        if not isinstance(pool_state, dict):
+            raise ValueError("RL resume state is missing opponent-pool state")
+        serialization = pool_state.get("weight_serialization", ())
+        pool_count = int(state["pool_weight_count"])
+        if pool_count != len(serialization):
+            raise ValueError("RL resume pool weight index is inconsistent")
+        snapshots = {}
+        for item in serialization:
+            snapshot_index = int(item["index"])
+            opponent_id = item["opponent_id"]
+            prefix = f"opponent_{snapshot_index:03d}_"
             stored = {
                 key[len(prefix):] for key in state.files if key.startswith(prefix)
             }
@@ -396,13 +422,13 @@ def load_resume_state(weights_path, state_path):
             except ValueError as exc:
                 raise ValueError(
                     f"RL resume state {state_path} has no usable policy "
-                    f"weights for opponent snapshot {snapshot_index}."
+                    f"weights for opponent {opponent_id!r}."
                 ) from exc
             weights = {}
             for name in names:
                 weights[name] = np.asarray(state[prefix + name]).copy()
-            snapshots.append(weights)
-    return metadata, tuple(snapshots)
+            snapshots[opponent_id] = weights
+    return metadata, snapshots
 
 
 def _rng_state_metadata():
@@ -512,13 +538,21 @@ def _save_numbered_resume_checkpoint(
         "rng_state": _rng_state_metadata(),
         "adaptive_tuning": adaptive_tuning,
         "training_state": training_state,
-        "opponent_pool": runner.opponent_pool.manifest(),
-        "opponent_pool_metadata": list(runner.opponent_pool.export_metadata()),
+        "opponent_pool_state": runner.opponent_pool.export_state(),
+        "opponent_performance_state": (
+            runner.performance_tracker.export_state()
+        ),
+        "checkpoint_archive": {
+            "path": "checkpoint_archive/manifest.json",
+            "policy": archive_policy_manifest(),
+        },
     }
+    pool_state = runner.opponent_pool.export_state()
     _atomic_resume_state_save(
         state_path,
         metadata,
-        runner.opponent_pool.export_snapshots(),
+        pool_state,
+        runner.opponent_pool.export_weights(),
     )
 
     # Pool snapshots are much larger than policy checkpoints. The newest

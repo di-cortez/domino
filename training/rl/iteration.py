@@ -17,6 +17,11 @@ from training.rl.ppo import (
     ppo_is_enabled,
     update_from_samples,
 )
+from training.rl.matchmaking import (
+    aggregate_match_results,
+    build_match_plan,
+    matchmaking_metrics,
+)
 from training.rl.reporting import (
     build_iteration_metrics_row,
     _merge_parallel_summary,
@@ -41,6 +46,7 @@ class IterationContext:
     execution: RLExecutionOptions
     network: Any
     runner: Any
+    checkpoint_archive: Any
     reporter: Any
     runtime_profile: Any
     parallel_summary: dict
@@ -345,10 +351,24 @@ def run_iteration(context, state, iteration):
         "policy_snapshot_synchronization",
         time.perf_counter() - section_started,
     )
+    section_started = time.perf_counter()
+    match_plan = build_match_plan(
+        opponent_pool=context.runner.opponent_pool,
+        performance_tracker=context.runner.performance_tracker,
+        selected_buckets=context.training.opponent_buckets,
+        difficulty_weight=context.training.difficulty_weight,
+        iteration=iteration,
+        first_absolute_game=previous_games,
+        game_count=games,
+        base_seed=context.effective_seed,
+    )
+    context.runtime_profile.add(
+        "matchmaking_plan_construction",
+        time.perf_counter() - section_started,
+    )
     rollout_started = time.perf_counter()
     rollout_results, rollout_info = context.runner.collect_games(
-        previous_games,
-        games,
+        match_plan,
         context.effective_seed,
     )
     rollout_elapsed = time.perf_counter() - rollout_started
@@ -368,14 +388,29 @@ def run_iteration(context, state, iteration):
     if rollout_info.fallback_count:
         context.reporter.rollout_fallback(iteration, rollout_info)
     batch = []
-    wins = 0
     for result in rollout_results:
         batch.extend(result["samples"])
-        wins += int(result["winner"] == result["learner_position"])
+    opponent_results, bucket_results = aggregate_match_results(
+        match_plan,
+        rollout_results,
+    )
+    wins = sum(value["wins"] for value in bucket_results.values())
     state.win_rate_window.append(wins / games)
     moving_win_rate = sum(state.win_rate_window) / len(state.win_rate_window)
     context.runtime_profile.add(
-        "rollout_parent_aggregation",
+        "matchmaking_result_aggregation",
+        time.perf_counter() - section_started,
+    )
+    section_started = time.perf_counter()
+    context.runner.performance_tracker.update(
+        (
+            record.opponent_id
+            for record in context.runner.opponent_pool.active_opponents()
+        ),
+        opponent_results,
+    )
+    context.runtime_profile.add(
+        "opponent_performance_update",
         time.perf_counter() - section_started,
     )
     section_started = time.perf_counter()
@@ -398,14 +433,38 @@ def run_iteration(context, state, iteration):
     state.completed_this_invocation += games
     state.completed_iterations_this_invocation += 1
     section_started = time.perf_counter()
-    context.runner.opponent_pool.consider_updated_policy(
+    admitted_record = context.runner.opponent_pool.consider_updated_policy(
         context.network,
+        iteration=iteration,
         completed_games=state.completed_training_games,
         has_samples=bool(batch),
     )
+    active_opponent_ids = tuple(
+        record.opponent_id
+        for record in context.runner.opponent_pool.active_opponents()
+    )
+    context.runner.performance_tracker.ensure(active_opponent_ids)
+    context.runner.performance_tracker.retain_only(active_opponent_ids)
     context.runtime_profile.add(
-        "opponent_pool_refresh",
+        "opponent_pool_admission_and_retention",
         time.perf_counter() - section_started,
+    )
+    section_started = time.perf_counter()
+    if admitted_record is not None:
+        context.checkpoint_archive.consider_snapshot(
+            context.network,
+            admitted_record,
+            iteration=iteration,
+            completed_games=state.completed_training_games,
+        )
+    context.runtime_profile.add(
+        "checkpoint_archive_update",
+        time.perf_counter() - section_started,
+    )
+    matchmaking = matchmaking_metrics(
+        match_plan,
+        opponent_results,
+        bucket_results,
     )
     if ppo_metrics is not None:
         state.ppo_window.append({
@@ -444,8 +503,13 @@ def run_iteration(context, state, iteration):
         wins=wins,
         moving_win_rate=moving_win_rate,
         win_window_size=len(state.win_rate_window),
-        training_opponent=context.training.training_opponent,
-        pool_size=context.runner.opponent_pool.size,
+        opponent_buckets=context.training.opponent_buckets,
+        difficulty_weight=context.training.difficulty_weight,
+        opponent_count=context.runner.opponent_pool.size,
+        unique_neural_opponent_count=(
+            context.runner.opponent_pool.unique_neural_opponent_count
+        ),
+        bucket_results=bucket_results,
         gradient_metrics=gradient_metrics,
         use_value_head=context.training.use_value_head,
         value_loss_window=state.value_loss_window,
@@ -473,6 +537,7 @@ def run_iteration(context, state, iteration):
         checkpoint_written=checkpoint_written,
         checkpoint_path=checkpoint_path,
         iteration_started=iteration_started,
+        matchmaking=matchmaking,
     )
     context.runtime_profile.add(
         "metrics_payload_construction",

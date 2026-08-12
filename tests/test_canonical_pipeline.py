@@ -89,6 +89,9 @@ from training.rl.ppo import (
     PPO_TRAINING_ALGORITHM,
     REINFORCE_TRAINING_ALGORITHM,
 )
+from training.rl.checkpoint_archive import archive_policy_manifest
+from training.rl.matchmaking import matchmaking_policy_manifest
+from training.rl.pool import pool_policy_manifest
 from utils.artifacts import file_sha256
 
 
@@ -144,11 +147,12 @@ def _generation_config(dataset_games=3):
     )
 
 
-def _rl_config_from_summary(summary, *, max_pool_size):
+def _rl_config_from_summary(summary):
     """Return the canonical subset represented by a direct RL smoke run."""
     return {
         "games_per_iteration": summary["games_per_iteration"],
-        "training_opponent": summary["training_opponent"],
+        "opponent_buckets": summary["opponent_buckets"],
+        "difficulty_weight": summary["difficulty_weight"],
         "learning_rate": summary["learning_rate"],
         "entropy_coef": summary["entropy_coef"],
         "weight_decay": summary["weight_decay"],
@@ -156,7 +160,6 @@ def _rl_config_from_summary(summary, *, max_pool_size):
         "log_interval": 10,
         "checkpoint_interval": 1,
         "moving_average_window": summary["moving_average_window"],
-        "max_pool_size": max_pool_size,
         "use_value_head": summary["use_value_head"],
         "value_coef": summary["value_coef"] or 0.5,
         "reward_schema": summary["reward_schema"],
@@ -178,10 +181,10 @@ def _test_resume_configuration(**overrides):
         "log_interval": 10,
         "checkpoint_interval": 50,
         "moving_average_window": 10,
-        "training_opponent": "self_play",
+        "opponent_buckets": ("heuristic", "recent"),
+        "difficulty_weight": 0.5,
         "learning_rate": 0.001,
         "entropy_coef": 0.01,
-        "max_pool_size": 5,
         "use_value_head": False,
         "value_coef": 0.5,
         "gamma": 1.0,
@@ -197,6 +200,11 @@ def _test_resume_configuration(**overrides):
         "worker_memory_reserve_mb": 512,
         "worker_estimated_mb": 256,
         "worker_max_rss_mb": 1024,
+        "opponent_system_policy": {
+            "pool": pool_policy_manifest(("heuristic", "recent")),
+            "matchmaking": matchmaking_policy_manifest(),
+            "checkpoint_archive": archive_policy_manifest(),
+        },
     }
     values.update(overrides)
     return RLTrainingConfiguration.from_mapping(values)
@@ -983,17 +991,47 @@ def test_deep_opponent_pool_survives_a_resume_state_round_trip(tmp_path):
     weights_path = tmp_path / "deep.npz"
     network.save(weights_path)
     state_path = tmp_path / "deep.resume.npz"
+    opponent_id = "snapshot:0000000000"
+    pool_state = {
+        "schema_version": 1,
+        "policy_manifest": pool_policy_manifest(("recent",)),
+        "selected_buckets": ["recent"],
+        "next_snapshot_id": 1,
+        "opponents": [{
+            "opponent_id": opponent_id,
+            "kind": "policy_snapshot",
+            "checkpoint_id": "checkpoint:0000000000",
+            "introduced_iteration": 0,
+            "introduced_at_rl_games": 0,
+            "origin": "initial_policy",
+        }],
+        "buckets": {
+            "recent": {
+                "member_ids": [opponent_id],
+                "capacity": 200,
+                "admission_rule": "every_updated_iteration",
+                "retention_rule": "fifo",
+            },
+        },
+        "weight_serialization": [{"index": 0, "opponent_id": opponent_id}],
+    }
     metadata = {
         "version": RESUME_STATE_VERSION,
         "weights_sha256": file_sha256(weights_path),
+        "opponent_pool_state": pool_state,
     }
-    _atomic_resume_state_save(state_path, metadata, (snapshot,))
+    _atomic_resume_state_save(
+        state_path,
+        metadata,
+        pool_state,
+        {opponent_id: snapshot},
+    )
 
     _loaded_metadata, snapshots = load_resume_state(weights_path, state_path)
     assert len(snapshots) == 1
-    assert sorted(snapshots[0]) == sorted(network.weight_names)
+    assert sorted(snapshots[opponent_id]) == sorted(network.weight_names)
     for name, value in snapshot.items():
-        assert np.array_equal(snapshots[0][name], value)
+        assert np.array_equal(snapshots[opponent_id][name], value)
 
 
 def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
@@ -1008,7 +1046,6 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         "total_training_games": 4,
         "gpi": 2,
         "checkpoint_interval": 1,
-        "max_pool_size": 2,
         "sl_weights_path": str(supervised),
         "seed": 321,
         "device": "cpu",
@@ -1034,7 +1071,7 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         supervised_weights_path=supervised,
         supervised_weights_sha256=supervised_hash,
         ppo_config=uninterrupted["ppo_configuration"],
-        rl_config=_rl_config_from_summary(uninterrupted, max_pool_size=2),
+        rl_config=_rl_config_from_summary(uninterrupted),
         algorithm=REINFORCE_TRAINING_ALGORITHM,
     )
     partial = _train_rl(
@@ -1324,7 +1361,6 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
         stop_after_training_games=2,
         gpi=2,
         checkpoint_interval=1,
-        max_pool_size=2,
         sl_weights_path=str(supervised),
         rl_weights_path=str(tmp_path / "raw" / "training.npz"),
         seed=42,
@@ -1350,14 +1386,13 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
         supervised_weights_path=supervised,
         supervised_weights_sha256=supervised_hash,
         ppo_config=probe_summary["ppo_configuration"],
-        rl_config=_rl_config_from_summary(probe_summary, max_pool_size=2),
+        rl_config=_rl_config_from_summary(probe_summary),
     )
     summary = _train_rl(
         total_training_games=3,
         stop_after_training_games=2,
         gpi=2,
         checkpoint_interval=1,
-        max_pool_size=2,
         sl_weights_path=str(supervised),
         rl_weights_path=str(tmp_path / "canonical" / "training.npz"),
         seed=42,
@@ -1410,7 +1445,6 @@ def test_shutdown_before_first_iteration_still_creates_a_resumable_pair(tmp_path
         "total_training_games": 2,
         "gpi": 2,
         "checkpoint_interval": 1,
-        "max_pool_size": 1,
         "sl_weights_path": str(ROOT / "models" / "domino_sl_weights.npz"),
         "rl_weights_path": str(base),
         "seed": 91,
@@ -1464,7 +1498,6 @@ def test_numbered_checkpoint_callback_advances_by_committed_games(tmp_path):
         total_training_games=5,
         gpi=1,
         checkpoint_interval=2,
-        max_pool_size=1,
         sl_weights_path=str(ROOT / "models" / "domino_sl_weights.npz"),
         rl_weights_path=str(tmp_path / "callback" / "training.npz"),
         seed=92,

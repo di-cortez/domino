@@ -70,8 +70,10 @@ RL output lives at `models/rl/domino_rl_<level>_seed<seed>/`. `big`, `huge`,
 and `forever` publish immutable exact resume generations plus the convenience
 aliases `latest_weights.npz`, `optimizer_state.npz`, `rng_state.json`, and
 `opponent_pool/pool_manifest.json`. `training_state.json` is the commit marker;
-resume restores policy, optimizer, RNG state, opponent pool/order, adaptive
-selection, algorithm-specific update history, and cumulative counters. Examples:
+resume restores policy, optimizer, RNG state, opponent identities/bucket order,
+difficulty evidence, adaptive selection, algorithm-specific update history,
+and cumulative counters. The independent `checkpoint_archive/` keeps a bounded,
+progressively thinned policy history for analysis and future buckets. Examples:
 
 The marker advances at the normal numbered-checkpoint interval, not only at a
 100,000-game diagnostic boundary. Superseded non-milestone latest payloads are

@@ -56,7 +56,13 @@ def _row(iteration):
         "buffer_location": "ram",
         "buffer_bytes": 10_000,
         "selected_workers": 4,
-        "pool_size": 10,
+        "opponent_count": 11,
+        "unique_neural_opponent_count": 10,
+        "matchmaking": {
+            "plan_sha256": "a" * 64,
+            "uniform_budget": 1_000,
+            "difficulty_budget": 1_000,
+        },
         "rollout_seconds": 1.25,
         "ppo_seconds": 0.75,
         "rollout_duration_s": 1.25,
@@ -70,7 +76,7 @@ def _row(iteration):
     }
 
 
-def test_metrics_v2_uses_one_header_and_compact_array_rows(tmp_path):
+def test_metrics_v3_uses_one_header_and_compact_array_rows(tmp_path):
     path = tmp_path / "training_metrics.jsonl"
     metadata = {
         "run_configuration_sha256": "a" * 64,
@@ -91,6 +97,7 @@ def test_metrics_v2_uses_one_header_and_compact_array_rows(tmp_path):
     assert rows[0]["final_approx_kl"] == 0.007123456789
     assert rows[0]["epochs_completed"] == 4
     assert rows[0]["minibatch_sizes"] == [16, 16, 16, 15, 15, 15, 15, 15]
+    assert rows[0]["matchmaking"]["uniform_budget"] == 1_000
     assert "cumulative_training_games" not in TRAINING_METRIC_COLUMNS
     assert "decision_sample_count" not in TRAINING_METRIC_COLUMNS
     assert "final_entropy" not in TRAINING_METRIC_COLUMNS

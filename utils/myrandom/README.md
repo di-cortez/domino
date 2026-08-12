@@ -207,8 +207,7 @@ module:
   arguments.
 - `tests/test_runtime_profile.py`: RL-vs-random profile keys and artifact paths.
 - `train_script/run_pipeline.py`: compact random-baseline diagnostic text.
-- `training/canonical_run.py`: persisted `uniform_random`/opponent-selection
-  metadata.
+- `training/canonical_run.py`: persisted deterministic matchmaking metadata.
 - `training/rl/cli.py`: seed help text.
 - `ui/test_ui_controller.py`: verifies that the `random` UI choice constructs
   `RandomUIAgent`.

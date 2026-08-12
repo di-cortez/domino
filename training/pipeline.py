@@ -28,6 +28,7 @@ from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import MAX_DIAGNOSTIC_WORKERS, ParallelSafetyConfig
 from training.datagen import generator as dataset_generator
 from training.rl import self_play
+from training.supervised import cli as supervised_cli
 from training.supervised import training_loop
 from training.canonical_assets import (
     ArtifactCompatibilityError,
@@ -513,7 +514,7 @@ def _supervised_training_identity(args, max_epochs):
 def _network_architecture(args):
     """Return the one architecture selected for supervised and RL stages."""
     return architecture_from_hidden_sizes(
-        training_loop.hidden_sizes_from_args(args)
+        supervised_cli.hidden_sizes_from_args(args)
     )
 
 
@@ -1539,7 +1540,7 @@ def parse_args(argv=None):
     dataset.add_argument("--dataset-estimated-worker-mb", type=int, default=256)
     dataset.add_argument("--dataset-max-worker-rss-mb", type=int, default=1024)
     dataset.add_argument("--dataset-games", type=int, default=None, help=argparse.SUPPRESS)
-    training_loop.add_optional_training_arguments(parser)
+    supervised_cli.add_optional_training_arguments(parser)
     self_play.add_optional_rl_arguments(
         parser,
         fresh_from_sl_default=True,
@@ -1652,7 +1653,7 @@ def parse_args(argv=None):
     # Resolution runs after resume hydration so a locked run keeps the exact
     # architecture it was created with.
     try:
-        training_loop.resolve_architecture_arguments(args)
+        supervised_cli.resolve_architecture_arguments(args)
     except ValueError as exc:
         parser.error(str(exc))
     return _resolve_execution_identity(args)

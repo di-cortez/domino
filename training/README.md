@@ -179,7 +179,7 @@ first.
 | Stage | Command |
 |---|---|
 | Dataset generation | `python -m training.datagen.generator` |
-| Supervised training | `python -m training.supervised.training_loop` |
+| Supervised training | `python -m training.supervised.cli` |
 | Self-play RL | `python -m training.rl.self_play` |
 | Full canonical pipeline | `python -m training.pipeline <level>` |
 
@@ -200,7 +200,7 @@ compatible. After copying these files into the repo, run the pipeline again:
 
 ```bash
 python -m training.datagen.generator
-python -m training.supervised.training_loop
+python -m training.supervised.cli
 python -m training.rl.self_play
 ```
 

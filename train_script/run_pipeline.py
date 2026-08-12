@@ -169,6 +169,7 @@ def _run_dataset(config, args):
 
 def _run_supervised_training(config, args):
     """Train the supervised policy with compact epoch progress."""
+    supervised_cli = _silent_import("training.supervised.cli")
     training_loop = _silent_import("training.supervised.training_loop")
 
     return _run_stage(
@@ -178,7 +179,7 @@ def _run_supervised_training(config, args):
         lambda progress: training_loop.train_supervised(
             epochs=config.supervised_epochs,
             batch_size=args.sl_batch_size,
-            hidden_sizes=training_loop.hidden_sizes_from_args(args),
+            hidden_sizes=supervised_cli.hidden_sizes_from_args(args),
             quiet=True,
             progress_callback=progress,
             weight_decay=args.weight_decay,
@@ -382,8 +383,8 @@ def parse_args(argv=None):
     dataset.add_argument("--dataset-max-worker-rss-mb", type=int, default=1024)
     dataset.add_argument("--dataset-seed", type=int, default=None)
 
-    training_loop = _silent_import("training.supervised.training_loop")
-    training_loop.add_optional_training_arguments(parser)
+    supervised_cli = _silent_import("training.supervised.cli")
+    supervised_cli.add_optional_training_arguments(parser)
     self_play = importlib.import_module("training.rl.self_play")
     self_play.add_optional_rl_arguments(
         parser,

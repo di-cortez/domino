@@ -49,7 +49,7 @@ def add_optional_rl_arguments(
 
     ``include_regularization=False`` is for combined parsers that already
     installed the shared ``--weight-decay``/``--dropout`` controls through
-    :func:`training.supervised.training_loop.add_optional_training_arguments`.
+    :func:`training.supervised.cli.add_optional_training_arguments`.
     """
     group = parser.add_argument_group("optional reinforcement-learning controls")
     group.add_argument(

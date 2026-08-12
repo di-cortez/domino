@@ -6,13 +6,16 @@ Owned by `training/supervised/`.
 | File | Purpose |
 |---|---|
 | `training_loop.py` | Selects safe host/GPU storage, validates the fixed supervised batch, orchestrates plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
+| `cli.py` | Defines standalone and pipeline supervised arguments and the command-line entry point. |
+| `dataset.py` | Filters JSONL records and owns memory-safe RAM, compressed NPZ, and mmap encoded-dataset storage. |
+| `plotting.py` | Scales and atomically renders the supervised training/validation loss graph. |
 | `runtime.py` | Implements supervised batch/workspace safety, GPU residency probes/windows, and supervised memory telemetry. |
 
 
 Run:
 
 ```bash
-python -m training.supervised.training_loop
+python -m training.supervised.cli
 ```
 
 The loop:
@@ -124,13 +127,13 @@ and the summary records `training loss plateau`, `validation loss plateau`, or
 Enable any control independently by adding its flag:
 
 ```bash
-python -m training.supervised.training_loop --weight-decay
-python -m training.supervised.training_loop --dropout
-python -m training.supervised.training_loop --early-stopping
-python -m training.supervised.training_loop --lr-decay 0.7 --lr-decay-patience 8
-python -m training.supervised.training_loop --no-lr-decay
-python -m training.supervised.training_loop --sl-no-training-plateau-stop
-python -m training.supervised.training_loop --sl-device cpu --sl-seed 123
+python -m training.supervised.cli --weight-decay
+python -m training.supervised.cli --dropout
+python -m training.supervised.cli --early-stopping
+python -m training.supervised.cli --lr-decay 0.7 --lr-decay-patience 8
+python -m training.supervised.cli --no-lr-decay
+python -m training.supervised.cli --sl-no-training-plateau-stop
+python -m training.supervised.cli --sl-device cpu --sl-seed 123
 ```
 
 The supervised controls use these defaults:
@@ -160,7 +163,7 @@ Validation is checked every 10 epochs. The options can be combined and can
 receive explicit values:
 
 ```bash
-python -m training.supervised.training_loop \
+python -m training.supervised.cli \
   --weight-decay 0.00005 \
   --early-stopping 12 \
   --lr-decay 0.7 --lr-decay-patience 5 \

@@ -82,6 +82,10 @@ from training.pipeline import (
     parse_args as parse_canonical_pipeline_args,
 )
 from training.rl.cli import _training_kwargs_from_args
+from training.supervised.cli import (
+    hidden_sizes_from_args,
+    parse_args as parse_supervised_args,
+)
 from training.supervised.training_loop import (
     DEFAULT_EARLY_STOPPING_PATIENCE,
     DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
@@ -89,8 +93,6 @@ from training.supervised.training_loop import (
     DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
     DEFAULT_TRAINING_PLATEAU_PATIENCE,
     DEFAULT_TRAINING_PLATEAU_WINDOW,
-    hidden_sizes_from_args,
-    parse_args as parse_supervised_args,
 )
 from training.utils.cli_args import DEFAULT_DROPOUT_RATE, DEFAULT_WEIGHT_DECAY
 from train_script.run_pipeline import _build_config, parse_args as parse_pipeline_args

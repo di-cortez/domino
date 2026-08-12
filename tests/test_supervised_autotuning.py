@@ -29,13 +29,17 @@ from training.supervised.runtime import (
     SupervisedDataPlan,
     probe_gpu_residency,
 )
-from training.supervised.training_loop import (
-    _save_supervised_loss_plot,
+from training.supervised.dataset import (
     _mmap_cache_paths,
-    _supervised_loss_axis_limits,
     load_dataset,
     load_or_build_dataset,
+)
+from training.supervised.plotting import (
+    _supervised_loss_axis_limits,
+    save_supervised_loss_plot,
     supervised_loss_plot_path,
+)
+from training.supervised.training_loop import (
     supervised_random_manifest_path,
     train_supervised,
 )
@@ -413,7 +417,7 @@ class DatasetResidencyTests(unittest.TestCase):
                 "matplotlib.figure.Figure.savefig",
                 side_effect=RuntimeError("simulated plot failure"),
             ), self.assertRaisesRegex(RuntimeError, "simulated plot failure"):
-                _save_supervised_loss_plot(
+                save_supervised_loss_plot(
                     [1.0, 0.75],
                     [
                         {"epoch": 0, "validation_loss": 0.9},

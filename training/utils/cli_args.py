@@ -4,7 +4,7 @@ The supervised and RL policies are the same architecture and the RL run starts
 from the supervised checkpoint, so the regularization flags are owned by one
 stage-independent definition instead of being restated per parser. The value
 validators live here for the same reason: every training parser needs them and
-:mod:`training.supervised.training_loop` and :mod:`training.rl.cli` previously
+:mod:`training.supervised.cli` and :mod:`training.rl.cli` previously
 kept separate copies of the same positive-integer check.
 """
 

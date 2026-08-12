@@ -7,7 +7,7 @@ ignored by Git.
 | File | Contents |
 |---|---|
 | `supervised_dataset.jsonl` | JSON Lines file with one `{"state": ..., "target_action": ...}` training example per line. |
-| `supervised_dataset_encoded.npz` | Auto-generated cache with encoded `X/Y` arrays used by `training.supervised.training_loop`. |
+| `supervised_dataset_encoded.npz` | Auto-generated cache with encoded `X/Y` arrays used by `training.supervised.dataset`. |
 | `supervised_dataset_standard_seed<seed>.jsonl` | Reusable long-run pipeline dataset for that seed. |
 | `supervised_dataset_standard_seed<seed>.meta.json` | Structural identity, generation configuration, provenance, example count, and SHA-256. |
 

@@ -443,7 +443,7 @@ class ParallelDiagnosticsTests(unittest.TestCase):
     def test_supervised_encoder_preallocates_float32_and_honors_ram_guard(self):
         from agents.encoder import DominoEncoder
         from training.datagen.generator import generate_dataset
-        from training.supervised.training_loop import load_dataset
+        from training.supervised.dataset import load_dataset
 
         with tempfile.TemporaryDirectory() as temp_dir:
             dataset_path = Path(temp_dir) / "tiny.jsonl"

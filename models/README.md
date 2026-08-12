@@ -24,7 +24,7 @@ Regenerate in order:
 
 ```bash
 python -m training.datagen.generator
-python -m training.supervised.training_loop
+python -m training.supervised.cli
 python -m training.rl.self_play --fresh-from-sl
 ```
 

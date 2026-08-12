@@ -189,7 +189,7 @@ Run stages directly when iterating on one component:
 
 ```bash
 python -m training.datagen.generator --workers auto --seed 123
-python -m training.supervised.training_loop --sl-device auto --sl-seed 123
+python -m training.supervised.cli --sl-device auto --sl-seed 123
 python -m training.rl.self_play --rl-workers auto --seed 123
 python -m training.rl.self_play --fresh-from-sl --rl-workers auto --seed 123
 python -m diagnostics.evaluate --games 10000 --seed 123

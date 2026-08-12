@@ -19,7 +19,7 @@
 # training module's dataset/epoch/output defaults:
 #
 #   python -m training.datagen.generator
-#   python -m training.supervised.training_loop
+#   python -m training.supervised.cli
 #
 # Stage 3 wraps `python -m training.rl.self_play`, which does accept CLI flags
 # (exact games, learning rate, reward schema, gamma,
@@ -397,7 +397,7 @@ else
     fi
 
     section "Step 2/4: training supervised policy (${SL_EXTRA_ARGS[*]} -> models/domino_sl_weights.npz)"
-    "$PYTHON_BIN" -u -m training.supervised.training_loop "${SL_EXTRA_ARGS[@]}"
+    "$PYTHON_BIN" -u -m training.supervised.cli "${SL_EXTRA_ARGS[@]}"
 fi
 
 if [[ "$SKIP_RL" -eq 1 ]]; then

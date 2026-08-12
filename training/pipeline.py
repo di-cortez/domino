@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -28,6 +28,7 @@ from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import MAX_DIAGNOSTIC_WORKERS, ParallelSafetyConfig
 from training.datagen import generator as dataset_generator
 from training.rl import cli as rl_cli
+from training.rl.config import DEFAULT_GPI
 from training.rl import training_loop as rl_training_loop
 from training.supervised import cli as supervised_cli
 from training.supervised import training_loop
@@ -51,6 +52,7 @@ from training.canonical_run import (
     update_diagnostic_markers,
 )
 from training.rl.ppo import (
+    POLICY_GRADIENT_CLIP_NORM,
     PPO_TRAINING_ALGORITHM,
     DEFAULT_PPO_MAX_EPOCHS,
     MAX_PPO_EPOCHS,
@@ -91,10 +93,8 @@ PERIODIC_DIAGNOSTIC_TUNING_FILE = "periodic_diagnostic_tuning.json"
 FOREVER_ACTIVE_RUN_FORMAT_VERSION = 1
 FOREVER_ACTIVE_RUN_FILE = "active_forever_run.json"
 _RESUME_OPERATIONAL_ARGUMENTS = frozenset({
-    "adaptive_tuning_path",
     "artifact_root",
     "execution_id",
-    "metrics_output_path",
     "numbered_checkpoints",
     "rebuild_dataset",
     "rebuild_supervised_assets",
@@ -125,7 +125,7 @@ class PipelineConfig:
     reuse_supervised_assets: bool
     dataset_games: int = CANONICAL_DATASET_GAMES
     supervised_epochs: int = CANONICAL_SUPERVISED_MAX_EPOCHS
-    rl_games_per_iteration: int = rl_training_loop.DEFAULT_GPI
+    rl_games_per_iteration: int = DEFAULT_GPI
     ppo_max_epochs: int = DEFAULT_PPO_MAX_EPOCHS
 
     @property
@@ -710,7 +710,7 @@ def _rl_config(args):
         "value_coef": float(args.value_coef),
         "reward_schema": args.reward_schema,
         "gamma": float(args.gamma),
-        "clip_grad_norm": float(args.clip_grad_norm),
+        "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
         "normalize_advantages": normalize_advantages,
         "moving_average_window": int(args.moving_average_window),
         "requested_device": args.device,
@@ -1201,8 +1201,6 @@ def run_rl_pipeline(root, config, args, assets):
     internal_target = FOREVER_INTERNAL_TARGET if target is None else int(target)
     periodic_boundaries = config.periodic_diagnostics
     checkpoint_base = run_dir / "checkpoint_states" / "training.npz"
-    metrics_path = run_dir / "training_metrics.jsonl"
-    tuning_path = run_dir / "adaptive_tuning.json"
     last_summary = None
 
     with ShutdownFlag() as shutdown, _rl_progress(target, completed) as progress_bar:
@@ -1215,31 +1213,38 @@ def run_rl_pipeline(root, config, args, assets):
                 args.periodic_diagnostic_every_games,
                 periodic_boundaries,
             )
-            base_kwargs = rl_cli._training_kwargs_from_args(args)
-            base_kwargs.update({
-                "iterations": None,
-                "total_training_games": internal_target,
-                "stop_after_training_games": stop_at,
-                "adaptive_tuning_training_games": (
+            training_options, resource_options, execution_options = (
+                rl_cli.training_options_from_args(args)
+            )
+            training_options = replace(
+                training_options,
+                iterations=None,
+                total_training_games=internal_target,
+            )
+            resource_options = replace(
+                resource_options,
+                adaptive_tuning_training_games=(
                     FOREVER_TUNING_REFERENCE_GAMES if target is None else int(target)
                 ),
-                "sl_weights_path": str(supervised_path),
-                "rl_weights_path": str(checkpoint_base),
-                "adaptive_tuning_path": str(tuning_path),
-                "metrics_output_path": str(metrics_path),
-                "numbered_checkpoints": True,
-                "resume_weights_path": (
+                sl_weights_path=str(supervised_path),
+                rl_weights_path=str(checkpoint_base),
+            )
+            execution_options = replace(
+                execution_options,
+                stop_after_training_games=stop_at,
+                numbered_checkpoints=True,
+                resume_weights_path=(
                     None if resume_point is None else str(resume_point.weights_path)
                 ),
-                "resume_state_file": (
+                resume_state_file=(
                     None if resume_point is None else str(resume_point.resume_state_path)
                 ),
-                "fresh_from_sl": resume_point is None,
-                "shutdown_requested": shutdown,
-                "quiet": True,
-                "status_callback": _status,
-                "run_configuration": run_configuration,
-            })
+                fresh_from_sl=resume_point is None,
+                shutdown_requested=shutdown,
+                quiet=True,
+                status_callback=_status,
+                run_configuration=run_configuration,
+            )
 
             def progress(done, _reported_total):
                 if progress_bar is not None and done > progress_bar.n:
@@ -1311,10 +1316,17 @@ def run_rl_pipeline(root, config, args, assets):
                     ),
                 )
 
-            base_kwargs["progress_callback"] = progress
-            base_kwargs["metrics_callback"] = metrics
-            base_kwargs["checkpoint_callback"] = publish_scheduled_checkpoint
-            last_summary = rl_training_loop.train(**base_kwargs)
+            execution_options = replace(
+                execution_options,
+                progress_callback=progress,
+                metrics_callback=metrics,
+                checkpoint_callback=publish_scheduled_checkpoint,
+            )
+            last_summary = rl_training_loop.train(
+                training_options,
+                resource_options,
+                execution_options,
+            )
             completed = int(last_summary["completed_training_games"])
             iterations = int(last_summary["rl_iterations_completed"])
             optimizer_steps = int(last_summary["optimizer_step_count"])

@@ -108,7 +108,6 @@ def _tuning_kwargs(network, **overrides):
         "workers": "auto",
         "retune_workers": False,
         "saved_tuning": None,
-        "worker_candidates": (1, 2),
         "base_seed": 42,
         "training_opponent": "self_play",
         "schema": REWARD_SCHEMAS["default"],
@@ -122,12 +121,17 @@ def _tuning_kwargs(network, **overrides):
 
 def test_worker_benchmark_uses_exact_one_percent_with_partial_final_block():
     runner = _Runner()
-    with mock.patch("training.rl.adaptive_tuning._new_runner", return_value=runner):
+    with (
+        mock.patch("training.rl.adaptive_tuning._new_runner", return_value=runner),
+        mock.patch(
+            "training.rl.adaptive_tuning.DEFAULT_RL_WORKER_CANDIDATES",
+            (1,),
+        ),
+    ):
         test_games, rows = benchmark_worker_candidates(
             _FrozenNetwork(),
             gpi=600,
             total_training_games=100_000,
-            candidates=(1,),
             base_seed=42,
             training_opponent="self_play",
             schema=REWARD_SCHEMAS["default"],
@@ -151,6 +155,10 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
     with (
         mock.patch("training.rl.adaptive_tuning._new_runner", return_value=runner),
         mock.patch(
+            "training.rl.adaptive_tuning.DEFAULT_RL_WORKER_CANDIDATES",
+            (1, 2, 4, 6),
+        ),
+        mock.patch(
             "training.rl.adaptive_tuning.time.perf_counter",
             side_effect=(0.0, 1.0, 2.0, 2.8, 4.0, 4.75),
         ),
@@ -159,7 +167,6 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
             _FrozenNetwork(),
             gpi=100,
             total_training_games=10_000,
-            candidates=(1, 2, 4, 6),
             base_seed=42,
             training_opponent="self_play",
             schema=REWARD_SCHEMAS["default"],

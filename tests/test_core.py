@@ -62,7 +62,7 @@ from middleware.opponent_model import (
     mask_from_tiles,
     reconstruct_public_actions,
 )
-from training.rl.config import DEFAULT_GPI
+from training.rl.config import DEFAULT_GPI, RLResourceOptions
 from training.rl.rollout import (
     EVENT_REWARD_DECAY,
     LEARNER_DRAW_PENALTY,
@@ -81,7 +81,7 @@ from training.pipeline import (
     _rl_config as _canonical_rl_config,
     parse_args as parse_canonical_pipeline_args,
 )
-from training.rl.cli import _training_kwargs_from_args
+from training.rl.cli import training_options_from_args
 from training.supervised.cli import (
     hidden_sizes_from_args,
     parse_args as parse_supervised_args,
@@ -646,7 +646,6 @@ def test_rl_dropout_is_absent_from_rollout_and_evaluation_forward_passes():
         network,
         samples,
         entropy_coef=0.0,
-        clip_grad_norm=None,
         normalize_advantages=False,
         use_value_head=False,
         value_coef=0.5,
@@ -681,20 +680,56 @@ def test_regularization_is_disabled_unless_its_flag_is_passed():
         assert only_dropout.weight_decay == DISABLED_WEIGHT_DECAY
 
     # The same single coefficient reaches the supervised and the RL network.
-    rl_kwargs = _training_kwargs_from_args(
+    rl_training, _rl_resources, _rl_execution = training_options_from_args(
         parse_rl_args(["--weight-decay", "0.002", "--dropout", "0.35"])
     )
-    assert rl_kwargs["weight_decay"] == 0.002
-    assert rl_kwargs["dropout_rate"] == 0.35
-    disabled_kwargs = _training_kwargs_from_args(parse_rl_args([]))
-    assert disabled_kwargs["weight_decay"] == DISABLED_WEIGHT_DECAY
-    assert disabled_kwargs["dropout_rate"] == DISABLED_DROPOUT_RATE
+    assert rl_training.weight_decay == 0.002
+    assert rl_training.dropout_rate == 0.35
+    disabled_training, _resources, _execution = training_options_from_args(
+        parse_rl_args([])
+    )
+    assert disabled_training.weight_decay == DISABLED_WEIGHT_DECAY
+    assert disabled_training.dropout_rate == DISABLED_DROPOUT_RATE
 
     canonical = parse_canonical_pipeline_args(
         ["small", "--weight-decay", "0.002", "--dropout", "0.35"]
     )
     assert _canonical_rl_config(canonical)["weight_decay"] == 0.002
     assert _canonical_rl_config(canonical)["dropout_rate"] == 0.35
+
+
+def test_rl_artifact_paths_are_derived_from_policy_weights(tmp_path):
+    direct = RLResourceOptions(rl_weights_path=tmp_path / "experiment.npz")
+    assert direct.adaptive_tuning_path == tmp_path / "adaptive_tuning.json"
+    assert (
+        direct.metrics_output_path
+        == tmp_path / "experiment_training_metrics.jsonl"
+    )
+
+    canonical = RLResourceOptions(
+        rl_weights_path=tmp_path / "run" / "checkpoint_states" / "training.npz"
+    )
+    assert (
+        canonical.adaptive_tuning_path
+        == tmp_path / "run" / "adaptive_tuning.json"
+    )
+    assert (
+        canonical.metrics_output_path
+        == tmp_path / "run" / "training_metrics.jsonl"
+    )
+
+
+def test_removed_rl_implementation_details_are_not_cli_arguments():
+    for flag in (
+        "--adaptive-tuning-path",
+        "--metrics-output-path",
+        "--clip-grad-norm",
+    ):
+        try:
+            parse_rl_args([flag, "unused"])
+        except SystemExit:
+            continue
+        raise AssertionError(f"Removed RL flag was still accepted: {flag}")
 
 
 def test_networks_are_unregularized_without_explicit_coefficients():
@@ -1684,7 +1719,6 @@ def test_legacy_value_head_update_reports_pre_update_predictions():
         network,
         samples,
         entropy_coef=0.0,
-        clip_grad_norm=None,
         normalize_advantages=False,
         use_value_head=True,
         value_coef=0.5,

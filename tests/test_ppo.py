@@ -259,7 +259,6 @@ def test_ppo_value_head_updates_critic_and_reports_value_metrics():
         base_seed=42,
         iteration=1,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         value_coef=0.5,
         max_epochs=2,
     )
@@ -290,7 +289,6 @@ def test_ppo_value_head_requires_pre_update_values_in_the_buffer():
             base_seed=42,
             iteration=1,
             entropy_coef=0.0,
-            clip_grad_norm=5.0,
         )
 
 
@@ -335,7 +333,6 @@ def test_kl_early_stop_occurs_only_after_the_completed_epoch():
         base_seed=42,
         iteration=1,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         max_epochs=16,
     )
 
@@ -362,7 +359,6 @@ def test_kl_early_stop_can_end_a_sixteen_epoch_budget_after_several_epochs():
         base_seed=42,
         iteration=2,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         max_epochs=16,
     )
 
@@ -382,7 +378,6 @@ def test_small_kl_runs_all_sixteen_epochs_and_counts_every_optimizer_step():
         base_seed=42,
         iteration=3,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         max_epochs=16,
     )
 
@@ -402,7 +397,6 @@ def test_fixed_kl_policy_is_reported_and_only_stop_kl_controls_early_stopping():
         base_seed=42,
         iteration=4,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         max_epochs=2,
     )
 
@@ -421,7 +415,6 @@ def test_ppo_rejects_more_than_sixteen_epochs():
             base_seed=42,
             iteration=4,
             entropy_coef=0.0,
-            clip_grad_norm=5.0,
             max_epochs=17,
         )
 
@@ -459,7 +452,6 @@ def test_simulated_gpu_workspace_oom_falls_back_before_any_optimizer_step():
             base_seed=9,
             iteration=3,
             entropy_coef=0.0,
-            clip_grad_norm=5.0,
             max_epochs=2,
         )
 

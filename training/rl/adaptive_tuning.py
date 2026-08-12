@@ -252,7 +252,6 @@ def benchmark_worker_candidates(
     *,
     gpi,
     total_training_games,
-    candidates,
     base_seed,
     training_opponent,
     schema,
@@ -268,7 +267,11 @@ def benchmark_worker_candidates(
         1,
         int(int(total_training_games) * RL_WORKER_AUTOTUNE_FRACTION),
     )
-    candidates = _candidate_counts(candidates, safety, max(gpi, test_games))
+    candidates = _candidate_counts(
+        DEFAULT_RL_WORKER_CANDIDATES,
+        safety,
+        max(gpi, test_games),
+    )
     runner = _new_runner(
         network,
         training_opponent=training_opponent,
@@ -481,7 +484,6 @@ def run_worker_tuning(
     workers,
     retune_workers,
     saved_tuning,
-    worker_candidates,
     base_seed,
     training_opponent,
     schema,
@@ -532,7 +534,6 @@ def run_worker_tuning(
                 network,
                 gpi=gpi,
                 total_training_games=total_training_games,
-                candidates=worker_candidates,
                 base_seed=base_seed,
                 training_opponent=training_opponent,
                 schema=schema,

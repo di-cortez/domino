@@ -14,7 +14,16 @@ import time
 import numpy as np
 
 from training.rl.rollout import REWARD_ZERO_EPSILON
-from training.rl.ppo import fixed_ppo_policy, ppo_is_enabled
+from training.rl.constants import (
+    RL_WORKER_AUTOTUNE_FRACTION,
+    RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
+)
+from training.rl.ppo import (
+    POLICY_GRADIENT_CLIP_NORM,
+    fixed_ppo_policy,
+    ppo_is_enabled,
+)
+from training.rl.resume import resume_state_path
 from utils.resource_limits import MIB
 from utils.runtime_status import format_duration, print_memory_report
 
@@ -65,6 +74,252 @@ TRAINING_METRIC_COLUMNS = (
     "checkpoint_path",
     "elapsed_training_seconds",
 )
+
+
+def build_training_metrics_header(
+    context,
+    *,
+    supervised_weights_sha256,
+    requested_device,
+):
+    """Build the immutable metadata header for an RL metrics stream."""
+    training = context.training
+    resources = context.resources
+    execution = context.execution
+    return {
+        "run_configuration_sha256": (
+            context.resume_configuration.run_configuration_sha256
+        ),
+        "run_configuration": dict(execution.run_configuration or {}),
+        "training": {
+            "effective_seed": int(context.effective_seed),
+            "algorithm": context.algorithm,
+            "total_training_games": int(training.total_training_games),
+            "games_per_iteration": int(context.selected_gpi),
+            "training_opponent": training.training_opponent,
+            "learning_rate": float(training.learning_rate),
+            "entropy_coef": float(training.entropy_coef),
+            "max_pool_size": int(training.max_pool_size),
+            "use_value_head": bool(training.use_value_head),
+            "value_coef": float(training.value_coef),
+            "gamma": float(training.gamma),
+            "reward_schema": training.reward_schema,
+            "reward_constants": dict(context.schema),
+            "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
+            "normalize_advantages": bool(training.normalize_advantages),
+            "weight_decay": float(training.weight_decay),
+            "dropout_rate": float(training.dropout_rate),
+            "moving_average_window": int(execution.moving_average_window),
+            "requested_device": requested_device,
+            "resolved_device": context.network.device,
+            "requested_workers": resources.workers,
+            "selected_workers": int(context.selected_workers),
+            "supervised_weights_sha256": supervised_weights_sha256,
+            "ppo_configuration": fixed_ppo_policy(training.ppo_max_epochs),
+            "opponent_pool": context.runner.opponent_pool.manifest(),
+        },
+    }
+
+
+def build_iteration_metrics_row(
+    context,
+    state,
+    *,
+    iteration,
+    games,
+    batch_size,
+    wins,
+    moving_win_rate,
+    reward_summary,
+    gradient_metrics,
+    ppo_metrics,
+    rollout_elapsed,
+    update_elapsed,
+    checkpoint_written,
+    checkpoint_path,
+    iteration_started,
+):
+    """Build the complete in-memory metrics row for one RL iteration."""
+    moving_value_loss = (
+        float(sum(state.value_loss_window) / len(state.value_loss_window))
+        if state.value_loss_window else None
+    )
+    reward = reward_summary or {}
+    return {
+        "iteration": int(iteration),
+        "total_iterations": int(context.final_iteration),
+        "games": int(games),
+        "cumulative_games": int(state.completed_training_games),
+        "cumulative_training_games": int(state.completed_training_games),
+        "total_training_games": int(context.training.total_training_games),
+        "games_per_iteration": int(context.selected_gpi),
+        "decision_sample_count": int(batch_size),
+        "decisions": int(batch_size),
+        "wins_in_batch": int(wins),
+        "batch_win_rate": float(wins / games),
+        "moving_average_win_rate": float(moving_win_rate),
+        "reward_mean": reward.get("reward_mean"),
+        "reward_std": reward.get("reward_std"),
+        "reward_min": reward.get("reward_min"),
+        "reward_max": reward.get("reward_max"),
+        "good_pct": reward.get("good_pct"),
+        "neutral_pct": reward.get("neutral_pct"),
+        "bad_pct": reward.get("bad_pct"),
+        "entropy": None if gradient_metrics is None else float(gradient_metrics["entropy"]),
+        "grad_norm": None if gradient_metrics is None else float(gradient_metrics["grad_norm"]),
+        "applied_grad_norm": None if gradient_metrics is None else float(gradient_metrics["applied_grad_norm"]),
+        "grad_clipped": False if gradient_metrics is None else bool(gradient_metrics["grad_clipped"]),
+        "value_loss": None if gradient_metrics is None else gradient_metrics["value_loss"],
+        "moving_average_value_loss": moving_value_loss,
+        "requested_minibatches": None if ppo_metrics is None else int(ppo_metrics["requested_minibatches"]),
+        "effective_minibatches": None if ppo_metrics is None else int(ppo_metrics["effective_minibatches"]),
+        "minibatch_sizes": None if ppo_metrics is None else ppo_metrics["minibatch_sizes"],
+        "epochs_completed": None if ppo_metrics is None else int(ppo_metrics["epochs_completed"]),
+        "stopped_by_kl": False if ppo_metrics is None else bool(ppo_metrics["stopped_by_kl"]),
+        "optimizer_steps": 0 if gradient_metrics is None else int(
+            ppo_metrics["optimizer_steps"] if ppo_metrics is not None else 1
+        ),
+        "final_approx_kl": None if ppo_metrics is None else float(ppo_metrics["final_approx_kl"]),
+        "max_approx_kl": None if ppo_metrics is None else float(ppo_metrics["max_approx_kl"]),
+        "final_clip_fraction": None if ppo_metrics is None else float(ppo_metrics["final_clip_fraction"]),
+        "final_entropy": None if ppo_metrics is None else float(ppo_metrics["final_entropy"]),
+        "final_policy_loss": None if ppo_metrics is None else float(ppo_metrics["final_policy_loss"]),
+        "gradient_norm_mean": None if ppo_metrics is None else float(ppo_metrics["gradient_norm_mean"]),
+        "gradient_norm_max": None if ppo_metrics is None else float(ppo_metrics["gradient_norm_max"]),
+        "buffer_location": None if ppo_metrics is None else ppo_metrics["buffer_location"],
+        "buffer_bytes": 0 if ppo_metrics is None else int(ppo_metrics["buffer_bytes"]),
+        "selected_workers": int(context.runner.worker_count),
+        "pool_size": int(context.runner.opponent_pool.size),
+        "rollout_seconds": float(rollout_elapsed),
+        "ppo_seconds": float(update_elapsed if ppo_metrics else 0.0),
+        "rollout_duration_s": float(rollout_elapsed),
+        "update_duration_s": float(update_elapsed),
+        "total_iteration_seconds": float(time.perf_counter() - iteration_started),
+        "iteration_duration_s": float(time.perf_counter() - iteration_started),
+        "checkpoint_written": bool(checkpoint_written),
+        "checkpoint_path": checkpoint_path,
+        "elapsed_training_s": float(
+            time.perf_counter() - context.training_perf_started
+        ),
+        "rl_training_algorithm": context.algorithm,
+    }
+
+
+def _autotune_summary(context):
+    """Return the stable compatibility view of worker autotuning."""
+    worker_results = context.adaptive_tuning.get("worker_results", [])
+    return {
+        "optimal_workers": int(context.selected_workers),
+        "candidate_workers": [
+            int(row["requested_workers"]) for row in worker_results
+        ],
+        "benchmark_fraction": RL_WORKER_AUTOTUNE_FRACTION,
+        "minimum_gain": RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
+        "iterations_per_test": None,
+        "games_per_test": int(
+            context.adaptive_tuning.get("worker_test_games", 0)
+        ),
+        "reused_iteration_count": 0,
+        "reused_game_count": 0,
+        "discarded_game_count": sum(
+            int(row.get("actual_games", 0)) for row in worker_results
+        ),
+        "attempts": worker_results,
+    }
+
+
+def build_training_summary(
+    session,
+    *,
+    actual_final_iteration,
+    stopped_by_shutdown,
+    final_runtime_workers,
+    pool_snapshot_count,
+    runtime_profile_delta,
+    elapsed_time,
+):
+    """Build the public result of a complete or interrupted RL invocation."""
+    context = session.context
+    state = session.state
+    training = context.training
+    resources = context.resources
+    execution = context.execution
+    return {
+        "iterations": int(actual_final_iteration),
+        "rl_iterations_completed": int(actual_final_iteration),
+        "completed_iterations_this_run": int(
+            state.completed_iterations_this_invocation
+        ),
+        "start_iteration": int(session.start_iteration),
+        "start_training_games": int(
+            state.completed_training_games - state.completed_this_invocation
+        ),
+        "games_per_iteration": int(context.selected_gpi),
+        "requested_games_per_iteration": int(training.gpi),
+        "total_training_games": int(training.total_training_games),
+        "completed_training_games": int(state.completed_training_games),
+        "invocation_target_training_games": int(context.invocation_target_games),
+        "shutdown_requested": bool(stopped_by_shutdown),
+        "training_opponent": training.training_opponent,
+        "learning_rate": training.learning_rate,
+        "entropy_coef": training.entropy_coef,
+        "use_value_head": training.use_value_head,
+        "value_coef": training.value_coef if training.use_value_head else None,
+        "gamma": training.gamma,
+        "reward_schema": training.reward_schema,
+        "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
+        "normalize_advantages": training.normalize_advantages,
+        "weight_decay": training.weight_decay,
+        "dropout_rate": training.dropout_rate,
+        "moving_average_window": execution.moving_average_window,
+        "seed": training.seed,
+        "effective_seed": context.effective_seed,
+        "device": context.network.device,
+        "requested_device": session.requested_device,
+        "device_fallback_reason": session.device_fallback_reason,
+        "requested_workers": resources.workers,
+        "selected_workers": int(context.selected_workers),
+        "final_workers": int(final_runtime_workers),
+        "autotune": _autotune_summary(context),
+        "adaptive_tuning": context.adaptive_tuning,
+        "adaptive_tuning_path": str(resources.adaptive_tuning_path),
+        "parallel": context.parallel_summary,
+        "rl_weights_path": str(state.final_weights_path),
+        "metrics_output_path": str(session.metrics_path),
+        "initialization_source": session.initialization_source,
+        "fresh_from_sl": bool(execution.fresh_from_sl),
+        "numbered_checkpoints": bool(execution.numbered_checkpoints),
+        "total_decision_samples": int(state.total_decision_samples),
+        "trainable_decisions_seen": int(state.total_decision_samples),
+        "policy_updates_completed": int(state.policy_updates_completed),
+        "decisions_per_game": float(
+            state.total_decision_samples / max(1, state.completed_training_games)
+        ),
+        "clipped_iteration_count": int(state.clipped_iteration_count),
+        "clipped_iteration_rate": float(
+            state.clipped_iteration_count / max(1, actual_final_iteration)
+        ),
+        "pool_snapshot_count": int(pool_snapshot_count),
+        "total_rollout_duration_s": float(state.total_rollout_duration_s),
+        "total_update_duration_s": float(state.total_update_duration_s),
+        "optimizer_step_count": int(context.network.optimizer_step_count),
+        "elapsed_rl_seconds": float(
+            context.restored_elapsed_rl_seconds
+            + time.perf_counter() - context.training_perf_started
+        ),
+        "resume_state_path": (
+            str(resume_state_path(state.final_weights_path))
+            if execution.numbered_checkpoints else None
+        ),
+        "rl_training_algorithm": context.algorithm,
+        "run_configuration_sha256": (
+            context.resume_configuration.run_configuration_sha256
+        ),
+        "ppo_configuration": fixed_ppo_policy(training.ppo_max_epochs),
+        "opponent_pool": context.runner.opponent_pool.manifest(),
+        "runtime_profile_delta": runtime_profile_delta,
+        "duration_s": elapsed_time,
+    }
 
 
 class RLTrainingReporter:

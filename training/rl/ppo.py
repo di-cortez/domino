@@ -40,6 +40,7 @@ PPO_MIN_MINIBATCHES = 4
 PPO_MAX_MINIBATCHES = 16
 PPO_PREFER_GPU_BUFFER = True
 PPO_GPU_BUFFER_SAFETY_FRACTION = 0.70
+POLICY_GRADIENT_CLIP_NORM = 5.0
 ADVANTAGE_EPSILON = 1e-8
 
 
@@ -676,7 +677,6 @@ def ppo_update(
     base_seed,
     iteration,
     entropy_coef,
-    clip_grad_norm,
     value_coef=0.5,
     max_epochs=DEFAULT_PPO_MAX_EPOCHS,
 ):
@@ -767,7 +767,7 @@ def ppo_update(
                     value_coef=value_coef,
                     clip_epsilon=PPO_CLIP_EPSILON,
                     entropy_coef=entropy_coef,
-                    clip_grad_norm=clip_grad_norm,
+                    clip_grad_norm=POLICY_GRADIENT_CLIP_NORM,
                 )
                 timing["optimizer_steps"] += time.perf_counter() - optimizer_started
                 step_detail = step_metrics.pop("runtime_profile_detail", {})
@@ -942,7 +942,6 @@ def update_from_samples(
     base_seed,
     iteration,
     entropy_coef,
-    clip_grad_norm,
     value_coef,
     normalize_advantages,
     max_epochs,
@@ -985,7 +984,6 @@ def update_from_samples(
         base_seed=base_seed,
         iteration=iteration,
         entropy_coef=entropy_coef,
-        clip_grad_norm=clip_grad_norm,
         value_coef=value_coef,
         max_epochs=max_epochs,
     )

@@ -20,6 +20,11 @@ from diagnostics.rl_progress import (
 from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from training.rl import training_loop
+from training.rl.config import (
+    RLExecutionOptions,
+    RLResourceOptions,
+    RLTrainingOptions,
+)
 
 
 def test_runtime_profile_accumulates_sessions_without_estimating_history(tmp_path):
@@ -150,18 +155,18 @@ def test_self_play_profile_contains_rollout_and_nested_ppo_phases(tmp_path):
         device="cpu",
     ).save(supervised)
     result = training_loop.train(
-        iterations=1,
-        gpi=8,
-        workers=1,
-        device="cpu",
-        seed=123,
-        fresh_from_sl=True,
-        sl_weights_path=supervised,
-        rl_weights_path=tmp_path / "rl.npz",
-        metrics_output_path=tmp_path / "metrics.jsonl",
-        adaptive_tuning_path=tmp_path / "tuning.json",
-        checkpoint_interval=1,
-        quiet=True,
+        RLTrainingOptions(iterations=1, gpi=8, seed=123),
+        RLResourceOptions(
+            workers=1,
+            device="cpu",
+            sl_weights_path=supervised,
+            rl_weights_path=tmp_path / "rl.npz",
+        ),
+        RLExecutionOptions(
+            fresh_from_sl=True,
+            checkpoint_interval=1,
+            quiet=True,
+        ),
     )
 
     profile = result["runtime_profile_delta"]

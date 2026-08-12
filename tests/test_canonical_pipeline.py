@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import fields
 import json
 from pathlib import Path
 
@@ -35,6 +36,11 @@ from diagnostics.rl_progress import (
     rebuild_progress_reports,
 )
 from training.rl import training_loop
+from training.rl.config import (
+    RLExecutionOptions,
+    RLResourceOptions,
+    RLTrainingOptions,
+)
 from training.canonical_assets import (
     ArtifactCompatibilityError,
     EXPECTED_WEIGHT_SHAPES,
@@ -87,6 +93,25 @@ from utils.artifacts import file_sha256
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _train_rl(**kwargs):
+    """Build the public typed options used by direct RL integration tests."""
+    groups = []
+    for option_type in (
+        RLTrainingOptions,
+        RLResourceOptions,
+        RLExecutionOptions,
+    ):
+        names = {field.name for field in fields(option_type)}
+        groups.append(option_type(**{
+            key: kwargs.pop(key)
+            for key in tuple(kwargs)
+            if key in names
+        }))
+    if kwargs:
+        raise AssertionError(f"Unknown RL test options: {sorted(kwargs)}")
+    return training_loop.train(*groups)
 
 
 def _write_test_supervised_checkpoint(path, seed=123, hidden_sizes=None):
@@ -994,7 +1019,7 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         "ppo_max_epochs": 1,
         "use_value_head": False,
     }
-    uninterrupted = training_loop.train(
+    uninterrupted = _train_rl(
         rl_weights_path=str(tmp_path / "uninterrupted" / "training.npz"),
         fresh_from_sl=True,
         **common,
@@ -1012,7 +1037,7 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         rl_config=_rl_config_from_summary(uninterrupted, max_pool_size=2),
         algorithm=REINFORCE_TRAINING_ALGORITHM,
     )
-    partial = training_loop.train(
+    partial = _train_rl(
         rl_weights_path=str(tmp_path / "split" / "training.npz"),
         stop_after_training_games=2,
         fresh_from_sl=True,
@@ -1044,7 +1069,7 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
 
     point = load_resume_point(run_dir)
 
-    resumed = training_loop.train(
+    resumed = _train_rl(
         rl_weights_path=str(tmp_path / "split" / "training.npz"),
         resume_weights_path=str(point.weights_path),
         resume_state_file=str(point.resume_state_path),
@@ -1294,7 +1319,7 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
     tmp_path,
 ):
     supervised = ROOT / "models" / "domino_sl_weights.npz"
-    probe_summary = training_loop.train(
+    probe_summary = _train_rl(
         total_training_games=3,
         stop_after_training_games=2,
         gpi=2,
@@ -1327,7 +1352,7 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
         ppo_config=probe_summary["ppo_configuration"],
         rl_config=_rl_config_from_summary(probe_summary, max_pool_size=2),
     )
-    summary = training_loop.train(
+    summary = _train_rl(
         total_training_games=3,
         stop_after_training_games=2,
         gpi=2,
@@ -1399,7 +1424,7 @@ def test_shutdown_before_first_iteration_still_creates_a_resumable_pair(tmp_path
         "quiet": True,
         "numbered_checkpoints": True,
     }
-    stopped = training_loop.train(
+    stopped = _train_rl(
         stop_after_training_games=2,
         shutdown_requested=lambda: True,
         fresh_from_sl=True,
@@ -1411,7 +1436,7 @@ def test_shutdown_before_first_iteration_still_creates_a_resumable_pair(tmp_path
     state = Path(stopped["resume_state_path"])
     assert weights.is_file() and state.is_file()
 
-    resumed = training_loop.train(
+    resumed = _train_rl(
         stop_after_training_games=2,
         resume_weights_path=str(weights),
         resume_state_file=str(state),
@@ -1435,7 +1460,7 @@ def test_numbered_checkpoint_callback_advances_by_committed_games(tmp_path):
         )
         events.append((dict(event), int(metadata["completed_training_games"])))
 
-    summary = training_loop.train(
+    summary = _train_rl(
         total_training_games=5,
         gpi=1,
         checkpoint_interval=2,

@@ -20,6 +20,7 @@ from agents.nn import DISABLED_DROPOUT_RATE
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import RULESET_VERSION
 from training.rl.ppo import (
+    POLICY_GRADIENT_CLIP_NORM,
     PPO_TRAINING_ALGORITHM,
     REINFORCE_TRAINING_ALGORITHM,
     fixed_ppo_policy,
@@ -51,7 +52,6 @@ class RLTrainingConfiguration:
     value_coef: float
     gamma: float
     reward_schema: str
-    clip_grad_norm: float | None
     normalize_advantages: bool
     weight_decay: float
     dropout_rate: float
@@ -121,7 +121,6 @@ class RLTrainingConfiguration:
             "value_coef": float(rl["value_coef"]),
             "gamma": float(rl["gamma"]),
             "reward_schema": rl["reward_schema"],
-            "clip_grad_norm": rl["clip_grad_norm"],
             "normalize_advantages": bool(rl["normalize_advantages"]),
             "weight_decay": float(rl["weight_decay"]),
             "dropout_rate": float(rl["dropout_rate"]),
@@ -145,6 +144,7 @@ class RLTrainingConfiguration:
         """Return the durable checkpoint representation, including constants."""
         return {
             **asdict(self),
+            "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
             "rl_training_algorithm": self.rl_training_algorithm,
             "ruleset_version": RULESET_VERSION,
             "ppo_configuration": fixed_ppo_policy(self.ppo_max_epochs),

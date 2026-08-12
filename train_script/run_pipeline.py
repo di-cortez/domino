@@ -10,7 +10,7 @@ import io
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -211,6 +211,7 @@ def _run_supervised_training(config, args):
 def _run_rl_training(config, args):
     """Run reinforcement learning with compact iteration progress."""
     training_loop = importlib.import_module("training.rl.training_loop")
+    rl_cli = importlib.import_module("training.rl.cli")
 
     def rl_status(message):
         if tqdm is not None:
@@ -229,51 +230,31 @@ def _run_rl_training(config, args):
             else config.rl_iterations * config.rl_games_per_iteration
         )
     )
+    training_options, resource_options, execution_options = (
+        rl_cli.training_options_from_args(args)
+    )
+    training_options = replace(
+        training_options,
+        iterations=explicit_iterations,
+        total_training_games=(
+            args.total_training_games
+            if explicit_iterations is not None
+            else total_training_games
+        ),
+    )
     return _run_stage(
         "RL training",
         config.rl_iterations,
         "iter",
         lambda progress: training_loop.train(
-            iterations=explicit_iterations,
-            total_training_games=(
-                args.total_training_games
-                if explicit_iterations is not None
-                else total_training_games
+            training_options,
+            resource_options,
+            replace(
+                execution_options,
+                quiet=True,
+                progress_callback=progress,
+                status_callback=rl_status,
             ),
-            gpi=fixed_gpi,
-            retune_workers=args.retune_workers,
-            training_opponent=args.training_opponent,
-            learning_rate=args.learning_rate,
-            entropy_coef=args.entropy_coef,
-            weight_decay=args.weight_decay,
-            dropout_rate=args.dropout,
-            log_interval=args.log_interval,
-            checkpoint_interval=args.checkpoint_interval,
-            max_pool_size=args.max_pool_size,
-            sl_weights_path=args.sl_weights_path,
-            rl_weights_path=args.rl_weights_path,
-            adaptive_tuning_path=args.adaptive_tuning_path,
-            metrics_output_path=args.metrics_output_path,
-            fresh_from_sl=args.fresh_from_sl,
-            quiet=True,
-            progress_callback=progress,
-            use_value_head=args.value_head,
-            value_coef=args.value_coef,
-            gamma=args.gamma,
-            reward_schema=args.reward_schema,
-            clip_grad_norm=args.clip_grad_norm,
-            normalize_advantages=args.normalize_advantages,
-            moving_average_window=args.moving_average_window,
-            seed=args.seed,
-            device=args.device,
-            workers=args.rl_workers,
-            safety_config=ParallelSafetyConfig(
-                memory_reserve_mb=args.rl_memory_reserve_mb,
-                estimated_worker_mb=args.rl_estimated_worker_mb,
-                max_worker_rss_mb=args.rl_max_worker_rss_mb,
-            ),
-            ppo_max_epochs=args.ppo_max_epochs,
-            status_callback=rl_status,
         ),
         lambda summary: (
             f"{summary['total_training_games']} exact games in "

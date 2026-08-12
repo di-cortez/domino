@@ -69,7 +69,6 @@ RL_REWARD_SCHEMA="default"
 # loss or win rate is dominated by batch noise. Gradient clipping and optional
 # advantage normalization stabilize comparisons, while a seed makes
 # side-by-side hyperparameter runs reproducible.
-RL_CLIP_GRAD_NORM=5.0
 RL_NORMALIZE_ADVANTAGES="auto"
 RL_MOVING_AVERAGE_WINDOW=10
 RL_PPO_MAX_EPOCHS=4
@@ -172,7 +171,6 @@ Regularization, off unless requested (forwarded to both the SL and the RL stage)
   --dropout F                  Hidden-layer dropout rate used by training updates only
 
 RL convergence monitoring:
-  --rl-clip-grad-norm F         Gradient-norm clipping threshold (default: $RL_CLIP_GRAD_NORM)
   --rl-ppo-max-epochs N         1 selects REINFORCE; 2-16 select PPO (default: $RL_PPO_MAX_EPOCHS)
   --rl-normalize-advantages     Normalize once over the complete decision buffer (PPO default)
   --rl-no-normalize-advantages  Explicitly disable normalization
@@ -244,7 +242,6 @@ while [[ $# -gt 0 ]]; do
         --rl-value-coef) RL_VALUE_COEF="$2"; shift 2 ;;
         --rl-gamma) RL_GAMMA="$2"; shift 2 ;;
         --rl-reward-schema) RL_REWARD_SCHEMA="$2"; shift 2 ;;
-        --rl-clip-grad-norm) RL_CLIP_GRAD_NORM="$2"; shift 2 ;;
         --rl-normalize-advantages) RL_NORMALIZE_ADVANTAGES=1; shift ;;
         --rl-no-normalize-advantages) RL_NORMALIZE_ADVANTAGES=0; shift ;;
         --rl-ppo-max-epochs) RL_PPO_MAX_EPOCHS="$2"; shift 2 ;;
@@ -414,12 +411,10 @@ else
         --max-pool-size "$RL_MAX_POOL_SIZE" \
         --sl-weights-path "$RL_SL_WEIGHTS_PATH" \
         --rl-weights-path "$RL_WEIGHTS_FILE" \
-        --adaptive-tuning-path "${RL_WEIGHTS_FILE%.npz}_adaptive_tuning.json" \
         --fresh-from-sl \
         --value-coef "$RL_VALUE_COEF" \
         --gamma "$RL_GAMMA" \
         --reward-schema "$RL_REWARD_SCHEMA" \
-        --clip-grad-norm "$RL_CLIP_GRAD_NORM" \
         --moving-average-window "$RL_MOVING_AVERAGE_WINDOW" \
         --device "$RL_DEVICE" \
         --rl-workers "$RL_WORKERS" \

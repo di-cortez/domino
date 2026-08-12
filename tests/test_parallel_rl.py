@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import fields
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +21,11 @@ from diagnostics.parallel_runner import (
     ParallelSafetyConfig,
 )
 from training.rl.parallel import RLRolloutRunner, worker_count
+from training.rl.config import (
+    RLExecutionOptions,
+    RLResourceOptions,
+    RLTrainingOptions,
+)
 from training.rl.resume import (
     NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
     _load_initial_network,
@@ -84,7 +90,20 @@ class ParallelRLTests(unittest.TestCase):
 
     def _train(self, **kwargs):
         kwargs.setdefault("sl_weights_path", str(self.sl_weights_path))
-        return train(**kwargs)
+        groups = []
+        for option_type in (
+            RLTrainingOptions,
+            RLResourceOptions,
+            RLExecutionOptions,
+        ):
+            names = {field.name for field in fields(option_type)}
+            groups.append(option_type(**{
+                key: kwargs.pop(key)
+                for key in tuple(kwargs)
+                if key in names
+            }))
+        self.assertFalse(kwargs, f"Unknown RL test options: {sorted(kwargs)}")
+        return train(*groups)
 
     def _network(self):
         return PolicyNetwork.load_from_sl(
@@ -553,20 +572,23 @@ class ParallelRLTests(unittest.TestCase):
     def test_autotuning_discards_benchmark_games(self):
         messages = []
         with tempfile.TemporaryDirectory() as temp_dir:
-            summary = self._train(
-                iterations=4,
-                gpi=4,
-                checkpoint_interval=100,
-                max_pool_size=2,
-                seed=44,
-                device="cpu",
-                workers="auto",
-                safety_config=self.safety,
-                worker_candidates=(1, 2),
-                status_callback=messages.append,
-                rl_weights_path=str(Path(temp_dir) / "auto.npz"),
-                quiet=True,
-            )
+            with mock.patch(
+                "training.rl.adaptive_tuning.DEFAULT_RL_WORKER_CANDIDATES",
+                (1, 2),
+            ):
+                summary = self._train(
+                    iterations=4,
+                    gpi=4,
+                    checkpoint_interval=100,
+                    max_pool_size=2,
+                    seed=44,
+                    device="cpu",
+                    workers="auto",
+                    safety_config=self.safety,
+                    status_callback=messages.append,
+                    rl_weights_path=str(Path(temp_dir) / "auto.npz"),
+                    quiet=True,
+                )
         tuning = summary["autotune"]
         self.assertIsNone(tuning["iterations_per_test"])
         self.assertEqual(tuning["games_per_test"], 1)
@@ -590,7 +612,13 @@ class ParallelRLTests(unittest.TestCase):
             max_worker_rss_mb=1024,
         )
         with tempfile.TemporaryDirectory() as temp_dir:
-            with mock.patch.dict(os.environ, constrained_memory, clear=False):
+            with (
+                mock.patch.dict(os.environ, constrained_memory, clear=False),
+                mock.patch(
+                    "training.rl.adaptive_tuning.DEFAULT_RL_WORKER_CANDIDATES",
+                    (1, 2),
+                ),
+            ):
                 summary = self._train(
                     iterations=4,
                     gpi=4,
@@ -600,7 +628,6 @@ class ParallelRLTests(unittest.TestCase):
                     device="cpu",
                     workers="auto",
                     safety_config=safety,
-                    worker_candidates=(1, 2),
                     status_callback=lambda _message: None,
                     rl_weights_path=str(Path(temp_dir) / "limited.npz"),
                     quiet=True,

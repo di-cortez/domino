@@ -1,6 +1,7 @@
 """Argument parsing and CLI-to-training option translation for RL."""
 
 import argparse
+from dataclasses import replace
 import time
 
 from agents.rl_nn import DEVICES
@@ -11,15 +12,16 @@ from training.rl.ppo import (
     PPO_DISABLED_EPOCHS,
 )
 from training.rl.config import (
-    DEFAULT_CLIP_GRAD_NORM,
     DEFAULT_DEVICE,
     DEFAULT_GPI,
-    DEFAULT_ITERATIONS,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
     DEFAULT_TOTAL_TRAINING_GAMES,
     COMMON_GPI_VALUES,
     RL_WEIGHTS,
+    RLExecutionOptions,
+    RLResourceOptions,
+    RLTrainingOptions,
     SL_WEIGHTS,
     TRAINING_OPPONENT,
     VALUE_COEF,
@@ -99,16 +101,6 @@ def add_optional_rl_arguments(
     group.add_argument("--max-pool-size", type=int, default=50)
     group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
     group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
-    group.add_argument(
-        "--adaptive-tuning-path",
-        default=None,
-        help="Adaptive-tuning JSON path (default: next to RL weights).",
-    )
-    group.add_argument(
-        "--metrics-output-path",
-        default=None,
-        help="Per-iteration JSONL path (default: next to RL weights).",
-    )
     initialization = group.add_mutually_exclusive_group()
     initialization.add_argument(
         "--fresh-from-sl",
@@ -172,12 +164,6 @@ def add_optional_rl_arguments(
         choices=tuple(REWARD_SCHEMAS),
         default=DEFAULT_REWARD_SCHEMA,
         help="Named preset for the terminal/event reward constants.",
-    )
-    group.add_argument(
-        "--clip-grad-norm",
-        type=float,
-        default=DEFAULT_CLIP_GRAD_NORM,
-        help="Gradient-norm clipping threshold for the policy-gradient update.",
     )
     group.add_argument(
         "--normalize-advantages",
@@ -261,11 +247,11 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _training_kwargs_from_args(args):
-    """Translate CLI arguments into the public ``train`` keyword interface."""
-    return {
-        "iterations": args.iterations,
-        "total_training_games": (
+def training_options_from_args(args):
+    """Translate CLI arguments into the three public RL option groups."""
+    training = RLTrainingOptions(
+        iterations=args.iterations,
+        total_training_games=(
             args.total_training_games
             if args.iterations is not None
             else (
@@ -274,44 +260,46 @@ def _training_kwargs_from_args(args):
                 else args.total_training_games
             )
         ),
-        "gpi": args.gpi,
-        "retune_workers": args.retune_workers,
-        "training_opponent": args.training_opponent,
-        "learning_rate": args.learning_rate,
-        "entropy_coef": args.entropy_coef,
-        "weight_decay": args.weight_decay,
-        "dropout_rate": args.dropout,
-        "log_interval": args.log_interval,
-        "checkpoint_interval": args.checkpoint_interval,
-        "max_pool_size": args.max_pool_size,
-        "sl_weights_path": args.sl_weights_path,
-        "rl_weights_path": args.rl_weights_path,
-        "adaptive_tuning_path": args.adaptive_tuning_path,
-        "metrics_output_path": args.metrics_output_path,
-        "fresh_from_sl": args.fresh_from_sl,
-        "use_value_head": args.value_head,
-        "value_coef": args.value_coef,
-        "gamma": args.gamma,
-        "reward_schema": args.reward_schema,
-        "clip_grad_norm": args.clip_grad_norm,
-        "normalize_advantages": args.normalize_advantages,
-        "moving_average_window": args.moving_average_window,
-        "seed": args.seed,
-        "device": args.device,
-        "workers": args.rl_workers,
-        "safety_config": ParallelSafetyConfig(
+        gpi=args.gpi,
+        training_opponent=args.training_opponent,
+        learning_rate=args.learning_rate,
+        entropy_coef=args.entropy_coef,
+        weight_decay=args.weight_decay,
+        dropout_rate=args.dropout,
+        max_pool_size=args.max_pool_size,
+        use_value_head=args.value_head,
+        value_coef=args.value_coef,
+        gamma=args.gamma,
+        reward_schema=args.reward_schema,
+        normalize_advantages=args.normalize_advantages,
+        seed=args.seed,
+        ppo_max_epochs=args.ppo_max_epochs,
+    )
+    resources = RLResourceOptions(
+        sl_weights_path=args.sl_weights_path,
+        rl_weights_path=args.rl_weights_path,
+        device=args.device,
+        workers=args.rl_workers,
+        safety_config=ParallelSafetyConfig(
             memory_reserve_mb=args.rl_memory_reserve_mb,
             estimated_worker_mb=args.rl_estimated_worker_mb,
             max_worker_rss_mb=args.rl_max_worker_rss_mb,
         ),
-        "resume_weights_path": args.resume_weights_path,
-        "resume_state_file": args.resume_state_file,
-        "numbered_checkpoints": args.numbered_checkpoints,
-        "ppo_max_epochs": args.ppo_max_epochs,
-    }
+        retune_workers=args.retune_workers,
+    )
+    execution = RLExecutionOptions(
+        log_interval=args.log_interval,
+        checkpoint_interval=args.checkpoint_interval,
+        moving_average_window=args.moving_average_window,
+        resume_weights_path=args.resume_weights_path,
+        resume_state_file=args.resume_state_file,
+        numbered_checkpoints=args.numbered_checkpoints,
+        fresh_from_sl=args.fresh_from_sl,
+    )
+    return training, resources, execution
 
 
-def _run_compact_cli(args, training_kwargs):
+def _run_compact_cli(args, options):
     """Run the standalone CLI with the pipeline's compact presentation."""
     from training.rl.training_loop import train
 
@@ -322,17 +310,18 @@ def _run_compact_cli(args, training_kwargs):
 
     print("\nRL training")
     started = time.time()
-    fixed_gpi = training_kwargs["gpi"]
+    training, resources, execution = options
+    fixed_gpi = training.gpi
     planned_games = (
         args.iterations * fixed_gpi
         if args.iterations is not None
-        else training_kwargs["total_training_games"]
+        else training.total_training_games
     )
     initial_games = 0
-    if args.resume_weights_path and args.resume_state_file:
+    if execution.resume_weights_path and execution.resume_state_file:
         resume_metadata, _pool = load_resume_state(
-            args.resume_weights_path,
-            args.resume_state_file,
+            execution.resume_weights_path,
+            execution.resume_state_file,
         )
         planned_games = int(
             resume_metadata["configuration"]["total_training_games"]
@@ -350,10 +339,14 @@ def _run_compact_cli(args, training_kwargs):
                 last_reported = done
 
         summary = train(
-            **training_kwargs,
-            quiet=True,
-            progress_callback=progress,
-            status_callback=lambda message: print(message, flush=True),
+            training,
+            resources,
+            replace(
+                execution,
+                quiet=True,
+                progress_callback=progress,
+                status_callback=lambda message: print(message, flush=True),
+            ),
         )
     else:
         with tqdm(
@@ -372,10 +365,14 @@ def _run_compact_cli(args, training_kwargs):
                     progress_bar.update(done - progress_bar.n)
 
             summary = train(
-                **training_kwargs,
-                quiet=True,
-                progress_callback=progress,
-                status_callback=tqdm.write,
+                training,
+                resources,
+                replace(
+                    execution,
+                    quiet=True,
+                    progress_callback=progress,
+                    status_callback=tqdm.write,
+                ),
             )
 
     elapsed = time.time() - started
@@ -395,10 +392,10 @@ def main(argv=None):
     from training.rl.training_loop import train
 
     args = parse_args(argv)
-    training_kwargs = _training_kwargs_from_args(args)
+    options = training_options_from_args(args)
     if args.compact:
-        return _run_compact_cli(args, training_kwargs)
-    return train(**training_kwargs)
+        return _run_compact_cli(args, options)
+    return train(*options)
 
 
 if __name__ == "__main__":

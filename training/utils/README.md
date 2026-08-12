@@ -61,7 +61,7 @@ One consequence is worth knowing before enabling dropout with PPO. The rollout
 log-probabilities are recorded without dropout while the update evaluates a
 thinned network, so the first-epoch importance ratios are no longer exactly
 one; expect higher `approx_kl` and clip fractions, and consider raising
-`--ppo-stop-kl` if updates stop early.
+the fixed PPO stopping policy if updates stop early.
 
 Runs and canonical assets created before these controls existed record no
 regularization field. That absence is read as the disabled value, so existing

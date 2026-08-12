@@ -22,7 +22,7 @@ from training.rl.adaptive_tuning import (
     run_worker_tuning,
     selected_worker_candidate,
 )
-from training.rl.self_play import REWARD_SCHEMAS
+from training.rl.rollout import REWARD_SCHEMAS
 
 
 class _RunInfo:

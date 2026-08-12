@@ -71,15 +71,14 @@ Pipeline levels differ primarily in exact cumulative RL games:
 | `forever` | 100,000 | 42, reusable | No limit | None automatically | Every 100,000 games |
 
 GPI is never autotuned. Canonical pipelines and direct
-`training.rl.self_play` runs accept `--gpi` from
-`100, 200, 400, 600, 800, 1000, 2000`, defaulting to 2,000; sweeps keep it
-fixed rather than using it as a tuning axis. Before real games begin, an
+`training.rl.cli` runs accept `--gpi` from
+`100, 200, 400, 600, 800, 1000, 2000`, defaulting to 2,000. Before real games begin, an
 isolated benchmark selects the rollout-worker count and discards its games.
 Training uses masked PPO with adaptive
 minibatches. Direct self-play and the finite canonical profiles retain the
 four-epoch default; `forever` now allows up to 16 epochs. After each complete
 epoch, a whole-buffer KL check stops the update before the next epoch when its
-hard `0.015` limit is exceeded. Pass `--no-ppo` to use one
+hard `0.015` limit is exceeded. Pass `--ppo-max-epochs 1` to use one
 full-buffer REINFORCE update per iteration instead; that path does not build a
 PPO buffer or calculate ratios, clipping, KL control, minibatches, or the
 post-update full-buffer PPO evaluation. Opponent snapshots refresh once per
@@ -106,13 +105,13 @@ python -m training.pipeline forever
 Start and later resume an unbounded policy-only REINFORCE run with:
 
 ```bash
-python -m training.pipeline forever --no-ppo
+python -m training.pipeline forever --ppo-max-epochs 1
 python -m training.pipeline forever
 ```
 
 The algorithm is part of the exact resume identity and is reloaded
-automatically. A conflicting `--ppo` or `--no-ppo` supplied with resume is
-warned about and ignored. The optional critic is off by default and works with
+automatically. Any conflicting training option supplied with resume is warned
+about and ignored. The optional critic is off by default and works with
 both algorithms.
 For PPO actor-critic training:
 
@@ -191,18 +190,14 @@ Run stages directly when iterating on one component:
 ```bash
 python -m training.datagen.generator --workers auto --seed 123
 python -m training.supervised.cli --sl-device auto --sl-seed 123
-python -m training.rl.self_play --rl-workers auto --seed 123
-python -m training.rl.self_play --fresh-from-sl --rl-workers auto --seed 123
+python -m training.rl.cli --rl-workers auto --seed 123
+python -m training.rl.cli --fresh-from-sl --rl-workers auto --seed 123
 python -m diagnostics.evaluate --games 10000 --seed 123
 ```
 
-The standalone self-play command preserves its historical default of
+The standalone RL command defaults to
 continuing a compatible RL checkpoint when one exists; `--fresh-from-sl`
 forces a new RL run from the supervised checkpoint.
-
-The long RL parameter sweep has safe resume and reporting commands documented
-in [`train_script/README.md`](train_script/README.md). It varies learning rate,
-gamma, and the critic value coefficient while retaining the fixed GPI.
 
 ## Diagnostics
 

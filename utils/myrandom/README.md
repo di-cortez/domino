@@ -129,7 +129,7 @@ There are no `from random import ...` statements. Every remaining case uses
 | `training/rl/parallel.py` | Reseeds Python and NumPy globals inside each rollout worker. Future RL games should derive streams from absolute game identity. |
 | `training/rl/resume.py` | Persists and restores Python and NumPy global states. Future resume should store only genuinely sequential named-generator states. |
 | `training/rl/rollout.py` | Uses `random.randint` for learner position and `random.choice` for the opponent pool. These need separate stable RL namespaces. |
-| `training/rl/self_play.py` | Chooses a fallback root seed with `secrets`, then seeds both Python and NumPy globals. It should construct the RL `SeedPlan` instead. |
+| `training/rl/training_loop.py` | Chooses a fallback root seed with `secrets`, then seeds both Python and NumPy globals. It should construct the RL `SeedPlan` instead. |
 | `ui/ui_agents.py` | `RandomUIAgent` uses `random.choice`; interactive runs need a UI-owned explicit generator. |
 | `tests/test_adaptive_tuning.py` | Exercises the old global-state snapshot contract; replace as adaptive tuning migrates. |
 | `tests/test_exact_model_optimization.py` | Uses local/global Python generators to synthesize reproducible test cases and actions. Local explicit NumPy test streams can replace them. |
@@ -155,7 +155,7 @@ callers are migration work:
 | `training/rl/ppo.py` | A local `np.random.RandomState(seed)` permutes decisions into minibatches. Migrate to `SeedPlan.generator(PPO_MINIBATCH, iteration, epoch)`. |
 | `training/rl/parallel.py` | Calls `np.random.seed` in rollout workers; use per-game RL streams. |
 | `training/rl/resume.py` | Serializes the legacy NumPy global state; replace with named sequential generator snapshots only where coordinate derivation is insufficient. |
-| `training/rl/self_play.py` | Seeds the NumPy global state at startup; construct and distribute an RL seed plan instead. |
+| `training/rl/training_loop.py` | Seeds the NumPy global state at startup; construct and distribute an RL seed plan instead. |
 
 Tests with direct legacy NumPy state are
 `tests/test_adaptive_tuning.py`, `tests/test_core.py`,
@@ -175,7 +175,7 @@ Seed-affecting uses:
   evaluation.
 - `diagnostics/pairwise.py`: fallback 63-bit root seed for one pair.
 - `training/pipeline.py`: fallback seed for ephemeral pipeline levels.
-- `training/rl/self_play.py`: fallback 63-bit RL root seed.
+- `training/rl/training_loop.py`: fallback 63-bit RL root seed.
 - `utils/myrandom/entropy.py`: the intended central `fresh_root_seed()` owner.
 
 Technical identifiers only:

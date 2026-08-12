@@ -1,17 +1,14 @@
 """Argument parsing and CLI-to-training option translation for RL."""
 
 import argparse
+import time
 
 from agents.rl_nn import DEVICES
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
 from training.rl.ppo import (
-    DEFAULT_CLIP_EPSILON,
-    DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    DEFAULT_MAX_EPOCHS,
-    DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    DEFAULT_STOP_KL,
-    DEFAULT_TARGET_KL,
+    DEFAULT_PPO_MAX_EPOCHS,
     MAX_PPO_EPOCHS,
+    PPO_DISABLED_EPOCHS,
 )
 from training.rl.config import (
     DEFAULT_CLIP_GRAD_NORM,
@@ -20,7 +17,6 @@ from training.rl.config import (
     DEFAULT_ITERATIONS,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
-    DEFAULT_PPO_ENABLED,
     DEFAULT_TOTAL_TRAINING_GAMES,
     COMMON_GPI_VALUES,
     RL_WEIGHTS,
@@ -33,19 +29,21 @@ from training.rl.parallel import (
     worker_count as parse_rl_worker_count,
 )
 from training.rl.rollout import DEFAULT_GAMMA, DEFAULT_REWARD_SCHEMA, REWARD_SCHEMAS
+from training.rl.resume import load_resume_state
 from training.utils.cli_args import add_regularization_arguments, positive_int
+from utils.runtime_status import format_duration
 
 
 def add_optional_rl_arguments(
     parser,
     *,
     fresh_from_sl_default=False,
-    ppo_max_epochs_default=DEFAULT_MAX_EPOCHS,
+    ppo_max_epochs_default=DEFAULT_PPO_MAX_EPOCHS,
     expose_gpi=True,
     include_regularization=True,
     expose_resume_pair=True,
 ):
-    """Add self-play hyperparameter and rollout-resource flags to ``parser``.
+    """Add RL hyperparameter and rollout-resource flags to ``parser``.
 
     ``include_regularization=False`` is for combined parsers that already
     installed the shared ``--weight-decay``/``--dropout`` controls through
@@ -139,15 +137,6 @@ def add_optional_rl_arguments(
             ),
         )
         group.add_argument(
-            "--start-iteration",
-            type=int,
-            default=0,
-            help=(
-                "Absolute completed iteration when continuing a numbered "
-                "checkpoint."
-            ),
-        )
-        group.add_argument(
             "--resume-weights-path",
             default=None,
             help="Iteration-suffixed weights file from a complete resume pair.",
@@ -160,7 +149,6 @@ def add_optional_rl_arguments(
     else:
         parser.set_defaults(
             numbered_checkpoints=False,
-            start_iteration=0,
             resume_weights_path=None,
             resume_state_file=None,
         )
@@ -169,7 +157,7 @@ def add_optional_rl_arguments(
         action="store_true",
         help=(
             "Train a linear V(s) critic and use reward-minus-value policy "
-            "advantages with PPO or the legacy --no-ppo update."
+            "advantages with PPO or the single-update REINFORCE path."
         ),
     )
     group.add_argument("--value-coef", type=float, default=VALUE_COEF)
@@ -238,68 +226,25 @@ def add_optional_rl_arguments(
     group.add_argument("--rl-memory-reserve-mb", type=int, default=512)
     group.add_argument("--rl-estimated-worker-mb", type=int, default=256)
     group.add_argument("--rl-max-worker-rss-mb", type=int, default=1024)
-    ppo = parser.add_argument_group("RL update algorithm and PPO v1 controls")
-    ppo_toggle = ppo.add_mutually_exclusive_group()
-    ppo_toggle.add_argument(
-        "--ppo",
-        dest="ppo_enabled",
-        action="store_true",
-        default=DEFAULT_PPO_ENABLED,
-        help="Use masked PPO with minibatches (default).",
-    )
-    ppo_toggle.add_argument(
-        "--no-ppo",
-        dest="ppo_enabled",
-        action="store_false",
-        default=argparse.SUPPRESS,
-        help=(
-            "Use one full-buffer REINFORCE update per iteration, without PPO "
-            "minibatches, ratios, clipping, KL control, or post-update "
-            "full-buffer evaluation."
-        ),
-    )
-    ppo.add_argument("--ppo-clip-epsilon", type=float, default=DEFAULT_CLIP_EPSILON)
-    ppo.add_argument("--ppo-target-kl", type=float, default=DEFAULT_TARGET_KL)
-    ppo.add_argument("--ppo-stop-kl", type=float, default=DEFAULT_STOP_KL)
+    ppo = parser.add_argument_group("RL update algorithm")
     ppo.add_argument(
         "--ppo-max-epochs",
         type=int,
+        choices=range(PPO_DISABLED_EPOCHS, MAX_PPO_EPOCHS + 1),
         default=ppo_max_epochs_default,
         help=(
-            "Maximum PPO epochs over one on-policy buffer; whole-buffer KL is "
-            "checked after every epoch. Standalone and finite canonical "
-            f"profiles default to {DEFAULT_MAX_EPOCHS}; canonical forever "
-            f"defaults to {MAX_PPO_EPOCHS}."
+            "Maximum epochs over one on-policy buffer. Value 1 selects the "
+            "single-update REINFORCE path with no PPO control overhead; values "
+            "2-16 select PPO with fixed clipping, minibatch, KL, and buffer "
+            f"policies. Standalone defaults to {DEFAULT_PPO_MAX_EPOCHS}; "
+            f"canonical forever defaults to {MAX_PPO_EPOCHS}."
         ),
-    )
-    ppo.add_argument(
-        "--ppo-games-per-minibatch-scale",
-        type=int,
-        default=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    )
-    ppo.add_argument(
-        "--ppo-min-decisions-per-minibatch",
-        type=int,
-        default=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    )
-    buffer_group = ppo.add_mutually_exclusive_group()
-    buffer_group.add_argument(
-        "--prefer-gpu-buffer",
-        dest="prefer_gpu_buffer",
-        action="store_true",
-        default=True,
-    )
-    buffer_group.add_argument(
-        "--no-prefer-gpu-buffer",
-        dest="prefer_gpu_buffer",
-        action="store_false",
-        default=argparse.SUPPRESS,
     )
     return parser
 
 
 def parse_args(argv=None):
-    """Parse optional self-play training controls."""
+    """Parse optional reinforcement-learning controls."""
     parser = argparse.ArgumentParser(
         description="Train the domino policy with reinforcement learning.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -359,16 +304,102 @@ def _training_kwargs_from_args(args):
             estimated_worker_mb=args.rl_estimated_worker_mb,
             max_worker_rss_mb=args.rl_max_worker_rss_mb,
         ),
-        "start_iteration": args.start_iteration,
         "resume_weights_path": args.resume_weights_path,
         "resume_state_file": args.resume_state_file,
         "numbered_checkpoints": args.numbered_checkpoints,
-        "ppo_enabled": args.ppo_enabled,
-        "ppo_clip_epsilon": args.ppo_clip_epsilon,
-        "ppo_target_kl": args.ppo_target_kl,
-        "ppo_stop_kl": args.ppo_stop_kl,
         "ppo_max_epochs": args.ppo_max_epochs,
-        "ppo_games_per_minibatch_scale": args.ppo_games_per_minibatch_scale,
-        "ppo_min_decisions_per_minibatch": args.ppo_min_decisions_per_minibatch,
-        "prefer_gpu_buffer": args.prefer_gpu_buffer,
     }
+
+
+def _run_compact_cli(args, training_kwargs):
+    """Run the standalone CLI with the pipeline's compact presentation."""
+    from training.rl.training_loop import train
+
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        tqdm = None
+
+    print("\nRL training")
+    started = time.time()
+    fixed_gpi = training_kwargs["gpi"]
+    planned_games = (
+        args.iterations * fixed_gpi
+        if args.iterations is not None
+        else training_kwargs["total_training_games"]
+    )
+    initial_games = 0
+    if args.resume_weights_path and args.resume_state_file:
+        resume_metadata, _pool = load_resume_state(
+            args.resume_weights_path,
+            args.resume_state_file,
+        )
+        planned_games = int(
+            resume_metadata["configuration"]["total_training_games"]
+        )
+        initial_games = int(resume_metadata["completed_training_games"])
+
+    if tqdm is None:
+        progress_interval = max(1, planned_games // 10)
+        last_reported = initial_games
+
+        def progress(done, total):
+            nonlocal last_reported
+            if done == total or done - last_reported >= progress_interval:
+                print(f"RL progress: {done}/{total} games", flush=True)
+                last_reported = done
+
+        summary = train(
+            **training_kwargs,
+            quiet=True,
+            progress_callback=progress,
+            status_callback=lambda message: print(message, flush=True),
+        )
+    else:
+        with tqdm(
+            total=planned_games,
+            initial=initial_games,
+            desc="RL training",
+            unit="game",
+            leave=True,
+        ) as progress_bar:
+
+            def progress(done, total):
+                if progress_bar.total != total:
+                    progress_bar.total = total
+                    progress_bar.refresh()
+                if done > progress_bar.n:
+                    progress_bar.update(done - progress_bar.n)
+
+            summary = train(
+                **training_kwargs,
+                quiet=True,
+                progress_callback=progress,
+                status_callback=tqdm.write,
+            )
+
+    elapsed = time.time() - started
+    print(
+        f"RL training complete in {format_duration(elapsed)} | "
+        f"{summary['completed_training_games']} exact training games, "
+        f"GPI {summary['games_per_iteration']}, "
+        f"{summary['selected_workers']} rollout worker(s), "
+        f"algorithm {summary['rl_training_algorithm']}, "
+        f"weights {summary['rl_weights_path']}"
+    )
+    return summary
+
+
+def main(argv=None):
+    """Run the standalone RL command."""
+    from training.rl.training_loop import train
+
+    args = parse_args(argv)
+    training_kwargs = _training_kwargs_from_args(args)
+    if args.compact:
+        return _run_compact_cli(args, training_kwargs)
+    return train(**training_kwargs)
+
+
+if __name__ == "__main__":
+    main()

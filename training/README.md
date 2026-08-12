@@ -93,11 +93,11 @@ python -m training.pipeline forever --seed 42 --gpi 2000 \
 python -m training.pipeline forever
 ```
 
-PPO remains the default. To run `forever` with the policy-only historical
+PPO remains the default. To run `forever` with the policy-only
 REINFORCE update and later resume that exact run:
 
 ```bash
-python -m training.pipeline forever --no-ppo --run-name reinforce
+python -m training.pipeline forever --ppo-max-epochs 1 --run-name reinforce
 python -m training.pipeline forever
 ```
 
@@ -182,7 +182,7 @@ first.
 |---|---|
 | Dataset generation | `python -m training.datagen.generator` |
 | Supervised training | `python -m training.supervised.cli` |
-| Self-play RL | `python -m training.rl.self_play` |
+| Self-play RL | `python -m training.rl.cli` |
 | Full canonical pipeline | `python -m training.pipeline <level>` |
 
 ## Important Shape Change
@@ -203,7 +203,7 @@ compatible. After copying these files into the repo, run the pipeline again:
 ```bash
 python -m training.datagen.generator
 python -m training.supervised.cli
-python -m training.rl.self_play
+python -m training.rl.cli
 ```
 
 ## Worker controls

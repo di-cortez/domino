@@ -22,7 +22,6 @@ import random
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
 from multiprocessing import shared_memory
 import numpy as np
 
@@ -43,6 +42,11 @@ from diagnostics.parallel_runner import (
     ignore_parent_shutdown_signals,
     terminate_executor,
 )
+from training.rl.pool import (
+    OpponentPool,
+    SharedPolicyBank,
+    SharedPolicyDescriptor,
+)
 
 
 DEFAULT_RL_WORKERS = "auto"
@@ -57,190 +61,6 @@ class RLRolloutExecutionError(RuntimeError):
         self.results = results
         self.run_info = run_info
         self.__cause__ = cause
-
-
-@dataclass(frozen=True)
-class SharedPolicyDescriptor:
-    """Pickle-friendly description of one policy stored in shared memory."""
-
-    name: str
-    weight_names: tuple[str, ...]
-    shapes: tuple[tuple[int, ...], ...]
-    element_count: int
-    dtype: str
-
-
-class SharedPolicyBank:
-    """Own the current policy and a fixed-size ring of opponent snapshots."""
-
-    def __init__(self, network, max_pool_size):
-        if max_pool_size < 0:
-            raise ValueError("max_pool_size must be non-negative")
-        self.weight_names = tuple(network.weight_names)
-        self.shapes = tuple(
-            tuple(int(value) for value in getattr(network, name).shape)
-            for name in self.weight_names
-        )
-        first_weight = getattr(network, self.weight_names[0])
-        if hasattr(first_weight, "get"):
-            first_weight = first_weight.get()
-        self.dtype = np.asarray(first_weight).dtype
-        self.element_count = sum(math.prod(shape) for shape in self.shapes)
-        self._segments = []
-        self._descriptors = []
-        self._closed = False
-        try:
-            for _slot in range(1 + max_pool_size):
-                segment = shared_memory.SharedMemory(
-                    create=True,
-                    size=self.element_count * self.dtype.itemsize,
-                )
-                self._segments.append(segment)
-                self._descriptors.append(SharedPolicyDescriptor(
-                    name=segment.name,
-                    weight_names=self.weight_names,
-                    shapes=self.shapes,
-                    element_count=self.element_count,
-                    dtype=self.dtype.str,
-                ))
-        except BaseException:
-            self.close()
-            raise
-
-        self.max_pool_size = int(max_pool_size)
-        self.pool_slots = []
-        self._pool_metadata = {}
-        self._next_snapshot_id = 0
-        self._next_pool_slot = 0
-        self.write_current(network)
-
-    @property
-    def current_descriptor(self):
-        return self._descriptors[0]
-
-    @property
-    def pool_descriptors(self):
-        return tuple(self._descriptors[1:])
-
-    @property
-    def allocated_bytes(self):
-        return len(self._segments) * self.element_count * self.dtype.itemsize
-
-    def _write_slot(self, slot_index, network):
-        flat = np.ndarray(
-            (self.element_count,),
-            dtype=self.dtype,
-            buffer=self._segments[slot_index].buf,
-        )
-        offset = 0
-        for name, shape in zip(self.weight_names, self.shapes):
-            value = getattr(network, name)
-            if hasattr(value, "get"):
-                value = value.get()
-            value = np.asarray(value, dtype=self.dtype)
-            if value.shape != shape:
-                raise ValueError(
-                    f"Policy weight {name} changed shape from {shape} to {value.shape}."
-                )
-            size = value.size
-            np.copyto(flat[offset:offset + size].reshape(shape), value)
-            offset += size
-
-    def write_current(self, network):
-        """Publish the learner policy after the previous gradient update."""
-        self._write_slot(0, network)
-
-    def append_pool_snapshot(self, network, metadata=None):
-        """Append a frozen opponent snapshot, overwriting the oldest ring slot."""
-        if self.max_pool_size == 0:
-            return
-        slot = self._next_pool_slot
-        self._write_slot(slot + 1, network)
-        if slot in self.pool_slots:
-            self.pool_slots.remove(slot)
-        self.pool_slots.append(slot)
-        metadata = dict(metadata or {})
-        snapshot_id = int(metadata.get("snapshot_id", self._next_snapshot_id))
-        metadata.update({
-            "snapshot_id": snapshot_id,
-            "logical_order": len(self.pool_slots) - 1,
-            "sampling_rule": "uniform_random",
-        })
-        self._pool_metadata[slot] = metadata
-        self._next_snapshot_id = max(self._next_snapshot_id, snapshot_id + 1)
-        self._next_pool_slot = (slot + 1) % self.max_pool_size
-
-    def export_pool_snapshots(self):
-        """Copy opponent snapshots in their logical oldest-to-newest order."""
-        snapshots = []
-        for slot in self.pool_slots:
-            flat = np.ndarray(
-                (self.element_count,),
-                dtype=self.dtype,
-                buffer=self._segments[slot + 1].buf,
-            )
-            weights = {}
-            offset = 0
-            for name, shape in zip(self.weight_names, self.shapes):
-                size = math.prod(shape)
-                weights[name] = flat[offset:offset + size].reshape(shape).copy()
-                offset += size
-            snapshots.append(weights)
-        return tuple(snapshots)
-
-    def export_pool_metadata(self):
-        """Return JSON-safe metadata in the same logical order as snapshots."""
-        values = []
-        for logical_order, slot in enumerate(self.pool_slots):
-            metadata = dict(self._pool_metadata.get(slot, {}))
-            metadata["logical_order"] = logical_order
-            metadata.setdefault("sampling_rule", "uniform_random")
-            values.append(metadata)
-        return tuple(values)
-
-    def restore_pool_snapshots(self, snapshots, metadata=None):
-        """Replace the ring with serialized snapshots from a resume state."""
-        snapshots = tuple(snapshots)
-        if metadata is None:
-            metadata = tuple({} for _snapshot in snapshots)
-        else:
-            metadata = tuple(metadata)
-        if len(metadata) != len(snapshots):
-            raise ValueError("Opponent-pool metadata count does not match snapshots.")
-        if len(snapshots) > self.max_pool_size:
-            raise ValueError(
-                f"Resume state contains {len(snapshots)} opponent snapshots, "
-                f"but max_pool_size is {self.max_pool_size}."
-            )
-        self.pool_slots = []
-        self._pool_metadata = {}
-        self._next_snapshot_id = 0
-        self._next_pool_slot = 0
-        for weights, snapshot_metadata in zip(snapshots, metadata):
-            missing = [name for name in self.weight_names if name not in weights]
-            if missing:
-                raise ValueError(
-                    "Resume opponent snapshot is missing policy weights: "
-                    + ", ".join(missing)
-                )
-            self.append_pool_snapshot(
-                _CPUInferencePolicy(weights),
-                metadata=snapshot_metadata,
-            )
-
-    def close(self):
-        """Release every shared segment, even after a failed training run."""
-        if self._closed:
-            return
-        self._closed = True
-        for segment in self._segments:
-            try:
-                segment.close()
-            finally:
-                try:
-                    segment.unlink()
-                except FileNotFoundError:
-                    pass
 
 
 class _CPUInferencePolicy:
@@ -484,11 +304,11 @@ class RLRolloutRunner:
         self.schema = dict(schema)
         self.gamma = float(gamma)
         self.bank = SharedPolicyBank(network, max_pool_size)
-        if training_opponent == "self_play":
-            self.bank.append_pool_snapshot(network, metadata={
-                "origin": "initial_policy",
-                "introduced_at_rl_games": 0,
-            })
+        self.opponent_pool = OpponentPool(
+            self.bank,
+            enabled=training_opponent == "self_play",
+            initial_network=network,
+        )
         self.executor = None
         self.requested_workers = 1
         self.worker_count = 1
@@ -505,22 +325,10 @@ class RLRolloutRunner:
         """Publish weights only while no worker task is in flight."""
         self.bank.write_current(network)
 
-    def append_pool_snapshot(self, network, metadata=None):
-        """Publish a new frozen opponent after the iteration update."""
-        self.bank.append_pool_snapshot(network, metadata=metadata)
-
-    def export_pool_snapshots(self):
-        """Return copies suitable for an atomic parent-side resume file."""
-        return self.bank.export_pool_snapshots()
-
-    def export_pool_metadata(self):
-        """Return persisted provenance for exported opponent snapshots."""
-        return self.bank.export_pool_metadata()
-
-    def restore_pool_snapshots(self, snapshots, metadata=None):
+    def restore_opponent_pool(self, snapshots, metadata=None):
         """Restore the exact opponent pool before starting resumed rollouts."""
         self._shutdown_executor()
-        self.bank.restore_pool_snapshots(snapshots, metadata=metadata)
+        self.opponent_pool.restore(snapshots, metadata=metadata)
 
     def _shutdown_executor(self, terminate=False):
         if self.executor is None:
@@ -789,7 +597,7 @@ class RLRolloutRunner:
             )
             for local_index in range(game_count)
         ]
-        pool_slots = tuple(self.bank.pool_slots)
+        pool_slots = self.opponent_pool.eligible_slots()
         return self._execute_specs(
             specs,
             _worker_collect_rollouts,

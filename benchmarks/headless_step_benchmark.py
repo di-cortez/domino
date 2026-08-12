@@ -31,7 +31,7 @@ from agents.neural_agent import NeuralAgent
 from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import DominoEngine
-from training.rl.self_play import (
+from training.rl.rollout import (
     DEFAULT_GAMMA,
     DEFAULT_REWARD_SCHEMA,
     REWARD_SCHEMAS,

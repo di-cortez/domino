@@ -1,13 +1,15 @@
-# Self-play reinforcement learning
+# Reinforcement learning
 
-Refines the supervised policy through on-policy self-play with masked PPO.
+Refines the supervised policy through on-policy RL against a snapshot pool or
+the heuristic player, with masked PPO by default.
 Owned by `training/rl/`.
 
 | File | Purpose |
 |---|---|
-| `self_play.py` | Orchestrates the exact-budget on-policy training lifecycle and delegates its specialized phases. |
+| `training_loop.py` | Orchestrates the exact-budget on-policy training lifecycle and delegates its specialized phases. |
 | `config.py` / `cli.py` | Validate side-effect-free RL options and own the standalone/canonical shared argument definitions. |
-| `constants.py` | Fixed implementation invariants shared by the RL modules (worker-autotune policy, PPO minibatch bounds). |
+| `constants.py` | Fixed worker-autotuning implementation invariants shared by RL modules. |
+| `pool.py` | Owns opponent admission, retention, persistence, and rollout eligibility behind an extensible pool boundary. |
 | `rollout.py` | Finalizes rewards and trajectories and plays one CPU-only self-play or heuristic-opponent training game. |
 | `resume.py` | Loads compatible policies and atomically saves, validates, and restores exact numbered RL resume pairs. |
 | `reporting.py` | Owns iteration summaries, durable metrics JSONL writes, worker metadata aggregation, and cumulative RL runtime profiles. |
@@ -19,13 +21,13 @@ Owned by `training/rl/`.
 Run:
 
 ```bash
-python -m training.rl.self_play
-python -m training.rl.self_play --compact
-python -m training.rl.self_play --rl-workers auto --seed 123
-python -m training.rl.self_play --rl-workers 4 --device cpu
-python -m training.rl.self_play --gpi 1000
-python -m training.rl.self_play --fresh-from-sl
-python -m training.rl.self_play --dropout 0.1 --weight-decay
+python -m training.rl.cli
+python -m training.rl.cli --compact
+python -m training.rl.cli --rl-workers auto --seed 123
+python -m training.rl.cli --rl-workers 4 --device cpu
+python -m training.rl.cli --gpi 1000
+python -m training.rl.cli --fresh-from-sl
+python -m training.rl.cli --dropout 0.1 --weight-decay
 ```
 
 Default behavior:
@@ -72,7 +74,7 @@ policy, so the snapshot cadence is exactly the iteration size: `--gpi` sets it,
 and the pool therefore spans `max_pool_size * gpi` training games. At the
 defaults that is 50 snapshots covering 100,000 games.
 
-GPI is never autotuned. Canonical pipelines and direct self-play accept
+GPI is never autotuned. Canonical pipelines and direct RL training accept
 `--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000`, defaulting to
 `2000`.
 
@@ -115,22 +117,22 @@ state, RNGs, supervised-checkpoint hash, fixed GPI, tuned workers, rolling logs,
 and the exact opponent-policy pool. The newest pool state replaces the previous
 one to bound disk use; numbered policy files remain available.
 
-To continue manually, pass the matching pair and its completed iteration while
-keeping the original training configuration and total target:
+To continue manually, pass only the matching pair. The checkpoint supplies the
+completed iteration, game budget, algorithm, hyperparameters, worker policy,
+and all other training settings:
 
 ```bash
-python -m training.rl.self_play --iterations 2000 --numbered-checkpoints \
-  --rl-weights-path models/example.npz --start-iteration 500 \
+python -m training.rl.cli \
   --resume-weights-path models/example_iter000500.npz \
-  --resume-state-file models/example_iter000500.resume.npz --seed 42
+  --resume-state-file models/example_iter000500.resume.npz
 ```
 
 Resume validates the checksum and configuration before loading anything,
 restores optimizer/RNG/pool state, continues at the next absolute game id, and
-requires the same fixed GPI while reusing saved workers without rerunning their
-autotune.
-This is a true continuation. Loading an ordinary `.npz` through the legacy
-path restores only weights and cannot reconstruct the former in-memory pool.
+reuses the saved GPI/workers without rerunning their autotune, and ignores any
+conflicting training options. Loading an ordinary `.npz` through
+`--continue-existing-rl` restores only weights and cannot reconstruct the
+former in-memory pool.
 
 Diagnostics and the UI use `mode="evaluation"`, which always selects the
 highest-probability legal action and stores no trajectory. Their results
@@ -179,7 +181,7 @@ unprofiled instead of being estimated.
 
 Pass `--compact` to suppress iteration and checkpoint lines while retaining
 worker-autotuning messages, one absolute iteration progress bar, and one final
-summary. The parameter-sweep shell enables this presentation automatically.
+summary.
 
 The learner trajectory stores only real decisions. Draw, pass, and single-option
 tile plays are forced actions, so `RLAgent` returns them directly without
@@ -194,7 +196,7 @@ pass, and single-choice plays never enter the buffer. PPO uses `old_log_prob`
 to compare the updated policy with the rollout policy. Advantages use the
 existing finalized reward and are normalized once over the complete iteration.
 
-With `--no-ppo`, the same fresh on-policy decisions go directly to the legacy
+With `--ppo-max-epochs 1`, the same fresh on-policy decisions go directly to the
 full-buffer policy-gradient update. Exactly one optimizer step is attempted per
 non-empty iteration, and none of `training/rl/ppo.py`'s buffer, ratio, clipped
 surrogate, KL, minibatch, or whole-buffer evaluation paths run. Checkpoint,
@@ -208,14 +210,14 @@ fallback restarts a partially applied epoch.
 
 Requested minibatches are fixed by the implementation as
 `clamp(ceil(actual_games / 125), 4, 16)`, further capped to keep roughly 128
-decisions per minibatch. The 4/16 bounds, 1% worker benchmark fraction, 10%
-worker acceptance gain, and 70% GPU-buffer safety fraction are centralized in
-`training/rl/constants.py` and are not experiment or CLI parameters. Each epoch visits every
+decisions per minibatch. PPO implementation constants live in `ppo.py`; the
+1% worker benchmark fraction and 10% worker acceptance gain live in
+`constants.py`. None are experiment or CLI parameters. Each epoch visits every
 decision exactly once with a deterministic new permutation. PPO uses clip
 epsilon `0.2`, reports target KL `0.01` as an informational reference, and
 does not start another epoch after the
 completed epoch's whole-buffer approximate KL exceeds `0.015`. Direct
-self-play and finite canonical profiles run at most four epochs by default;
+standalone and finite canonical profiles run at most four epochs by default;
 the canonical `forever` profile runs at most 16. An explicit
 `--ppo-max-epochs` overrides the profile default within the supported 1–16
 range.
@@ -225,7 +227,7 @@ Enable the optional PPO actor-critic with:
 ```bash
 python -m training.pipeline forever --value-head --run-name critic
 # Or directly:
-python -m training.rl.self_play --value-head
+python -m training.rl.cli --value-head
 ```
 
 This adds a linear `V(s)` head over the last hidden layer. The current
@@ -234,7 +236,7 @@ finalized policy reward is the value target, and the masked policy update uses
 clipped value loss, and evaluates value loss, clipping, prediction moments, and
 explained variance after each epoch. The value-loss coefficient defaults to
 `0.5` (`--value-coef`). Checkpoints contain `Wv` and `bv`. Combining
-`--no-ppo --value-head` keeps the historical one-full-buffer actor-critic path.
+`--ppo-max-epochs 1 --value-head` keeps the one-full-buffer actor-critic path.
 
 Policy-only loading ignores `Wv`/`bv`, while value-head loading initializes
 them to zero when they are absent. This permits mode changes without changing
@@ -253,7 +255,7 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 | `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
 | `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
 | `--clip-grad-norm` | Gradient-norm clipping threshold for the policy-gradient update | `5.0` |
-| `--ppo` / `--no-ppo` | Masked PPO or historical one-update REINFORCE regression | PPO |
+| `--ppo-max-epochs` | `1` selects one-update REINFORCE; `2`–`16` select masked PPO | `4` standalone/finite, `16` forever |
 | `--value-head` | Train a linear critic with PPO or REINFORCE | off |
 | `--weight-decay [COEFFICIENT]` | Decoupled L2 shrink on every weight matrix and `Wv` after clipping; shared with supervised training | off (`0.0001`) |
 | `--dropout [RATE]` | Hidden-layer dropout shared with supervised training | off (`0.1`) |
@@ -266,14 +268,14 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 | `--device` | Array backend: `auto` matches `GPU_ENABLED` exactly (CuPy when installed, else NumPy); `cpu`/`gpu` force one backend regardless of what's installed/enabled globally | `auto` |
 
 ```bash
-python -m training.rl.self_play --gamma 0.97 --reward-schema shaped --seed 42
+python -m training.rl.cli --gamma 0.97 --reward-schema shaped --seed 42
 ```
 
 A point-in-time value loss or win rate is dominated by batch noise; the
 iteration log always reports `reward mean/std/min/max` and a trailing moving
 average of value loss and win rate next to the raw values, so a plateau can be
 judged from the average rather than a single noisy line. In detailed
-`training.rl.self_play` output, a value-head run also prints the count and
+`training.rl.cli` output, a value-head run also prints the count and
 mean/std/min/max of the pre-update `V(s)` predictions for every displayed
 iteration. These are the same predictions used in `reward - V(s)`; the report
 reuses that forward pass rather than evaluating the buffer again.
@@ -292,12 +294,12 @@ before changing devices: it records CPU/GPU optimizer-call counts and separates
 rollout rules, exact-model work, inference, buffer transfer, backpropagation,
 parameter updates, and metric transfers.
 
-`training.rl.self_play` also accepts `--iterations`, `--total-training-games`,
+`training.rl.cli` also accepts `--iterations`, `--total-training-games`,
 `--gpi`, `--training-opponent`, `--learning-rate`, `--entropy-coef`, `--log-interval`,
 `--checkpoint-interval`, `--max-pool-size`,
 `--sl-weights-path`, and `--rl-weights-path`; see
 `training/rl/cli.py:add_optional_rl_arguments` for the authoritative
-definitions, or run `python -m training.rl.self_play --help`.
+definitions, or run `python -m training.rl.cli --help`.
 
 The former GPI-autotune options (`--games-per-iteration`, `--adaptive-gpi`,
 `--no-adaptive-gpi`, `--gpi-candidates`, `--gpi-benchmark-games-target`,
@@ -317,7 +319,7 @@ unchanged for every `--gpi` of 400 or more, including the default 2,000;
 `--gpi 100` and `--gpi 200` now snapshot every 100 or 200 games instead of
 every 400.
 
-`TRAINING_OPPONENT` at the top of `self_play.py` controls the training opponent:
+`TRAINING_OPPONENT` at the top of `training_loop.py` controls the training opponent:
 
 | Value | Meaning |
 |---|---|
@@ -376,7 +378,7 @@ state described above is the exception: it serializes and restores that pool
 for exact interruption recovery.
 ## Host and device memory
 
-RL self-play performs a host-memory preflight for the shared snapshot bank and
+RL training performs a host-memory preflight for the shared snapshot bank and
 expected batch, then checks the actual workspace before each `hstack`. With
 `--device auto`, less than 256 MiB of effective free VRAM causes an announced
 CPU fallback; explicit `--device gpu` fails early instead. Diagnostics later

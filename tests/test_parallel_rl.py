@@ -20,16 +20,16 @@ from diagnostics.parallel_runner import (
     ParallelSafetyConfig,
 )
 from training.rl.parallel import RLRolloutRunner, worker_count
-from training.rl.resume import NUMBERED_CHECKPOINT_WEIGHT_RETENTION
-from training.rl.self_play import (
-    REWARD_SCHEMAS,
+from training.rl.resume import (
+    NUMBERED_CHECKPOINT_WEIGHT_RETENTION,
     _load_initial_network,
     load_resume_state,
     numbered_checkpoint_path,
-    parse_args as parse_self_play_args,
     resume_state_path,
-    train,
 )
+from training.rl.rollout import REWARD_SCHEMAS
+from training.rl.cli import parse_args as parse_rl_args
+from training.rl.training_loop import train
 from train_script.run_pipeline import parse_args as parse_pipeline_args
 from utils.resource_limits import MemorySafetyError
 
@@ -124,7 +124,7 @@ class ParallelRLTests(unittest.TestCase):
         ])
         self.assertEqual(args.rl_workers, 3)
         self.assertEqual(args.rl_memory_reserve_mb, 256)
-        self.assertTrue(parse_self_play_args(["--compact"]).compact)
+        self.assertTrue(parse_rl_args(["--compact"]).compact)
 
     def test_rollouts_are_identical_with_one_and_multiple_workers(self):
         one_worker, one_info = self._collect(1)
@@ -344,37 +344,17 @@ class ParallelRLTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "inconsistent"):
                 load_resume_state(full["rl_weights_path"], partial_state)
 
-            with self.assertRaisesRegex(ValueError, "gamma"):
-                self._train(
-                    iterations=4,
-                    rl_weights_path=str(resumed_base),
-                    start_iteration=2,
-                    resume_weights_path=str(partial_weights),
-                    resume_state_file=str(partial_state),
-                    gamma=0.97,
-                    **common,
-                )
-
-            with self.assertRaisesRegex(ValueError, "rl_training_algorithm"):
-                self._train(
-                    iterations=4,
-                    rl_weights_path=str(resumed_base),
-                    start_iteration=2,
-                    resume_weights_path=str(partial_weights),
-                    resume_state_file=str(partial_state),
-                    ppo_enabled=False,
-                    **common,
-                )
-
             resumed = self._train(
                 iterations=4,
                 rl_weights_path=str(resumed_base),
-                start_iteration=2,
                 resume_weights_path=str(partial_weights),
                 resume_state_file=str(partial_state),
-                ppo_target_kl=0.005,
+                gamma=0.97,
+                ppo_max_epochs=1,
                 **common,
             )
+            self.assertEqual(resumed["gamma"], common.get("gamma", 1.0))
+            self.assertEqual(resumed["rl_training_algorithm"], "ppo_v1")
             with np.load(full["rl_weights_path"], allow_pickle=False) as left:
                 with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
                     self.assertEqual(left.files, right.files)
@@ -388,7 +368,10 @@ class ParallelRLTests(unittest.TestCase):
             self.assertEqual(full["games_per_iteration"], resumed["games_per_iteration"])
             self.assertEqual(full["selected_workers"], resumed["selected_workers"])
             self.assertEqual(full["optimizer_step_count"], resumed["optimizer_step_count"])
-            self.assertEqual(resumed["ppo_configuration"]["target_kl"], 0.005)
+            self.assertEqual(
+                resumed["ppo_configuration"]["fixed_policy"]["target_kl"],
+                0.01,
+            )
 
     def test_four_hidden_layer_run_trains_and_resumes_exactly(self):
         """Carry a deeper architecture through rollouts, PPO, and exact resume."""
@@ -438,7 +421,6 @@ class ParallelRLTests(unittest.TestCase):
             resumed = self._train(
                 iterations=4,
                 rl_weights_path=str(resumed_base),
-                start_iteration=2,
                 resume_weights_path=str(partial_weights),
                 resume_state_file=str(partial_state),
                 **common,
@@ -490,7 +472,7 @@ class ParallelRLTests(unittest.TestCase):
                 "checkpoint_interval": 1,
                 "max_pool_size": 2,
                 "use_value_head": True,
-                "ppo_enabled": False,
+                "ppo_max_epochs": 1,
                 "seed": 654,
                 "device": "cpu",
                 "workers": 1,
@@ -513,7 +495,6 @@ class ParallelRLTests(unittest.TestCase):
             resumed = self._train(
                 iterations=3,
                 rl_weights_path=str(resumed_base),
-                start_iteration=1,
                 resume_weights_path=str(partial_weights),
                 resume_state_file=str(resume_state_path(partial_weights)),
                 **common,
@@ -534,7 +515,6 @@ class ParallelRLTests(unittest.TestCase):
                 "checkpoint_interval": 1,
                 "max_pool_size": 2,
                 "use_value_head": True,
-                "ppo_enabled": True,
                 "ppo_max_epochs": 2,
                 "seed": 655,
                 "device": "cpu",
@@ -558,7 +538,6 @@ class ParallelRLTests(unittest.TestCase):
             resumed = self._train(
                 iterations=3,
                 rl_weights_path=str(resumed_base),
-                start_iteration=1,
                 resume_weights_path=str(partial_weights),
                 resume_state_file=str(resume_state_path(partial_weights)),
                 **common,

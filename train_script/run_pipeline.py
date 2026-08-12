@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the full domino data, training, self-play, and diagnostics pipeline."""
+"""Run the full domino data, supervised, RL, and diagnostics pipeline."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from utils.runtime_status import format_duration, pipeline_compute_report
+from diagnostics.parallel_runner import ParallelSafetyConfig
 from agents.nn import (
     TP_MIN_EPOCHS,
     TP_MIN_RELATIVE_IMPROVEMENT,
@@ -208,8 +209,8 @@ def _run_supervised_training(config, args):
 
 
 def _run_rl_training(config, args):
-    """Run reinforcement-learning self-play with compact iteration progress."""
-    self_play = importlib.import_module("training.rl.self_play")
+    """Run reinforcement learning with compact iteration progress."""
+    training_loop = importlib.import_module("training.rl.training_loop")
 
     def rl_status(message):
         if tqdm is not None:
@@ -229,10 +230,10 @@ def _run_rl_training(config, args):
         )
     )
     return _run_stage(
-        "RL self-play",
+        "RL training",
         config.rl_iterations,
         "iter",
-        lambda progress: self_play.train(
+        lambda progress: training_loop.train(
             iterations=explicit_iterations,
             total_training_games=(
                 args.total_training_games
@@ -266,21 +267,12 @@ def _run_rl_training(config, args):
             seed=args.seed,
             device=args.device,
             workers=args.rl_workers,
-            safety_config=self_play.ParallelSafetyConfig(
+            safety_config=ParallelSafetyConfig(
                 memory_reserve_mb=args.rl_memory_reserve_mb,
                 estimated_worker_mb=args.rl_estimated_worker_mb,
                 max_worker_rss_mb=args.rl_max_worker_rss_mb,
             ),
-            ppo_enabled=args.ppo_enabled,
-            ppo_clip_epsilon=args.ppo_clip_epsilon,
-            ppo_target_kl=args.ppo_target_kl,
-            ppo_stop_kl=args.ppo_stop_kl,
             ppo_max_epochs=args.ppo_max_epochs,
-            ppo_games_per_minibatch_scale=args.ppo_games_per_minibatch_scale,
-            ppo_min_decisions_per_minibatch=(
-                args.ppo_min_decisions_per_minibatch
-            ),
-            prefer_gpu_buffer=args.prefer_gpu_buffer,
             status_callback=rl_status,
         ),
         lambda summary: (
@@ -342,7 +334,7 @@ def parse_args(argv=None):
     """Parse the optional workload scale."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run dataset generation, supervised training, RL self-play, and "
+            "Run dataset generation, supervised training, RL training, and "
             "agent-vs-random diagnostics with compact progress output."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -384,8 +376,8 @@ def parse_args(argv=None):
 
     supervised_cli = _silent_import("training.supervised.cli")
     supervised_cli.add_optional_training_arguments(parser)
-    self_play = importlib.import_module("training.rl.self_play")
-    self_play.add_optional_rl_arguments(
+    rl_cli = importlib.import_module("training.rl.cli")
+    rl_cli.add_optional_rl_arguments(
         parser,
         fresh_from_sl_default=True,
         expose_gpi=True,

@@ -13,9 +13,11 @@ import numpy as np
 from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from middleware.domino_engine import RULESET_VERSION
-from training.rl.resume import (
-    LEGACY_TRAINING_ALGORITHM,
+from training.rl.ppo import (
     PPO_TRAINING_ALGORITHM,
+    REINFORCE_TRAINING_ALGORITHM,
+)
+from training.rl.resume import (
     RLTrainingConfiguration,
     _validate_resume_configuration,
     load_resume_state,
@@ -29,17 +31,13 @@ from utils.artifacts import (
 from utils.repository import current_git_commit
 
 
-RUN_FORMAT_VERSION = 2
-CONFIG_HASH_VERSION = 1
+RUN_FORMAT_VERSION = 3
+CONFIG_HASH_VERSION = 2
 MILESTONE_RESUME_RETENTION = 5
 SUPPORTED_TRAINING_ALGORITHMS = frozenset((
     PPO_TRAINING_ALGORITHM,
-    LEGACY_TRAINING_ALGORITHM,
+    REINFORCE_TRAINING_ALGORITHM,
 ))
-DEFAULTED_RL_CONFIG_FIELDS = {
-    "weight_decay": 0.0,
-    "dropout_rate": 0.0,
-}
 
 
 @dataclass(frozen=True)
@@ -102,30 +100,6 @@ def _validated_algorithm(algorithm):
     if algorithm not in SUPPORTED_TRAINING_ALGORITHMS:
         raise ValueError(f"Unsupported canonical RL algorithm: {algorithm!r}.")
     return algorithm
-
-
-def _ppo_resume_identity(configuration):
-    """Return PPO fields that can affect computation after a checkpoint."""
-    identity = dict(configuration or {})
-    identity.pop("target_kl", None)
-    return identity
-
-
-def _rl_config_identity(configuration):
-    """Return one rl_config normalized for comparison across CLI generations.
-
-    Runs created before the opt-in dropout and RL weight-decay controls stored
-    no such keys. Their absence is exactly the disabled value, so filling it in
-    lets those runs continue against the current CLI without rewriting the
-    stored configuration hash.
-
-    ``pool_refresh_games`` is dropped for the same reason: runs created while it
-    existed stored a cadence setting that no longer affects computation, because
-    the opponent pool now takes exactly one snapshot per iteration.
-    """
-    identity = {**DEFAULTED_RL_CONFIG_FIELDS, **dict(configuration or {})}
-    identity.pop("pool_refresh_games", None)
-    return identity
 
 
 def configuration_sha256(configuration):
@@ -347,12 +321,6 @@ def create_run_config(
         for key in immutable_keys:
             existing_value = existing.get(key)
             requested_value = value.get(key)
-            if key == "ppo_config":
-                existing_value = _ppo_resume_identity(existing_value)
-                requested_value = _ppo_resume_identity(requested_value)
-            elif key == "rl_config":
-                existing_value = _rl_config_identity(existing_value)
-                requested_value = _rl_config_identity(requested_value)
             if existing_value != requested_value:
                 differences.append(key)
         target_changed = existing.get("target_rl_games") != value["target_rl_games"]
@@ -401,9 +369,6 @@ def load_resume_point(run_dir):
     }
     for key, expected_value in expected.items():
         checkpoint_value = state.get(key)
-        if key == "ppo_config":
-            checkpoint_value = _ppo_resume_identity(checkpoint_value)
-            expected_value = _ppo_resume_identity(expected_value)
         if checkpoint_value != expected_value:
             differences.append(
                 f"{key}: checkpoint={checkpoint_value!r}, "
@@ -684,7 +649,7 @@ def publish_checkpoint(
         except (OSError, json.JSONDecodeError):
             previous_milestone = None
     policy_updates_completed = int(
-        training.get("ppo_updates_completed", 0)
+        training.get("policy_updates_completed", 0)
     )
     state = {
         "format_version": RUN_FORMAT_VERSION,
@@ -710,7 +675,7 @@ def publish_checkpoint(
         ),
         "reinforce_updates_completed": (
             policy_updates_completed
-            if algorithm == LEGACY_TRAINING_ALGORITHM else 0
+            if algorithm == REINFORCE_TRAINING_ALGORITHM else 0
         ),
         "optimizer_steps_completed": int(optimizer["step_count"]),
         "trainable_decisions_seen": int(

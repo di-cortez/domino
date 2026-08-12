@@ -1,12 +1,11 @@
-"""On-policy self-play with masked PPO minibatches by default.
+"""Exact-game-budget reinforcement-learning orchestration.
 
 The policy controls only real tile-play decisions. Draw, pass, and single-option
 tile-play turns are forced by the rules engine and do not enter the learner
 trajectory. Local draw/pass events are distributed to all earlier real
 decisions with temporal decay, then combined with a uniform terminal reward and
 used as PPO advantages after one global normalization per iteration. The
-historical one-update REINFORCE/value-head path remains available explicitly
-through ``--no-ppo`` for regression comparisons.
+single-update REINFORCE/value-head path is selected by ``ppo_max_epochs=1``.
 
 Independent games within each iteration run in deterministic CPU-only workers.
 Workers read frozen policies from shared memory and return trajectories; only
@@ -24,12 +23,7 @@ import time
 import numpy as np
 
 from agents.nn import DISABLED_DROPOUT_RATE, DISABLED_WEIGHT_DECAY
-from training.rl.cli import (
-    _training_kwargs_from_args,
-    add_optional_rl_arguments,
-    parse_args,
-    parse_rl_worker_count,
-)
+from diagnostics.parallel_runner import ParallelSafetyConfig
 from training.rl.config import (
     DEFAULT_CLIP_GRAD_NORM,
     DEFAULT_DEVICE,
@@ -37,7 +31,6 @@ from training.rl.config import (
     DEFAULT_ITERATIONS,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
-    DEFAULT_PPO_ENABLED,
     DEFAULT_TOTAL_TRAINING_GAMES,
     RL_WEIGHTS,
     SL_WEIGHTS,
@@ -48,33 +41,9 @@ from training.rl.config import (
 from training.rl.rollout import (
     DEFAULT_GAMMA,
     DEFAULT_REWARD_SCHEMA,
-    EVENT_REWARD_DECAY,
-    FINAL_PIP_PENALTY,
-    LEARNER_DRAW_PENALTY,
-    LEARNER_PASS_PENALTY,
-    OPPONENT_DRAW_REWARD,
-    OPPONENT_PASS_REWARD,
-    REWARD_SCHEMAS,
     REWARD_ZERO_EPSILON,
-    TERMINAL_LOSS_REWARD,
-    TERMINAL_WIN_REWARD,
-    EventStats,
-    TrainingSample,
-    _collect_self_play_steps,
-    _collect_steps_vs_heuristic,
-    _event_reward_for_action,
-    _finish_episode_with_rewards,
-    _play_training_game,
-    _play_training_game_unprofiled,
-    _profile_worker_section,
-    _profile_worker_start,
-    _remaining_pips,
-    _terminal_reward,
-    _tile_play_actions,
 )
 from training.rl.resume import (
-    LEGACY_TRAINING_ALGORITHM,
-    PPO_TRAINING_ALGORITHM,
     RLTrainingConfiguration,
     RESUME_STATE_VERSION,
     SUPPORTED_RESUME_STATE_VERSIONS,
@@ -97,12 +66,11 @@ from training.rl.resume import (
 )
 from utils.repository import current_git_commit
 from training.rl.reporting import (
+    RLTrainingReporter,
     RLRuntimeProfile,
-    _gradient_log_text,
     _merge_parallel_summary,
     _new_parallel_summary,
     _prepare_metrics_file,
-    _print_ppo_window,
     _reward_signal_summary,
     _write_metrics_row,
 )
@@ -118,28 +86,19 @@ from training.rl.adaptive_tuning import (
     run_worker_tuning,
 )
 from training.rl.ppo import (
-    DEFAULT_CLIP_EPSILON,
-    DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    DEFAULT_MAX_EPOCHS,
-    DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    DEFAULT_STOP_KL,
-    DEFAULT_TARGET_KL,
-    PPOBuffer,
-    ppo_update,
+    DEFAULT_PPO_MAX_EPOCHS,
+    fixed_ppo_policy,
+    ppo_is_enabled,
+    update_from_samples,
 )
 from training.rl.constants import (
-    PPO_GPU_BUFFER_SAFETY_FRACTION,
-    PPO_MAX_MINIBATCHES,
-    PPO_MIN_MINIBATCHES,
     RL_WORKER_AUTOTUNE_FRACTION,
     RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
 )
 from utils.resource_limits import (
-    MIB,
     choose_safe_rl_device,
     ensure_ram_available,
 )
-from utils.runtime_status import format_duration, print_memory_report
 
 
 def _value_prediction_summary(values):
@@ -155,7 +114,7 @@ def _value_prediction_summary(values):
     }
 
 
-def _legacy_policy_update(
+def _reinforce_policy_update(
     network,
     batch,
     *,
@@ -166,7 +125,7 @@ def _legacy_policy_update(
     value_coef,
     collect_value_predictions=False,
 ):
-    """Apply the historical one-full-buffer update for ``--no-ppo``."""
+    """Apply the one-full-buffer update selected by ``ppo_max_epochs=1``."""
     xp = network.xp
     x_batch = xp.hstack([xp.asarray(sample.x) for sample in batch])
     actions = [sample.action_index for sample in batch]
@@ -245,19 +204,11 @@ def train(
     metrics_callback=None,
     metrics_output_path=None,
     adaptive_tuning_path=None,
-    start_iteration=0,
     resume_weights_path=None,
     resume_state_file=None,
     numbered_checkpoints=False,
     fresh_from_sl=False,
-    ppo_enabled=DEFAULT_PPO_ENABLED,
-    ppo_clip_epsilon=DEFAULT_CLIP_EPSILON,
-    ppo_target_kl=DEFAULT_TARGET_KL,
-    ppo_stop_kl=DEFAULT_STOP_KL,
-    ppo_max_epochs=DEFAULT_MAX_EPOCHS,
-    ppo_games_per_minibatch_scale=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    ppo_min_decisions_per_minibatch=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    prefer_gpu_buffer=True,
+    ppo_max_epochs=DEFAULT_PPO_MAX_EPOCHS,
     stop_after_training_games=None,
     shutdown_requested=None,
     adaptive_tuning_training_games=None,
@@ -272,6 +223,71 @@ def train(
     iteration to be partial. Worker-benchmark games are always discarded.
     """
     runtime_profile = RLRuntimeProfile()
+    reporter = RLTrainingReporter(
+        quiet=quiet,
+        status_callback=status_callback,
+    )
+    has_resume_weights = resume_weights_path is not None
+    has_resume_state = resume_state_file is not None
+    if has_resume_weights != has_resume_state:
+        raise ValueError(
+            "resume_weights_path and resume_state_file must be provided together"
+        )
+    if fresh_from_sl and has_resume_weights:
+        raise ValueError("fresh_from_sl cannot be combined with a resume pair")
+
+    resume_metadata = None
+    resume_pool_snapshots = ()
+    saved_configuration = None
+    completed_training_games = 0
+    start_iteration = 0
+    if has_resume_weights:
+        resume_metadata, resume_pool_snapshots = load_resume_state(
+            resume_weights_path,
+            resume_state_file,
+        )
+        saved_configuration = RLTrainingConfiguration.from_mapping(
+            resume_metadata["configuration"]
+        )
+        reporter.status(
+            "Resume configuration loaded from disk; command-line and caller "
+            "training options are ignored."
+        )
+        iterations = None
+        total_training_games = saved_configuration.total_training_games
+        gpi = saved_configuration.selected_gpi
+        retune_workers = False
+        training_opponent = saved_configuration.training_opponent
+        learning_rate = saved_configuration.learning_rate
+        entropy_coef = saved_configuration.entropy_coef
+        weight_decay = saved_configuration.weight_decay
+        dropout_rate = saved_configuration.dropout_rate
+        log_interval = saved_configuration.log_interval
+        checkpoint_interval = saved_configuration.checkpoint_interval
+        max_pool_size = saved_configuration.max_pool_size
+        use_value_head = saved_configuration.use_value_head
+        value_coef = saved_configuration.value_coef
+        gamma = saved_configuration.gamma
+        reward_schema = saved_configuration.reward_schema
+        clip_grad_norm = saved_configuration.clip_grad_norm
+        normalize_advantages = saved_configuration.normalize_advantages
+        moving_average_window = saved_configuration.moving_average_window
+        seed = saved_configuration.effective_seed
+        device = saved_configuration.device
+        workers = saved_configuration.selected_workers
+        safety_config = ParallelSafetyConfig(
+            memory_reserve_mb=saved_configuration.worker_memory_reserve_mb,
+            estimated_worker_mb=saved_configuration.worker_estimated_mb,
+            max_worker_rss_mb=saved_configuration.worker_max_rss_mb,
+        )
+        ppo_max_epochs = saved_configuration.ppo_max_epochs
+        adaptive_tuning_training_games = total_training_games
+        fresh_from_sl = False
+        numbered_checkpoints = True
+        start_iteration = int(resume_metadata["completed_iteration"])
+        completed_training_games = int(
+            resume_metadata["completed_training_games"]
+        )
 
     resolved_options = resolve_training_options(
         iterations=iterations,
@@ -285,14 +301,8 @@ def train(
         moving_average_window=moving_average_window,
         training_opponent=training_opponent,
         reward_schema=reward_schema,
-        ppo_enabled=ppo_enabled,
         value_coef=value_coef,
-        ppo_clip_epsilon=ppo_clip_epsilon,
-        ppo_target_kl=ppo_target_kl,
-        ppo_stop_kl=ppo_stop_kl,
         ppo_max_epochs=ppo_max_epochs,
-        ppo_games_per_minibatch_scale=ppo_games_per_minibatch_scale,
-        ppo_min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
         normalize_advantages=normalize_advantages,
         workers=workers,
         safety_config=safety_config,
@@ -308,44 +318,7 @@ def train(
     workers = resolved_options.workers
     safety_config = resolved_options.safety_config
     schema = resolved_options.schema
-    has_resume_weights = resume_weights_path is not None
-    has_resume_state = resume_state_file is not None
-    if has_resume_weights != has_resume_state:
-        raise ValueError(
-            "resume_weights_path and resume_state_file must be provided together"
-        )
-    if start_iteration < 0:
-        raise ValueError("start_iteration must be non-negative")
-    if start_iteration > 0 and not has_resume_weights:
-        raise ValueError("A positive start_iteration requires a complete resume pair")
-    if fresh_from_sl and has_resume_weights:
-        raise ValueError("fresh_from_sl cannot be combined with a resume pair")
-
-    resume_metadata = None
-    resume_pool_snapshots = ()
-    completed_training_games = 0
-    if has_resume_weights:
-        resume_metadata, resume_pool_snapshots = load_resume_state(
-            resume_weights_path,
-            resume_state_file,
-        )
-        completed_iteration = int(resume_metadata["completed_iteration"])
-        if completed_iteration != int(start_iteration):
-            raise ValueError(
-                f"Resume state completed iteration {completed_iteration}, but "
-                f"start_iteration is {start_iteration}."
-            )
-        completed_training_games = int(
-            resume_metadata["completed_training_games"]
-        )
-        saved_seed = int(resume_metadata["configuration"]["effective_seed"])
-        if seed is not None and int(seed) != saved_seed:
-            raise ValueError(
-                f"Resume state uses seed {saved_seed}, but seed {int(seed)} was requested."
-            )
-        effective_seed = saved_seed
-    else:
-        effective_seed = int(seed) if seed is not None else secrets.randbits(63)
+    effective_seed = int(seed) if seed is not None else secrets.randbits(63)
     if completed_training_games >= total_training_games:
         raise ValueError(
             "The resume checkpoint has already completed the requested game budget."
@@ -392,19 +365,13 @@ def train(
     )
     if resume_metadata is not None:
         network.load_optimizer_state_dict(resume_metadata["optimizer_state"])
-    sl_weights_sha256 = _sl_checkpoint_sha256(sl_weights_path)
+    sl_weights_sha256 = (
+        saved_configuration.sl_weights_sha256
+        if saved_configuration is not None
+        else _sl_checkpoint_sha256(sl_weights_path)
+    )
 
-    if status_callback is not None:
-        emit_status = status_callback
-    elif quiet:
-        emit_status = lambda _message: None
-    else:
-        emit_status = lambda message: print(message, flush=True)
-    if device_fallback_reason:
-        emit_status(
-            "RL memory safety: automatic GPU selection fell back to CPU because "
-            f"{device_fallback_reason}."
-        )
+    reporter.device_fallback(device_fallback_reason)
 
     tuning_path = Path(adaptive_tuning_path) if adaptive_tuning_path else (
         Path(rl_weights_path).parent / "adaptive_tuning.json"
@@ -415,10 +382,8 @@ def train(
     if saved_tuning and not retune_workers:
         warning = hardware_warning(saved_tuning, hardware_metadata(network.device))
         if warning:
-            emit_status(f"Warning: {warning}")
-    emit_status("-" * 70)
-    emit_status("RL rollout-worker tuning")
-    emit_status("-" * 70)
+            reporter.status(f"Warning: {warning}")
+    reporter.tuning_header()
     runtime_profile.add(
         "validation_model_load_and_resume",
         time.perf_counter() - runtime_profile.started,
@@ -440,7 +405,7 @@ def train(
         safety=safety_config,
         pool_snapshots=resume_pool_snapshots,
         output_path=tuning_path,
-        status_callback=emit_status,
+        status_callback=reporter.status,
     )
     runtime_profile.add(
         "adaptive_tuning",
@@ -449,48 +414,39 @@ def train(
     runner_setup_started = time.perf_counter()
     selected_gpi = int(gpi)
     selected_workers = int(adaptive_tuning["selected_workers"])
-    emit_status(f"Fixed GPI: {selected_gpi}.")
-    emit_status("RL update configuration:")
-    emit_status(
-        f"  value head: {'on' if use_value_head else 'off'}"
-        + (f" | value coefficient: {value_coef:g}" if use_value_head else "")
+    reporter.update_configuration(
+        algorithm=algorithm,
+        use_value_head=use_value_head,
+        value_coef=value_coef,
+        dropout_rate=dropout_rate,
+        weight_decay=weight_decay,
+        ppo_max_epochs=ppo_max_epochs,
+        gpi=selected_gpi,
     )
-    emit_status(
-        "  regularization: "
-        + (f"dropout {dropout_rate:g}" if dropout_rate > 0 else "dropout off")
-        + " | "
-        + (
-            f"decoupled weight decay {weight_decay:g}"
-            if weight_decay > 0 else "weight decay off"
-        )
-    )
-    if ppo_enabled:
-        emit_status(
-            f"  algorithm: {algorithm} | clip epsilon: {ppo_clip_epsilon:.2f} | "
-            f"target KL: {ppo_target_kl:.3f} | stop KL: {ppo_stop_kl:.3f}"
-        )
-        emit_status(
-            f"  max epochs: {ppo_max_epochs} | minibatches: adaptive, "
-            f"{PPO_MIN_MINIBATCHES} to {PPO_MAX_MINIBATCHES} | preferred "
-            "buffer: GPU | fallback: RAM"
-        )
-    else:
-        emit_status(
-            f"  algorithm: {algorithm} | one full-buffer policy-gradient "
-            "update per iteration"
-        )
-        emit_status(
-            "  PPO minibatches, ratios, clipping, KL control, and post-update "
-            "full-buffer evaluation: disabled"
-        )
-    emit_status("-" * 70)
 
-    if run_configuration is None:
+    if saved_configuration is not None:
+        resume_configuration = saved_configuration
+        if run_configuration is not None:
+            expected_configuration = RLTrainingConfiguration.from_run_config(
+                run_configuration,
+                total_training_games=saved_configuration.total_training_games,
+                selected_workers=saved_configuration.selected_workers,
+                device=saved_configuration.device,
+            )
+            _validate_resume_configuration(
+                resume_metadata,
+                expected_configuration,
+                emit_status=reporter.status,
+            )
+    elif run_configuration is None:
         resume_configuration = RLTrainingConfiguration.from_mapping({
             "total_training_games": int(total_training_games),
             "selected_gpi": int(selected_gpi),
             "selected_workers": int(selected_workers),
             "rl_training_algorithm": algorithm,
+            "log_interval": int(log_interval),
+            "checkpoint_interval": int(checkpoint_interval),
+            "moving_average_window": int(moving_average_window),
             "training_opponent": training_opponent,
             "learning_rate": float(learning_rate),
             "entropy_coef": float(entropy_coef),
@@ -506,17 +462,10 @@ def train(
             "effective_seed": int(effective_seed),
             "device": network.device,
             "sl_weights_sha256": sl_weights_sha256,
-            "ppo_clip_epsilon": float(ppo_clip_epsilon),
-            "ppo_target_kl": float(ppo_target_kl),
-            "ppo_stop_kl": float(ppo_stop_kl),
             "ppo_max_epochs": int(ppo_max_epochs),
-            "ppo_games_per_minibatch_scale": int(
-                ppo_games_per_minibatch_scale
-            ),
-            "ppo_min_decisions_per_minibatch": int(
-                ppo_min_decisions_per_minibatch
-            ),
-            "prefer_gpu_buffer": bool(prefer_gpu_buffer),
+            "worker_memory_reserve_mb": int(safety_config.memory_reserve_mb),
+            "worker_estimated_mb": int(safety_config.estimated_worker_mb),
+            "worker_max_rss_mb": int(safety_config.max_worker_rss_mb),
             "run_configuration_sha256": None,
             "git_commit": current_git_commit(),
         })
@@ -527,13 +476,8 @@ def train(
             selected_workers=selected_workers,
             device=network.device,
         )
-    if resume_metadata is not None:
-        _validate_resume_configuration(
-            resume_metadata,
-            resume_configuration,
-            emit_status=emit_status,
-        )
-        resume_configuration.warn_if_commit_changed(emit_status)
+    if saved_configuration is not None:
+        resume_configuration.warn_if_commit_changed(reporter.status)
 
     remaining_training_games = invocation_target_games - completed_training_games
     iterations_to_run = math.ceil(remaining_training_games / selected_gpi)
@@ -548,16 +492,13 @@ def train(
     ensure_ram_available(
         estimated_shared_bytes + estimated_batch_bytes,
         safety_config.memory_reserve_mb,
-        "RL self-play decision buffer and shared-policy preflight",
+        "RL decision buffer and shared-policy preflight",
     )
-    if not quiet:
-        print_memory_report("RL self-play startup memory")
-        print(
-            "RL resource preflight: "
-            f"requested device={requested_device!r}, selected device={network.device!r}, "
-            f"estimated peak host allocation "
-            f"{(estimated_shared_bytes + estimated_batch_bytes) / MIB:.1f} MiB."
-        )
+    reporter.resource_preflight(
+        requested_device=requested_device,
+        selected_device=network.device,
+        estimated_host_bytes=estimated_shared_bytes + estimated_batch_bytes,
+    )
 
     runner = RLRolloutRunner(
         network,
@@ -568,37 +509,37 @@ def train(
         safety=safety_config,
     )
     if resume_pool_snapshots:
-        runner.restore_pool_snapshots(
+        runner.restore_opponent_pool(
             resume_pool_snapshots,
             metadata=(resume_metadata or {}).get("opponent_pool_metadata"),
         )
     actual_workers, was_capped, cap_reason = runner.set_workers(selected_workers)
     if was_capped:
-        emit_status(
-            f"Selected workers reduced from {selected_workers} to {actual_workers} "
-            f"by current resource preflight: {cap_reason}."
-        )
+        reporter.worker_cap(selected_workers, actual_workers, cap_reason)
         selected_workers = actual_workers
         adaptive_tuning["selected_workers"] = int(actual_workers)
         adaptive_tuning["worker_source"] += "_safety_capped"
         atomic_write_tuning_json(tuning_path, adaptive_tuning)
-        resume_configuration = replace(
-            resume_configuration,
-            selected_workers=int(actual_workers),
-        )
+        if saved_configuration is None:
+            resume_configuration = replace(
+                resume_configuration,
+                selected_workers=int(actual_workers),
+            )
 
     if resume_metadata is not None:
         _restore_rng_state(resume_metadata["rng_state"])
-        emit_status(
-            f"Resuming RL after iteration {start_iteration} and "
-            f"{completed_training_games} real games; restored "
-            f"{len(resume_pool_snapshots)} opponent-pool snapshot(s)."
+        reporter.resumed(
+            start_iteration,
+            completed_training_games,
+            len(resume_pool_snapshots),
         )
     win_rate_window, value_loss_window, ppo_window, restored_state = (
         _restore_training_windows(resume_metadata, moving_average_window)
     )
     total_decision_samples = int(restored_state.get("total_decision_samples", 0))
-    ppo_updates_completed = int(restored_state.get("ppo_updates_completed", 0))
+    policy_updates_completed = int(
+        restored_state.get("policy_updates_completed", 0)
+    )
     clipped_iteration_count = int(restored_state.get("clipped_iteration_count", 0))
     total_rollout_duration_s = float(
         restored_state.get("total_rollout_duration_s", 0.0)
@@ -646,23 +587,8 @@ def train(
             "requested_workers": workers,
             "selected_workers": int(selected_workers),
             "supervised_weights_sha256": sl_weights_sha256,
-            "ppo": {
-                "enabled": bool(ppo_enabled),
-                "clip_epsilon": float(ppo_clip_epsilon),
-                "target_kl": float(ppo_target_kl),
-                "stop_kl": float(ppo_stop_kl),
-                "max_epochs": int(ppo_max_epochs),
-                "min_minibatches": PPO_MIN_MINIBATCHES,
-                "max_minibatches": PPO_MAX_MINIBATCHES,
-                "games_per_minibatch_scale": int(
-                    ppo_games_per_minibatch_scale
-                ),
-                "min_decisions_per_minibatch": int(
-                    ppo_min_decisions_per_minibatch
-                ),
-                "prefer_gpu_buffer": bool(prefer_gpu_buffer),
-                "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
-            },
+            "ppo_configuration": fixed_ppo_policy(ppo_max_epochs),
+            "opponent_pool": runner.opponent_pool.manifest(),
         },
     }
     metrics_path = _prepare_metrics_file(
@@ -726,11 +652,7 @@ def train(
                 iteration=iteration,
             )
             if rollout_info.fallback_count:
-                emit_status(
-                    f"RL iteration {iteration} retained completed games and "
-                    f"reduced workers to {rollout_info.final_workers}: "
-                    f"{rollout_info.fallback_history[-1]['reason']}."
-                )
+                reporter.rollout_fallback(iteration, rollout_info)
 
             batch = []
             wins = 0
@@ -769,70 +691,35 @@ def train(
                     time.perf_counter() - section_started,
                 )
                 update_started = time.perf_counter()
-                if ppo_enabled:
-                    buffer_started = time.perf_counter()
-                    old_values = None
-                    value_predictions = None
-                    if use_value_head:
-                        value_states = network.xp.hstack([
-                            network.xp.asarray(
-                                sample.x,
-                                dtype=network.xp.float32,
-                            )
-                            for sample in batch
-                        ])
-                        backend_old_values = network.predict_values(value_states)
-                        if not quiet and iteration % log_interval == 0:
-                            value_predictions = _value_prediction_summary(
-                                backend_old_values
-                            )
-                        old_values = np.ascontiguousarray(
-                            backend_old_values.get()
-                            if hasattr(backend_old_values, "get")
-                            else backend_old_values,
-                            dtype=np.float32,
-                        ).reshape(-1)
-                    decision_buffer = PPOBuffer.from_samples(
-                        batch,
-                        normalize=normalize_advantages,
-                        old_values=old_values,
-                    )
-                    runtime_profile.add(
-                        "ppo_buffer_assembly_and_advantage_normalization",
-                        time.perf_counter() - buffer_started,
-                    )
-                    ppo_started = time.perf_counter()
-                    ppo_metrics = ppo_update(
+                if ppo_is_enabled(ppo_max_epochs):
+                    ppo_result = update_from_samples(
                         network,
-                        decision_buffer,
+                        batch,
                         actual_games=games_this_iteration,
                         base_seed=effective_seed,
                         iteration=iteration,
                         entropy_coef=entropy_coef,
                         clip_grad_norm=clip_grad_norm,
                         value_coef=value_coef,
-                        clip_epsilon=ppo_clip_epsilon,
-                        target_kl=ppo_target_kl,
-                        stop_kl=ppo_stop_kl,
+                        normalize_advantages=normalize_advantages,
                         max_epochs=ppo_max_epochs,
-                        games_per_minibatch_scale=ppo_games_per_minibatch_scale,
-                        min_decisions_per_minibatch=ppo_min_decisions_per_minibatch,
-                        prefer_gpu_buffer=prefer_gpu_buffer,
+                        collect_value_predictions=(
+                            use_value_head
+                            and not quiet
+                            and iteration % log_interval == 0
+                        ),
                     )
-                    network.synchronize()
                     runtime_profile.add(
-                        "ppo_update",
-                        time.perf_counter() - ppo_started,
+                        "ppo_buffer_assembly_and_advantage_normalization",
+                        ppo_result.buffer_seconds,
                     )
+                    runtime_profile.add("ppo_update", ppo_result.update_seconds)
+                    ppo_metrics = ppo_result.metrics
                     runtime_profile.merge_ppo_metrics(ppo_metrics)
-                    if value_predictions is not None:
-                        ppo_metrics["value_predictions_before_update"] = (
-                            value_predictions
-                        )
                     gradient_metrics = ppo_metrics
                 else:
-                    legacy_started = time.perf_counter()
-                    gradient_metrics = _legacy_policy_update(
+                    reinforce_started = time.perf_counter()
+                    gradient_metrics = _reinforce_policy_update(
                         network,
                         batch,
                         entropy_coef=entropy_coef,
@@ -848,8 +735,8 @@ def train(
                     )
                     network.synchronize()
                     runtime_profile.add(
-                        "legacy_policy_update",
-                        time.perf_counter() - legacy_started,
+                        "reinforce_policy_update",
+                        time.perf_counter() - reinforce_started,
                     )
                 update_elapsed = time.perf_counter() - update_started
                 total_update_duration_s += update_elapsed
@@ -858,7 +745,7 @@ def train(
                     clipped_iteration_count += 1
                 if use_value_head:
                     value_loss_window.append(gradient_metrics["value_loss"])
-                ppo_updates_completed += 1
+                policy_updates_completed += 1
 
             completed_training_games += games_this_iteration
             completed_this_invocation += games_this_iteration
@@ -867,11 +754,11 @@ def train(
             # One frozen snapshot per iteration: the whole iteration shares a
             # single immutable learner policy, so the snapshot cadence is
             # exactly the iteration size selected by --gpi.
-            if batch and training_opponent == "self_play":
-                runner.append_pool_snapshot(network, metadata={
-                    "origin": "training_update",
-                    "introduced_at_rl_games": int(completed_training_games),
-                })
+            runner.opponent_pool.consider_updated_policy(
+                network,
+                completed_games=completed_training_games,
+                has_samples=bool(batch),
+            )
             runtime_profile.add(
                 "opponent_pool_refresh",
                 time.perf_counter() - section_started,
@@ -905,7 +792,7 @@ def train(
                     value_loss_window=value_loss_window,
                     ppo_window=ppo_window,
                     total_decision_samples=total_decision_samples,
-                    ppo_updates_completed=ppo_updates_completed,
+                    policy_updates_completed=policy_updates_completed,
                     clipped_iteration_count=clipped_iteration_count,
                     total_rollout_duration_s=total_rollout_duration_s,
                     total_update_duration_s=total_update_duration_s,
@@ -939,62 +826,36 @@ def train(
                 now = time.time()
                 checkpoint_elapsed = now - last_checkpoint_time
                 last_checkpoint_time = now
-                if not quiet:
-                    print(
-                        f"  [checkpoint] saved {checkpoint_weights_path} | "
-                        f"{completed_training_games}/{total_training_games} games | "
-                        f"time since previous checkpoint: "
-                        f"{format_duration(checkpoint_elapsed)}"
-                    )
+                reporter.checkpoint(
+                    checkpoint_weights_path,
+                    completed_training_games,
+                    total_training_games,
+                    checkpoint_elapsed,
+                )
             runtime_profile.add(
                 "checkpoint_serialization",
                 time.perf_counter() - section_started,
             )
 
             section_started = time.perf_counter()
-            if iteration % log_interval == 0 and not quiet:
-                if reward_summary is None:
-                    print(
-                        f"Iteration {iteration} | {games_this_iteration} games | "
-                        "no real policy decisions"
-                    )
-                else:
-                    win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
-                    pool_suffix = (
-                        f" | pool: {len(runner.bank.pool_slots)}"
-                        if training_opponent == "self_play" else ""
-                    )
-                    print(
-                        f"Iteration {iteration} | games {games_this_iteration} | cumulative "
-                        f"{completed_training_games}/{total_training_games} | reward "
-                        f"mean/std/min/max: {reward_summary['reward_mean']:+.2f}/"
-                        f"{reward_summary['reward_std']:.2f}/"
-                        f"{reward_summary['reward_min']:+.2f}/"
-                        f"{reward_summary['reward_max']:+.2f} | good/neutral/bad: "
-                        f"{reward_summary['good_pct']:.0f}%/"
-                        f"{reward_summary['neutral_pct']:.0f}%/"
-                        f"{reward_summary['bad_pct']:.0f}% | wins {win_label}: "
-                        f"{wins}/{games_this_iteration} "
-                        f"(avg/{len(win_rate_window)}: {moving_win_rate:.1%})"
-                        f"{pool_suffix} | grad: {_gradient_log_text(gradient_metrics)}"
-                    )
-                    value_predictions = gradient_metrics.get(
-                        "value_predictions_before_update"
-                    )
-                    if use_value_head and value_predictions is not None:
-                        print(
-                            "  Value head: pre-update V(s) mean/std/min/max "
-                            f"{value_predictions['mean']:+.3f}/"
-                            f"{value_predictions['std']:.3f}/"
-                            f"{value_predictions['min']:+.3f}/"
-                            f"{value_predictions['max']:+.3f} over "
-                            f"{value_predictions['sample_count']} decisions | "
-                            f"value loss {gradient_metrics['value_loss']:.3f} "
-                            f"(avg/{len(value_loss_window)}: "
-                            f"{sum(value_loss_window) / len(value_loss_window):.3f})"
-                        )
-                    if ppo_enabled:
-                        _print_ppo_window(ppo_window)
+            reporter.iteration(
+                iteration=iteration,
+                log_interval=log_interval,
+                games=games_this_iteration,
+                completed_games=completed_training_games,
+                total_games=total_training_games,
+                reward_summary=reward_summary,
+                wins=wins,
+                moving_win_rate=moving_win_rate,
+                win_window_size=len(win_rate_window),
+                training_opponent=training_opponent,
+                pool_size=runner.opponent_pool.size,
+                gradient_metrics=gradient_metrics,
+                use_value_head=use_value_head,
+                value_loss_window=value_loss_window,
+                ppo_window=ppo_window,
+                ppo_max_epochs=ppo_max_epochs,
+            )
             runtime_profile.add(
                 "console_logging",
                 time.perf_counter() - section_started,
@@ -1049,9 +910,9 @@ def train(
                 "buffer_location": None if ppo_metrics is None else ppo_metrics["buffer_location"],
                 "buffer_bytes": 0 if ppo_metrics is None else int(ppo_metrics["buffer_bytes"]),
                 "selected_workers": int(runner.worker_count),
-                "pool_size": int(len(runner.bank.pool_slots)),
+                "pool_size": int(runner.opponent_pool.size),
                 "rollout_seconds": float(rollout_elapsed),
-                "ppo_seconds": float(update_elapsed if ppo_enabled else 0.0),
+                "ppo_seconds": float(update_elapsed if ppo_metrics else 0.0),
                 "rollout_duration_s": float(rollout_elapsed),
                 "update_duration_s": float(update_elapsed),
                 "total_iteration_seconds": float(time.perf_counter() - iteration_started),
@@ -1134,7 +995,7 @@ def train(
                 value_loss_window=value_loss_window,
                 ppo_window=ppo_window,
                 total_decision_samples=total_decision_samples,
-                ppo_updates_completed=ppo_updates_completed,
+                policy_updates_completed=policy_updates_completed,
                 clipped_iteration_count=clipped_iteration_count,
                 total_rollout_duration_s=total_rollout_duration_s,
                 total_update_duration_s=total_update_duration_s,
@@ -1158,7 +1019,7 @@ def train(
     finally:
         metrics_stream.close()
         final_runtime_workers = runner.worker_count
-        pool_snapshot_count = len(runner.bank.pool_slots)
+        pool_snapshot_count = runner.opponent_pool.size
         runner.close()
 
     parallel_summary["final_workers"] = final_runtime_workers
@@ -1166,9 +1027,7 @@ def train(
         _atomic_network_save(network, rl_weights_path)
         final_weights_path = Path(rl_weights_path)
     elapsed_time = time.time() - start_time
-    if not quiet:
-        print(f"\nTraining complete. Total elapsed time: {format_duration(elapsed_time)}.")
-        print(f"Final weights: {final_weights_path}")
+    reporter.complete(elapsed_time, final_weights_path)
 
     worker_results = adaptive_tuning.get("worker_results", [])
     autotune_summary = {
@@ -1246,7 +1105,7 @@ def train(
         "numbered_checkpoints": bool(numbered_checkpoints),
         "total_decision_samples": int(total_decision_samples),
         "trainable_decisions_seen": int(total_decision_samples),
-        "ppo_updates_completed": int(ppo_updates_completed),
+        "policy_updates_completed": int(policy_updates_completed),
         "decisions_per_game": float(
             total_decision_samples / max(1, completed_training_games)
         ),
@@ -1269,113 +1128,8 @@ def train(
         "run_configuration_sha256": (
             resume_configuration.run_configuration_sha256
         ),
-        "ppo_enabled": bool(ppo_enabled),
-        "ppo_configuration": {
-            "clip_epsilon": float(ppo_clip_epsilon),
-            "target_kl": float(ppo_target_kl),
-            "stop_kl": float(ppo_stop_kl),
-            "max_epochs": int(ppo_max_epochs),
-            "min_minibatches": PPO_MIN_MINIBATCHES,
-            "max_minibatches": PPO_MAX_MINIBATCHES,
-            "games_per_minibatch_scale": int(ppo_games_per_minibatch_scale),
-            "min_decisions_per_minibatch": int(ppo_min_decisions_per_minibatch),
-            "prefer_gpu_buffer": bool(prefer_gpu_buffer),
-            "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
-        },
+        "ppo_configuration": fixed_ppo_policy(ppo_max_epochs),
+        "opponent_pool": runner.opponent_pool.manifest(),
         "runtime_profile_delta": runtime_profile_delta,
         "duration_s": elapsed_time,
     }
-
-
-def _run_compact_cli(args, training_kwargs):
-    """Run the standalone CLI with the pipeline's compact presentation."""
-    try:
-        from tqdm.auto import tqdm
-    except ImportError:
-        tqdm = None
-
-    print("\nRL self-play")
-    started = time.time()
-    fixed_gpi = training_kwargs["gpi"]
-    planned_games = (
-        args.iterations * fixed_gpi
-        if args.iterations is not None
-        else (
-            DEFAULT_TOTAL_TRAINING_GAMES
-            if args.total_training_games is None
-            else args.total_training_games
-        )
-    )
-    initial_games = 0
-    if args.resume_weights_path and args.resume_state_file:
-        resume_metadata, _pool = load_resume_state(
-            args.resume_weights_path,
-            args.resume_state_file,
-        )
-        initial_games = int(resume_metadata["completed_training_games"])
-
-    if tqdm is None:
-        progress_interval = max(1, planned_games // 10)
-        last_reported = initial_games
-
-        def progress(done, total):
-            nonlocal last_reported
-            if done == total or done - last_reported >= progress_interval:
-                print(f"RL self-play progress: {done}/{total} games", flush=True)
-                last_reported = done
-
-        def status(message):
-            print(message, flush=True)
-
-        summary = train(
-            **training_kwargs,
-            quiet=True,
-            progress_callback=progress,
-            status_callback=status,
-        )
-    else:
-        with tqdm(
-            total=planned_games,
-            initial=initial_games,
-            desc="RL self-play",
-            unit="game",
-            leave=True,
-        ) as progress_bar:
-
-            def progress(done, total):
-                if progress_bar.total != total:
-                    progress_bar.total = total
-                    progress_bar.refresh()
-                if done > progress_bar.n:
-                    progress_bar.update(done - progress_bar.n)
-
-            summary = train(
-                **training_kwargs,
-                quiet=True,
-                progress_callback=progress,
-                status_callback=tqdm.write,
-            )
-
-    elapsed = time.time() - started
-    print(
-        f"RL self-play complete in {format_duration(elapsed)} | "
-        f"{summary['total_training_games']} exact training games in "
-        f"{summary['completed_iterations_this_run']} iteration(s), GPI "
-        f"{summary['games_per_iteration']}, "
-        f"{summary['selected_workers']} rollout worker(s), "
-        f"algorithm {summary['rl_training_algorithm']}, "
-        f"weights {summary['rl_weights_path']}"
-    )
-    return summary
-
-
-def main(argv=None):
-    args = parse_args(argv)
-    training_kwargs = _training_kwargs_from_args(args)
-    if args.compact:
-        return _run_compact_cli(args, training_kwargs)
-    return train(**training_kwargs)
-
-
-if __name__ == "__main__":
-    main()

@@ -19,7 +19,7 @@ from diagnostics.rl_progress import (
 )
 from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import ParallelSafetyConfig
-from training.rl import self_play
+from training.rl import training_loop
 
 
 def test_runtime_profile_accumulates_sessions_without_estimating_history(tmp_path):
@@ -149,7 +149,7 @@ def test_self_play_profile_contains_rollout_and_nested_ppo_phases(tmp_path):
         output_size=DominoEncoder.ACTION_SIZE,
         device="cpu",
     ).save(supervised)
-    result = self_play.train(
+    result = training_loop.train(
         iterations=1,
         gpi=8,
         workers=1,

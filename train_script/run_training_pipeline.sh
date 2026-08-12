@@ -21,13 +21,13 @@
 #   python -m training.datagen.generator
 #   python -m training.supervised.cli
 #
-# Stage 3 wraps `python -m training.rl.self_play`, which does accept CLI flags
+# Stage 3 wraps `python -m training.rl.cli`, which does accept CLI flags
 # (exact games, learning rate, reward schema, gamma,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
 # passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
 # default paths. This script only chains the four stages and forwards flags
-# through; see `training/rl/self_play.py add_optional_rl_arguments` and
+# through; see `training/rl/cli.py add_optional_rl_arguments` and
 # `diagnostics/evaluate.py` for the authoritative flag definitions.
 #
 # Usage:
@@ -72,6 +72,7 @@ RL_REWARD_SCHEMA="default"
 RL_CLIP_GRAD_NORM=5.0
 RL_NORMALIZE_ADVANTAGES="auto"
 RL_MOVING_AVERAGE_WINDOW=10
+RL_PPO_MAX_EPOCHS=4
 RL_SEED=""
 
 # Array backend: "auto" (default) matches GPU_ENABLED exactly (CuPy when
@@ -82,8 +83,6 @@ RL_WORKERS="auto"
 RL_MEMORY_RESERVE_MB=512
 RL_ESTIMATED_WORKER_MB=256
 RL_MAX_WORKER_RSS_MB=1024
-RL_PPO=1
-
 # Shared regularization: both coefficients are forwarded to the supervised and
 # the RL stage because both stages train the same architecture.
 WEIGHT_DECAY=""
@@ -148,7 +147,7 @@ unless one of the remaining SL convergence flags below is passed.
 
 Self-play reinforcement learning ($RL_TOTAL_TRAINING_GAMES exact real games by
 default; the self-play default GPI and discarded worker tuning; all forwarded to
-training.rl.self_play):
+training.rl.cli):
   --rl-weights-file PATH       Output RL weights path (default: $RL_WEIGHTS_FILE)
   --rl-sl-weights-path PATH    Input SL weights used to initialize a fresh RL run (default: $RL_SL_WEIGHTS_PATH)
   --rl-total-training-games N  Exact real-game budget (default: $RL_TOTAL_TRAINING_GAMES)
@@ -159,7 +158,7 @@ training.rl.self_play):
   --rl-log-interval N          Iterations between log lines (default: $RL_LOG_INTERVAL)
   --rl-checkpoint-interval N   Iterations between checkpoints (default: $RL_CHECKPOINT_INTERVAL)
   --rl-max-pool-size N         Max frozen snapshots kept in the pool (default: $RL_MAX_POOL_SIZE)
-  --rl-value-head              Turn the critic ON for PPO or --rl-no-ppo
+  --rl-value-head              Turn the critic ON for PPO or REINFORCE
   --rl-value-coef F            Value-loss coefficient, only used when --rl-value-head is set (default: $RL_VALUE_COEF)
   --rl-gamma F                 Terminal-reward discount per remaining real decision, 1.0 = no discount (default: $RL_GAMMA)
   --rl-reward-schema NAME      "default", "sparse", or "shaped" reward preset (default: $RL_REWARD_SCHEMA)
@@ -174,8 +173,7 @@ Regularization, off unless requested (forwarded to both the SL and the RL stage)
 
 RL convergence monitoring:
   --rl-clip-grad-norm F         Gradient-norm clipping threshold (default: $RL_CLIP_GRAD_NORM)
-  --rl-ppo                      Use masked PPO with minibatches (default)
-  --rl-no-ppo                   Use historical one-update REINFORCE for regression
+  --rl-ppo-max-epochs N         1 selects REINFORCE; 2-16 select PPO (default: $RL_PPO_MAX_EPOCHS)
   --rl-normalize-advantages     Normalize once over the complete decision buffer (PPO default)
   --rl-no-normalize-advantages  Explicitly disable normalization
   --rl-moving-average-window N  Trailing-iteration window for value-loss/win-rate moving averages in the log (default: $RL_MOVING_AVERAGE_WINDOW)
@@ -249,8 +247,7 @@ while [[ $# -gt 0 ]]; do
         --rl-clip-grad-norm) RL_CLIP_GRAD_NORM="$2"; shift 2 ;;
         --rl-normalize-advantages) RL_NORMALIZE_ADVANTAGES=1; shift ;;
         --rl-no-normalize-advantages) RL_NORMALIZE_ADVANTAGES=0; shift ;;
-        --rl-ppo) RL_PPO=1; shift ;;
-        --rl-no-ppo) RL_PPO=0; shift ;;
+        --rl-ppo-max-epochs) RL_PPO_MAX_EPOCHS="$2"; shift 2 ;;
         --rl-moving-average-window) RL_MOVING_AVERAGE_WINDOW="$2"; shift 2 ;;
         --rl-seed) RL_SEED="$2"; shift 2 ;;
         --rl-device) RL_DEVICE="$2"; shift 2 ;;
@@ -396,10 +393,6 @@ else
     if [[ -n "$RL_ITERATIONS" ]]; then
         BUDGET_ARGS=(--iterations "$RL_ITERATIONS")
     fi
-    PPO_FLAG="--ppo"
-    if [[ "$RL_PPO" -eq 0 ]]; then
-        PPO_FLAG="--no-ppo"
-    fi
     RL_SEED_ARGS=()
     if [[ -n "$RL_SEED" ]]; then
         RL_SEED_ARGS+=(--seed "$RL_SEED")
@@ -411,7 +404,7 @@ else
     if [[ -n "$DROPOUT" ]]; then
         RL_REGULARIZATION_ARGS+=(--dropout "$DROPOUT")
     fi
-    "$PYTHON_BIN" -u -m training.rl.self_play \
+    "$PYTHON_BIN" -u -m training.rl.cli \
         "${BUDGET_ARGS[@]}" \
         --training-opponent "$RL_TRAINING_OPPONENT" \
         --learning-rate "$RL_LEARNING_RATE" \
@@ -433,7 +426,7 @@ else
         --rl-memory-reserve-mb "$RL_MEMORY_RESERVE_MB" \
         --rl-estimated-worker-mb "$RL_ESTIMATED_WORKER_MB" \
         --rl-max-worker-rss-mb "$RL_MAX_WORKER_RSS_MB" \
-        "$PPO_FLAG" \
+        --ppo-max-epochs "$RL_PPO_MAX_EPOCHS" \
         "${NORMALIZE_ARGS[@]}" \
         "${RL_REGULARIZATION_ARGS[@]}" \
         "${RL_SEED_ARGS[@]}" \

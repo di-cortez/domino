@@ -34,7 +34,7 @@ from diagnostics.rl_progress import (
     read_periodic_history,
     rebuild_progress_reports,
 )
-from training.rl import self_play
+from training.rl import training_loop
 from training.canonical_assets import (
     ArtifactCompatibilityError,
     EXPECTED_WEIGHT_SHAPES,
@@ -79,9 +79,9 @@ from training.pipeline import (
     parse_args,
     validate_args,
 )
-from training.rl.resume import (
-    LEGACY_TRAINING_ALGORITHM,
+from training.rl.ppo import (
     PPO_TRAINING_ALGORITHM,
+    REINFORCE_TRAINING_ALGORITHM,
 )
 from utils.artifacts import file_sha256
 
@@ -128,6 +128,9 @@ def _rl_config_from_summary(summary, *, max_pool_size):
         "entropy_coef": summary["entropy_coef"],
         "weight_decay": summary["weight_decay"],
         "dropout_rate": summary["dropout_rate"],
+        "log_interval": 10,
+        "checkpoint_interval": 1,
+        "moving_average_window": summary["moving_average_window"],
         "max_pool_size": max_pool_size,
         "use_value_head": summary["use_value_head"],
         "value_coef": summary["value_coef"] or 0.5,
@@ -135,6 +138,9 @@ def _rl_config_from_summary(summary, *, max_pool_size):
         "gamma": summary["gamma"],
         "clip_grad_norm": summary["clip_grad_norm"],
         "normalize_advantages": summary["normalize_advantages"],
+        "worker_memory_reserve_mb": 0,
+        "worker_estimated_mb": 1,
+        "worker_max_rss_mb": 1024,
     }
 
 
@@ -144,6 +150,9 @@ def _test_resume_configuration(**overrides):
         "selected_gpi": 100,
         "selected_workers": 1,
         "rl_training_algorithm": PPO_TRAINING_ALGORITHM,
+        "log_interval": 10,
+        "checkpoint_interval": 50,
+        "moving_average_window": 10,
         "training_opponent": "self_play",
         "learning_rate": 0.001,
         "entropy_coef": 0.01,
@@ -159,12 +168,10 @@ def _test_resume_configuration(**overrides):
         "effective_seed": 3,
         "device": "cpu",
         "sl_weights_sha256": "abc",
-        "ppo_clip_epsilon": 0.2,
-        "ppo_stop_kl": 0.015,
         "ppo_max_epochs": 4,
-        "ppo_games_per_minibatch_scale": 1,
-        "ppo_min_decisions_per_minibatch": 1,
-        "prefer_gpu_buffer": False,
+        "worker_memory_reserve_mb": 512,
+        "worker_estimated_mb": 256,
+        "worker_max_rss_mb": 1024,
     }
     values.update(overrides)
     return RLTrainingConfiguration.from_mapping(values)
@@ -376,7 +383,9 @@ def test_forever_run_reloads_locked_arguments_from_the_active_pointer(
 def test_canonical_pipeline_accepts_ppo_and_reinforce_with_optional_critic(tmp_path):
     root_args = ["--artifact-root", str(tmp_path)]
     ppo = parse_args(["forever", *root_args])
-    reinforce = parse_args(["forever", "--no-ppo", *root_args])
+    reinforce = parse_args([
+        "forever", "--ppo-max-epochs", "1", *root_args
+    ])
     finite = parse_args(["huge"])
     explicit = parse_args([
         "forever",
@@ -387,10 +396,8 @@ def test_canonical_pipeline_accepts_ppo_and_reinforce_with_optional_critic(tmp_p
 
     validate_args(ppo, PIPELINE_LEVELS["forever"])
     validate_args(reinforce, PIPELINE_LEVELS["forever"])
-    assert ppo.ppo_enabled is True
     assert ppo.ppo_max_epochs == 16
-    assert reinforce.ppo_enabled is False
-    assert reinforce.ppo_max_epochs == 4
+    assert reinforce.ppo_max_epochs == 1
     assert finite.ppo_max_epochs == 4
     assert explicit.ppo_max_epochs == 7
 
@@ -408,14 +415,14 @@ def test_canonical_pipeline_accepts_ppo_and_reinforce_with_optional_critic(tmp_p
         str(tmp_path),
         "--run-name",
         "critic_reinforce",
-        "--no-ppo",
+        "--ppo-max-epochs",
+        "1",
         "--value-head",
     ])
     validate_args(critic_ppo, PIPELINE_LEVELS["forever"])
     validate_args(critic_reinforce, PIPELINE_LEVELS["forever"])
-    assert critic_ppo.ppo_enabled is True
     assert critic_ppo.value_head is True
-    assert critic_reinforce.ppo_enabled is False
+    assert critic_reinforce.ppo_max_epochs == 1
     assert critic_reinforce.value_head is True
 
 
@@ -759,19 +766,19 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
     assert second["created_at"] == first["created_at"]
     assert first["algorithm"] == PPO_TRAINING_ALGORITHM
 
-    reporting_only = dict(values)
-    reporting_only["ppo_config"] = {
+    changed_ppo = dict(values)
+    changed_ppo["ppo_config"] = {
         "clip_epsilon": 0.2,
         "target_kl": 0.005,
     }
-    unchanged = create_run_config(run_dir, **reporting_only)
-    assert unchanged["configuration_sha256"] == first["configuration_sha256"]
+    with pytest.raises(ValueError, match="ppo_config"):
+        create_run_config(run_dir, **changed_ppo)
 
     with pytest.raises(ValueError, match="algorithm"):
         create_run_config(
             run_dir,
             **values,
-            algorithm=LEGACY_TRAINING_ALGORITHM,
+            algorithm=REINFORCE_TRAINING_ALGORITHM,
         )
 
     extended = dict(values)
@@ -780,8 +787,7 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
         create_run_config(run_dir, **extended)
 
 
-def test_runs_without_stored_regularizers_still_resume(tmp_path):
-    """Read a missing dropout/weight-decay field as the disabled default."""
+def test_run_config_requires_exact_rl_fields_without_legacy_defaults(tmp_path):
     run_dir = canonical_run_dir(tmp_path, "big", 42)
     legacy_rl_config = {"gamma": 1.0, "learning_rate": 0.001}
     values = {
@@ -803,8 +809,8 @@ def test_runs_without_stored_regularizers_still_resume(tmp_path):
         "weight_decay": 0.0,
         "dropout_rate": 0.0,
     }
-    reused = create_run_config(run_dir, **disabled)
-    assert reused["configuration_sha256"] == published["configuration_sha256"]
+    with pytest.raises(ValueError, match="rl_config"):
+        create_run_config(run_dir, **disabled)
 
     enabled = dict(values)
     enabled["rl_config"] = {**legacy_rl_config, "dropout_rate": 0.2}
@@ -812,15 +818,15 @@ def test_runs_without_stored_regularizers_still_resume(tmp_path):
         create_run_config(run_dir, **enabled)
 
 
-def test_resume_state_without_stored_regularizers_is_compatible():
-    """Continue a pre-regularization exact resume pair without a rebuild."""
+def test_resume_state_requires_every_current_configuration_field():
     expected = _test_resume_configuration()
     legacy = {
         key: value
         for key, value in expected.to_dict().items()
         if key not in ("weight_decay", "dropout_rate")
     }
-    _validate_resume_configuration({"configuration": legacy}, expected)
+    with pytest.raises(ValueError, match="weight_decay|dropout_rate"):
+        _validate_resume_configuration({"configuration": legacy}, expected)
 
     enabled = RLTrainingConfiguration.from_mapping({
         **expected.to_dict(),
@@ -852,13 +858,7 @@ def test_commit_change_warns_but_never_blocks_exact_resume(monkeypatch):
     assert all("commit" in message.lower() for message in messages)
 
 
-def test_runs_with_stored_pool_refresh_games_still_resume(tmp_path):
-    """Ignore the retired opponent-cadence field stored by older runs.
-
-    The cadence is now one snapshot per iteration, controlled by gpi, so a
-    stored ``pool_refresh_games`` no longer affects computation and must not
-    make an existing run refuse to continue.
-    """
+def test_retired_pool_refresh_field_is_not_accepted(tmp_path):
     run_dir = canonical_run_dir(tmp_path, "big", 42)
     legacy_rl_config = {
         "gamma": 1.0,
@@ -880,10 +880,8 @@ def test_runs_with_stored_pool_refresh_games_still_resume(tmp_path):
 
     current = dict(values)
     current["rl_config"] = {"gamma": 1.0, "learning_rate": 0.001}
-    reused = create_run_config(run_dir, **current)
-    assert reused["configuration_sha256"] == published["configuration_sha256"]
-    # The stored configuration is never rewritten by the removal.
-    assert reused["rl_config"]["pool_refresh_games"] == 400
+    with pytest.raises(ValueError, match="rl_config"):
+        create_run_config(run_dir, **current)
 
     # A field that still affects computation must keep rejecting the resume.
     conflicting = dict(values)
@@ -892,17 +890,18 @@ def test_runs_with_stored_pool_refresh_games_still_resume(tmp_path):
         create_run_config(run_dir, **conflicting)
 
 
-def test_resume_state_with_stored_pool_refresh_games_is_compatible():
-    """Continue an exact resume pair saved while the cadence flag existed."""
+def test_resume_state_rejects_retired_pool_refresh_field():
     expected = _test_resume_configuration()
     assert "pool_refresh_games" not in expected.to_dict()
 
     legacy = {**expected.to_dict(), "pool_refresh_games": 400}
-    _validate_resume_configuration({"configuration": legacy}, expected)
+    with pytest.raises(ValueError, match="pool_refresh_games"):
+        _validate_resume_configuration({"configuration": legacy}, expected)
 
-    # Any stored value is ignored, not merely the historical default.
+    # Any unexpected retired value is rejected.
     other = {**expected.to_dict(), "pool_refresh_games": 1}
-    _validate_resume_configuration({"configuration": other}, expected)
+    with pytest.raises(ValueError, match="pool_refresh_games"):
+        _validate_resume_configuration({"configuration": other}, expected)
 
     # A field that still affects computation must keep rejecting the resume.
     conflicting = {**legacy, "selected_gpi": 200}
@@ -992,10 +991,10 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         "safety_config": safety,
         "quiet": True,
         "numbered_checkpoints": True,
-        "ppo_enabled": False,
+        "ppo_max_epochs": 1,
         "use_value_head": False,
     }
-    uninterrupted = self_play.train(
+    uninterrupted = training_loop.train(
         rl_weights_path=str(tmp_path / "uninterrupted" / "training.npz"),
         fresh_from_sl=True,
         **common,
@@ -1011,9 +1010,9 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         supervised_weights_sha256=supervised_hash,
         ppo_config=uninterrupted["ppo_configuration"],
         rl_config=_rl_config_from_summary(uninterrupted, max_pool_size=2),
-        algorithm=LEGACY_TRAINING_ALGORITHM,
+        algorithm=REINFORCE_TRAINING_ALGORITHM,
     )
-    partial = self_play.train(
+    partial = training_loop.train(
         rl_weights_path=str(tmp_path / "split" / "training.npz"),
         stop_after_training_games=2,
         fresh_from_sl=True,
@@ -1022,7 +1021,7 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
     )
 
     profile = partial["runtime_profile_delta"]
-    assert "legacy_policy_update" in profile["sections_seconds"]
+    assert "reinforce_policy_update" in profile["sections_seconds"]
     assert "ppo_update" not in profile["sections_seconds"]
     assert profile["ppo_sections_seconds"] == {}
 
@@ -1038,16 +1037,15 @@ def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
         last_periodic_diagnostic_game=0,
         next_periodic_diagnostic_game=100_000,
     )
-    assert state["algorithm"] == LEGACY_TRAINING_ALGORITHM
+    assert state["algorithm"] == REINFORCE_TRAINING_ALGORITHM
     assert state["policy_updates_completed"] == 1
     assert state["ppo_updates_completed"] == 0
     assert state["reinforce_updates_completed"] == 1
 
     point = load_resume_point(run_dir)
 
-    resumed = self_play.train(
+    resumed = training_loop.train(
         rl_weights_path=str(tmp_path / "split" / "training.npz"),
-        start_iteration=point.completed_iterations,
         resume_weights_path=str(point.weights_path),
         resume_state_file=str(point.resume_state_path),
         run_configuration=run_config,
@@ -1296,7 +1294,7 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
     tmp_path,
 ):
     supervised = ROOT / "models" / "domino_sl_weights.npz"
-    probe_summary = self_play.train(
+    probe_summary = training_loop.train(
         total_training_games=3,
         stop_after_training_games=2,
         gpi=2,
@@ -1329,7 +1327,7 @@ def test_canonical_checkpoint_is_complete_and_alias_damage_does_not_break_resume
         ppo_config=probe_summary["ppo_configuration"],
         rl_config=_rl_config_from_summary(probe_summary, max_pool_size=2),
     )
-    summary = self_play.train(
+    summary = training_loop.train(
         total_training_games=3,
         stop_after_training_games=2,
         gpi=2,
@@ -1401,7 +1399,7 @@ def test_shutdown_before_first_iteration_still_creates_a_resumable_pair(tmp_path
         "quiet": True,
         "numbered_checkpoints": True,
     }
-    stopped = self_play.train(
+    stopped = training_loop.train(
         stop_after_training_games=2,
         shutdown_requested=lambda: True,
         fresh_from_sl=True,
@@ -1413,9 +1411,8 @@ def test_shutdown_before_first_iteration_still_creates_a_resumable_pair(tmp_path
     state = Path(stopped["resume_state_path"])
     assert weights.is_file() and state.is_file()
 
-    resumed = self_play.train(
+    resumed = training_loop.train(
         stop_after_training_games=2,
-        start_iteration=0,
         resume_weights_path=str(weights),
         resume_state_file=str(state),
         **common,
@@ -1432,13 +1429,13 @@ def test_numbered_checkpoint_callback_advances_by_committed_games(tmp_path):
     events = []
 
     def observe(event):
-        metadata, _pool = self_play.load_resume_state(
+        metadata, _pool = load_resume_state(
             event["rl_weights_path"],
             event["resume_state_path"],
         )
         events.append((dict(event), int(metadata["completed_training_games"])))
 
-    summary = self_play.train(
+    summary = training_loop.train(
         total_training_games=5,
         gpi=1,
         checkpoint_interval=2,

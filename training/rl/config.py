@@ -1,11 +1,15 @@
-"""Defaults and side-effect-free option resolution for RL self-play."""
+"""Defaults and side-effect-free reinforcement-learning option resolution."""
 
 from dataclasses import dataclass
 
 from agents.nn import DISABLED_DROPOUT_RATE, DISABLED_WEIGHT_DECAY
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
-from training.rl.ppo import MAX_PPO_EPOCHS
-from training.rl.resume import LEGACY_TRAINING_ALGORITHM, PPO_TRAINING_ALGORITHM
+from training.rl.ppo import (
+    PPO_TRAINING_ALGORITHM,
+    REINFORCE_TRAINING_ALGORITHM,
+    ppo_is_enabled,
+    validate_ppo_max_epochs,
+)
 from training.rl.rollout import REWARD_SCHEMAS
 
 
@@ -16,7 +20,6 @@ DEFAULT_ITERATIONS = 1000
 COMMON_GPI_VALUES = (100, 200, 400, 600, 800, 1000, 2000)
 DEFAULT_GPI = 2000
 DEFAULT_TOTAL_TRAINING_GAMES = 100_000
-DEFAULT_PPO_ENABLED = True
 
 SL_WEIGHTS = "models/domino_sl_weights.npz"
 RL_WEIGHTS = "models/domino_rl_weights.npz"
@@ -25,8 +28,8 @@ VALUE_COEF = 0.5
 DEFAULT_CLIP_GRAD_NORM = 5.0
 DEFAULT_MOVING_AVERAGE_WINDOW = 10
 
-# ``None`` resolves to on for PPO and off for the legacy one-update regression
-# path. Explicit CLI flags always win.
+# ``None`` resolves to on for PPO and off for the single-update REINFORCE path.
+# Explicit advantage-normalization CLI flags still win.
 DEFAULT_NORMALIZE_ADVANTAGES = None
 
 
@@ -58,14 +61,8 @@ def resolve_training_options(
     moving_average_window,
     training_opponent,
     reward_schema,
-    ppo_enabled,
     value_coef,
-    ppo_clip_epsilon,
-    ppo_target_kl,
-    ppo_stop_kl,
     ppo_max_epochs,
-    ppo_games_per_minibatch_scale,
-    ppo_min_decisions_per_minibatch,
     normalize_advantages,
     workers,
     safety_config,
@@ -120,26 +117,14 @@ def resolve_training_options(
         raise ValueError("weight_decay must be non-negative")
     if not 0.0 <= float(dropout_rate) < 1.0:
         raise ValueError("dropout_rate must be at least 0 and below 1")
-    if ppo_enabled:
-        if not 0 < float(ppo_clip_epsilon) < 1:
-            raise ValueError("ppo_clip_epsilon must be in (0, 1)")
-        if float(ppo_target_kl) <= 0 or float(ppo_stop_kl) <= 0:
-            raise ValueError(
-                "PPO KL reporting target and stop threshold must be positive"
-            )
-        if not 1 <= int(ppo_max_epochs) <= MAX_PPO_EPOCHS:
-            raise ValueError(
-                f"ppo_max_epochs must be between 1 and {MAX_PPO_EPOCHS}"
-            )
-        if int(ppo_games_per_minibatch_scale) < 1:
-            raise ValueError("ppo_games_per_minibatch_scale must be positive")
-        if int(ppo_min_decisions_per_minibatch) < 1:
-            raise ValueError("ppo_min_decisions_per_minibatch must be positive")
+    ppo_max_epochs = validate_ppo_max_epochs(ppo_max_epochs)
     algorithm = (
-        PPO_TRAINING_ALGORITHM if ppo_enabled else LEGACY_TRAINING_ALGORITHM
+        PPO_TRAINING_ALGORITHM
+        if ppo_is_enabled(ppo_max_epochs)
+        else REINFORCE_TRAINING_ALGORITHM
     )
     normalize_advantages = (
-        bool(ppo_enabled)
+        ppo_is_enabled(ppo_max_epochs)
         if normalize_advantages is None
         else bool(normalize_advantages)
     )

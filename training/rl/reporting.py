@@ -1,6 +1,6 @@
-"""Reporting and cumulative runtime profiling for RL self-play.
+"""User-facing reporting, metrics, and cumulative RL runtime profiling.
 
-This module intentionally has no dependency on :mod:`training.rl.self_play` so
+This module intentionally has no dependency on :mod:`training.rl.training_loop` so
 logging, metrics persistence, and profile aggregation remain reusable without
 reintroducing the rollout/orchestrator import cycle.
 """
@@ -14,6 +14,9 @@ import time
 import numpy as np
 
 from training.rl.rollout import REWARD_ZERO_EPSILON
+from training.rl.ppo import fixed_ppo_policy, ppo_is_enabled
+from utils.resource_limits import MIB
+from utils.runtime_status import format_duration, print_memory_report
 
 
 TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"
@@ -64,8 +67,196 @@ TRAINING_METRIC_COLUMNS = (
 )
 
 
+class RLTrainingReporter:
+    """Keep presentation concerns out of the RL orchestration loop."""
+
+    def __init__(self, *, quiet=False, status_callback=None):
+        self.quiet = bool(quiet)
+        if status_callback is not None:
+            self._status_callback = status_callback
+        elif self.quiet:
+            self._status_callback = lambda _message: None
+        else:
+            self._status_callback = lambda message: print(message, flush=True)
+
+    def status(self, message):
+        """Emit a compact/pipeline-safe status message."""
+        self._status_callback(message)
+
+    def device_fallback(self, reason):
+        if reason:
+            self.status(
+                "RL memory safety: automatic GPU selection fell back to CPU "
+                f"because {reason}."
+            )
+
+    def tuning_header(self):
+        self.status("-" * 70)
+        self.status("RL rollout-worker tuning")
+        self.status("-" * 70)
+
+    def update_configuration(
+        self,
+        *,
+        algorithm,
+        use_value_head,
+        value_coef,
+        dropout_rate,
+        weight_decay,
+        ppo_max_epochs,
+        gpi,
+    ):
+        """Describe the selected fixed algorithm policy once per invocation."""
+        policy = fixed_ppo_policy(ppo_max_epochs)
+        fixed = policy["fixed_policy"]
+        self.status(f"Fixed GPI: {int(gpi)}.")
+        self.status("RL update configuration:")
+        self.status(
+            f"  value head: {'on' if use_value_head else 'off'}"
+            + (f" | value coefficient: {value_coef:g}" if use_value_head else "")
+        )
+        self.status(
+            "  regularization: "
+            + (f"dropout {dropout_rate:g}" if dropout_rate > 0 else "dropout off")
+            + " | "
+            + (
+                f"decoupled weight decay {weight_decay:g}"
+                if weight_decay > 0
+                else "weight decay off"
+            )
+        )
+        if ppo_is_enabled(ppo_max_epochs):
+            self.status(
+                f"  algorithm: {algorithm} | clip epsilon: "
+                f"{fixed['clip_epsilon']:.2f} | target KL: "
+                f"{fixed['target_kl']:.3f} | stop KL: {fixed['stop_kl']:.3f}"
+            )
+            self.status(
+                f"  max epochs: {ppo_max_epochs} | minibatches: adaptive, "
+                f"{fixed['min_minibatches']} to {fixed['max_minibatches']} | "
+                "preferred buffer: GPU | fallback: RAM"
+            )
+        else:
+            self.status(
+                f"  algorithm: {algorithm} | one full-buffer policy-gradient "
+                "update per iteration"
+            )
+            self.status(
+                "  PPO minibatches, ratios, clipping, KL control, and "
+                "post-update full-buffer evaluation: disabled"
+            )
+        self.status("-" * 70)
+
+    def resource_preflight(
+        self,
+        *,
+        requested_device,
+        selected_device,
+        estimated_host_bytes,
+    ):
+        if self.quiet:
+            return
+        print_memory_report("RL training startup memory")
+        print(
+            "RL resource preflight: "
+            f"requested device={requested_device!r}, "
+            f"selected device={selected_device!r}, estimated peak host "
+            f"allocation {estimated_host_bytes / MIB:.1f} MiB."
+        )
+
+    def worker_cap(self, requested, selected, reason):
+        self.status(
+            f"Selected workers reduced from {requested} to {selected} by "
+            f"current resource preflight: {reason}."
+        )
+
+    def resumed(self, iteration, games, pool_size):
+        self.status(
+            f"Resuming RL after iteration {iteration} and {games} real games; "
+            f"restored {pool_size} opponent-pool snapshot(s)."
+        )
+
+    def rollout_fallback(self, iteration, rollout_info):
+        self.status(
+            f"RL iteration {iteration} retained completed games and reduced "
+            f"workers to {rollout_info.final_workers}: "
+            f"{rollout_info.fallback_history[-1]['reason']}."
+        )
+
+    def checkpoint(self, path, completed_games, total_games, elapsed):
+        if not self.quiet:
+            print(
+                f"  [checkpoint] saved {path} | "
+                f"{completed_games}/{total_games} games | time since previous "
+                f"checkpoint: {format_duration(elapsed)}"
+            )
+
+    def iteration(
+        self,
+        *,
+        iteration,
+        log_interval,
+        games,
+        completed_games,
+        total_games,
+        reward_summary,
+        wins,
+        moving_win_rate,
+        win_window_size,
+        training_opponent,
+        pool_size,
+        gradient_metrics,
+        use_value_head,
+        value_loss_window,
+        ppo_window,
+        ppo_max_epochs,
+    ):
+        if self.quiet or iteration % log_interval:
+            return
+        if reward_summary is None:
+            print(f"Iteration {iteration} | {games} games | no real policy decisions")
+            return
+        win_label = "vs pool" if training_opponent == "self_play" else "vs heuristic"
+        pool_suffix = (
+            f" | pool: {pool_size}" if training_opponent == "self_play" else ""
+        )
+        print(
+            f"Iteration {iteration} | games {games} | cumulative "
+            f"{completed_games}/{total_games} | reward mean/std/min/max: "
+            f"{reward_summary['reward_mean']:+.2f}/"
+            f"{reward_summary['reward_std']:.2f}/"
+            f"{reward_summary['reward_min']:+.2f}/"
+            f"{reward_summary['reward_max']:+.2f} | good/neutral/bad: "
+            f"{reward_summary['good_pct']:.0f}%/"
+            f"{reward_summary['neutral_pct']:.0f}%/"
+            f"{reward_summary['bad_pct']:.0f}% | wins {win_label}: "
+            f"{wins}/{games} (avg/{win_window_size}: {moving_win_rate:.1%})"
+            f"{pool_suffix} | grad: {_gradient_log_text(gradient_metrics)}"
+        )
+        value_predictions = gradient_metrics.get("value_predictions_before_update")
+        if use_value_head and value_predictions is not None:
+            print(
+                "  Value head: pre-update V(s) mean/std/min/max "
+                f"{value_predictions['mean']:+.3f}/"
+                f"{value_predictions['std']:.3f}/"
+                f"{value_predictions['min']:+.3f}/"
+                f"{value_predictions['max']:+.3f} over "
+                f"{value_predictions['sample_count']} decisions | value loss "
+                f"{gradient_metrics['value_loss']:.3f} "
+                f"(avg/{len(value_loss_window)}: "
+                f"{sum(value_loss_window) / len(value_loss_window):.3f})"
+            )
+        if ppo_is_enabled(ppo_max_epochs):
+            _print_ppo_window(ppo_window)
+
+    def complete(self, elapsed, weights_path):
+        if not self.quiet:
+            print(f"\nTraining complete. Total elapsed time: {format_duration(elapsed)}.")
+            print(f"Final weights: {weights_path}")
+
+
 class RLRuntimeProfile:
-    """Accumulate one self-play invocation's hierarchical runtime profile."""
+    """Accumulate one RL invocation's hierarchical runtime profile."""
 
     def __init__(self):
         self.started = time.perf_counter()
@@ -454,7 +645,7 @@ def _prepare_metrics_file(path, start_iteration, metadata=None):
 
 
 def _write_metrics_row(stream, row):
-    """Append and durably flush one self-play metrics row."""
+    """Append and durably flush one RL metrics row."""
     stream.write(
         json.dumps(
             _metric_values(row),

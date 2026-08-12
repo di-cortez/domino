@@ -17,7 +17,6 @@ from agents.network_architecture import (
     hidden_layer_count_from_weights,
     policy_layer_names,
 )
-from training.rl.ppo import PPOBuffer
 from training.utils.seeding import stable_seed
 from training.rl.constants import (
     RL_WORKER_AUTOTUNE_FRACTION,
@@ -127,13 +126,23 @@ def restore_isolation_state(network, snapshot, pool_snapshots=()):
 
 
 def _flatten_samples(results):
+    """Estimate retained trajectory bytes without constructing a PPO buffer."""
     samples = []
     for result in results:
         samples.extend(result["samples"])
     if not samples:
         return 0, 0
-    buffer = PPOBuffer.from_samples(samples, normalize=False)
-    return buffer.size, buffer.nbytes
+    array_bytes = sum(
+        int(np.asarray(sample.x).nbytes)
+        + int(np.asarray(sample.legal_mask).nbytes)
+        for sample in samples
+    )
+    # action index plus old log-prob, advantage/return, and the two persisted
+    # reward components used by update diagnostics.
+    scalar_bytes = len(samples) * (
+        np.dtype(np.int64).itemsize + 5 * np.dtype(np.float32).itemsize
+    )
+    return len(samples), int(array_bytes + scalar_bytes)
 
 
 def _resource_sample(extra_host_bytes=0):
@@ -227,7 +236,7 @@ def _new_runner(
         safety=safety,
     )
     if pool_snapshots:
-        runner.restore_pool_snapshots(pool_snapshots)
+        runner.restore_opponent_pool(pool_snapshots)
     return runner
 
 

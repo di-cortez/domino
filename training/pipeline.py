@@ -494,13 +494,6 @@ def _supervised_training_identity(args, max_epochs):
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,
         lr_decay_patience=int(args.lr_decay_patience),
-        training_plateau_enabled=not args.disable_training_plateau,
-        training_plateau_window=int(args.sl_training_plateau_window),
-        training_plateau_patience=int(args.sl_training_plateau_patience),
-        training_plateau_min_epochs=int(args.sl_training_plateau_min_epochs),
-        training_plateau_min_relative_improvement=float(
-            args.sl_training_plateau_min_relative_improvement
-        ),
         device=args.sl_device,
         memory_reserve_mb=int(args.sl_memory_reserve_mb),
         gpu_memory_reserve_mb=int(args.sl_gpu_memory_reserve_mb),
@@ -611,7 +604,7 @@ def ensure_canonical_supervised_assets(root, config, args):
     weights_check = inspect_canonical_weights(
         paths,
         seed=seed,
-        dataset_sha256=dataset_metadata["dataset_sha256"],
+        dataset_metadata=dataset_metadata,
         training_config=training_config,
         architecture=architecture,
     )
@@ -641,13 +634,6 @@ def ensure_canonical_supervised_assets(root, config, args):
                 early_stopping_patience=args.early_stopping,
                 lr_decay_factor=args.lr_decay,
                 lr_decay_patience=args.lr_decay_patience,
-                training_plateau_enabled=not args.disable_training_plateau,
-                training_plateau_window=args.sl_training_plateau_window,
-                training_plateau_patience=args.sl_training_plateau_patience,
-                training_plateau_min_epochs=args.sl_training_plateau_min_epochs,
-                training_plateau_min_relative_improvement=(
-                    args.sl_training_plateau_min_relative_improvement
-                ),
                 device=args.sl_device,
                 memory_reserve_mb=args.sl_memory_reserve_mb,
                 gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
@@ -657,7 +643,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             paths,
             root=root,
             seed=seed,
-            dataset_sha256=dataset_metadata["dataset_sha256"],
+            dataset_metadata=dataset_metadata,
             training_config=training_config,
             training_summary=supervised_summary,
             architecture=architecture,
@@ -677,14 +663,16 @@ def ensure_canonical_supervised_assets(root, config, args):
     print(f"Dataset SHA-256: {dataset_metadata['dataset_sha256']}")
     print(f"Weights: {paths.weights}")
     print(f"Weights status: {weights_status}")
-    print(f"Weights SHA-256: {weights_metadata['weights_sha256']}")
+    print(f"Weights SHA-256: {weights_metadata['artifact']['sha256']}")
+    training_result = weights_metadata["training"]["result"]
+    training_hyperparameters = weights_metadata["training"]["hyperparameters"]
     print(
         "Supervised epochs: "
-        f"{weights_metadata.get('epochs_completed')}/"
-        f"{weights_metadata.get('max_epochs')} "
-        f"(best: {weights_metadata.get('best_epoch')})"
+        f"{training_result.get('epochs_completed')}/"
+        f"{training_hyperparameters.get('max_epochs')} "
+        f"(best: {training_result.get('best_epoch')})"
     )
-    print(f"Supervised stop: {weights_metadata.get('stopping_reason')}")
+    print(f"Supervised stop: {training_result.get('stopping_reason')}")
     print("-" * 70)
     return {
         "paths": paths,
@@ -1053,7 +1041,7 @@ def run_rl_pipeline(root, config, args, assets):
     ppo_config = _ppo_config(args)
     architecture = _network_architecture(args)
     supervised_path = assets["paths"].weights
-    supervised_hash = assets["weights_metadata"]["weights_sha256"]
+    supervised_hash = assets["weights_metadata"]["artifact"]["sha256"]
     existing_run_config = (
         load_run_config(run_dir)
         if (run_dir / "run_config.json").is_file()

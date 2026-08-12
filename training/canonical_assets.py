@@ -10,6 +10,12 @@ import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
+from agents.nn import (
+    TP_MIN_EPOCHS,
+    TP_MIN_RELATIVE_IMPROVEMENT,
+    TP_PATIENCE_BLOCKS,
+    TP_WINDOW_EPOCHS,
+)
 from training.utils.encoding import ENCODED_FEATURE_VERSION
 from utils.artifacts import atomic_write_json, file_sha256
 from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
@@ -17,18 +23,21 @@ from utils.repository import current_git_commit
 
 
 FORMAT_VERSION = 1
+SUPERVISED_WEIGHTS_FORMAT_VERSION = 2
 DATASET_FORMAT = "jsonl_state_action_v1"
 DATASET_GENERATOR_VERSION = "canonical_real_decisions_numpy_seed_plan_v2"
 RULESET_VERSION = "two_player_domino_v1"
 HEURISTIC_VERSION = "strategic_exact_belief_v1"
 EXPECTED_WEIGHT_SHAPES = DEFAULT_NETWORK_ARCHITECTURE.policy_weight_shapes()
-# Opt-in supervised regularizers added after the first canonical assets were
-# published. Metadata written before them recorded no field, which is exactly
-# the disabled value, so filling it in keeps those assets reusable instead of
-# forcing a retrain that would reproduce the same weights.
-DEFAULTED_TRAINING_CONFIG_FIELDS = {
-    "dropout_rate": 0.0,
-}
+SUPERVISED_EXECUTION_CONFIG_FIELDS = frozenset({
+    "device",
+    "gpu_memory_reserve_mb",
+    "memory_reserve_mb",
+})
+SUPERVISED_RANDOM_CONFIG_FIELDS = frozenset({
+    "random_bit_generator",
+    "random_derivation_scheme",
+})
 
 
 class ArtifactCompatibilityError(RuntimeError):
@@ -121,14 +130,6 @@ def canonical_training_config(**values):
     return _json_value(values)
 
 
-def _defaulted_training_config(training_config):
-    """Return one training config with disabled defaults for later fields."""
-    return {
-        **DEFAULTED_TRAINING_CONFIG_FIELDS,
-        **_json_value(dict(training_config or {})),
-    }
-
-
 def _load_metadata(path):
     try:
         with open(path, "r", encoding="utf-8") as stream:
@@ -151,6 +152,85 @@ def _compare_fields(metadata, expected):
                 f"{field} differs (found {actual!r}, expected {expected_value!r})"
             )
     return reasons
+
+
+def _compare_nested_value(metadata, path, expected):
+    """Return one mismatch for a dotted metadata path, if it differs."""
+    actual = metadata
+    for field in path.split("."):
+        if not isinstance(actual, dict):
+            actual = None
+            break
+        actual = actual.get(field)
+    if actual == expected:
+        return []
+    return [f"{path} differs (found {actual!r}, expected {expected!r})"]
+
+
+def _split_supervised_training_config(training_config):
+    """Separate learning, randomization, and runtime configuration."""
+    normalized = _json_value(dict(training_config or {}))
+    execution = {
+        field: normalized[field]
+        for field in sorted(SUPERVISED_EXECUTION_CONFIG_FIELDS)
+        if field in normalized
+    }
+    randomization = {
+        field: normalized[field]
+        for field in sorted(SUPERVISED_RANDOM_CONFIG_FIELDS)
+        if field in normalized
+    }
+    excluded = SUPERVISED_EXECUTION_CONFIG_FIELDS | SUPERVISED_RANDOM_CONFIG_FIELDS
+    hyperparameters = {
+        field: value
+        for field, value in normalized.items()
+        if field not in excluded
+    }
+    return hyperparameters, randomization, execution
+
+
+def _fixed_tp_policy():
+    """Return the immutable supervised TP policy recorded in every manifest."""
+    return {
+        "name": "fixed_block_median_training_plateau_v1",
+        "window_epochs": TP_WINDOW_EPOCHS,
+        "patience_blocks": TP_PATIENCE_BLOCKS,
+        "minimum_epochs": TP_MIN_EPOCHS,
+        "minimum_relative_improvement": TP_MIN_RELATIVE_IMPROVEMENT,
+    }
+
+
+def _weights_dataset_section(dataset_metadata):
+    """Return dataset origin and creation parameters for a weights manifest."""
+    generation_parameters = dict(dataset_metadata["generation_config"])
+    generation_parameters.pop("dataset_games", None)
+    return {
+        "sha256": dataset_metadata["dataset_sha256"],
+        "seed": int(dataset_metadata["seed"]),
+        "games": int(dataset_metadata["dataset_games"]),
+        "examples": int(dataset_metadata["dataset_examples"]),
+        "creation": {
+            "format": dataset_metadata["dataset_format"],
+            "generator_version": dataset_metadata["dataset_generator_version"],
+            "heuristic_version": dataset_metadata["heuristic_version"],
+            "parameters": _json_value(generation_parameters),
+        },
+    }
+
+
+def _resolved_supervised_execution(training_summary):
+    """Return concise machine-dependent choices made during one SL run."""
+    return {
+        "requested_device": training_summary.get("requested_device"),
+        "selected_device": training_summary.get("selected_device"),
+        "device_fallback_reason": training_summary.get("device_fallback_reason"),
+        "host_storage_mode": training_summary.get("host_storage_mode"),
+        "storage_mode": training_summary.get("storage_mode"),
+        "resident_window_examples": training_summary.get(
+            "resident_window_examples"
+        ),
+        "full_dataset_on_gpu": training_summary.get("full_dataset_on_gpu"),
+    }
 
 
 def inspect_canonical_dataset(paths, *, seed, dataset_games, generation_config):
@@ -247,7 +327,7 @@ def inspect_canonical_weights(
     paths,
     *,
     seed,
-    dataset_sha256,
+    dataset_metadata,
     training_config,
     architecture=DEFAULT_NETWORK_ARCHITECTURE,
 ):
@@ -260,27 +340,26 @@ def inspect_canonical_weights(
     metadata, error = _load_metadata(paths.weights_meta)
     if error:
         return ArtifactCheck(False, "incompatible", (error,), metadata, None)
-    stored_training_config = metadata.get("training_config")
-    if isinstance(stored_training_config, dict):
-        metadata = {
-            **metadata,
-            "training_config": _defaulted_training_config(
-                stored_training_config
-            ),
-        }
-    expected = {
-        "format_version": FORMAT_VERSION,
-        "artifact_type": "supervised_weights",
-        "seed": int(seed),
-        "dataset_sha256": dataset_sha256,
-        "encoder_size": DominoEncoder.VECTOR_SIZE,
-        "action_count": DominoEncoder.ACTION_SIZE,
-        "network_architecture": architecture.as_dict(),
-        "ruleset_version": RULESET_VERSION,
-        "encoded_feature_version": ENCODED_FEATURE_VERSION,
-        "training_config": _defaulted_training_config(training_config),
+    hyperparameters, randomization, execution = (
+        _split_supervised_training_config(training_config)
+    )
+    comparisons = {
+        "format_version": SUPERVISED_WEIGHTS_FORMAT_VERSION,
+        "artifact.type": "supervised_weights",
+        "dataset": _weights_dataset_section(dataset_metadata),
+        "model.encoder_size": DominoEncoder.VECTOR_SIZE,
+        "model.action_count": DominoEncoder.ACTION_SIZE,
+        "model.network_architecture": architecture.as_dict(),
+        "training.hyperparameters": hyperparameters,
+        "training.randomization": {"root_seed": int(seed), **randomization},
+        "training.fixed_tp_policy": _fixed_tp_policy(),
+        "execution.requested": execution,
+        "contracts.ruleset_version": RULESET_VERSION,
+        "contracts.encoded_feature_version": ENCODED_FEATURE_VERSION,
     }
-    reasons = _compare_fields(metadata, expected)
+    reasons = []
+    for path, expected in comparisons.items():
+        reasons.extend(_compare_nested_value(metadata, path, expected))
     reasons.extend(
         _inspect_weight_archive(
             paths.weights,
@@ -288,10 +367,11 @@ def inspect_canonical_weights(
         )
     )
     actual_hash = file_sha256(paths.weights)
-    if metadata.get("weights_sha256") != actual_hash:
+    stored_hash = (metadata.get("artifact") or {}).get("sha256")
+    if stored_hash != actual_hash:
         reasons.append(
-            "weights_sha256 differs from the current weights file "
-            f"({metadata.get('weights_sha256')!r} != {actual_hash!r})"
+            "artifact.sha256 differs from the current weights file "
+            f"({stored_hash!r} != {actual_hash!r})"
         )
     return ArtifactCheck(
         not reasons,
@@ -307,36 +387,61 @@ def write_weights_metadata(
     *,
     root,
     seed,
-    dataset_sha256,
+    dataset_metadata,
     training_config,
     training_summary,
     architecture=DEFAULT_NETWORK_ARCHITECTURE,
 ):
     """Publish provenance and convergence metadata for supervised weights."""
     digest = file_sha256(paths.weights)
+    hyperparameters, randomization, execution = (
+        _split_supervised_training_config(training_config)
+    )
     metadata = {
-        "format_version": FORMAT_VERSION,
-        "artifact_type": "supervised_weights",
-        "seed": int(seed),
-        "dataset_sha256": dataset_sha256,
-        "weights_sha256": digest,
-        "encoder_size": DominoEncoder.VECTOR_SIZE,
-        "action_count": DominoEncoder.ACTION_SIZE,
-        "network_architecture": architecture.as_dict(),
-        "ruleset_version": RULESET_VERSION,
-        "encoded_feature_version": ENCODED_FEATURE_VERSION,
-        "training_config": _json_value(training_config),
-        "max_epochs": int(training_summary["requested_epochs"]),
-        "epochs_completed": int(training_summary["epochs"]),
-        "best_epoch": training_summary.get("best_epoch"),
-        "best_validation_loss": float(training_summary["best_validation_loss"]),
-        "early_stopping_triggered": bool(
-            training_summary.get("early_stopping_triggered")
-        ),
-        "stopping_reason": training_summary.get("stopping_reason"),
-        "final_training_loss": training_summary.get("final_training_loss"),
-        "final_validation_loss": training_summary.get("final_validation_loss"),
-        "git_commit": current_git_commit(root),
+        "format_version": SUPERVISED_WEIGHTS_FORMAT_VERSION,
+        "artifact": {
+            "type": "supervised_weights",
+            "sha256": digest,
+        },
+        "dataset": _weights_dataset_section(dataset_metadata),
+        "model": {
+            "encoder_size": DominoEncoder.VECTOR_SIZE,
+            "action_count": DominoEncoder.ACTION_SIZE,
+            "network_architecture": architecture.as_dict(),
+        },
+        "training": {
+            "hyperparameters": hyperparameters,
+            "randomization": {"root_seed": int(seed), **randomization},
+            "fixed_tp_policy": _fixed_tp_policy(),
+            "result": {
+                "epochs_completed": int(training_summary["epochs"]),
+                "best_epoch": training_summary.get("best_epoch"),
+                "best_validation_loss": float(
+                    training_summary["best_validation_loss"]
+                ),
+                "early_stopping_triggered": bool(
+                    training_summary.get("early_stopping_triggered")
+                ),
+                "stopping_reason": training_summary.get("stopping_reason"),
+                "final_training_loss": training_summary.get(
+                    "final_training_loss"
+                ),
+                "final_validation_loss": training_summary.get(
+                    "final_validation_loss"
+                ),
+            },
+        },
+        "execution": {
+            "requested": execution,
+            "resolved": _resolved_supervised_execution(training_summary),
+        },
+        "contracts": {
+            "ruleset_version": RULESET_VERSION,
+            "encoded_feature_version": ENCODED_FEATURE_VERSION,
+        },
+        "repository": {
+            "git_commit": current_git_commit(root),
+        },
     }
     atomic_write_json(paths.weights_meta, metadata)
     return metadata

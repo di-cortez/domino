@@ -29,6 +29,7 @@ from training.supervised.dataset import (
     load_or_build_dataset,
 )
 from training.supervised.plotting import save_supervised_loss_plot
+from training.supervised.reporting import SupervisedTrainingReporter
 from training.supervised.runtime import (
     DEFAULT_SUPERVISED_BATCH_SIZE,
     SUPERVISED_GPU_MEMORY_RESERVE_MB,
@@ -36,13 +37,7 @@ from training.supervised.runtime import (
     SupervisedResourceTracker,
     probe_gpu_residency,
 )
-from utils.resource_limits import (
-    MIB,
-    MemorySafetyError,
-    choose_safe_supervised_device,
-    effective_gpu_available_bytes,
-    gpu_memory_info,
-)
+from utils.resource_limits import MemorySafetyError, choose_safe_supervised_device
 from utils.artifacts import atomic_savez
 from utils.myrandom import (
     DEFAULT_BIT_GENERATOR,
@@ -50,7 +45,6 @@ from utils.myrandom import (
     SeedPlan,
     fresh_root_seed,
 )
-from utils.runtime_status import format_duration, memory_report
 
 
 EPOCHS = 2000
@@ -60,16 +54,6 @@ DEFAULT_EARLY_STOPPING_PATIENCE = 5
 DEFAULT_SUPERVISED_LR_DECAY_PATIENCE = 5
 DEFAULT_SUPERVISED_LR_DECAY_FACTOR = 0.5
 SUPERVISED_VALIDATION_INTERVAL_EPOCHS = 10
-DEFAULT_TRAINING_PLATEAU_WINDOW = 25
-DEFAULT_TRAINING_PLATEAU_PATIENCE = 4
-DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS = 100
-DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT = 0.001
-
-def _format_optional_mib(byte_count):
-    """Format an optional byte measurement for detailed resource logs."""
-    if byte_count is None:
-        return "unavailable"
-    return f"{byte_count / MIB:.1f} MiB"
 
 
 def supervised_random_manifest_path(weights_file):
@@ -131,13 +115,6 @@ def train_supervised(
     early_stopping_patience=None,
     lr_decay_factor=DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
     lr_decay_patience=DEFAULT_SUPERVISED_LR_DECAY_PATIENCE,
-    training_plateau_enabled=True,
-    training_plateau_window=DEFAULT_TRAINING_PLATEAU_WINDOW,
-    training_plateau_patience=DEFAULT_TRAINING_PLATEAU_PATIENCE,
-    training_plateau_min_epochs=DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
-    training_plateau_min_relative_improvement=(
-        DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT
-    ),
     device="auto",
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
     gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
@@ -149,8 +126,8 @@ def train_supervised(
     architecture = architecture_from_hidden_sizes(hidden_sizes)
     started = time.time()
     seed = int(seed) if seed is not None else fresh_root_seed()
-    if not quiet:
-        print(f"Supervised training startup memory: {memory_report()}")
+    reporter = SupervisedTrainingReporter(quiet)
+    reporter.startup()
 
     encoder = DominoEncoder()
     dataset = load_or_build_dataset(
@@ -262,43 +239,15 @@ def train_supervised(
             seed_plan=network.seed_plan,
         )
 
-    if not quiet:
-        print(f"Supervised device: {selected_device}")
-        if fallback_reason:
-            print(f"Automatic supervised CPU fallback: {fallback_reason}.")
-        if selected_device == "gpu":
-            gpu_info = gpu_memory_info()
-            effective_free = effective_gpu_available_bytes()
-            if gpu_info is not None:
-                effective_text = (
-                    "unknown"
-                    if effective_free is None
-                    else f"{effective_free / MIB:.1f} MiB"
-                )
-                print(
-                    "GPU VRAM before supervised residency: "
-                    f"{gpu_info.available / MIB:.1f} MiB free / "
-                    f"{gpu_info.total / MIB:.1f} MiB total; "
-                    f"{effective_text} effective free."
-                )
-            print(
-                "GPU dataset residency: "
-                f"{data_plan.resident_window_examples:,} examples; "
-                f"mode={data_plan.storage_mode}; "
-                f"reserve={gpu_memory_reserve_mb} MiB."
-            )
-            if data_plan.full_upload_seconds is not None:
-                print(
-                    "One-time full-dataset GPU upload: "
-                    f"{data_plan.full_upload_seconds:.3f}s."
-                )
-        print(
-            f"Split complete: {train_count} train | "
-            f"{validation_count} validation"
-        )
-
-    if not quiet:
-        print("Supervised training starts from fresh random weights.")
+    reporter.runtime_configuration(
+        selected_device=selected_device,
+        fallback_reason=fallback_reason,
+        data_plan=data_plan,
+        gpu_memory_reserve_mb=gpu_memory_reserve_mb,
+        train_count=train_count,
+        validation_count=validation_count,
+    )
+    reporter.fresh_weights()
 
     requested_batch_size = int(batch_size)
     if requested_batch_size < 1:
@@ -323,15 +272,10 @@ def train_supervised(
         raise MemorySafetyError(
             f"Fixed supervised batch {selected_batch_size:,} is unsafe: {reason}."
         )
-    if not quiet:
-        print(
-            f"Supervised batch size: {selected_batch_size:,}"
-            + (
-                f" (requested {requested_batch_size:,}; capped to training set)."
-                if selected_batch_size != requested_batch_size
-                else "."
-            )
-        )
+    reporter.batch_size(
+        selected=selected_batch_size,
+        requested=requested_batch_size,
+    )
 
     tracker = SupervisedResourceTracker(selected_device)
     best_state = {
@@ -347,18 +291,13 @@ def train_supervised(
                 name: getattr(current_network, name).copy()
                 for name in current_network.weight_names
             }
-            if not quiet:
-                print(
-                    f"  -> New best validation loss "
-                    f"{validation_loss:.4f} at epoch {epoch}."
-                )
+            reporter.new_best(epoch=epoch, validation_loss=validation_loss)
 
     x_train = dataset.x[:, :train_count]
     y_train = dataset.y[:, :train_count]
     x_val = dataset.x[:, train_count:] if validation_count else None
     y_val = dataset.y[:, train_count:] if validation_count else None
-    if not quiet:
-        print("\nStarting supervised training...")
+    reporter.training_started()
 
     epoch_metrics = []
 
@@ -384,14 +323,6 @@ def train_supervised(
             epoch_runner=data_plan.train_epoch,
             validation_runner=data_plan.validation_loss,
             epoch_metrics_callback=record_epoch_metrics,
-            training_plateau_window=(
-                training_plateau_window if training_plateau_enabled else None
-            ),
-            training_plateau_patience=training_plateau_patience,
-            training_plateau_min_epochs=training_plateau_min_epochs,
-            training_plateau_min_relative_improvement=(
-                training_plateau_min_relative_improvement
-            ),
         )
         weights_path = Path(weights_file)
         weights_path.parent.mkdir(parents=True, exist_ok=True)
@@ -436,39 +367,16 @@ def train_supervised(
             else min(prior, data_plan.minimum_effective_free_vram_bytes)
         )
 
-    if not quiet:
-        best_text = (
-            "unavailable"
-            if best_state["validation_loss"] == float("inf")
-            else f"{best_state['validation_loss']:.4f}"
-        )
-        print(f"Model saved to {weights_file} (best validation loss: {best_text}).")
-        print(
-            "Random manifest saved to "
-            f"{supervised_random_manifest_path(weights_file)}."
-        )
-        print(f"Loss graph saved to {loss_plot_path}.")
-        if data_plan.storage_mode == "gpu_windowed":
-            rotations = [
-                metrics["window_rotations"] for metrics in epoch_metrics
-            ]
-            print(
-                "GPU window rotations: "
-                f"{sum(rotations)} total across {len(rotations)} epochs "
-                f"({min(rotations)}-{max(rotations)} per epoch)."
-            )
-        print(
-            "Supervised resource bounds: "
-            f"peak host RSS="
-            f"{_format_optional_mib(resource_summary['peak_host_rss_bytes'])}; "
-            f"minimum available host RAM="
-            f"{_format_optional_mib(resource_summary['minimum_available_host_ram_bytes'])}; "
-            f"peak CuPy pool="
-            f"{_format_optional_mib(resource_summary['peak_gpu_pool_used_bytes'])}; "
-            f"minimum effective free VRAM="
-            f"{_format_optional_mib(resource_summary['minimum_effective_free_vram_bytes'])}."
-        )
-        print(f"Total elapsed time: {format_duration(elapsed)}.")
+    reporter.completion(
+        weights_file=weights_file,
+        random_manifest_path=supervised_random_manifest_path(weights_file),
+        loss_plot_path=loss_plot_path,
+        best_validation_loss=best_state["validation_loss"],
+        storage_mode=data_plan.storage_mode,
+        epoch_metrics=epoch_metrics,
+        resource_summary=resource_summary,
+        elapsed=elapsed,
+    )
 
     return {
         "epochs": len(loss_history),
@@ -497,33 +405,6 @@ def train_supervised(
         "weight_decay": weight_decay,
         "dropout_rate": dropout_rate,
         "early_stopping_patience": early_stopping_patience,
-        "training_plateau_enabled": training_summary[
-            "training_plateau_enabled"
-        ],
-        "training_plateau_window": training_summary[
-            "training_plateau_window"
-        ],
-        "training_plateau_patience": training_summary[
-            "training_plateau_patience"
-        ],
-        "training_plateau_min_epochs": training_summary[
-            "training_plateau_min_epochs"
-        ],
-        "training_plateau_min_relative_improvement": training_summary[
-            "training_plateau_min_relative_improvement"
-        ],
-        "training_plateau_checks_without_improvement": training_summary[
-            "training_plateau_checks_without_improvement"
-        ],
-        "training_plateau_last_relative_improvement": training_summary[
-            "training_plateau_last_relative_improvement"
-        ],
-        "training_plateau_loss_start_epoch": training_summary[
-            "training_plateau_loss_start_epoch"
-        ],
-        "training_plateau_stopped": training_summary[
-            "training_plateau_stopped"
-        ],
         "stopping_reason": training_summary["stopping_reason"],
         "requested_device": requested_device,
         "selected_device": selected_device,

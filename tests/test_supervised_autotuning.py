@@ -21,7 +21,13 @@ if str(ROOT) not in sys.path:
 
 from agents.encoder import DominoEncoder
 from agents.neural_agent import NeuralAgent
-from agents.nn import GPU_ENABLED, SupervisedNeuralNetwork
+from agents.nn import (
+    GPU_ENABLED,
+    TP_MIN_EPOCHS,
+    TP_PATIENCE_BLOCKS,
+    TP_WINDOW_EPOCHS,
+    SupervisedNeuralNetwork,
+)
 from agents.rl_nn import PolicyNetwork
 from training.supervised.runtime import (
     DEFAULT_SUPERVISED_BATCH_SIZE,
@@ -152,67 +158,45 @@ class SchedulerAndNumericTests(unittest.TestCase):
 
     def test_training_loss_plateau_requires_repeated_complete_blocks(self):
         network, x, y = self._network_and_arrays()
-        metrics = []
 
         history = network.train(
             x,
             y,
-            epochs=30,
+            epochs=TP_MIN_EPOCHS + TP_WINDOW_EPOCHS * TP_PATIENCE_BLOCKS,
             batch_size=3,
             quiet=True,
             epoch_runner=lambda *_args: (0.5, 1, 0),
-            epoch_metrics_callback=lambda row: metrics.append(row.copy()),
-            training_plateau_window=2,
-            training_plateau_patience=3,
-            training_plateau_min_epochs=4,
-            training_plateau_min_relative_improvement=0.001,
         )
 
-        self.assertEqual(len(history), 8)
         self.assertEqual(
-            [row["epoch"] + 1 for row in metrics if row["training_plateau_checked"]],
-            [4, 6, 8],
+            len(history),
+            TP_MIN_EPOCHS + TP_WINDOW_EPOCHS * (TP_PATIENCE_BLOCKS - 1),
         )
-        self.assertTrue(network.last_training_summary["training_plateau_stopped"])
-        self.assertEqual(
-            network.last_training_summary["stopping_reason"],
-            "training_loss_plateau",
-        )
-        self.assertEqual(
-            network.last_training_summary[
-                "training_plateau_checks_without_improvement"
-            ],
-            3,
-        )
+        self.assertEqual(network.last_training_summary["stopping_reason"],
+                         "training_loss_plateau")
 
     def test_meaningful_training_loss_improvement_resets_plateau_patience(self):
         network, x, y = self._network_and_arrays()
-        block_losses = iter(
-            [1.0, 1.0, 0.9995, 0.9995, 0.98, 0.98, 0.9795, 0.9795]
+        losses = iter(
+            [1.0] * TP_MIN_EPOCHS
+            + [0.9995] * TP_WINDOW_EPOCHS
+            + [0.98] * TP_WINDOW_EPOCHS
+            + [0.9795] * TP_WINDOW_EPOCHS
+            + [0.9790] * TP_WINDOW_EPOCHS
         )
+        epoch_count = TP_MIN_EPOCHS + 4 * TP_WINDOW_EPOCHS
 
         history = network.train(
             x,
             y,
-            epochs=8,
+            epochs=epoch_count,
             batch_size=3,
             quiet=True,
-            epoch_runner=lambda *_args: (next(block_losses), 1, 0),
-            training_plateau_window=2,
-            training_plateau_patience=2,
-            training_plateau_min_epochs=4,
-            training_plateau_min_relative_improvement=0.001,
+            epoch_runner=lambda *_args: (next(losses), 1, 0),
         )
 
-        self.assertEqual(len(history), 8)
-        self.assertFalse(network.last_training_summary["training_plateau_stopped"])
+        self.assertEqual(len(history), epoch_count)
         self.assertEqual(network.last_training_summary["stopping_reason"], "epoch_limit")
-        self.assertEqual(
-            network.last_training_summary[
-                "training_plateau_checks_without_improvement"
-            ],
-            1,
-        )
 
     def test_float32_forward_backward_and_legacy_checkpoint_loading(self):
         network, x, y = self._network_and_arrays()
@@ -459,8 +443,6 @@ class DatasetResidencyTests(unittest.TestCase):
                 )
             self.assertEqual(output.getvalue(), "")
             self.assertEqual(summary["epochs"], 2)
-            self.assertTrue(summary["training_plateau_enabled"])
-            self.assertFalse(summary["training_plateau_stopped"])
             self.assertEqual(summary["stopping_reason"], "epoch_limit")
             self.assertEqual(summary["selected_device"], "cpu")
             self.assertEqual(summary["selected_batch_size"], 8)
@@ -485,14 +467,14 @@ class DatasetResidencyTests(unittest.TestCase):
             self.assertEqual(neural_agent.network.W1.dtype, np.float32)
             self.assertEqual(rl_network.W1.dtype, np.float32)
 
-    def test_real_cpu_supervised_run_stops_on_configured_training_plateau(self):
+    def test_real_cpu_supervised_run_has_no_plateau_configuration_output(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             dataset_path = root / "examples.jsonl"
             _write_dataset(dataset_path, count=20)
 
             summary = train_supervised(
-                epochs=20,
+                epochs=2,
                 batch_size=8,
                 dataset_file=dataset_path,
                 cache_file=root / "cache.npz",
@@ -501,16 +483,10 @@ class DatasetResidencyTests(unittest.TestCase):
                 device="cpu",
                 seed=7,
                 memory_reserve_mb=0,
-                training_plateau_window=2,
-                training_plateau_patience=2,
-                training_plateau_min_epochs=4,
-                training_plateau_min_relative_improvement=1.0,
             )
 
-            self.assertEqual(summary["epochs"], 6)
-            self.assertTrue(summary["training_plateau_stopped"])
-            self.assertEqual(summary["stopping_reason"], "training_loss_plateau")
-            self.assertEqual(summary["training_plateau_loss_start_epoch"], 1)
+            self.assertEqual(summary["epochs"], 2)
+            self.assertFalse(any("training_plateau" in key for key in summary))
             self.assertTrue((root / "weights.npz").is_file())
             self.assertTrue((root / "weights_loss.png").is_file())
 
@@ -632,11 +608,6 @@ class DatasetResidencyTests(unittest.TestCase):
             early_stopping=None,
             lr_decay=0.5,
             lr_decay_patience=5,
-            disable_training_plateau=False,
-            sl_training_plateau_window=25,
-            sl_training_plateau_patience=4,
-            sl_training_plateau_min_epochs=100,
-            sl_training_plateau_min_relative_improvement=0.001,
             sl_device="cpu",
             hidden_layers=2,
             hidden1_size=256,
@@ -657,8 +628,7 @@ class DatasetResidencyTests(unittest.TestCase):
         self.assertTrue(captured_kwargs["quiet"])
         self.assertEqual(captured_kwargs["device"], "cpu")
         self.assertEqual(captured_kwargs["batch_size"], 8192)
-        self.assertTrue(captured_kwargs["training_plateau_enabled"])
-        self.assertEqual(captured_kwargs["training_plateau_window"], 25)
+        self.assertFalse(any("training_plateau" in key for key in captured_kwargs))
         self.assertIn(
             "2/2 epochs, best validation loss 0.2500, 20 examples",
             output.getvalue(),

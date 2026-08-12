@@ -18,6 +18,27 @@ from utils.myrandom import RandomNamespace, SeedPlan
 
 DEVICES = ("auto", "cpu", "gpu")
 NETWORK_DTYPE = host_np.float32
+
+# SUPERVISED TRAINING CONSTANTS
+#
+# ``TP`` is the abbreviation used in this module for ``training plateau``.
+# TP stopping is deliberately an implementation policy, not a hyperparameter:
+# every supervised run checks the median training loss in fixed, consecutive
+# epoch windows and stops only after several windows fail to improve enough.
+# Keeping the policy here prevents command-line, pipeline, resume, and reporting
+# code from carrying knobs that this project does not intend to tune.
+#
+# The first TP check is allowed after ``TP_MIN_EPOCHS``. Each check compares the
+# newest ``TP_WINDOW_EPOCHS`` losses with the preceding window. An improvement
+# below ``TP_MIN_RELATIVE_IMPROVEMENT`` increments the saturation counter; a
+# larger improvement resets it. Training stops when that counter reaches
+# ``TP_PATIENCE_BLOCKS``. With these constants, the earliest possible TP stop is
+# epoch 175 (checks at epochs 100, 125, 150, and 175).
+TP_WINDOW_EPOCHS = 25
+TP_PATIENCE_BLOCKS = 4
+TP_MIN_EPOCHS = 100
+TP_MIN_RELATIVE_IMPROVEMENT = 0.001
+
 # Both regularizers are opt-in; these values reproduce an unregularized run.
 DISABLED_DROPOUT_RATE = 0.0
 DISABLED_WEIGHT_DECAY = 0.0
@@ -80,6 +101,28 @@ def resolve_device(device="auto"):
     if GPU_ENABLED and _cupy is not None:
         return _cupy, "gpu"
     return host_np, "cpu"
+
+
+def _tp_relative_improvement(loss_history):
+    """Return the current fixed-policy TP improvement, or ``None``.
+
+    TP means ``training plateau``. A value is produced only at the fixed check
+    boundaries described by the module-level ``TP_*`` training constants.
+    """
+    completed_epochs = len(loss_history)
+    if completed_epochs < TP_MIN_EPOCHS:
+        return None
+    if completed_epochs < 2 * TP_WINDOW_EPOCHS:
+        return None
+    if completed_epochs % TP_WINDOW_EPOCHS:
+        return None
+
+    previous_block = loss_history[-2 * TP_WINDOW_EPOCHS:-TP_WINDOW_EPOCHS]
+    current_block = loss_history[-TP_WINDOW_EPOCHS:]
+    previous_median = float(host_np.median(previous_block))
+    current_median = float(host_np.median(current_block))
+    denominator = max(abs(previous_median), 1e-12)
+    return (previous_median - current_median) / denominator
 
 
 class SupervisedNeuralNetwork:
@@ -442,20 +485,15 @@ class SupervisedNeuralNetwork:
         epoch_runner=None,
         validation_runner=None,
         epoch_metrics_callback=None,
-        training_plateau_window=None,
-        training_plateau_patience=4,
-        training_plateau_min_epochs=100,
-        training_plateau_min_relative_improvement=0.001,
     ):
-        """Train sequential epochs with independent plateau counters.
+        """Train sequential epochs with independent stopping counters.
 
         ``epoch_runner`` and ``validation_runner`` let the supervised pipeline
         provide RAM, mmap, full-GPU, or windowed-GPU data access without moving
         storage policy into the network. The default path retains the public
-        array-based API used by tests and small direct callers. Passing a
-        ``training_plateau_window`` enables conservative block-median early
-        stopping; direct callers remain opt-in while the supervised pipeline
-        enables it by default.
+        array-based API used by tests and small direct callers. The fixed TP
+        (training plateau) policy declared at the top of this module always
+        guards long supervised runs against saturated training loss.
         """
         if epochs < 1:
             raise ValueError("epochs must be positive")
@@ -467,17 +505,6 @@ class SupervisedNeuralNetwork:
             raise ValueError("lr_decay_patience must be positive")
         if validation_interval < 1:
             raise ValueError("validation_interval must be positive")
-        if training_plateau_window is not None and training_plateau_window < 1:
-            raise ValueError("training_plateau_window must be positive")
-        if training_plateau_patience < 1:
-            raise ValueError("training_plateau_patience must be positive")
-        if training_plateau_min_epochs < 1:
-            raise ValueError("training_plateau_min_epochs must be positive")
-        if training_plateau_min_relative_improvement < 0:
-            raise ValueError(
-                "training_plateau_min_relative_improvement must be non-negative"
-            )
-
         loss_history = []
         best_validation_loss = float("inf")
         lr_checks_without_improvement = 0
@@ -485,11 +512,9 @@ class SupervisedNeuralNetwork:
         lr_decay_count = 0
         initial_learning_rate = self.lr
         completed_epochs = 0
-        training_plateau_checks_without_improvement = 0
-        training_plateau_last_relative_improvement = None
-        training_plateau_stopped = False
+        tp_checks_without_improvement = 0
+        tp_stopped = False
         stopping_reason = "epoch_limit"
-        plateau_loss_start = 0
 
         for epoch in range(epochs):
             current_batch_size = batch_size
@@ -573,45 +598,16 @@ class SupervisedNeuralNetwork:
             elif epoch % validation_interval == 0 and not quiet:
                 print(f"Epoch {epoch} | training loss: {mean_loss:.4f}")
 
-            training_plateau_checked = False
-            training_plateau_relative_improvement = None
-            if (
-                training_plateau_window is not None
-                and plateau_loss_start is not None
-                and completed_epochs >= training_plateau_min_epochs
-            ):
-                stable_losses = loss_history[plateau_loss_start:]
-                stable_epoch_count = len(stable_losses)
-                if (
-                    stable_epoch_count >= 2 * training_plateau_window
-                    and stable_epoch_count % training_plateau_window == 0
-                ):
-                    previous_block = stable_losses[
-                        -2 * training_plateau_window:-training_plateau_window
-                    ]
-                    current_block = stable_losses[-training_plateau_window:]
-                    previous_median = float(host_np.median(previous_block))
-                    current_median = float(host_np.median(current_block))
-                    denominator = max(abs(previous_median), 1e-12)
-                    training_plateau_relative_improvement = (
-                        previous_median - current_median
-                    ) / denominator
-                    training_plateau_last_relative_improvement = (
-                        training_plateau_relative_improvement
-                    )
-                    training_plateau_checked = True
-                    if (
-                        training_plateau_relative_improvement
-                        < training_plateau_min_relative_improvement
-                    ):
-                        training_plateau_checks_without_improvement += 1
-                    else:
-                        training_plateau_checks_without_improvement = 0
-
-                    training_plateau_stopped = (
-                        training_plateau_checks_without_improvement
-                        >= training_plateau_patience
-                    )
+            # TP means ``training plateau``. The helper reads the fixed TP_*
+            # constants at the top of this file; there are intentionally no
+            # per-call aliases or configuration variables for this policy.
+            tp_relative_improvement = _tp_relative_improvement(loss_history)
+            if tp_relative_improvement is not None:
+                if tp_relative_improvement < TP_MIN_RELATIVE_IMPROVEMENT:
+                    tp_checks_without_improvement += 1
+                else:
+                    tp_checks_without_improvement = 0
+                tp_stopped = tp_checks_without_improvement >= TP_PATIENCE_BLOCKS
 
             metrics = {
                 "epoch": epoch,
@@ -621,13 +617,6 @@ class SupervisedNeuralNetwork:
                 "window_rotations": window_rotations,
                 "training_loss": float(mean_loss),
                 "validation_loss": validation_loss,
-                "training_plateau_checked": training_plateau_checked,
-                "training_plateau_relative_improvement": (
-                    training_plateau_relative_improvement
-                ),
-                "training_plateau_checks_without_improvement": (
-                    training_plateau_checks_without_improvement
-                ),
             }
             if epoch_metrics_callback is not None:
                 epoch_metrics_callback(metrics)
@@ -648,14 +637,14 @@ class SupervisedNeuralNetwork:
                         f"epoch {epoch}."
                     )
                 break
-            if training_plateau_stopped:
+            if tp_stopped:
                 stopping_reason = "training_loss_plateau"
                 if not quiet:
                     print(
                         "Early stopping: median training loss improved by less "
-                        f"than {training_plateau_min_relative_improvement:.3%} "
-                        f"across {training_plateau_patience} consecutive "
-                        f"{training_plateau_window}-epoch blocks. Stopped "
+                        f"than {TP_MIN_RELATIVE_IMPROVEMENT:.3%} across "
+                        f"{TP_PATIENCE_BLOCKS} consecutive "
+                        f"{TP_WINDOW_EPOCHS}-epoch blocks. Stopped "
                         f"after epoch {epoch + 1}."
                     )
                 break
@@ -674,23 +663,6 @@ class SupervisedNeuralNetwork:
             "early_checks_without_improvement": (
                 early_checks_without_improvement
             ),
-            "training_plateau_enabled": training_plateau_window is not None,
-            "training_plateau_window": training_plateau_window,
-            "training_plateau_patience": training_plateau_patience,
-            "training_plateau_min_epochs": training_plateau_min_epochs,
-            "training_plateau_min_relative_improvement": (
-                training_plateau_min_relative_improvement
-            ),
-            "training_plateau_checks_without_improvement": (
-                training_plateau_checks_without_improvement
-            ),
-            "training_plateau_last_relative_improvement": (
-                training_plateau_last_relative_improvement
-            ),
-            "training_plateau_loss_start_epoch": (
-                None if plateau_loss_start is None else plateau_loss_start + 1
-            ),
-            "training_plateau_stopped": training_plateau_stopped,
             "stopping_reason": stopping_reason,
         }
         return loss_history

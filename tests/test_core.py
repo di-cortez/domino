@@ -89,10 +89,6 @@ from training.supervised.cli import (
 from training.supervised.training_loop import (
     DEFAULT_EARLY_STOPPING_PATIENCE,
     DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
-    DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
-    DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
-    DEFAULT_TRAINING_PLATEAU_PATIENCE,
-    DEFAULT_TRAINING_PLATEAU_WINDOW,
 )
 from training.utils.cli_args import DEFAULT_DROPOUT_RATE, DEFAULT_WEIGHT_DECAY
 from train_script.run_pipeline import _build_config, parse_args as parse_pipeline_args
@@ -971,20 +967,8 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     assert defaults.early_stopping is None
     assert defaults.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
     assert defaults.lr_decay_patience == 5
-    assert not defaults.disable_training_plateau
-    assert defaults.sl_training_plateau_window == DEFAULT_TRAINING_PLATEAU_WINDOW
-    assert (
-        defaults.sl_training_plateau_patience
-        == DEFAULT_TRAINING_PLATEAU_PATIENCE
-    )
-    assert (
-        defaults.sl_training_plateau_min_epochs
-        == DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS
-    )
-    assert (
-        defaults.sl_training_plateau_min_relative_improvement
-        == DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT
-    )
+    assert not hasattr(defaults, "disable_training_plateau")
+    assert not hasattr(defaults, "sl_training_plateau_window")
     assert defaults.sl_device == "auto"
 
     enabled = parse_supervised_args([
@@ -1015,12 +999,10 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
 
     disabled = parse_supervised_args([
         "--no-lr-decay",
-        "--sl-no-training-plateau-stop",
         "--device",
         "cpu",
     ])
     assert disabled.lr_decay is None
-    assert disabled.disable_training_plateau
     assert disabled.sl_device == "cpu"
 
     pipeline = parse_pipeline_args([

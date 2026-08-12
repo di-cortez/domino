@@ -180,7 +180,8 @@ winning-reason distribution, never game-result draws.
 
 Supervised epoch counts are maximum budgets. Training stops earlier by default
 after a conservative repeated-block check confirms that training loss has
-saturated; use `--sl-no-training-plateau-stop` for fixed-epoch experiments.
+saturated. This training-plateau policy is fixed by documented `TP_*` constants
+in `agents/nn.py`; it is intentionally not a command-line hyperparameter.
 
 Use `python -m training.pipeline --help` for rebuild, resume, worker, device,
 PPO, and diagnostic controls.

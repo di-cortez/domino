@@ -20,16 +20,11 @@ from training.supervised.training_loop import (
     DEFAULT_EARLY_STOPPING_PATIENCE,
     DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
     DEFAULT_SUPERVISED_LR_DECAY_PATIENCE,
-    DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
-    DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
-    DEFAULT_TRAINING_PLATEAU_PATIENCE,
-    DEFAULT_TRAINING_PLATEAU_WINDOW,
     train_supervised,
 )
 from training.utils.cli_args import (
     add_regularization_arguments,
     decay_factor,
-    nonnegative_float,
     nonnegative_int,
     positive_int,
 )
@@ -127,41 +122,6 @@ def add_optional_training_arguments(parser, *, include_device_alias=False):
         help="Failed validation checks required before each LR reduction.",
     )
     group.add_argument(
-        "--sl-no-training-plateau-stop",
-        dest="disable_training_plateau",
-        action="store_true",
-        default=False,
-        help="Disable automatic stopping when median training loss saturates.",
-    )
-    group.add_argument(
-        "--sl-training-plateau-window",
-        type=positive_int,
-        default=DEFAULT_TRAINING_PLATEAU_WINDOW,
-        metavar="EPOCHS",
-        help="Non-overlapping epoch-block size for training-loss plateau checks.",
-    )
-    group.add_argument(
-        "--sl-training-plateau-patience",
-        type=positive_int,
-        default=DEFAULT_TRAINING_PLATEAU_PATIENCE,
-        metavar="BLOCKS",
-        help="Consecutive low-improvement blocks required before stopping.",
-    )
-    group.add_argument(
-        "--sl-training-plateau-min-epochs",
-        type=positive_int,
-        default=DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
-        metavar="EPOCHS",
-        help="Minimum total epochs before training-loss stopping is allowed.",
-    )
-    group.add_argument(
-        "--sl-training-plateau-min-relative-improvement",
-        type=nonnegative_float,
-        default=DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
-        metavar="FRACTION",
-        help="Minimum median-loss improvement that resets plateau patience.",
-    )
-    group.add_argument(
         "--sl-device",
         choices=("auto", "cpu", "gpu"),
         default="auto",
@@ -232,13 +192,6 @@ def main(argv=None):
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,
         lr_decay_patience=args.lr_decay_patience,
-        training_plateau_enabled=not args.disable_training_plateau,
-        training_plateau_window=args.sl_training_plateau_window,
-        training_plateau_patience=args.sl_training_plateau_patience,
-        training_plateau_min_epochs=args.sl_training_plateau_min_epochs,
-        training_plateau_min_relative_improvement=(
-            args.sl_training_plateau_min_relative_improvement
-        ),
         device=args.sl_device,
         memory_reserve_mb=args.sl_memory_reserve_mb,
         gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,

@@ -18,6 +18,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from utils.runtime_status import format_duration, pipeline_compute_report
+from agents.nn import (
+    TP_MIN_EPOCHS,
+    TP_MIN_RELATIVE_IMPROVEMENT,
+    TP_PATIENCE_BLOCKS,
+    TP_WINDOW_EPOCHS,
+)
 
 try:
     from tqdm.auto import tqdm
@@ -187,13 +193,6 @@ def _run_supervised_training(config, args):
             early_stopping_patience=args.early_stopping,
             lr_decay_factor=args.lr_decay,
             lr_decay_patience=args.lr_decay_patience,
-            training_plateau_enabled=not args.disable_training_plateau,
-            training_plateau_window=args.sl_training_plateau_window,
-            training_plateau_patience=args.sl_training_plateau_patience,
-            training_plateau_min_epochs=args.sl_training_plateau_min_epochs,
-            training_plateau_min_relative_improvement=(
-                args.sl_training_plateau_min_relative_improvement
-            ),
             device=args.sl_device,
             memory_reserve_mb=args.sl_memory_reserve_mb,
             gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
@@ -459,17 +458,12 @@ def main():
     else:
         print("RL initialization: continue from the existing RL checkpoint when present.")
     print(f"Supervised batch size: fixed at {args.sl_batch_size:,}.")
-    if not args.disable_training_plateau:
-        print(
-            "Supervised training-loss plateau stop: enabled after at least "
-            f"{args.sl_training_plateau_min_epochs} "
-            f"epochs; {args.sl_training_plateau_patience} consecutive "
-            f"{args.sl_training_plateau_window}-epoch median blocks below "
-            f"{args.sl_training_plateau_min_relative_improvement:.3%} "
-            "relative improvement."
-        )
-    else:
-        print("Supervised training-loss plateau stop: disabled.")
+    print(
+        "Supervised training-loss plateau stop: fixed after at least "
+        f"{TP_MIN_EPOCHS} epochs; {TP_PATIENCE_BLOCKS} consecutive "
+        f"{TP_WINDOW_EPOCHS}-epoch median blocks below "
+        f"{TP_MIN_RELATIVE_IMPROVEMENT:.3%} relative improvement."
+    )
     if args.dataset_workers == "auto":
         print(
             "Dataset workers: automatic retained benchmark "

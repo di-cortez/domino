@@ -11,6 +11,12 @@ import pytest
 
 from agents.rl_nn import PolicyNetwork
 from agents.network_architecture import architecture_from_hidden_sizes
+from agents.nn import (
+    TP_MIN_EPOCHS,
+    TP_MIN_RELATIVE_IMPROVEMENT,
+    TP_PATIENCE_BLOCKS,
+    TP_WINDOW_EPOCHS,
+)
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from diagnostics.rl_progress import (
     CSV_FIELDS,
@@ -602,7 +608,7 @@ def test_canonical_asset_hashes_and_metadata_control_reuse(tmp_path):
         paths,
         root=tmp_path,
         seed=42,
-        dataset_sha256=dataset_meta["dataset_sha256"],
+        dataset_metadata=dataset_meta,
         training_config=training,
         training_summary={
             "requested_epochs": 10,
@@ -619,16 +625,40 @@ def test_canonical_asset_hashes_and_metadata_control_reuse(tmp_path):
     assert "created_at" not in weights_meta
     assert "dataset_path" not in weights_meta
     assert "weights_path" not in weights_meta
+    assert set(weights_meta) == {
+        "artifact",
+        "contracts",
+        "dataset",
+        "execution",
+        "format_version",
+        "model",
+        "repository",
+        "training",
+    }
+    assert weights_meta["training"]["fixed_tp_policy"] == {
+        "name": "fixed_block_median_training_plateau_v1",
+        "window_epochs": TP_WINDOW_EPOCHS,
+        "patience_blocks": TP_PATIENCE_BLOCKS,
+        "minimum_epochs": TP_MIN_EPOCHS,
+        "minimum_relative_improvement": TP_MIN_RELATIVE_IMPROVEMENT,
+    }
+    expected_generation_parameters = dict(generation)
+    expected_generation_parameters.pop("dataset_games")
+    assert (
+        weights_meta["dataset"]["creation"]["parameters"]
+        == expected_generation_parameters
+    )
+    assert weights_meta["training"]["result"]["epochs_completed"] == 4
     assert inspect_canonical_weights(
         paths,
         seed=42,
-        dataset_sha256=dataset_meta["dataset_sha256"],
+        dataset_metadata=dataset_meta,
         training_config=training,
     ).compatible
     architecture_mismatch = inspect_canonical_weights(
         paths,
         seed=42,
-        dataset_sha256=dataset_meta["dataset_sha256"],
+        dataset_metadata=dataset_meta,
         training_config=training,
         architecture=architecture_from_hidden_sizes(512, 192),
     )
@@ -687,7 +717,7 @@ def test_canonical_supervised_metadata_is_location_independent(tmp_path):
             paths,
             root=root,
             seed=42,
-            dataset_sha256=dataset_meta["dataset_sha256"],
+            dataset_metadata=dataset_meta,
             training_config=_training_config(),
             training_summary={
                 "requested_epochs": 10,

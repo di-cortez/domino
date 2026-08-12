@@ -46,9 +46,11 @@ maximum supervised budget of 5,000 epochs (the convergence/plateau stopping
 rules can finish earlier). They are
 `dataset/supervised_dataset_standard_seed<seed>.jsonl` and
 `models/domino_sl_standard_seed<seed>.npz`. Their sibling `meta.json` files
-record structural versions, configuration, provenance, convergence fields,
-and SHA-256. They deliberately omit creation timestamps and machine-local
-paths, so equal runs can publish equal metadata in different checkouts.
+record separately the artifact identity, source-dataset creation parameters,
+model architecture, SL hyperparameters and fixed TP policy, training result,
+resolved execution choices, structural contracts, repository provenance, and
+SHA-256. They deliberately omit creation timestamps and machine-local paths,
+so equal runs can publish equal metadata in different checkouts.
 Presence alone is never enough for reuse. An incompatible asset stops the run
 unless one of these explicit replacement controls is supplied:
 

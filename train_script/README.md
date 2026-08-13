@@ -4,7 +4,7 @@ These wrappers compose the training modules documented in
 [`training/README.md`](../training/README.md). The canonical Python wrapper
 `python -m train_script.run_pipeline` mirrors
 `python -m training.pipeline`, including `--gpi` with the supported fixed
-choices. The older shell batch wrapper retains `training.rl.self_play`'s default
+choices. The older shell batch wrapper retains `training.rl.cli`'s default
 of 2,000 games per iteration.
 
 ## Full batch wrapper
@@ -38,7 +38,7 @@ train_script/run_training_pipeline.sh --skip-dataset --skip-sl \
   --rl-iterations 2 --rl-checkpoint-interval 1 \
   --rl-weights-file models/smoke_test.npz
 
-# PPO actor-critic (add --rl-no-ppo for the historical update).
+# PPO actor-critic (use --rl-ppo-max-epochs 1 for REINFORCE).
 train_script/run_training_pipeline.sh --skip-dataset --skip-sl \
   --rl-value-head --rl-weights-file models/domino_rl_weights_critic.npz
 ```
@@ -56,7 +56,7 @@ Important RL options are:
 | `--rl-value-head` | Enable the value head with PPO or REINFORCE | off |
 | `--weight-decay` | L2 decay forwarded to both the SL and the RL stage | off |
 | `--dropout` | Hidden-layer dropout forwarded to both the SL and the RL stage | off |
-| `--rl-ppo` / `--rl-no-ppo` | PPO or one-update REINFORCE | PPO |
+| `--rl-ppo-max-epochs` | `1` selects REINFORCE; `2`–`16` select PPO | `4` |
 | `--hidden-layers` | Hidden policy layers, 1 to 8, used by supervised training | `2` |
 | `--hidden1-size` ... `--hidden8-size` | Hidden policy widths used by supervised training | `256`, then `128` |
 | `--rl-seed` | Fixed training seed | unset |

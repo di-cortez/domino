@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 from training.rl.reporting import (
     TRAINING_METRIC_COLUMNS,
@@ -56,7 +57,9 @@ def _row(iteration):
         "buffer_location": "ram",
         "buffer_bytes": 10_000,
         "selected_workers": 4,
-        "pool_size": 10,
+        "opponent_count": 11,
+        "unique_neural_opponent_count": 10,
+        "bucket_results": [[800, 480, 320], [1_200, 720, 480]],
         "rollout_seconds": 1.25,
         "ppo_seconds": 0.75,
         "rollout_duration_s": 1.25,
@@ -70,19 +73,39 @@ def _row(iteration):
     }
 
 
-def test_metrics_v2_uses_one_header_and_compact_array_rows(tmp_path):
-    path = tmp_path / "training_metrics.jsonl"
-    metadata = {
-        "run_configuration_sha256": "a" * 64,
+def _metadata(configuration_hash):
+    return {
+        "run_configuration_sha256": configuration_hash,
         "run_configuration": {"seed": 42, "gpi": 2_000},
+        "training": {
+            "games_per_iteration": 2_000,
+            "difficulty_weight": 0.5,
+            "opponent_buckets": ["heuristic", "recent"],
+        },
     }
+
+
+def test_metrics_v5_uses_header_bucket_names_and_numeric_array_rows(tmp_path):
+    path = tmp_path / "training_metrics.jsonl"
+    metadata = _metadata("a" * 64)
     _prepare_metrics_file(path, 0, metadata)
     with open(path, "a", encoding="utf-8") as stream:
         _write_metrics_row(stream, _row(1))
 
     raw_lines = path.read_text(encoding="utf-8").splitlines()
-    assert isinstance(json.loads(raw_lines[0]), dict)
-    assert isinstance(json.loads(raw_lines[1]), list)
+    raw_header = json.loads(raw_lines[0])
+    raw_row = json.loads(raw_lines[1])
+    assert isinstance(raw_header, dict)
+    assert isinstance(raw_row, list)
+    assert raw_header["bucket_results"] == {
+        "bucket_order": ["heuristic", "recent"],
+        "columns": ["games", "wins", "losses"],
+        "nominal_uniform_budget": 1_000,
+        "nominal_difficulty_budget": 1_000,
+    }
+    assert "heuristic" not in raw_lines[1]
+    assert "recent" not in raw_lines[1]
+    assert len(raw_lines[1].encode("utf-8")) < 1_000
 
     header, rows = read_training_metrics(path)
     assert header["version"] == TRAINING_METRICS_VERSION
@@ -91,6 +114,10 @@ def test_metrics_v2_uses_one_header_and_compact_array_rows(tmp_path):
     assert rows[0]["final_approx_kl"] == 0.007123456789
     assert rows[0]["epochs_completed"] == 4
     assert rows[0]["minibatch_sizes"] == [16, 16, 16, 15, 15, 15, 15, 15]
+    assert rows[0]["bucket_results"] == [
+        [800, 480, 320],
+        [1_200, 720, 480],
+    ]
     assert "cumulative_training_games" not in TRAINING_METRIC_COLUMNS
     assert "decision_sample_count" not in TRAINING_METRIC_COLUMNS
     assert "final_entropy" not in TRAINING_METRIC_COLUMNS
@@ -98,17 +125,21 @@ def test_metrics_v2_uses_one_header_and_compact_array_rows(tmp_path):
 
 def test_metrics_resume_truncates_after_the_checkpoint_and_checks_hash(tmp_path):
     path = tmp_path / "training_metrics.jsonl"
-    metadata = {"run_configuration_sha256": "b" * 64}
+    metadata = _metadata("b" * 64)
     _prepare_metrics_file(path, 0, metadata)
     with open(path, "a", encoding="utf-8") as stream:
         _write_metrics_row(stream, _row(1))
         _write_metrics_row(stream, _row(2))
 
-    _prepare_metrics_file(path, 1, metadata)
+    with mock.patch(
+        "training.rl.reporting.read_training_metrics",
+        side_effect=AssertionError("resume must stream instead"),
+    ):
+        _prepare_metrics_file(path, 1, metadata)
     _header, rows = read_training_metrics(path)
     assert [row["iteration"] for row in rows] == [1]
 
-    mismatched = {"run_configuration_sha256": "c" * 64}
+    mismatched = _metadata("c" * 64)
     try:
         _prepare_metrics_file(path, 1, mismatched)
     except ValueError as exc:

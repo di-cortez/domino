@@ -31,11 +31,11 @@ from agents.neural_agent import NeuralAgent
 from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import DominoEngine
-from training.rl.self_play import (
+from training.rl.rollout import (
     DEFAULT_GAMMA,
     DEFAULT_REWARD_SCHEMA,
     REWARD_SCHEMAS,
-    _collect_self_play_steps,
+    _collect_steps_vs_snapshot,
 )
 
 
@@ -198,9 +198,9 @@ def _run_rl_rollouts(game_count: int, base_seed: int, optimized: bool):
             seed = base_seed + game_index
             random.seed(seed)
             np.random.seed(seed & 0xFFFFFFFF)
-            samples, events, winner, learner_position = _collect_self_play_steps(
+            samples, events, winner, learner_position = _collect_steps_vs_snapshot(
                 network,
-                [],
+                network,
                 schema,
                 DEFAULT_GAMMA,
             )

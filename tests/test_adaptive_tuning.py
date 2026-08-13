@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import random
 import tempfile
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -22,7 +23,9 @@ from training.rl.adaptive_tuning import (
     run_worker_tuning,
     selected_worker_candidate,
 )
-from training.rl.self_play import REWARD_SCHEMAS
+from training.rl.rollout import REWARD_SCHEMAS
+from training.rl.matchmaking import matchmaking_policy_manifest
+from training.rl.pool import pool_policy_manifest
 
 
 class _RunInfo:
@@ -47,6 +50,8 @@ class _RunInfo:
 class _Runner:
     def __init__(self):
         self.worker_count = 1
+        self.opponent_pool = None
+        self.performance_tracker = None
         self.calls = []
         self.closed = False
 
@@ -54,7 +59,9 @@ class _Runner:
         self.worker_count = int(workers)
         return self.worker_count, False, None
 
-    def collect_games(self, first_game, game_count, seed):
+    def collect_games(self, match_plan, seed):
+        first_game = match_plan.first_absolute_game
+        game_count = match_plan.game_count
         self.calls.append((int(first_game), int(game_count), int(seed), self.worker_count))
         results = [
             {"game_index": int(first_game) + index, "samples": []}
@@ -108,12 +115,11 @@ def _tuning_kwargs(network, **overrides):
         "workers": "auto",
         "retune_workers": False,
         "saved_tuning": None,
-        "worker_candidates": (1, 2),
         "base_seed": 42,
-        "training_opponent": "self_play",
+        "opponent_buckets": ("heuristic", "recent"),
+        "difficulty_weight": 0.5,
         "schema": REWARD_SCHEMAS["default"],
         "gamma": 1.0,
-        "max_pool_size": 2,
         "safety": ParallelSafetyConfig(memory_reserve_mb=0),
     }
     values.update(overrides)
@@ -122,17 +128,29 @@ def _tuning_kwargs(network, **overrides):
 
 def test_worker_benchmark_uses_exact_one_percent_with_partial_final_block():
     runner = _Runner()
-    with mock.patch("training.rl.adaptive_tuning._new_runner", return_value=runner):
+    with (
+        mock.patch("training.rl.adaptive_tuning._new_runner", return_value=runner),
+        mock.patch(
+            "training.rl.adaptive_tuning.build_match_plan",
+            side_effect=lambda **value: SimpleNamespace(
+                first_absolute_game=value["first_absolute_game"],
+                game_count=value["game_count"],
+            ),
+        ),
+        mock.patch(
+            "training.rl.adaptive_tuning.DEFAULT_RL_WORKER_CANDIDATES",
+            (1,),
+        ),
+    ):
         test_games, rows = benchmark_worker_candidates(
             _FrozenNetwork(),
             gpi=600,
             total_training_games=100_000,
-            candidates=(1,),
             base_seed=42,
-            training_opponent="self_play",
+            opponent_buckets=("heuristic", "recent"),
+            difficulty_weight=0.5,
             schema=REWARD_SCHEMAS["default"],
             gamma=1.0,
-            max_pool_size=2,
             safety=ParallelSafetyConfig(memory_reserve_mb=0),
         )
 
@@ -151,6 +169,17 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
     with (
         mock.patch("training.rl.adaptive_tuning._new_runner", return_value=runner),
         mock.patch(
+            "training.rl.adaptive_tuning.build_match_plan",
+            side_effect=lambda **value: SimpleNamespace(
+                first_absolute_game=value["first_absolute_game"],
+                game_count=value["game_count"],
+            ),
+        ),
+        mock.patch(
+            "training.rl.adaptive_tuning.DEFAULT_RL_WORKER_CANDIDATES",
+            (1, 2, 4, 6),
+        ),
+        mock.patch(
             "training.rl.adaptive_tuning.time.perf_counter",
             side_effect=(0.0, 1.0, 2.0, 2.8, 4.0, 4.75),
         ),
@@ -159,12 +188,11 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
             _FrozenNetwork(),
             gpi=100,
             total_training_games=10_000,
-            candidates=(1, 2, 4, 6),
             base_seed=42,
-            training_opponent="self_play",
+            opponent_buckets=("heuristic", "recent"),
+            difficulty_weight=0.5,
             schema=REWARD_SCHEMAS["default"],
             gamma=1.0,
-            max_pool_size=2,
             safety=ParallelSafetyConfig(memory_reserve_mb=0),
             status_callback=messages.append,
         )
@@ -180,28 +208,31 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
 
 def test_capture_restore_recovers_weights_optimizer_rng_and_pool():
     network = _policy()
-    pool = [_pool_snapshot(network)]
+    pool = {"snapshot:0000000000": _pool_snapshot(network)}
     random.seed(71)
     np.random.seed(72)
-    snapshot = capture_isolation_state(network, pool)
+    snapshot = capture_isolation_state(network, pool_weights=pool)
 
     network.W1 += 5.0
     network.optimizer_step_count = 99
-    pool[0]["W1"] += 7.0
+    pool["snapshot:0000000000"]["W1"] += 7.0
     random.random()
     np.random.random()
-    restore_isolation_state(network, snapshot, pool)
+    restore_isolation_state(network, snapshot, pool_weights=pool)
 
     assert policy_sha256(network) == snapshot["weights_sha256"]
     assert network.optimizer_state_dict() == snapshot["optimizer"]
     assert random.getstate() == snapshot["python_rng"]
     assert _numpy_rng_equal(np.random.get_state(), snapshot["numpy_rng"])
-    np.testing.assert_array_equal(pool[0]["W1"], snapshot["pool_snapshots"][0]["W1"])
+    np.testing.assert_array_equal(
+        pool["snapshot:0000000000"]["W1"],
+        snapshot["pool_weights"]["snapshot:0000000000"]["W1"],
+    )
 
 
 def test_worker_tuning_restores_state_and_writes_fixed_gpi_metadata():
     network = _policy(seed=8)
-    pool = [_pool_snapshot(network)]
+    pool = {"snapshot:0000000000": _pool_snapshot(network)}
     initial_hash = policy_sha256(network)
     initial_optimizer = network.optimizer_state_dict()
     random.seed(81)
@@ -212,7 +243,7 @@ def test_worker_tuning_restores_state_and_writes_fixed_gpi_metadata():
     def fake_workers(policy, **kwargs):
         policy.W1 += 1.0
         policy.optimizer_step_count += 10
-        kwargs["pool_snapshots"][0]["W1"] += 3.0
+        kwargs["pool_weights"]["snapshot:0000000000"]["W1"] += 3.0
         random.random()
         np.random.random()
         return 1000, [
@@ -233,7 +264,7 @@ def test_worker_tuning_restores_state_and_writes_fixed_gpi_metadata():
         ):
             metadata = _tuning_kwargs(
                 network,
-                pool_snapshots=pool,
+                pool_weights=pool,
                 output_path=path,
             )
         saved = json.loads(path.read_text(encoding="utf-8"))
@@ -241,7 +272,7 @@ def test_worker_tuning_restores_state_and_writes_fixed_gpi_metadata():
     assert metadata["gpi"] == 600
     assert metadata["selected_workers"] == 2
     assert metadata["worker_test_games"] == 1000
-    assert saved["version"] == 4
+    assert saved["version"] == 5
     assert saved["worker_minimum_gain"] == 0.10
     assert saved["initial_weights_sha256"] == initial_hash
     assert saved["isolation_verified"]
@@ -258,6 +289,11 @@ def test_saved_worker_tuning_is_reused_for_the_same_fixed_gpi():
         "selected_workers": 6,
         "worker_results": [{"requested_workers": 6, "success": True}],
         "worker_test_games": 1000,
+        "opponent_buckets": ["heuristic", "recent"],
+        "difficulty_weight": 0.5,
+        "version": 5,
+        "pool_policy": pool_policy_manifest(("heuristic", "recent")),
+        "matchmaking_policy": matchmaking_policy_manifest(),
     }
     with mock.patch(
         "training.rl.adaptive_tuning.benchmark_worker_candidates"

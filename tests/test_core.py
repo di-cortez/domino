@@ -62,8 +62,8 @@ from middleware.opponent_model import (
     mask_from_tiles,
     reconstruct_public_actions,
 )
-from training.rl.self_play import (
-    DEFAULT_GPI,
+from training.rl.config import DEFAULT_GPI, RLResourceOptions
+from training.rl.rollout import (
     EVENT_REWARD_DECAY,
     LEARNER_DRAW_PENALTY,
     LEARNER_PASS_PENALTY,
@@ -73,24 +73,22 @@ from training.rl.self_play import (
     TrainingSample,
     _event_reward_for_action,
     _finish_episode_with_rewards,
-    _legacy_policy_update,
-    _reward_signal_summary,
-    parse_args as parse_self_play_args,
 )
+from training.rl.reporting import _reward_signal_summary
+from training.rl.training_loop import _reinforce_policy_update
+from training.rl.cli import parse_args as parse_rl_args
 from training.pipeline import (
     _rl_config as _canonical_rl_config,
     parse_args as parse_canonical_pipeline_args,
 )
-from training.rl.cli import _training_kwargs_from_args
+from training.rl.cli import training_options_from_args
+from training.supervised.cli import (
+    hidden_sizes_from_args,
+    parse_args as parse_supervised_args,
+)
 from training.supervised.training_loop import (
     DEFAULT_EARLY_STOPPING_PATIENCE,
     DEFAULT_SUPERVISED_LR_DECAY_FACTOR,
-    DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS,
-    DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT,
-    DEFAULT_TRAINING_PLATEAU_PATIENCE,
-    DEFAULT_TRAINING_PLATEAU_WINDOW,
-    hidden_sizes_from_args,
-    parse_args as parse_supervised_args,
 )
 from training.utils.cli_args import DEFAULT_DROPOUT_RATE, DEFAULT_WEIGHT_DECAY
 from train_script.run_pipeline import _build_config, parse_args as parse_pipeline_args
@@ -629,8 +627,8 @@ def test_rl_dropout_is_absent_from_rollout_and_evaluation_forward_passes():
     network.evaluate_actions(x_batch, legal_mask, [3, 3, 3, 3], training=True)
     assert "D1" in network.cache and "D2" in network.cache
 
-    # The legacy --no-ppo update differentiates the cache built by
-    # _legacy_policy_update, so that pass must be a dropout pass too.
+    # The single-update REINFORCE path differentiates the cache built by
+    # _reinforce_policy_update, so that pass must be a dropout pass too.
     samples = [
         TrainingSample(
             x=host_np.ones((4, 1)),
@@ -644,11 +642,10 @@ def test_rl_dropout_is_absent_from_rollout_and_evaluation_forward_passes():
         )
     ]
     network.forward(x_batch)
-    _legacy_policy_update(
+    _reinforce_policy_update(
         network,
         samples,
         entropy_coef=0.0,
-        clip_grad_norm=None,
         normalize_advantages=False,
         use_value_head=False,
         value_coef=0.5,
@@ -660,7 +657,7 @@ def test_regularization_is_disabled_unless_its_flag_is_passed():
     """Keep every entry point unregularized until a flag requests otherwise."""
     parsers = (
         (parse_supervised_args, []),
-        (parse_self_play_args, []),
+        (parse_rl_args, []),
         (parse_pipeline_args, []),
         (parse_canonical_pipeline_args, ["small"]),
     )
@@ -683,20 +680,56 @@ def test_regularization_is_disabled_unless_its_flag_is_passed():
         assert only_dropout.weight_decay == DISABLED_WEIGHT_DECAY
 
     # The same single coefficient reaches the supervised and the RL network.
-    rl_kwargs = _training_kwargs_from_args(
-        parse_self_play_args(["--weight-decay", "0.002", "--dropout", "0.35"])
+    rl_training, _rl_resources, _rl_execution = training_options_from_args(
+        parse_rl_args(["--weight-decay", "0.002", "--dropout", "0.35"])
     )
-    assert rl_kwargs["weight_decay"] == 0.002
-    assert rl_kwargs["dropout_rate"] == 0.35
-    disabled_kwargs = _training_kwargs_from_args(parse_self_play_args([]))
-    assert disabled_kwargs["weight_decay"] == DISABLED_WEIGHT_DECAY
-    assert disabled_kwargs["dropout_rate"] == DISABLED_DROPOUT_RATE
+    assert rl_training.weight_decay == 0.002
+    assert rl_training.dropout_rate == 0.35
+    disabled_training, _resources, _execution = training_options_from_args(
+        parse_rl_args([])
+    )
+    assert disabled_training.weight_decay == DISABLED_WEIGHT_DECAY
+    assert disabled_training.dropout_rate == DISABLED_DROPOUT_RATE
 
     canonical = parse_canonical_pipeline_args(
         ["small", "--weight-decay", "0.002", "--dropout", "0.35"]
     )
     assert _canonical_rl_config(canonical)["weight_decay"] == 0.002
     assert _canonical_rl_config(canonical)["dropout_rate"] == 0.35
+
+
+def test_rl_artifact_paths_are_derived_from_policy_weights(tmp_path):
+    direct = RLResourceOptions(rl_weights_path=tmp_path / "experiment.npz")
+    assert direct.adaptive_tuning_path == tmp_path / "adaptive_tuning.json"
+    assert (
+        direct.metrics_output_path
+        == tmp_path / "experiment_training_metrics.jsonl"
+    )
+
+    canonical = RLResourceOptions(
+        rl_weights_path=tmp_path / "run" / "checkpoint_states" / "training.npz"
+    )
+    assert (
+        canonical.adaptive_tuning_path
+        == tmp_path / "run" / "adaptive_tuning.json"
+    )
+    assert (
+        canonical.metrics_output_path
+        == tmp_path / "run" / "training_metrics.jsonl"
+    )
+
+
+def test_removed_rl_implementation_details_are_not_cli_arguments():
+    for flag in (
+        "--adaptive-tuning-path",
+        "--metrics-output-path",
+        "--clip-grad-norm",
+    ):
+        try:
+            parse_rl_args([flag, "unused"])
+        except SystemExit:
+            continue
+        raise AssertionError(f"Removed RL flag was still accepted: {flag}")
 
 
 def test_networks_are_unregularized_without_explicit_coefficients():
@@ -969,20 +1002,8 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
     assert defaults.early_stopping is None
     assert defaults.lr_decay == DEFAULT_SUPERVISED_LR_DECAY_FACTOR
     assert defaults.lr_decay_patience == 5
-    assert not defaults.disable_training_plateau
-    assert defaults.sl_training_plateau_window == DEFAULT_TRAINING_PLATEAU_WINDOW
-    assert (
-        defaults.sl_training_plateau_patience
-        == DEFAULT_TRAINING_PLATEAU_PATIENCE
-    )
-    assert (
-        defaults.sl_training_plateau_min_epochs
-        == DEFAULT_TRAINING_PLATEAU_MIN_EPOCHS
-    )
-    assert (
-        defaults.sl_training_plateau_min_relative_improvement
-        == DEFAULT_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT
-    )
+    assert not hasattr(defaults, "disable_training_plateau")
+    assert not hasattr(defaults, "sl_training_plateau_window")
     assert defaults.sl_device == "auto"
 
     enabled = parse_supervised_args([
@@ -1013,12 +1034,10 @@ def test_supervised_regularization_cli_defaults_and_shortcuts():
 
     disabled = parse_supervised_args([
         "--no-lr-decay",
-        "--sl-no-training-plateau-stop",
         "--device",
         "cpu",
     ])
     assert disabled.lr_decay is None
-    assert disabled.disable_training_plateau
     assert disabled.sl_device == "cpu"
 
     pipeline = parse_pipeline_args([
@@ -1696,11 +1715,10 @@ def test_legacy_value_head_update_reports_pre_update_predictions():
         for reward in (1.0, -1.0)
     ]
 
-    metrics = _legacy_policy_update(
+    metrics = _reinforce_policy_update(
         network,
         samples,
         entropy_coef=0.0,
-        clip_grad_norm=None,
         normalize_advantages=False,
         use_value_head=True,
         value_coef=0.5,
@@ -1769,19 +1787,19 @@ def test_policy_checkpoint_saves_policy_weights_and_loads_legacy_value_keys():
 
 
 def test_value_head_cli_is_disabled_by_default():
-    assert not parse_self_play_args([]).value_head
-    assert parse_self_play_args(["--value-head"]).value_head
+    assert not parse_rl_args([]).value_head
+    assert parse_rl_args(["--value-head"]).value_head
 
 
 def test_rl_initialization_cli_defaults_are_context_specific():
-    assert not parse_self_play_args([]).fresh_from_sl
-    assert parse_self_play_args(["--fresh-from-sl"]).fresh_from_sl
+    assert not parse_rl_args([]).fresh_from_sl
+    assert parse_rl_args(["--fresh-from-sl"]).fresh_from_sl
     assert parse_pipeline_args([]).fresh_from_sl
     assert not parse_pipeline_args(["--continue-existing-rl"]).fresh_from_sl
 
 
 def test_rl_workload_and_pool_defaults_use_games():
-    standalone = parse_self_play_args([])
+    standalone = parse_rl_args([])
     pipeline = _build_config("default")
 
     # The standalone and canonical entry points share the fixed GPI default;
@@ -1789,7 +1807,7 @@ def test_rl_workload_and_pool_defaults_use_games():
     assert standalone.iterations is None
     assert standalone.total_training_games is None
     assert standalone.gpi == DEFAULT_GPI
-    assert standalone.ppo_enabled
+    assert standalone.ppo_max_epochs == 4
     assert not hasattr(standalone, "evaluation_games")
     assert not hasattr(standalone, "pool_interval")
     assert not hasattr(standalone, "pool_refresh_games")
@@ -1798,14 +1816,14 @@ def test_rl_workload_and_pool_defaults_use_games():
 
 
 def test_rl_gpi_is_fixed_explicit_and_positive():
-    assert parse_self_play_args(["--gpi", "1000"]).gpi == 1000
+    assert parse_rl_args(["--gpi", "1000"]).gpi == 1000
     for invalid_arguments in (
         ["--gpi", "0"],
         ["--gpi", "40"],
         ["--adaptive-gpi"],
     ):
         try:
-            parse_self_play_args(invalid_arguments)
+            parse_rl_args(invalid_arguments)
         except SystemExit:
             pass
         else:

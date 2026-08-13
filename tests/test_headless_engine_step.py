@@ -26,11 +26,11 @@ from diagnostics.pairwise import play_game
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
 from training.datagen.parallel import generate_dataset_game
-from training.rl.self_play import (
+from training.rl.rollout import (
     DEFAULT_GAMMA,
     DEFAULT_REWARD_SCHEMA,
     REWARD_SCHEMAS,
-    _collect_self_play_steps,
+    _collect_steps_vs_snapshot,
 )
 from utils.myrandom import SeedPlan
 
@@ -307,18 +307,18 @@ class HeadlessEngineStepTests(unittest.TestCase):
         random.seed(54321)
         np.random.seed(54321)
         with self._legacy_step_patch():
-            baseline = _collect_self_play_steps(
+            baseline = _collect_steps_vs_snapshot(
                 network,
-                [],
+                network,
                 schema,
                 DEFAULT_GAMMA,
             )
 
         random.seed(54321)
         np.random.seed(54321)
-        optimized = _collect_self_play_steps(
+        optimized = _collect_steps_vs_snapshot(
             network,
-            [],
+            network,
             schema,
             DEFAULT_GAMMA,
         )

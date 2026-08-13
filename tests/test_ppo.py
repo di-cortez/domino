@@ -144,7 +144,7 @@ def test_clipped_surrogate_handles_positive_and_negative_advantages():
     ratios = np.asarray([1.30, 0.70, 1.30, 0.70])
     advantages = np.asarray([1.0, -1.0, -1.0, 1.0])
 
-    actual = clipped_surrogate(ratios, advantages, clip_epsilon=0.2)
+    actual = clipped_surrogate(ratios, advantages)
 
     # Positive/high and negative/low ratios clip; the other two stay active.
     np.testing.assert_allclose(actual, [1.2, -0.8, -1.3, 0.7])
@@ -259,7 +259,6 @@ def test_ppo_value_head_updates_critic_and_reports_value_metrics():
         base_seed=42,
         iteration=1,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         value_coef=0.5,
         max_epochs=2,
     )
@@ -290,7 +289,6 @@ def test_ppo_value_head_requires_pre_update_values_in_the_buffer():
             base_seed=42,
             iteration=1,
             entropy_coef=0.0,
-            clip_grad_norm=5.0,
         )
 
 
@@ -335,7 +333,6 @@ def test_kl_early_stop_occurs_only_after_the_completed_epoch():
         base_seed=42,
         iteration=1,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         max_epochs=16,
     )
 
@@ -362,7 +359,6 @@ def test_kl_early_stop_can_end_a_sixteen_epoch_budget_after_several_epochs():
         base_seed=42,
         iteration=2,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         max_epochs=16,
     )
 
@@ -382,7 +378,6 @@ def test_small_kl_runs_all_sixteen_epochs_and_counts_every_optimizer_step():
         base_seed=42,
         iteration=3,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
         max_epochs=16,
     )
 
@@ -393,7 +388,7 @@ def test_small_kl_runs_all_sixteen_epochs_and_counts_every_optimizer_step():
     assert network.optimizer_step_count == metrics["optimizer_steps"]
 
 
-def test_target_kl_is_informational_and_does_not_control_early_stopping():
+def test_fixed_kl_policy_is_reported_and_only_stop_kl_controls_early_stopping():
     network = _FakePPONetwork(ratio_after_update=1.001)
     metrics = ppo_update(
         network,
@@ -402,20 +397,17 @@ def test_target_kl_is_informational_and_does_not_control_early_stopping():
         base_seed=42,
         iteration=4,
         entropy_coef=0.0,
-        clip_grad_norm=5.0,
-        target_kl=0.5,
-        stop_kl=0.015,
         max_epochs=2,
     )
 
     assert not metrics["stopped_by_kl"]
     assert metrics["epochs_completed"] == 2
-    assert metrics["target_kl"] == 0.5
+    assert metrics["target_kl"] == 0.01
     assert metrics["stop_kl"] == 0.015
 
 
 def test_ppo_rejects_more_than_sixteen_epochs():
-    with np.testing.assert_raises_regex(ValueError, "between one and 16"):
+    with np.testing.assert_raises_regex(ValueError, "between 1 and 16"):
         ppo_update(
             _FakePPONetwork(),
             _buffer(),
@@ -423,7 +415,6 @@ def test_ppo_rejects_more_than_sixteen_epochs():
             base_seed=42,
             iteration=4,
             entropy_coef=0.0,
-            clip_grad_norm=5.0,
             max_epochs=17,
         )
 
@@ -435,8 +426,8 @@ def test_complete_gpu_copy_and_ram_batches_are_equivalent():
     indices = np.asarray([1, 5, 9, 15], dtype=np.int64)
 
     with mock.patch("training.rl.ppo.effective_gpu_available_bytes", return_value=10**9):
-        gpu = PPOBufferStorage(gpu_network, buffer, prefer_gpu=True)
-    ram = PPOBufferStorage(cpu_network, buffer, prefer_gpu=True)
+        gpu = PPOBufferStorage(gpu_network, buffer)
+    ram = PPOBufferStorage(cpu_network, buffer)
     try:
         assert gpu.location == "gpu"
         assert ram.location == "ram"
@@ -461,7 +452,6 @@ def test_simulated_gpu_workspace_oom_falls_back_before_any_optimizer_step():
             base_seed=9,
             iteration=3,
             entropy_coef=0.0,
-            clip_grad_norm=5.0,
             max_epochs=2,
         )
 

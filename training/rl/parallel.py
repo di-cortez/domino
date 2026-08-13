@@ -22,7 +22,6 @@ import random
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
 from multiprocessing import shared_memory
 import numpy as np
 
@@ -43,6 +42,13 @@ from diagnostics.parallel_runner import (
     ignore_parent_shutdown_signals,
     terminate_executor,
 )
+from training.rl.pool import (
+    OpponentPool,
+    SharedPolicyBank,
+    SharedPolicyDescriptor,
+    unique_neural_capacity,
+)
+from training.rl.matchmaking import OpponentPerformanceTracker
 
 
 DEFAULT_RL_WORKERS = "auto"
@@ -57,190 +63,6 @@ class RLRolloutExecutionError(RuntimeError):
         self.results = results
         self.run_info = run_info
         self.__cause__ = cause
-
-
-@dataclass(frozen=True)
-class SharedPolicyDescriptor:
-    """Pickle-friendly description of one policy stored in shared memory."""
-
-    name: str
-    weight_names: tuple[str, ...]
-    shapes: tuple[tuple[int, ...], ...]
-    element_count: int
-    dtype: str
-
-
-class SharedPolicyBank:
-    """Own the current policy and a fixed-size ring of opponent snapshots."""
-
-    def __init__(self, network, max_pool_size):
-        if max_pool_size < 0:
-            raise ValueError("max_pool_size must be non-negative")
-        self.weight_names = tuple(network.weight_names)
-        self.shapes = tuple(
-            tuple(int(value) for value in getattr(network, name).shape)
-            for name in self.weight_names
-        )
-        first_weight = getattr(network, self.weight_names[0])
-        if hasattr(first_weight, "get"):
-            first_weight = first_weight.get()
-        self.dtype = np.asarray(first_weight).dtype
-        self.element_count = sum(math.prod(shape) for shape in self.shapes)
-        self._segments = []
-        self._descriptors = []
-        self._closed = False
-        try:
-            for _slot in range(1 + max_pool_size):
-                segment = shared_memory.SharedMemory(
-                    create=True,
-                    size=self.element_count * self.dtype.itemsize,
-                )
-                self._segments.append(segment)
-                self._descriptors.append(SharedPolicyDescriptor(
-                    name=segment.name,
-                    weight_names=self.weight_names,
-                    shapes=self.shapes,
-                    element_count=self.element_count,
-                    dtype=self.dtype.str,
-                ))
-        except BaseException:
-            self.close()
-            raise
-
-        self.max_pool_size = int(max_pool_size)
-        self.pool_slots = []
-        self._pool_metadata = {}
-        self._next_snapshot_id = 0
-        self._next_pool_slot = 0
-        self.write_current(network)
-
-    @property
-    def current_descriptor(self):
-        return self._descriptors[0]
-
-    @property
-    def pool_descriptors(self):
-        return tuple(self._descriptors[1:])
-
-    @property
-    def allocated_bytes(self):
-        return len(self._segments) * self.element_count * self.dtype.itemsize
-
-    def _write_slot(self, slot_index, network):
-        flat = np.ndarray(
-            (self.element_count,),
-            dtype=self.dtype,
-            buffer=self._segments[slot_index].buf,
-        )
-        offset = 0
-        for name, shape in zip(self.weight_names, self.shapes):
-            value = getattr(network, name)
-            if hasattr(value, "get"):
-                value = value.get()
-            value = np.asarray(value, dtype=self.dtype)
-            if value.shape != shape:
-                raise ValueError(
-                    f"Policy weight {name} changed shape from {shape} to {value.shape}."
-                )
-            size = value.size
-            np.copyto(flat[offset:offset + size].reshape(shape), value)
-            offset += size
-
-    def write_current(self, network):
-        """Publish the learner policy after the previous gradient update."""
-        self._write_slot(0, network)
-
-    def append_pool_snapshot(self, network, metadata=None):
-        """Append a frozen opponent snapshot, overwriting the oldest ring slot."""
-        if self.max_pool_size == 0:
-            return
-        slot = self._next_pool_slot
-        self._write_slot(slot + 1, network)
-        if slot in self.pool_slots:
-            self.pool_slots.remove(slot)
-        self.pool_slots.append(slot)
-        metadata = dict(metadata or {})
-        snapshot_id = int(metadata.get("snapshot_id", self._next_snapshot_id))
-        metadata.update({
-            "snapshot_id": snapshot_id,
-            "logical_order": len(self.pool_slots) - 1,
-            "sampling_rule": "uniform_random",
-        })
-        self._pool_metadata[slot] = metadata
-        self._next_snapshot_id = max(self._next_snapshot_id, snapshot_id + 1)
-        self._next_pool_slot = (slot + 1) % self.max_pool_size
-
-    def export_pool_snapshots(self):
-        """Copy opponent snapshots in their logical oldest-to-newest order."""
-        snapshots = []
-        for slot in self.pool_slots:
-            flat = np.ndarray(
-                (self.element_count,),
-                dtype=self.dtype,
-                buffer=self._segments[slot + 1].buf,
-            )
-            weights = {}
-            offset = 0
-            for name, shape in zip(self.weight_names, self.shapes):
-                size = math.prod(shape)
-                weights[name] = flat[offset:offset + size].reshape(shape).copy()
-                offset += size
-            snapshots.append(weights)
-        return tuple(snapshots)
-
-    def export_pool_metadata(self):
-        """Return JSON-safe metadata in the same logical order as snapshots."""
-        values = []
-        for logical_order, slot in enumerate(self.pool_slots):
-            metadata = dict(self._pool_metadata.get(slot, {}))
-            metadata["logical_order"] = logical_order
-            metadata.setdefault("sampling_rule", "uniform_random")
-            values.append(metadata)
-        return tuple(values)
-
-    def restore_pool_snapshots(self, snapshots, metadata=None):
-        """Replace the ring with serialized snapshots from a resume state."""
-        snapshots = tuple(snapshots)
-        if metadata is None:
-            metadata = tuple({} for _snapshot in snapshots)
-        else:
-            metadata = tuple(metadata)
-        if len(metadata) != len(snapshots):
-            raise ValueError("Opponent-pool metadata count does not match snapshots.")
-        if len(snapshots) > self.max_pool_size:
-            raise ValueError(
-                f"Resume state contains {len(snapshots)} opponent snapshots, "
-                f"but max_pool_size is {self.max_pool_size}."
-            )
-        self.pool_slots = []
-        self._pool_metadata = {}
-        self._next_snapshot_id = 0
-        self._next_pool_slot = 0
-        for weights, snapshot_metadata in zip(snapshots, metadata):
-            missing = [name for name in self.weight_names if name not in weights]
-            if missing:
-                raise ValueError(
-                    "Resume opponent snapshot is missing policy weights: "
-                    + ", ".join(missing)
-                )
-            self.append_pool_snapshot(
-                _CPUInferencePolicy(weights),
-                metadata=snapshot_metadata,
-            )
-
-    def close(self):
-        """Release every shared segment, even after a failed training run."""
-        if self._closed:
-            return
-        self._closed = True
-        for segment in self._segments:
-            try:
-                segment.close()
-            finally:
-                try:
-                    segment.unlink()
-                except FileNotFoundError:
-                    pass
 
 
 class _CPUInferencePolicy:
@@ -280,7 +102,6 @@ class _CPUInferencePolicy:
 _WORKER_SHARED_HANDLES = []
 _WORKER_CURRENT_POLICY = None
 _WORKER_POOL_POLICIES = ()
-_WORKER_TRAINING_OPPONENT = None
 _WORKER_SCHEMA = None
 _WORKER_GAMMA = None
 
@@ -305,14 +126,13 @@ def _attach_policy(descriptor):
 def _worker_initializer(
     current_descriptor,
     pool_descriptors,
-    training_opponent,
     schema,
     gamma,
 ):
     """Attach every reusable policy view inside one CPU-only worker."""
     global _WORKER_SHARED_HANDLES
     global _WORKER_CURRENT_POLICY, _WORKER_POOL_POLICIES
-    global _WORKER_TRAINING_OPPONENT, _WORKER_SCHEMA, _WORKER_GAMMA
+    global _WORKER_SCHEMA, _WORKER_GAMMA
 
     ignore_parent_shutdown_signals()
     # The environment is already set before spawn; repeating it here protects
@@ -330,7 +150,6 @@ def _worker_initializer(
     _WORKER_SHARED_HANDLES = handles
     _WORKER_CURRENT_POLICY = current
     _WORKER_POOL_POLICIES = tuple(pool_policies)
-    _WORKER_TRAINING_OPPONENT = training_opponent
     _WORKER_SCHEMA = dict(schema)
     _WORKER_GAMMA = float(gamma)
 
@@ -364,11 +183,8 @@ def _add_worker_section(profile, section, started):
 def _worker_collect_rollouts(job):
     """Play one dynamic block of seeded training games."""
     profile_started = time.perf_counter()
-    game_specs, pool_slots = job
-    from training.rl.rollout import (
-        _collect_self_play_steps,
-        _collect_steps_vs_heuristic,
-    )
+    game_specs = job
+    from training.rl.rollout import collect_steps_for_assignment
 
     results = []
     runtime_profile = {
@@ -380,8 +196,8 @@ def _worker_collect_rollouts(job):
         "learner_policy": {},
         "opponent_policy": {},
     }
-    pool = [_WORKER_POOL_POLICIES[index] for index in pool_slots]
-    for game_index, seed in game_specs:
+    for assignment, seed in game_specs:
+        game_index = assignment.game_index
         profile_game = game_index % DEEP_PROFILE_SAMPLE_INTERVAL == 0
         game_profile = runtime_profile if profile_game else None
         sampled_game_started = time.perf_counter() if profile_game else None
@@ -390,21 +206,19 @@ def _worker_collect_rollouts(job):
         np.random.seed(seed & 0xFFFFFFFF)
         if profile_game:
             _add_worker_section(runtime_profile, "per_game_rng_setup", section_started)
-        if _WORKER_TRAINING_OPPONENT == "self_play":
-            samples, events, winner, learner_position = _collect_self_play_steps(
-                _WORKER_CURRENT_POLICY,
-                pool,
-                _WORKER_SCHEMA,
-                _WORKER_GAMMA,
-                runtime_profile=game_profile,
-            )
-        else:
-            samples, events, winner, learner_position = _collect_steps_vs_heuristic(
-                _WORKER_CURRENT_POLICY,
-                _WORKER_SCHEMA,
-                _WORKER_GAMMA,
-                runtime_profile=game_profile,
-            )
+        opponent_network = (
+            None
+            if assignment.bank_slot is None
+            else _WORKER_POOL_POLICIES[assignment.bank_slot]
+        )
+        samples, events, winner, learner_position = collect_steps_for_assignment(
+            _WORKER_CURRENT_POLICY,
+            assignment.opponent_kind,
+            opponent_network,
+            _WORKER_SCHEMA,
+            _WORKER_GAMMA,
+            runtime_profile=game_profile,
+        )
         section_started = time.perf_counter() if profile_game else None
         results.append({
             "game_index": int(game_index),
@@ -413,6 +227,10 @@ def _worker_collect_rollouts(job):
             "event_stats": _event_stats_dict(events),
             "winner": int(winner),
             "learner_position": int(learner_position),
+            "bucket_name": assignment.bucket_name,
+            "opponent_id": assignment.opponent_id,
+            "opponent_kind": assignment.opponent_kind,
+            "bank_slot": assignment.bank_slot,
         })
         runtime_profile["games"] += 1
         if profile_game:
@@ -473,22 +291,28 @@ class RLRolloutRunner:
         self,
         network,
         *,
-        training_opponent,
+        opponent_buckets,
         schema,
         gamma,
-        max_pool_size,
         safety=None,
     ):
         self.safety = safety or ParallelSafetyConfig()
-        self.training_opponent = training_opponent
         self.schema = dict(schema)
         self.gamma = float(gamma)
-        self.bank = SharedPolicyBank(network, max_pool_size)
-        if training_opponent == "self_play":
-            self.bank.append_pool_snapshot(network, metadata={
-                "origin": "initial_policy",
-                "introduced_at_rl_games": 0,
-            })
+        self.bank = SharedPolicyBank(
+            network,
+            unique_neural_capacity(opponent_buckets),
+        )
+        self.opponent_pool = OpponentPool(
+            self.bank,
+            selected_buckets=opponent_buckets,
+            initial_network=network,
+        )
+        self.performance_tracker = OpponentPerformanceTracker()
+        self.performance_tracker.ensure(
+            record.opponent_id
+            for record in self.opponent_pool.active_opponents()
+        )
         self.executor = None
         self.requested_workers = 1
         self.worker_count = 1
@@ -505,22 +329,17 @@ class RLRolloutRunner:
         """Publish weights only while no worker task is in flight."""
         self.bank.write_current(network)
 
-    def append_pool_snapshot(self, network, metadata=None):
-        """Publish a new frozen opponent after the iteration update."""
-        self.bank.append_pool_snapshot(network, metadata=metadata)
-
-    def export_pool_snapshots(self):
-        """Return copies suitable for an atomic parent-side resume file."""
-        return self.bank.export_pool_snapshots()
-
-    def export_pool_metadata(self):
-        """Return persisted provenance for exported opponent snapshots."""
-        return self.bank.export_pool_metadata()
-
-    def restore_pool_snapshots(self, snapshots, metadata=None):
+    def restore_opponent_pool(self, state, weights, performance_state):
         """Restore the exact opponent pool before starting resumed rollouts."""
         self._shutdown_executor()
-        self.bank.restore_pool_snapshots(snapshots, metadata=metadata)
+        self.opponent_pool.restore_state(state, weights)
+        self.performance_tracker.restore_state(
+            performance_state,
+            (
+                record.opponent_id
+                for record in self.opponent_pool.active_opponents()
+            ),
+        )
 
     def _shutdown_executor(self, terminate=False):
         if self.executor is None:
@@ -563,8 +382,7 @@ class RLRolloutRunner:
                     initializer=_worker_initializer,
                     initargs=(
                         self.bank.current_descriptor,
-                        self.bank.pool_descriptors,
-                        self.training_opponent,
+                        self.bank.opponent_descriptors,
                         self.schema,
                         self.gamma,
                     ),
@@ -702,8 +520,8 @@ class RLRolloutRunner:
 
     def _execute_specs(self, specs, worker_function, job_builder):
         """Execute unique ids, retaining completed rollouts across fallbacks."""
-        specs = sorted((int(index), int(seed)) for index, seed in specs)
-        if len({index for index, _seed in specs}) != len(specs):
+        specs = sorted(specs, key=lambda item: int(item[0].game_index))
+        if len({item[0].game_index for item in specs}) != len(specs):
             raise ValueError("RL game specs contain duplicate game ids")
         run_info = ParallelRunInfo(
             requested_workers=self.requested_workers,
@@ -732,7 +550,11 @@ class RLRolloutRunner:
             OSError,
         )
         while len(results_by_index) < len(specs):
-            pending = [spec for spec in specs if spec[0] not in results_by_index]
+            pending = [
+                spec
+                for spec in specs
+                if spec[0].game_index not in results_by_index
+            ]
             run_info.attempted_worker_counts.append(self.worker_count)
             jobs = job_builder(_chunk_specs(pending, self.worker_count, self.safety))
             try:
@@ -774,34 +596,26 @@ class RLRolloutRunner:
                 ) from exc
 
         self.last_runtime_profile = dict(run_info.runtime_profile)
-        return [results_by_index[index] for index, _seed in specs], run_info
+        return [
+            results_by_index[assignment.game_index]
+            for assignment, _seed in specs
+        ], run_info
 
-    def collect_games(self, first_absolute_game, game_count, base_seed):
-        """Collect an exact absolute game-id range, including partial batches."""
-        first_absolute_game = int(first_absolute_game)
-        game_count = int(game_count)
-        if first_absolute_game < 0 or game_count < 1:
-            raise ValueError("RL absolute game offset must be non-negative and count positive")
+    def collect_games(self, match_plan, base_seed):
+        """Execute one immutable MatchPlan without discovering opponents."""
+        if not match_plan.assignments:
+            raise ValueError("RL MatchPlan must contain at least one assignment")
         specs = [
             (
-                first_absolute_game + local_index,
-                game_seed(base_seed, first_absolute_game + local_index),
+                assignment,
+                game_seed(base_seed, assignment.game_index),
             )
-            for local_index in range(game_count)
+            for assignment in match_plan.assignments
         ]
-        pool_slots = tuple(self.bank.pool_slots)
         return self._execute_specs(
             specs,
             _worker_collect_rollouts,
-            lambda chunks: [(chunk, pool_slots) for chunk in chunks],
-        )
-
-    def collect_training_iteration(self, iteration_index, game_count, base_seed):
-        """Backward-compatible fixed-size wrapper around :meth:`collect_games`."""
-        return self.collect_games(
-            int(iteration_index) * int(game_count),
-            game_count,
-            base_seed,
+            lambda chunks: list(chunks),
         )
 
     def close(self):

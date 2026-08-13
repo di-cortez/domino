@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the full domino data, training, self-play, and diagnostics pipeline."""
+"""Run the full domino data, supervised, RL, and diagnostics pipeline."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import io
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +18,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from utils.runtime_status import format_duration, pipeline_compute_report
+from diagnostics.parallel_runner import ParallelSafetyConfig
+from agents.nn import (
+    TP_MIN_EPOCHS,
+    TP_MIN_RELATIVE_IMPROVEMENT,
+    TP_PATIENCE_BLOCKS,
+    TP_WINDOW_EPOCHS,
+)
 
 try:
     from tqdm.auto import tqdm
@@ -169,6 +176,7 @@ def _run_dataset(config, args):
 
 def _run_supervised_training(config, args):
     """Train the supervised policy with compact epoch progress."""
+    supervised_cli = _silent_import("training.supervised.cli")
     training_loop = _silent_import("training.supervised.training_loop")
 
     return _run_stage(
@@ -178,7 +186,7 @@ def _run_supervised_training(config, args):
         lambda progress: training_loop.train_supervised(
             epochs=config.supervised_epochs,
             batch_size=args.sl_batch_size,
-            hidden_sizes=training_loop.hidden_sizes_from_args(args),
+            hidden_sizes=supervised_cli.hidden_sizes_from_args(args),
             quiet=True,
             progress_callback=progress,
             weight_decay=args.weight_decay,
@@ -186,13 +194,6 @@ def _run_supervised_training(config, args):
             early_stopping_patience=args.early_stopping,
             lr_decay_factor=args.lr_decay,
             lr_decay_patience=args.lr_decay_patience,
-            training_plateau_enabled=not args.disable_training_plateau,
-            training_plateau_window=args.sl_training_plateau_window,
-            training_plateau_patience=args.sl_training_plateau_patience,
-            training_plateau_min_epochs=args.sl_training_plateau_min_epochs,
-            training_plateau_min_relative_improvement=(
-                args.sl_training_plateau_min_relative_improvement
-            ),
             device=args.sl_device,
             memory_reserve_mb=args.sl_memory_reserve_mb,
             gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
@@ -208,8 +209,9 @@ def _run_supervised_training(config, args):
 
 
 def _run_rl_training(config, args):
-    """Run reinforcement-learning self-play with compact iteration progress."""
-    self_play = importlib.import_module("training.rl.self_play")
+    """Run reinforcement learning with compact iteration progress."""
+    training_loop = importlib.import_module("training.rl.training_loop")
+    rl_cli = importlib.import_module("training.rl.cli")
 
     def rl_status(message):
         if tqdm is not None:
@@ -228,60 +230,31 @@ def _run_rl_training(config, args):
             else config.rl_iterations * config.rl_games_per_iteration
         )
     )
+    training_options, resource_options, execution_options = (
+        rl_cli.training_options_from_args(args)
+    )
+    training_options = replace(
+        training_options,
+        iterations=explicit_iterations,
+        total_training_games=(
+            args.total_training_games
+            if explicit_iterations is not None
+            else total_training_games
+        ),
+    )
     return _run_stage(
-        "RL self-play",
+        "RL training",
         config.rl_iterations,
         "iter",
-        lambda progress: self_play.train(
-            iterations=explicit_iterations,
-            total_training_games=(
-                args.total_training_games
-                if explicit_iterations is not None
-                else total_training_games
+        lambda progress: training_loop.train(
+            training_options,
+            resource_options,
+            replace(
+                execution_options,
+                quiet=True,
+                progress_callback=progress,
+                status_callback=rl_status,
             ),
-            gpi=fixed_gpi,
-            retune_workers=args.retune_workers,
-            training_opponent=args.training_opponent,
-            learning_rate=args.learning_rate,
-            entropy_coef=args.entropy_coef,
-            weight_decay=args.weight_decay,
-            dropout_rate=args.dropout,
-            log_interval=args.log_interval,
-            checkpoint_interval=args.checkpoint_interval,
-            max_pool_size=args.max_pool_size,
-            sl_weights_path=args.sl_weights_path,
-            rl_weights_path=args.rl_weights_path,
-            adaptive_tuning_path=args.adaptive_tuning_path,
-            metrics_output_path=args.metrics_output_path,
-            fresh_from_sl=args.fresh_from_sl,
-            quiet=True,
-            progress_callback=progress,
-            use_value_head=args.value_head,
-            value_coef=args.value_coef,
-            gamma=args.gamma,
-            reward_schema=args.reward_schema,
-            clip_grad_norm=args.clip_grad_norm,
-            normalize_advantages=args.normalize_advantages,
-            moving_average_window=args.moving_average_window,
-            seed=args.seed,
-            device=args.device,
-            workers=args.rl_workers,
-            safety_config=self_play.ParallelSafetyConfig(
-                memory_reserve_mb=args.rl_memory_reserve_mb,
-                estimated_worker_mb=args.rl_estimated_worker_mb,
-                max_worker_rss_mb=args.rl_max_worker_rss_mb,
-            ),
-            ppo_enabled=args.ppo_enabled,
-            ppo_clip_epsilon=args.ppo_clip_epsilon,
-            ppo_target_kl=args.ppo_target_kl,
-            ppo_stop_kl=args.ppo_stop_kl,
-            ppo_max_epochs=args.ppo_max_epochs,
-            ppo_games_per_minibatch_scale=args.ppo_games_per_minibatch_scale,
-            ppo_min_decisions_per_minibatch=(
-                args.ppo_min_decisions_per_minibatch
-            ),
-            prefer_gpu_buffer=args.prefer_gpu_buffer,
-            status_callback=rl_status,
         ),
         lambda summary: (
             f"{summary['total_training_games']} exact games in "
@@ -342,7 +315,7 @@ def parse_args(argv=None):
     """Parse the optional workload scale."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run dataset generation, supervised training, RL self-play, and "
+            "Run dataset generation, supervised training, RL training, and "
             "agent-vs-random diagnostics with compact progress output."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -382,10 +355,10 @@ def parse_args(argv=None):
     dataset.add_argument("--dataset-max-worker-rss-mb", type=int, default=1024)
     dataset.add_argument("--dataset-seed", type=int, default=None)
 
-    training_loop = _silent_import("training.supervised.training_loop")
-    training_loop.add_optional_training_arguments(parser)
-    self_play = importlib.import_module("training.rl.self_play")
-    self_play.add_optional_rl_arguments(
+    supervised_cli = _silent_import("training.supervised.cli")
+    supervised_cli.add_optional_training_arguments(parser)
+    rl_cli = importlib.import_module("training.rl.cli")
+    rl_cli.add_optional_rl_arguments(
         parser,
         fresh_from_sl_default=True,
         expose_gpi=True,
@@ -458,17 +431,12 @@ def main():
     else:
         print("RL initialization: continue from the existing RL checkpoint when present.")
     print(f"Supervised batch size: fixed at {args.sl_batch_size:,}.")
-    if not args.disable_training_plateau:
-        print(
-            "Supervised training-loss plateau stop: enabled after at least "
-            f"{args.sl_training_plateau_min_epochs} "
-            f"epochs; {args.sl_training_plateau_patience} consecutive "
-            f"{args.sl_training_plateau_window}-epoch median blocks below "
-            f"{args.sl_training_plateau_min_relative_improvement:.3%} "
-            "relative improvement."
-        )
-    else:
-        print("Supervised training-loss plateau stop: disabled.")
+    print(
+        "Supervised training-loss plateau stop: fixed after at least "
+        f"{TP_MIN_EPOCHS} epochs; {TP_PATIENCE_BLOCKS} consecutive "
+        f"{TP_WINDOW_EPOCHS}-epoch median blocks below "
+        f"{TP_MIN_RELATIVE_IMPROVEMENT:.3%} relative improvement."
+    )
     if args.dataset_workers == "auto":
         print(
             "Dataset workers: automatic retained benchmark "

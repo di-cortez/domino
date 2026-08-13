@@ -6,13 +6,17 @@ Owned by `training/supervised/`.
 | File | Purpose |
 |---|---|
 | `training_loop.py` | Selects safe host/GPU storage, validates the fixed supervised batch, orchestrates plateau scheduling, and saves `models/domino_sl_weights.npz` plus its loss graph. |
+| `cli.py` | Defines standalone and pipeline supervised arguments and the command-line entry point. |
+| `dataset.py` | Filters JSONL records and owns memory-safe RAM, compressed NPZ, and mmap encoded-dataset storage. |
+| `plotting.py` | Scales and atomically renders the supervised training/validation loss graph. |
+| `reporting.py` | Owns detailed user-facing startup, device, checkpoint, artifact, and resource messages. |
 | `runtime.py` | Implements supervised batch/workspace safety, GPU residency probes/windows, and supervised memory telemetry. |
 
 
 Run:
 
 ```bash
-python -m training.supervised.training_loop
+python -m training.supervised.cli
 ```
 
 The loop:
@@ -105,11 +109,13 @@ at different times.
 ## Supervised scheduler and controls
 
 The normal command starts at learning rate `0.005` and treats the requested
-epoch count as a maximum. Automatic training-loss stopping is enabled by
-default. It compares medians of non-overlapping 25-epoch blocks. A block counts
-as saturated when its relative improvement over the previous block is below
+epoch count as a maximum. Automatic training-loss stopping is always active.
+It compares medians of non-overlapping 25-epoch blocks. A block counts as
+saturated when its relative improvement over the previous block is below
 `0.001` (0.1%). The run stops only after four consecutive saturated blocks and
-never before epoch 100. A genuine improvement resets the counter.
+never before epoch 100. A genuine improvement resets the counter. These values
+are the documented `TP_*` supervised-training constants at the beginning of
+`agents/nn.py`; they are implementation policy rather than CLI hyperparameters.
 
 Validation remains every 10 epochs, and validation-based LR decay is also on
 by default. The first validation result establishes the global best; after
@@ -124,13 +130,12 @@ and the summary records `training loss plateau`, `validation loss plateau`, or
 Enable any control independently by adding its flag:
 
 ```bash
-python -m training.supervised.training_loop --weight-decay
-python -m training.supervised.training_loop --dropout
-python -m training.supervised.training_loop --early-stopping
-python -m training.supervised.training_loop --lr-decay 0.7 --lr-decay-patience 8
-python -m training.supervised.training_loop --no-lr-decay
-python -m training.supervised.training_loop --sl-no-training-plateau-stop
-python -m training.supervised.training_loop --sl-device cpu --sl-seed 123
+python -m training.supervised.cli --weight-decay
+python -m training.supervised.cli --dropout
+python -m training.supervised.cli --early-stopping
+python -m training.supervised.cli --lr-decay 0.7 --lr-decay-patience 8
+python -m training.supervised.cli --no-lr-decay
+python -m training.supervised.cli --sl-device cpu --sl-seed 123
 ```
 
 The supervised controls use these defaults:
@@ -143,11 +148,6 @@ The supervised controls use these defaults:
 | `--lr-decay [FACTOR]` | Multiplies LR after the configured consecutive failed checks | `0.5` (on) |
 | `--lr-decay-patience N` | Consecutive failed validation checks before each reduction | `5` |
 | `--no-lr-decay` | Disables plateau scheduling for controlled comparisons | off |
-| `--sl-no-training-plateau-stop` | Disables automatic training-loss saturation stopping | off |
-| `--sl-training-plateau-window N` | Epochs in each non-overlapping median-loss block | `25` |
-| `--sl-training-plateau-patience N` | Consecutive saturated blocks required to stop | `4` |
-| `--sl-training-plateau-min-epochs N` | Minimum total epochs before this stop is allowed | `100` |
-| `--sl-training-plateau-min-relative-improvement F` | Block improvement below this fraction counts as saturated | `0.001` |
 | `--sl-device` / standalone `--device` | `auto`, forced `cpu`, or required `gpu` | `auto` |
 | `--sl-batch-size N` | Fixed safe batch; power of two from 1,024 through 1,048,576 | `8,192` |
 | `--hidden-layers N` | Number of hidden policy layers, 1 to 8 | `2` |
@@ -160,7 +160,7 @@ Validation is checked every 10 epochs. The options can be combined and can
 receive explicit values:
 
 ```bash
-python -m training.supervised.training_loop \
+python -m training.supervised.cli \
   --weight-decay 0.00005 \
   --early-stopping 12 \
   --lr-decay 0.7 --lr-decay-patience 5 \

@@ -136,7 +136,7 @@ illegal actions receive zero probability and no direct policy or entropy
 gradient. A decision's reward is not weighted by its number of legal choices.
 
 `PolicyNetwork` is policy-only by default and self-play updates it with PPO.
-Optional value-head training is retained only for explicit `--no-ppo`
+Optional value-head training is retained only for `--ppo-max-epochs 1`
 regression runs; it adds `Wv`/`bv`, reading the last hidden activation, next to
 the policy arrays.
 Diagnostics detect those two arrays, load the optional head without changing

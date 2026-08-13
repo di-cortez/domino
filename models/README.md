@@ -12,7 +12,7 @@ by Git and can be regenerated through the training pipeline.
 | `domino_sl_standard_seed<seed>.npz` | Canonical supervised policy shared by long-run pipeline levels. |
 | `domino_sl_standard_seed<seed>.meta.json` | Dataset hash, architecture, training configuration, convergence, commit, and weights hash; no machine-local path or creation time. |
 | `domino_sl_standard_seed<seed>.random_manifest.json` | Canonical supervised root seed and PCG64 namespace-derivation contract. |
-| `rl/domino_rl_<level>_seed<seed>/` | Canonical RL run state, checkpoints, pool, and diagnostics. |
+| `rl/domino_rl_<level>_seed<seed>/` | Canonical RL run state, exact checkpoints, opponent pool, bounded historical checkpoint archive, and diagnostics. |
 | `rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Run-local quick-profile dataset, cache, SL checkpoint, metadata, and loss plot; never reused by another invocation. |
 
 Both NPZ files store policy arrays `W1`, `b1`, `W2`, `b2`, `W3`, and `b3` with
@@ -24,7 +24,7 @@ Regenerate in order:
 
 ```bash
 python -m training.datagen.generator
-python -m training.supervised.training_loop
+python -m training.supervised.cli
 python -m training.rl.self_play --fresh-from-sl
 ```
 
@@ -43,6 +43,8 @@ milestone policy files under `checkpoints/`, and convenience aliases
 `latest_weights.npz`, `optimizer_state.npz`, `rng_state.json`, and
 `opponent_pool/pool_manifest.json`. Resume follows the immutable paths and
 hashes in the marker, not `best_checkpoint.json`; `best` is monitoring-only.
+The separate `checkpoint_archive/` retains a bounded multi-resolution learner
+history and is not used as an exact-resume checkpoint pair.
 Forever runs also persist `periodic_diagnostic_tuning.json`, so the periodic
 RL-vs-random worker benchmark is selected once and reused after resume.
 

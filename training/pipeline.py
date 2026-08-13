@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -27,7 +27,10 @@ from diagnostics.rl_progress import (
 from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import MAX_DIAGNOSTIC_WORKERS, ParallelSafetyConfig
 from training.datagen import generator as dataset_generator
-from training.rl import self_play
+from training.rl import cli as rl_cli
+from training.rl.config import DEFAULT_GPI
+from training.rl import training_loop as rl_training_loop
+from training.supervised import cli as supervised_cli
 from training.supervised import training_loop
 from training.canonical_assets import (
     ArtifactCompatibilityError,
@@ -48,18 +51,19 @@ from training.canonical_run import (
     publish_checkpoint,
     update_diagnostic_markers,
 )
-from training.rl.resume import (
-    LEGACY_TRAINING_ALGORITHM,
+from training.rl.ppo import (
+    POLICY_GRADIENT_CLIP_NORM,
     PPO_TRAINING_ALGORITHM,
+    DEFAULT_PPO_MAX_EPOCHS,
+    MAX_PPO_EPOCHS,
+    REINFORCE_TRAINING_ALGORITHM,
+    fixed_ppo_policy,
+    ppo_is_enabled,
 )
 from training.rl.constants import (
-    PPO_GPU_BUFFER_SAFETY_FRACTION,
-    PPO_MAX_MINIBATCHES,
-    PPO_MIN_MINIBATCHES,
     RL_WORKER_AUTOTUNE_FRACTION,
     RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
 )
-from training.rl.ppo import DEFAULT_MAX_EPOCHS, MAX_PPO_EPOCHS
 from utils.artifacts import atomic_write_json, file_sha256
 from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
 from utils.resource_limits import choose_safe_rl_device
@@ -89,10 +93,8 @@ PERIODIC_DIAGNOSTIC_TUNING_FILE = "periodic_diagnostic_tuning.json"
 FOREVER_ACTIVE_RUN_FORMAT_VERSION = 1
 FOREVER_ACTIVE_RUN_FILE = "active_forever_run.json"
 _RESUME_OPERATIONAL_ARGUMENTS = frozenset({
-    "adaptive_tuning_path",
     "artifact_root",
     "execution_id",
-    "metrics_output_path",
     "numbered_checkpoints",
     "rebuild_dataset",
     "rebuild_supervised_assets",
@@ -106,7 +108,6 @@ _RESUME_OPERATIONAL_ARGUMENTS = frozenset({
     "run_name",
     "scale",
     "sl_weights_path",
-    "start_iteration",
 })
 
 
@@ -124,8 +125,8 @@ class PipelineConfig:
     reuse_supervised_assets: bool
     dataset_games: int = CANONICAL_DATASET_GAMES
     supervised_epochs: int = CANONICAL_SUPERVISED_MAX_EPOCHS
-    rl_games_per_iteration: int = self_play.DEFAULT_GPI
-    ppo_max_epochs: int = DEFAULT_MAX_EPOCHS
+    rl_games_per_iteration: int = DEFAULT_GPI
+    ppo_max_epochs: int = DEFAULT_PPO_MAX_EPOCHS
 
     @property
     def unbounded(self):
@@ -233,14 +234,7 @@ def _resolve_execution_identity(args):
         None if config.reuse_supervised_assets else _new_execution_id()
     )
     if getattr(args, "ppo_max_epochs", None) is None:
-        # Inactive PPO controls are still persisted in exact no-PPO resume
-        # state. Keep their historical defaults stable while giving only the
-        # forever PPO profile the larger epoch budget.
-        args.ppo_max_epochs = (
-            int(config.ppo_max_epochs)
-            if args.ppo_enabled
-            else DEFAULT_MAX_EPOCHS
-        )
+        args.ppo_max_epochs = int(config.ppo_max_epochs)
     return args
 
 
@@ -399,9 +393,17 @@ def _hydrate_forever_arguments(parser, args, explicit):
 
     if args.restart_rl:
         if active_run is not None and not ({"seed", "run_name"} & explicit):
-            active_config = load_run_config(active_run)
-            args.seed = int(active_config["seed"])
-            args.run_name = active_config.get("run_name")
+            try:
+                active_config = load_run_config(active_run)
+            except ValueError:
+                # A deliberate run/resume format bump must never make the
+                # explicit fresh-start escape hatch unusable. Defaults are
+                # resolved below and the incompatible directory is archived
+                # before the new run is created.
+                active_config = None
+            if active_config is not None:
+                args.seed = int(active_config["seed"])
+                args.run_name = active_config.get("run_name")
         return args
 
     selected_run = None
@@ -435,7 +437,13 @@ def _hydrate_forever_arguments(parser, args, explicit):
 
     if not (selected_run / "run_config.json").is_file():
         return args
-    return _apply_saved_run_arguments(parser, args, explicit, selected_run)
+    try:
+        return _apply_saved_run_arguments(parser, args, explicit, selected_run)
+    except ValueError as exc:
+        parser.error(
+            f"The selected forever run cannot be resumed: {exc} "
+            "Use --restart-rl to archive it and start the current format."
+        )
 
 
 def _resolved_rl_device(requested_device):
@@ -493,13 +501,6 @@ def _supervised_training_identity(args, max_epochs):
         early_stopping_patience=args.early_stopping,
         lr_decay_factor=args.lr_decay,
         lr_decay_patience=int(args.lr_decay_patience),
-        training_plateau_enabled=not args.disable_training_plateau,
-        training_plateau_window=int(args.sl_training_plateau_window),
-        training_plateau_patience=int(args.sl_training_plateau_patience),
-        training_plateau_min_epochs=int(args.sl_training_plateau_min_epochs),
-        training_plateau_min_relative_improvement=float(
-            args.sl_training_plateau_min_relative_improvement
-        ),
         device=args.sl_device,
         memory_reserve_mb=int(args.sl_memory_reserve_mb),
         gpu_memory_reserve_mb=int(args.sl_gpu_memory_reserve_mb),
@@ -513,7 +514,7 @@ def _supervised_training_identity(args, max_epochs):
 def _network_architecture(args):
     """Return the one architecture selected for supervised and RL stages."""
     return architecture_from_hidden_sizes(
-        training_loop.hidden_sizes_from_args(args)
+        supervised_cli.hidden_sizes_from_args(args)
     )
 
 
@@ -610,7 +611,7 @@ def ensure_canonical_supervised_assets(root, config, args):
     weights_check = inspect_canonical_weights(
         paths,
         seed=seed,
-        dataset_sha256=dataset_metadata["dataset_sha256"],
+        dataset_metadata=dataset_metadata,
         training_config=training_config,
         architecture=architecture,
     )
@@ -640,13 +641,6 @@ def ensure_canonical_supervised_assets(root, config, args):
                 early_stopping_patience=args.early_stopping,
                 lr_decay_factor=args.lr_decay,
                 lr_decay_patience=args.lr_decay_patience,
-                training_plateau_enabled=not args.disable_training_plateau,
-                training_plateau_window=args.sl_training_plateau_window,
-                training_plateau_patience=args.sl_training_plateau_patience,
-                training_plateau_min_epochs=args.sl_training_plateau_min_epochs,
-                training_plateau_min_relative_improvement=(
-                    args.sl_training_plateau_min_relative_improvement
-                ),
                 device=args.sl_device,
                 memory_reserve_mb=args.sl_memory_reserve_mb,
                 gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
@@ -656,7 +650,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             paths,
             root=root,
             seed=seed,
-            dataset_sha256=dataset_metadata["dataset_sha256"],
+            dataset_metadata=dataset_metadata,
             training_config=training_config,
             training_summary=supervised_summary,
             architecture=architecture,
@@ -676,14 +670,16 @@ def ensure_canonical_supervised_assets(root, config, args):
     print(f"Dataset SHA-256: {dataset_metadata['dataset_sha256']}")
     print(f"Weights: {paths.weights}")
     print(f"Weights status: {weights_status}")
-    print(f"Weights SHA-256: {weights_metadata['weights_sha256']}")
+    print(f"Weights SHA-256: {weights_metadata['artifact']['sha256']}")
+    training_result = weights_metadata["training"]["result"]
+    training_hyperparameters = weights_metadata["training"]["hyperparameters"]
     print(
         "Supervised epochs: "
-        f"{weights_metadata.get('epochs_completed')}/"
-        f"{weights_metadata.get('max_epochs')} "
-        f"(best: {weights_metadata.get('best_epoch')})"
+        f"{training_result.get('epochs_completed')}/"
+        f"{training_hyperparameters.get('max_epochs')} "
+        f"(best: {training_result.get('best_epoch')})"
     )
-    print(f"Supervised stop: {weights_metadata.get('stopping_reason')}")
+    print(f"Supervised stop: {training_result.get('stopping_reason')}")
     print("-" * 70)
     return {
         "paths": paths,
@@ -697,50 +693,38 @@ def ensure_canonical_supervised_assets(root, config, args):
 
 
 def _ppo_config(args):
-    return {
-        "clip_epsilon": float(args.ppo_clip_epsilon),
-        "target_kl": float(args.ppo_target_kl),
-        "stop_kl": float(args.ppo_stop_kl),
-        "max_epochs": int(args.ppo_max_epochs),
-        "min_minibatches": PPO_MIN_MINIBATCHES,
-        "max_minibatches": PPO_MAX_MINIBATCHES,
-        "games_per_minibatch_scale": int(args.ppo_games_per_minibatch_scale),
-        "min_decisions_per_minibatch": int(
-            args.ppo_min_decisions_per_minibatch
-        ),
-        "prefer_gpu_buffer": bool(args.prefer_gpu_buffer),
-        "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
-    }
+    return fixed_ppo_policy(args.ppo_max_epochs)
 
 
 def _rl_algorithm(args):
     return (
         PPO_TRAINING_ALGORITHM
-        if args.ppo_enabled else LEGACY_TRAINING_ALGORITHM
+        if ppo_is_enabled(args.ppo_max_epochs)
+        else REINFORCE_TRAINING_ALGORITHM
     )
 
 
 def _rl_config(args):
     normalize_advantages = (
-        bool(args.ppo_enabled)
+        ppo_is_enabled(args.ppo_max_epochs)
         if args.normalize_advantages is None
         else bool(args.normalize_advantages)
     )
     return {
         "games_per_iteration": int(args.gpi),
-        "training_opponent": args.training_opponent,
+        "opponent_buckets": list(args.opponent_buckets),
+        "difficulty_weight": float(args.difficulty_weight),
         "learning_rate": float(args.learning_rate),
         "entropy_coef": float(args.entropy_coef),
         "weight_decay": float(args.weight_decay),
         "dropout_rate": float(args.dropout),
         "log_interval": int(args.log_interval),
         "checkpoint_interval": int(args.checkpoint_interval),
-        "max_pool_size": int(args.max_pool_size),
         "use_value_head": bool(args.value_head),
         "value_coef": float(args.value_coef),
         "reward_schema": args.reward_schema,
         "gamma": float(args.gamma),
-        "clip_grad_norm": float(args.clip_grad_norm),
+        "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
         "normalize_advantages": normalize_advantages,
         "moving_average_window": int(args.moving_average_window),
         "requested_device": args.device,
@@ -836,7 +820,7 @@ def _rl_progress(total, initial):
         with tqdm(
             total=total,
             initial=initial,
-            desc="RL self-play",
+            desc="RL training",
             unit="game",
             leave=True,
             bar_format=bar_format,
@@ -1052,7 +1036,7 @@ def run_rl_pipeline(root, config, args, assets):
     ppo_config = _ppo_config(args)
     architecture = _network_architecture(args)
     supervised_path = assets["paths"].weights
-    supervised_hash = assets["weights_metadata"]["weights_sha256"]
+    supervised_hash = assets["weights_metadata"]["artifact"]["sha256"]
     existing_run_config = (
         load_run_config(run_dir)
         if (run_dir / "run_config.json").is_file()
@@ -1144,6 +1128,10 @@ def run_rl_pipeline(root, config, args, assets):
     print(f"RL algorithm: {algorithm}")
     print(f"Fixed GPI: {args.gpi:,}")
     print(
+        "Opponent buckets: " + ", ".join(args.opponent_buckets)
+        + f" | difficulty weight: {args.difficulty_weight:g}"
+    )
+    print(
         "Regularization (SL and RL): "
         f"dropout {args.dropout:g} | weight decay {args.weight_decay:g}"
     )
@@ -1231,8 +1219,6 @@ def run_rl_pipeline(root, config, args, assets):
     internal_target = FOREVER_INTERNAL_TARGET if target is None else int(target)
     periodic_boundaries = config.periodic_diagnostics
     checkpoint_base = run_dir / "checkpoint_states" / "training.npz"
-    metrics_path = run_dir / "training_metrics.jsonl"
-    tuning_path = run_dir / "adaptive_tuning.json"
     last_summary = None
 
     with ShutdownFlag() as shutdown, _rl_progress(target, completed) as progress_bar:
@@ -1245,32 +1231,38 @@ def run_rl_pipeline(root, config, args, assets):
                 args.periodic_diagnostic_every_games,
                 periodic_boundaries,
             )
-            base_kwargs = self_play._training_kwargs_from_args(args)
-            base_kwargs.update({
-                "iterations": None,
-                "total_training_games": internal_target,
-                "stop_after_training_games": stop_at,
-                "adaptive_tuning_training_games": (
+            training_options, resource_options, execution_options = (
+                rl_cli.training_options_from_args(args)
+            )
+            training_options = replace(
+                training_options,
+                iterations=None,
+                total_training_games=internal_target,
+            )
+            resource_options = replace(
+                resource_options,
+                adaptive_tuning_training_games=(
                     FOREVER_TUNING_REFERENCE_GAMES if target is None else int(target)
                 ),
-                "sl_weights_path": str(supervised_path),
-                "rl_weights_path": str(checkpoint_base),
-                "adaptive_tuning_path": str(tuning_path),
-                "metrics_output_path": str(metrics_path),
-                "numbered_checkpoints": True,
-                "start_iteration": iterations,
-                "resume_weights_path": (
+                sl_weights_path=str(supervised_path),
+                rl_weights_path=str(checkpoint_base),
+            )
+            execution_options = replace(
+                execution_options,
+                stop_after_training_games=stop_at,
+                numbered_checkpoints=True,
+                resume_weights_path=(
                     None if resume_point is None else str(resume_point.weights_path)
                 ),
-                "resume_state_file": (
+                resume_state_file=(
                     None if resume_point is None else str(resume_point.resume_state_path)
                 ),
-                "fresh_from_sl": resume_point is None,
-                "shutdown_requested": shutdown,
-                "quiet": True,
-                "status_callback": _status,
-                "run_configuration": run_configuration,
-            })
+                fresh_from_sl=resume_point is None,
+                shutdown_requested=shutdown,
+                quiet=True,
+                status_callback=_status,
+                run_configuration=run_configuration,
+            )
 
             def progress(done, _reported_total):
                 if progress_bar is not None and done > progress_bar.n:
@@ -1342,10 +1334,17 @@ def run_rl_pipeline(root, config, args, assets):
                     ),
                 )
 
-            base_kwargs["progress_callback"] = progress
-            base_kwargs["metrics_callback"] = metrics
-            base_kwargs["checkpoint_callback"] = publish_scheduled_checkpoint
-            last_summary = self_play.train(**base_kwargs)
+            execution_options = replace(
+                execution_options,
+                progress_callback=progress,
+                metrics_callback=metrics,
+                checkpoint_callback=publish_scheduled_checkpoint,
+            )
+            last_summary = rl_training_loop.train(
+                training_options,
+                resource_options,
+                execution_options,
+            )
             completed = int(last_summary["completed_training_games"])
             iterations = int(last_summary["rl_iterations_completed"])
             optimizer_steps = int(last_summary["optimizer_step_count"])
@@ -1539,8 +1538,8 @@ def parse_args(argv=None):
     dataset.add_argument("--dataset-estimated-worker-mb", type=int, default=256)
     dataset.add_argument("--dataset-max-worker-rss-mb", type=int, default=1024)
     dataset.add_argument("--dataset-games", type=int, default=None, help=argparse.SUPPRESS)
-    training_loop.add_optional_training_arguments(parser)
-    self_play.add_optional_rl_arguments(
+    supervised_cli.add_optional_training_arguments(parser)
+    rl_cli.add_optional_rl_arguments(
         parser,
         fresh_from_sl_default=True,
         ppo_max_epochs_default=argparse.SUPPRESS,
@@ -1652,7 +1651,7 @@ def parse_args(argv=None):
     # Resolution runs after resume hydration so a locked run keeps the exact
     # architecture it was created with.
     try:
-        training_loop.resolve_architecture_arguments(args)
+        supervised_cli.resolve_architecture_arguments(args)
     except ValueError as exc:
         parser.error(str(exc))
     return _resolve_execution_identity(args)
@@ -1671,7 +1670,7 @@ def validate_args(args, config):
     if args.iterations is not None:
         raise ValueError(
             "Canonical pipelines use RL game budgets; --iterations is available "
-            "only in training.rl.self_play."
+            "only in training.rl.cli."
         )
     if config.unbounded and args.total_training_games is not None:
         raise ValueError("The forever level cannot have --total-training-games.")

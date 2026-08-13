@@ -15,23 +15,73 @@ from typing import Iterable
 
 import numpy as np
 
-from training.rl.constants import (
-    PPO_GPU_BUFFER_SAFETY_FRACTION,
-    PPO_MAX_MINIBATCHES,
-    PPO_MIN_MINIBATCHES,
-)
 from training.utils.seeding import stable_seed
 from utils.resource_limits import effective_gpu_available_bytes
 
 
-DEFAULT_CLIP_EPSILON = 0.2
-DEFAULT_TARGET_KL = 0.01
-DEFAULT_STOP_KL = 0.015
-DEFAULT_MAX_EPOCHS = 4
+# PPO IMPLEMENTATION CONSTANTS
+#
+# ``PPO_MAX_EPOCHS`` is the only PPO training control exposed to callers. A
+# value of one deliberately selects the separate single-update REINFORCE path;
+# values from two through sixteen select PPO. Everything else below is a fixed
+# implementation policy and is recorded in manifests for provenance, not
+# threaded through the training loop as configurable state.
+PPO_DISABLED_EPOCHS = 1
+DEFAULT_PPO_MAX_EPOCHS = 4
 MAX_PPO_EPOCHS = 16
-DEFAULT_GAMES_PER_MINIBATCH_SCALE = 125
-DEFAULT_MIN_DECISIONS_PER_MINIBATCH = 128
+PPO_TRAINING_ALGORITHM = "ppo_v1"
+REINFORCE_TRAINING_ALGORITHM = "reinforce_v1"
+PPO_CLIP_EPSILON = 0.2
+PPO_TARGET_KL = 0.01
+PPO_STOP_KL = 0.015
+PPO_GAMES_PER_MINIBATCH_SCALE = 125
+PPO_MIN_DECISIONS_PER_MINIBATCH = 128
+PPO_MIN_MINIBATCHES = 4
+PPO_MAX_MINIBATCHES = 16
+PPO_PREFER_GPU_BUFFER = True
+PPO_GPU_BUFFER_SAFETY_FRACTION = 0.70
+POLICY_GRADIENT_CLIP_NORM = 5.0
 ADVANTAGE_EPSILON = 1e-8
+
+
+def validate_ppo_max_epochs(max_epochs):
+    """Return a valid user-facing PPO epoch budget."""
+    max_epochs = int(max_epochs)
+    if not PPO_DISABLED_EPOCHS <= max_epochs <= MAX_PPO_EPOCHS:
+        raise ValueError(
+            f"ppo_max_epochs must be between {PPO_DISABLED_EPOCHS} and "
+            f"{MAX_PPO_EPOCHS}"
+        )
+    return max_epochs
+
+
+def ppo_is_enabled(max_epochs):
+    """Return whether an epoch budget selects PPO instead of REINFORCE."""
+    return validate_ppo_max_epochs(max_epochs) > PPO_DISABLED_EPOCHS
+
+
+def fixed_ppo_policy(max_epochs):
+    """Return the complete persisted PPO policy without configurable aliases."""
+    max_epochs = validate_ppo_max_epochs(max_epochs)
+    return {
+        "algorithm": (
+            PPO_TRAINING_ALGORITHM
+            if ppo_is_enabled(max_epochs)
+            else REINFORCE_TRAINING_ALGORITHM
+        ),
+        "max_epochs": max_epochs,
+        "fixed_policy": {
+            "clip_epsilon": PPO_CLIP_EPSILON,
+            "target_kl": PPO_TARGET_KL,
+            "stop_kl": PPO_STOP_KL,
+            "min_minibatches": PPO_MIN_MINIBATCHES,
+            "max_minibatches": PPO_MAX_MINIBATCHES,
+            "games_per_minibatch_scale": PPO_GAMES_PER_MINIBATCH_SCALE,
+            "min_decisions_per_minibatch": PPO_MIN_DECISIONS_PER_MINIBATCH,
+            "prefer_gpu_buffer": PPO_PREFER_GPU_BUFFER,
+            "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
+        },
+    }
 
 
 def _to_numpy(value, *, dtype=None):
@@ -206,28 +256,36 @@ class PPOBuffer:
         ))
 
 
+@dataclass(frozen=True)
+class PPOIterationUpdate:
+    """Completed PPO update plus the two parent-level timing boundaries."""
+
+    metrics: dict
+    buffer_seconds: float
+    update_seconds: float
+
+
 def requested_minibatches(
     actual_games,
-    *,
-    games_scale=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
 ):
     """Return the requested 4..16 minibatch count based on games collected."""
-    if actual_games < 1 or games_scale < 1:
-        raise ValueError("actual_games and games_scale must be positive.")
-    raw = math.ceil(int(actual_games) / int(games_scale))
+    if actual_games < 1:
+        raise ValueError("actual_games must be positive.")
+    raw = math.ceil(int(actual_games) / PPO_GAMES_PER_MINIBATCH_SCALE)
     return max(PPO_MIN_MINIBATCHES, min(PPO_MAX_MINIBATCHES, raw))
 
 
 def effective_minibatches(
     decision_count,
     requested,
-    *,
-    minimum_decisions=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
 ):
     """Cap minibatches so every non-final slice remains operationally useful."""
-    if decision_count < 1 or requested < 1 or minimum_decisions < 1:
+    if decision_count < 1 or requested < 1:
         raise ValueError("Decision/minibatch counts must be positive.")
-    maximum_useful = max(1, int(decision_count) // int(minimum_decisions))
+    maximum_useful = max(
+        1,
+        int(decision_count) // PPO_MIN_DECISIONS_PER_MINIBATCH,
+    )
     return min(int(requested), maximum_useful, int(decision_count))
 
 
@@ -249,19 +307,19 @@ def minibatch_indices(decision_count, minibatch_count, seed):
     return partitions
 
 
-def clipped_surrogate(ratios, advantages, clip_epsilon=DEFAULT_CLIP_EPSILON):
+def clipped_surrogate(ratios, advantages):
     """Return NumPy PPO surrogate terms, exposed for exact unit tests."""
     ratios = np.asarray(ratios, dtype=np.float64)
     advantages = np.asarray(advantages, dtype=np.float64)
     clipped = np.clip(
         ratios,
-        1.0 - float(clip_epsilon),
-        1.0 + float(clip_epsilon),
+        1.0 - PPO_CLIP_EPSILON,
+        1.0 + PPO_CLIP_EPSILON,
     )
     return np.minimum(ratios * advantages, clipped * advantages)
 
 
-def log_ratio_statistics(new_log_probs, old_log_probs, clip_epsilon=DEFAULT_CLIP_EPSILON):
+def log_ratio_statistics(new_log_probs, old_log_probs):
     """Return whole-buffer PPO ratio, KL, and clipping statistics."""
     new = np.asarray(new_log_probs, dtype=np.float64)
     old = np.asarray(old_log_probs, dtype=np.float64)
@@ -270,8 +328,8 @@ def log_ratio_statistics(new_log_probs, old_log_probs, clip_epsilon=DEFAULT_CLIP
     if not np.all(np.isfinite(ratio)):
         raise FloatingPointError("PPO probability ratio contains NaN or infinity.")
     approx_kl = float(np.mean((ratio - 1.0) - log_ratio))
-    lower = 1.0 - float(clip_epsilon)
-    upper = 1.0 + float(clip_epsilon)
+    lower = 1.0 - PPO_CLIP_EPSILON
+    upper = 1.0 + PPO_CLIP_EPSILON
     return {
         "approx_kl": max(0.0, approx_kl),
         "clip_fraction": float(np.mean((ratio < lower) | (ratio > upper))),
@@ -284,19 +342,21 @@ def log_ratio_statistics(new_log_probs, old_log_probs, clip_epsilon=DEFAULT_CLIP
 class PPOBufferStorage:
     """Backend view of a canonical host PPO buffer."""
 
-    def __init__(self, network, buffer, *, prefer_gpu=True):
+    def __init__(self, network, buffer):
         self.network = network
         self.buffer = buffer
         self.location = "ram_streamed" if network.device == "gpu" else "ram"
         self._device_arrays = None
         self.preflight = {
-            "requested_gpu": bool(prefer_gpu and network.device == "gpu"),
+            "requested_gpu": bool(
+                PPO_PREFER_GPU_BUFFER and network.device == "gpu"
+            ),
             "reported_free_vram_bytes": None,
             "usable_free_vram_bytes": None,
             "buffer_bytes": int(buffer.nbytes),
             "fallback_reason": None,
         }
-        if prefer_gpu and network.device == "gpu":
+        if PPO_PREFER_GPU_BUFFER and network.device == "gpu":
             self._try_full_gpu_copy()
 
     def _try_full_gpu_copy(self):
@@ -427,15 +487,9 @@ def prepare_storage(
     network,
     buffer,
     first_indices,
-    *,
-    prefer_gpu=True,
 ):
     """Allocate and workspace-probe storage before the first optimizer step."""
-    storage = PPOBufferStorage(
-        network,
-        buffer,
-        prefer_gpu=prefer_gpu,
-    )
+    storage = PPOBufferStorage(network, buffer)
     try:
         _validate_first_minibatch(network, storage, first_indices)
     except Exception as exc:
@@ -623,15 +677,8 @@ def ppo_update(
     base_seed,
     iteration,
     entropy_coef,
-    clip_grad_norm,
     value_coef=0.5,
-    clip_epsilon=DEFAULT_CLIP_EPSILON,
-    target_kl=DEFAULT_TARGET_KL,
-    stop_kl=DEFAULT_STOP_KL,
-    max_epochs=DEFAULT_MAX_EPOCHS,
-    games_per_minibatch_scale=DEFAULT_GAMES_PER_MINIBATCH_SCALE,
-    min_decisions_per_minibatch=DEFAULT_MIN_DECISIONS_PER_MINIBATCH,
-    prefer_gpu_buffer=True,
+    max_epochs=DEFAULT_PPO_MAX_EPOCHS,
 ):
     """Run deterministic, KL-limited PPO epochs over one on-policy buffer."""
     profile_started = time.perf_counter()
@@ -648,16 +695,9 @@ def ppo_update(
     }
     optimizer_step_detail = {}
     full_buffer_detail = {}
-    if not 0 < float(clip_epsilon) < 1:
-        raise ValueError("PPO clip_epsilon must be in (0, 1).")
-    if target_kl <= 0 or stop_kl <= 0:
-        raise ValueError(
-            "PPO KL reporting target and stop threshold must be positive."
-        )
-    if not 1 <= int(max_epochs) <= MAX_PPO_EPOCHS:
-        raise ValueError(
-            f"PPO max_epochs must be between one and {MAX_PPO_EPOCHS}."
-        )
+    max_epochs = validate_ppo_max_epochs(max_epochs)
+    if not ppo_is_enabled(max_epochs):
+        raise ValueError("ppo_update requires ppo_max_epochs of at least 2")
     if float(value_coef) < 0:
         raise ValueError("PPO value_coef must be non-negative.")
     use_value_head = bool(getattr(network, "use_value_head", False))
@@ -670,15 +710,8 @@ def ppo_update(
             "PPO old_values were provided, but the value head is disabled."
         )
 
-    requested = requested_minibatches(
-        actual_games,
-        games_scale=games_per_minibatch_scale,
-    )
-    effective = effective_minibatches(
-        buffer.size,
-        requested,
-        minimum_decisions=min_decisions_per_minibatch,
-    )
+    requested = requested_minibatches(actual_games)
+    effective = effective_minibatches(buffer.size, requested)
     first_partitions = minibatch_indices(
         buffer.size,
         effective,
@@ -690,7 +723,6 @@ def ppo_update(
         network,
         buffer,
         first_partitions[0],
-        prefer_gpu=prefer_gpu_buffer,
     )
     timing["storage_prepare"] = time.perf_counter() - storage_started
     epoch_rows = []
@@ -733,9 +765,9 @@ def ppo_update(
                         batch["old_values"] if use_value_head else None
                     ),
                     value_coef=value_coef,
-                    clip_epsilon=clip_epsilon,
+                    clip_epsilon=PPO_CLIP_EPSILON,
                     entropy_coef=entropy_coef,
-                    clip_grad_norm=clip_grad_norm,
+                    clip_grad_norm=POLICY_GRADIENT_CLIP_NORM,
                 )
                 timing["optimizer_steps"] += time.perf_counter() - optimizer_started
                 step_detail = step_metrics.pop("runtime_profile_detail", {})
@@ -762,7 +794,7 @@ def ppo_update(
                 network,
                 storage,
                 partitions,
-                clip_epsilon,
+                PPO_CLIP_EPSILON,
                 runtime_profile=full_buffer_detail,
             )
             timing["full_buffer_evaluation"] += (
@@ -784,7 +816,7 @@ def ppo_update(
                 "minibatch_sizes": [int(len(indices)) for indices in partitions],
             }
             epoch_rows.append(row)
-            if whole["approx_kl"] > float(stop_kl):
+            if whole["approx_kl"] > PPO_STOP_KL:
                 stopped_by_kl = True
                 timing["epoch_metrics_and_kl_control"] += (
                     time.perf_counter() - metrics_started
@@ -843,9 +875,9 @@ def ppo_update(
             "advantage_std_zero": bool(buffer.advantage_std_zero),
             "raw_advantage_mean": float(buffer.raw_advantage_mean),
             "raw_advantage_std": float(buffer.raw_advantage_std),
-            "target_kl": float(target_kl),
-            "stop_kl": float(stop_kl),
-            "clip_epsilon": float(clip_epsilon),
+            "target_kl": PPO_TARGET_KL,
+            "stop_kl": PPO_STOP_KL,
+            "clip_epsilon": PPO_CLIP_EPSILON,
             "epoch_metrics": epoch_rows,
             # Compatibility with the old one-update metric keys.
             "entropy": float(final["entropy"]),
@@ -887,3 +919,80 @@ def ppo_update(
         "full_buffer_evaluation": full_buffer_detail,
     }
     return result
+
+
+def _value_prediction_summary(values):
+    """Summarize pre-update value predictions without another forward pass."""
+    host_values = values.get() if hasattr(values, "get") else values
+    flattened = np.asarray(host_values, dtype=np.float64).reshape(-1)
+    return {
+        "sample_count": int(flattened.size),
+        "mean": float(np.mean(flattened)),
+        "std": float(np.std(flattened)),
+        "min": float(np.min(flattened)),
+        "max": float(np.max(flattened)),
+    }
+
+
+def update_from_samples(
+    network,
+    samples,
+    *,
+    actual_games,
+    base_seed,
+    iteration,
+    entropy_coef,
+    value_coef,
+    normalize_advantages,
+    max_epochs,
+    collect_value_predictions=False,
+):
+    """Build the immutable PPO buffer and update one on-policy iteration."""
+    if not ppo_is_enabled(max_epochs):
+        raise ValueError("PPO sample updates require ppo_max_epochs of at least 2")
+    buffer_started = time.perf_counter()
+    old_values = None
+    value_predictions = None
+    if getattr(network, "use_value_head", False):
+        value_states = network.xp.hstack([
+            network.xp.asarray(sample.x, dtype=network.xp.float32)
+            for sample in samples
+        ])
+        backend_old_values = network.predict_values(value_states)
+        if collect_value_predictions:
+            value_predictions = _value_prediction_summary(backend_old_values)
+        old_values = np.ascontiguousarray(
+            (
+                backend_old_values.get()
+                if hasattr(backend_old_values, "get")
+                else backend_old_values
+            ),
+            dtype=np.float32,
+        ).reshape(-1)
+    decision_buffer = PPOBuffer.from_samples(
+        samples,
+        normalize=normalize_advantages,
+        old_values=old_values,
+    )
+    buffer_seconds = time.perf_counter() - buffer_started
+
+    update_started = time.perf_counter()
+    metrics = ppo_update(
+        network,
+        decision_buffer,
+        actual_games=actual_games,
+        base_seed=base_seed,
+        iteration=iteration,
+        entropy_coef=entropy_coef,
+        value_coef=value_coef,
+        max_epochs=max_epochs,
+    )
+    network.synchronize()
+    update_seconds = time.perf_counter() - update_started
+    if value_predictions is not None:
+        metrics["value_predictions_before_update"] = value_predictions
+    return PPOIterationUpdate(
+        metrics=metrics,
+        buffer_seconds=float(buffer_seconds),
+        update_seconds=float(update_seconds),
+    )

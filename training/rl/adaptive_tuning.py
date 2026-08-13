@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -17,7 +18,6 @@ from agents.network_architecture import (
     hidden_layer_count_from_weights,
     policy_layer_names,
 )
-from training.rl.ppo import PPOBuffer
 from training.utils.seeding import stable_seed
 from training.rl.constants import (
     RL_WORKER_AUTOTUNE_FRACTION,
@@ -28,6 +28,9 @@ from training.rl.parallel import (
     RLRolloutRunner,
     _candidate_counts,
 )
+from training.rl.matchmaking import build_match_plan
+from training.rl.matchmaking import matchmaking_policy_manifest
+from training.rl.pool import pool_policy_manifest
 from utils.resource_limits import (
     MIB,
     effective_gpu_available_bytes,
@@ -37,7 +40,7 @@ from utils.resource_limits import (
 from utils.repository import current_git_commit
 
 
-TUNING_VERSION = 4
+TUNING_VERSION = 5
 
 
 def _policy_arrays(network):
@@ -64,20 +67,30 @@ def policy_sha256(network):
     return digest.hexdigest()
 
 
-def pool_sha256(pool_snapshots):
+def pool_sha256(pool_state=None, pool_weights=None, performance_state=None):
+    """Hash complete logical pool inputs without relying on bank positions."""
     digest = hashlib.sha256()
-    for snapshot_index, snapshot in enumerate(pool_snapshots):
-        digest.update(str(snapshot_index).encode("ascii"))
-        for name in policy_layer_names(
-            hidden_layer_count_from_weights(snapshot)
-        ):
+    for value in (pool_state or {}, performance_state or {}):
+        digest.update(json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+    for opponent_id, snapshot in sorted((pool_weights or {}).items()):
+        digest.update(opponent_id.encode("utf-8"))
+        for name in policy_layer_names(hidden_layer_count_from_weights(snapshot)):
             value = np.asarray(snapshot[name])
             digest.update(name.encode("ascii"))
             digest.update(value.tobytes(order="C"))
     return digest.hexdigest()
 
 
-def capture_isolation_state(network, pool_snapshots=()):
+def capture_isolation_state(
+    network,
+    pool_state=None,
+    pool_weights=None,
+    performance_state=None,
+):
     """Capture every mutable parent-side state that tuning must not consume."""
     return {
         "weights": _policy_arrays(network),
@@ -86,18 +99,30 @@ def capture_isolation_state(network, pool_snapshots=()):
         "rl_training_algorithm": getattr(network, "rl_training_algorithm", None),
         "python_rng": random.getstate(),
         "numpy_rng": np.random.get_state(),
-        "pool_snapshots": tuple(
-            {
-                name: np.asarray(value).copy()
-                for name, value in snapshot.items()
-            }
-            for snapshot in pool_snapshots
+        "pool_sha256": pool_sha256(
+            pool_state,
+            pool_weights,
+            performance_state,
         ),
-        "pool_sha256": pool_sha256(pool_snapshots),
+        "pool_state": deepcopy(pool_state),
+        "pool_weights": {
+            opponent_id: {
+                name: np.asarray(value).copy()
+                for name, value in weights.items()
+            }
+            for opponent_id, weights in (pool_weights or {}).items()
+        },
+        "performance_state": deepcopy(performance_state),
     }
 
 
-def restore_isolation_state(network, snapshot, pool_snapshots=()):
+def restore_isolation_state(
+    network,
+    snapshot,
+    pool_state=None,
+    pool_weights=None,
+    performance_state=None,
+):
     """Restore captured state and fail if any isolation invariant differs."""
     for name, value in snapshot["weights"].items():
         setattr(network, name, network.xp.asarray(value, dtype=network.xp.float32))
@@ -110,30 +135,51 @@ def restore_isolation_state(network, snapshot, pool_snapshots=()):
         network.rl_training_algorithm = saved_algorithm
     random.setstate(snapshot["python_rng"])
     np.random.set_state(snapshot["numpy_rng"])
-    saved_pool = snapshot["pool_snapshots"]
-    if len(pool_snapshots) != len(saved_pool):
-        raise RuntimeError("Adaptive tuning changed the opponent-pool size.")
-    for target, saved in zip(pool_snapshots, saved_pool):
-        for name, value in saved.items():
-            target[name] = value.copy()
+    if pool_state is not None:
+        pool_state.clear()
+        pool_state.update(deepcopy(snapshot["pool_state"]))
+    if pool_weights is not None:
+        pool_weights.clear()
+        pool_weights.update({
+            opponent_id: {
+                name: value.copy()
+                for name, value in weights.items()
+            }
+            for opponent_id, weights in snapshot["pool_weights"].items()
+        })
+    if performance_state is not None:
+        performance_state.clear()
+        performance_state.update(deepcopy(snapshot["performance_state"]))
     if policy_sha256(network) != snapshot["weights_sha256"]:
         raise RuntimeError("Adaptive tuning changed RL policy weights.")
     if network.optimizer_state_dict() != snapshot["optimizer"]:
         raise RuntimeError("Adaptive tuning changed the optimizer state.")
     if getattr(network, "rl_training_algorithm", None) != saved_algorithm:
         raise RuntimeError("Adaptive tuning changed RL algorithm metadata.")
-    if pool_sha256(pool_snapshots) != snapshot["pool_sha256"]:
+    if pool_sha256(pool_state, pool_weights, performance_state) != snapshot[
+        "pool_sha256"
+    ]:
         raise RuntimeError("Adaptive tuning changed the opponent pool.")
 
 
 def _flatten_samples(results):
+    """Estimate retained trajectory bytes without constructing a PPO buffer."""
     samples = []
     for result in results:
         samples.extend(result["samples"])
     if not samples:
         return 0, 0
-    buffer = PPOBuffer.from_samples(samples, normalize=False)
-    return buffer.size, buffer.nbytes
+    array_bytes = sum(
+        int(np.asarray(sample.x).nbytes)
+        + int(np.asarray(sample.legal_mask).nbytes)
+        for sample in samples
+    )
+    # action index plus old log-prob, advantage/return, and the two persisted
+    # reward components used by update diagnostics.
+    scalar_bytes = len(samples) * (
+        np.dtype(np.int64).itemsize + 5 * np.dtype(np.float32).itemsize
+    )
+    return len(samples), int(array_bytes + scalar_bytes)
 
 
 def _resource_sample(extra_host_bytes=0):
@@ -211,23 +257,27 @@ def _failure_result(
 def _new_runner(
     network,
     *,
-    training_opponent,
+    opponent_buckets,
     schema,
     gamma,
-    max_pool_size,
     safety,
-    pool_snapshots,
+    pool_state,
+    pool_weights,
+    performance_state,
 ):
     runner = RLRolloutRunner(
         network,
-        training_opponent=training_opponent,
+        opponent_buckets=opponent_buckets,
         schema=schema,
         gamma=gamma,
-        max_pool_size=max_pool_size if training_opponent == "self_play" else 0,
         safety=safety,
     )
-    if pool_snapshots:
-        runner.restore_pool_snapshots(pool_snapshots)
+    if pool_state is not None:
+        runner.restore_opponent_pool(
+            pool_state,
+            pool_weights,
+            performance_state,
+        )
     return runner
 
 
@@ -243,14 +293,15 @@ def benchmark_worker_candidates(
     *,
     gpi,
     total_training_games,
-    candidates,
     base_seed,
-    training_opponent,
+    opponent_buckets,
+    difficulty_weight,
     schema,
     gamma,
-    max_pool_size,
     safety,
-    pool_snapshots=(),
+    pool_state=None,
+    pool_weights=None,
+    performance_state=None,
     status_callback=None,
 ):
     """Benchmark workers until marginal throughput gain falls below the limit."""
@@ -259,15 +310,20 @@ def benchmark_worker_candidates(
         1,
         int(int(total_training_games) * RL_WORKER_AUTOTUNE_FRACTION),
     )
-    candidates = _candidate_counts(candidates, safety, max(gpi, test_games))
+    candidates = _candidate_counts(
+        DEFAULT_RL_WORKER_CANDIDATES,
+        safety,
+        max(gpi, test_games),
+    )
     runner = _new_runner(
         network,
-        training_opponent=training_opponent,
+        opponent_buckets=opponent_buckets,
         schema=schema,
         gamma=gamma,
-        max_pool_size=max_pool_size,
         safety=safety,
-        pool_snapshots=pool_snapshots,
+        pool_state=pool_state,
+        pool_weights=pool_weights,
+        performance_state=performance_state,
     )
     results = []
     previous_success = None
@@ -298,9 +354,18 @@ def benchmark_worker_candidates(
                 block_count = 0
                 while completed < test_games:
                     block_games = min(int(gpi), test_games - completed)
+                    match_plan = build_match_plan(
+                        opponent_pool=runner.opponent_pool,
+                        performance_tracker=runner.performance_tracker,
+                        selected_buckets=opponent_buckets,
+                        difficulty_weight=difficulty_weight,
+                        iteration=block_count + 1,
+                        first_absolute_game=completed,
+                        game_count=block_games,
+                        base_seed=candidate_seed,
+                    )
                     batch_results, run_info = runner.collect_games(
-                        completed,
-                        block_games,
+                        match_plan,
                         candidate_seed,
                     )
                     run_infos.append(run_info)
@@ -472,20 +537,26 @@ def run_worker_tuning(
     workers,
     retune_workers,
     saved_tuning,
-    worker_candidates,
     base_seed,
-    training_opponent,
+    opponent_buckets,
+    difficulty_weight,
     schema,
     gamma,
-    max_pool_size,
     safety,
-    pool_snapshots=(),
+    pool_state=None,
+    pool_weights=None,
+    performance_state=None,
     output_path=None,
     status_callback=None,
 ):
     """Select rollout workers while restoring all parent training state."""
     emit = status_callback or (lambda _message: None)
-    snapshot = capture_isolation_state(network, pool_snapshots)
+    snapshot = capture_isolation_state(
+        network,
+        pool_state,
+        pool_weights,
+        performance_state,
+    )
     current_hardware = hardware_metadata(network.device)
     try:
         saved_gpi = None
@@ -497,7 +568,16 @@ def run_worker_tuning(
         reuse_saved_workers = (
             saved_tuning
             and not retune_workers
+            and int(saved_tuning.get("version", -1)) == TUNING_VERSION
             and (saved_gpi is None or int(saved_gpi) == int(gpi))
+            and tuple(saved_tuning.get("opponent_buckets", ()))
+            == tuple(opponent_buckets)
+            and float(saved_tuning.get("difficulty_weight", -1.0))
+            == float(difficulty_weight)
+            and saved_tuning.get("pool_policy")
+            == pool_policy_manifest(opponent_buckets)
+            and saved_tuning.get("matchmaking_policy")
+            == matchmaking_policy_manifest()
         )
         if reuse_saved_workers:
             selected_workers = int(saved_tuning["selected_workers"])
@@ -523,14 +603,15 @@ def run_worker_tuning(
                 network,
                 gpi=gpi,
                 total_training_games=total_training_games,
-                candidates=worker_candidates,
                 base_seed=base_seed,
-                training_opponent=training_opponent,
+                opponent_buckets=opponent_buckets,
+                difficulty_weight=difficulty_weight,
                 schema=schema,
                 gamma=gamma,
-                max_pool_size=max_pool_size,
                 safety=safety,
-                pool_snapshots=pool_snapshots,
+                pool_state=pool_state,
+                pool_weights=pool_weights,
+                performance_state=performance_state,
                 status_callback=emit,
             )
             selected_workers = int(
@@ -549,6 +630,10 @@ def run_worker_tuning(
             "base_seed": int(base_seed),
             "total_training_games": int(total_training_games),
             "gpi": int(gpi),
+            "opponent_buckets": list(opponent_buckets),
+            "difficulty_weight": float(difficulty_weight),
+            "pool_policy": pool_policy_manifest(opponent_buckets),
+            "matchmaking_policy": matchmaking_policy_manifest(),
             "worker_test_games": int(worker_test_games),
             "worker_benchmark_fraction": RL_WORKER_AUTOTUNE_FRACTION,
             "worker_minimum_gain": RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
@@ -562,7 +647,13 @@ def run_worker_tuning(
             "isolation_verified": True,
         }
     finally:
-        restore_isolation_state(network, snapshot, pool_snapshots)
+        restore_isolation_state(
+            network,
+            snapshot,
+            pool_state,
+            pool_weights,
+            performance_state,
+        )
 
     if output_path is not None:
         atomic_write_json(output_path, metadata)

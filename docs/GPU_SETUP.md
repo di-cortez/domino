@@ -117,8 +117,8 @@ PY
 Then run only a help or intentionally small workload first:
 
 ```bash
-python -m training.supervised.training_loop --help
-python -m training.rl.self_play --help
+python -m training.supervised.cli --help
+python -m training.rl.cli --help
 python -m train_script.run_pipeline --help
 ```
 
@@ -137,9 +137,9 @@ The device values are:
 Relevant commands include:
 
 ```bash
-python -m training.supervised.training_loop --sl-device auto
-python -m training.supervised.training_loop --device gpu
-python -m training.rl.self_play --device gpu
+python -m training.supervised.cli --sl-device auto
+python -m training.supervised.cli --device gpu
+python -m training.rl.cli --device gpu
 python -m train_script.run_pipeline --sl-device gpu --device gpu
 ```
 
@@ -174,12 +174,12 @@ blocks at defined boundaries.
 Controls include:
 
 ```bash
-python -m training.supervised.training_loop \
+python -m training.supervised.cli \
   --sl-batch-size 8192 \
   --sl-memory-reserve-mb 1024 \
   --sl-gpu-memory-reserve-mb 1024
 
-python -m training.rl.self_play \
+python -m training.rl.cli \
   --device gpu \
   --memory-reserve-mb 1024 \
   --gpu-memory-reserve-mb 1024

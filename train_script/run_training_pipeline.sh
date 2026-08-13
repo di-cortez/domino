@@ -19,15 +19,15 @@
 # training module's dataset/epoch/output defaults:
 #
 #   python -m training.datagen.generator
-#   python -m training.supervised.training_loop
+#   python -m training.supervised.cli
 #
-# Stage 3 wraps `python -m training.rl.self_play`, which does accept CLI flags
+# Stage 3 wraps `python -m training.rl.cli`, which does accept CLI flags
 # (exact games, learning rate, reward schema, gamma,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
 # passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
 # default paths. This script only chains the four stages and forwards flags
-# through; see `training/rl/self_play.py add_optional_rl_arguments` and
+# through; see `training/rl/cli.py add_optional_rl_arguments` and
 # `diagnostics/evaluate.py` for the authoritative flag definitions.
 #
 # Usage:
@@ -54,12 +54,12 @@ RL_ITERATIONS=""
 
 RL_WEIGHTS_FILE="models/domino_rl_weights.npz"
 RL_SL_WEIGHTS_PATH="models/domino_sl_weights.npz"
-RL_TRAINING_OPPONENT="self_play"
+RL_OPPONENT_BUCKETS="heuristic,recent"
+RL_DIFFICULTY_WEIGHT=0.5
 RL_LEARNING_RATE=0.001
 RL_ENTROPY_COEF=0.01
 RL_LOG_INTERVAL=10
 RL_CHECKPOINT_INTERVAL=50
-RL_MAX_POOL_SIZE=50
 RL_VALUE_HEAD=0
 RL_VALUE_COEF=0.5
 RL_GAMMA=1.0
@@ -69,9 +69,9 @@ RL_REWARD_SCHEMA="default"
 # loss or win rate is dominated by batch noise. Gradient clipping and optional
 # advantage normalization stabilize comparisons, while a seed makes
 # side-by-side hyperparameter runs reproducible.
-RL_CLIP_GRAD_NORM=5.0
 RL_NORMALIZE_ADVANTAGES="auto"
 RL_MOVING_AVERAGE_WINDOW=10
+RL_PPO_MAX_EPOCHS=4
 RL_SEED=""
 
 # Array backend: "auto" (default) matches GPU_ENABLED exactly (CuPy when
@@ -82,8 +82,6 @@ RL_WORKERS="auto"
 RL_MEMORY_RESERVE_MB=512
 RL_ESTIMATED_WORKER_MB=256
 RL_MAX_WORKER_RSS_MB=1024
-RL_PPO=1
-
 # Shared regularization: both coefficients are forwarded to the supervised and
 # the RL stage because both stages train the same architecture.
 WEIGHT_DECAY=""
@@ -96,11 +94,6 @@ SL_EARLY_STOPPING_PATIENCE=""
 SL_LR_DECAY_FACTOR=0.5
 SL_LR_DECAY_PATIENCE=5
 SL_NO_LR_DECAY=0
-SL_TRAINING_PLATEAU_STOP=1
-SL_TRAINING_PLATEAU_WINDOW=25
-SL_TRAINING_PLATEAU_PATIENCE=4
-SL_TRAINING_PLATEAU_MIN_EPOCHS=100
-SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT=0.001
 SL_DEVICE="auto"
 SL_BATCH_SIZE=8192
 # Empty widths keep training_loop's documented per-layer defaults, so the
@@ -148,23 +141,23 @@ Usage: $(basename "$0") [options]
 Dataset generation runs with no extra flags (see training/README.md):
 dataset -> dataset/supervised_dataset.jsonl (30,000 games). Supervised
 training runs with no extra flags by default too (-> models/domino_sl_weights.npz,
-up to 2,000 epochs with automatic training-loss plateau stopping), unless one
-of the SL convergence flags below is passed.
+up to 2,000 epochs with the fixed automatic training-loss plateau policy),
+unless one of the remaining SL convergence flags below is passed.
 
 Self-play reinforcement learning ($RL_TOTAL_TRAINING_GAMES exact real games by
 default; the self-play default GPI and discarded worker tuning; all forwarded to
-training.rl.self_play):
+training.rl.cli):
   --rl-weights-file PATH       Output RL weights path (default: $RL_WEIGHTS_FILE)
   --rl-sl-weights-path PATH    Input SL weights used to initialize a fresh RL run (default: $RL_SL_WEIGHTS_PATH)
   --rl-total-training-games N  Exact real-game budget (default: $RL_TOTAL_TRAINING_GAMES)
   --rl-iterations N            Legacy fixed iteration budget; uses self-play's fixed default GPI
-  --rl-training-opponent NAME  "self_play" or "heuristic" (default: $RL_TRAINING_OPPONENT)
+  --rl-opponent-buckets NAMES  Comma-separated buckets: heuristic,random,recent (default: $RL_OPPONENT_BUCKETS)
+  --rl-difficulty-weight F     Uniform/difficulty allocation mixture in [0,1] (default: $RL_DIFFICULTY_WEIGHT)
   --rl-learning-rate F         Learning rate (default: $RL_LEARNING_RATE)
   --rl-entropy-coef F          Entropy bonus coefficient (default: $RL_ENTROPY_COEF)
   --rl-log-interval N          Iterations between log lines (default: $RL_LOG_INTERVAL)
   --rl-checkpoint-interval N   Iterations between checkpoints (default: $RL_CHECKPOINT_INTERVAL)
-  --rl-max-pool-size N         Max frozen snapshots kept in the pool (default: $RL_MAX_POOL_SIZE)
-  --rl-value-head              Turn the critic ON for PPO or --rl-no-ppo
+  --rl-value-head              Turn the critic ON for PPO or REINFORCE
   --rl-value-coef F            Value-loss coefficient, only used when --rl-value-head is set (default: $RL_VALUE_COEF)
   --rl-gamma F                 Terminal-reward discount per remaining real decision, 1.0 = no discount (default: $RL_GAMMA)
   --rl-reward-schema NAME      "default", "sparse", or "shaped" reward preset (default: $RL_REWARD_SCHEMA)
@@ -178,9 +171,7 @@ Regularization, off unless requested (forwarded to both the SL and the RL stage)
   --dropout F                  Hidden-layer dropout rate used by training updates only
 
 RL convergence monitoring:
-  --rl-clip-grad-norm F         Gradient-norm clipping threshold (default: $RL_CLIP_GRAD_NORM)
-  --rl-ppo                      Use masked PPO with minibatches (default)
-  --rl-no-ppo                   Use historical one-update REINFORCE for regression
+  --rl-ppo-max-epochs N         1 selects REINFORCE; 2-16 select PPO (default: $RL_PPO_MAX_EPOCHS)
   --rl-normalize-advantages     Normalize once over the complete decision buffer (PPO default)
   --rl-no-normalize-advantages  Explicitly disable normalization
   --rl-moving-average-window N  Trailing-iteration window for value-loss/win-rate moving averages in the log (default: $RL_MOVING_AVERAGE_WINDOW)
@@ -192,11 +183,6 @@ SL training controls:
   --sl-lr-decay-factor F          LR multiplier after a validation plateau (default: $SL_LR_DECAY_FACTOR)
   --sl-lr-decay-patience N        Failed validation checks before LR decay (default: $SL_LR_DECAY_PATIENCE)
   --sl-no-lr-decay                Disable the default supervised LR schedule
-  --sl-no-training-plateau-stop   Disable automatic training-loss saturation stopping
-  --sl-training-plateau-window N  Epochs per non-overlapping loss block (default: $SL_TRAINING_PLATEAU_WINDOW)
-  --sl-training-plateau-patience N  Consecutive saturated blocks before stopping (default: $SL_TRAINING_PLATEAU_PATIENCE)
-  --sl-training-plateau-min-epochs N  Minimum total epochs before stopping (default: $SL_TRAINING_PLATEAU_MIN_EPOCHS)
-  --sl-training-plateau-min-relative-improvement F  Improvement threshold (default: $SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT)
   --sl-device {auto,cpu,gpu}       Supervised array backend (default: $SL_DEVICE)
   --sl-batch-size N                Fixed mini-batch size: 1024, 2048, 4096, 8192,
                                    16384, 32768, 65536, 131072, 262144, 524288,
@@ -246,21 +232,19 @@ while [[ $# -gt 0 ]]; do
         --rl-sl-weights-path) RL_SL_WEIGHTS_PATH="$2"; shift 2 ;;
         --rl-total-training-games) RL_TOTAL_TRAINING_GAMES="$2"; shift 2 ;;
         --rl-iterations) RL_ITERATIONS="$2"; shift 2 ;;
-        --rl-training-opponent) RL_TRAINING_OPPONENT="$2"; shift 2 ;;
+        --rl-opponent-buckets) RL_OPPONENT_BUCKETS="$2"; shift 2 ;;
+        --rl-difficulty-weight) RL_DIFFICULTY_WEIGHT="$2"; shift 2 ;;
         --rl-learning-rate) RL_LEARNING_RATE="$2"; shift 2 ;;
         --rl-entropy-coef) RL_ENTROPY_COEF="$2"; shift 2 ;;
         --rl-log-interval) RL_LOG_INTERVAL="$2"; shift 2 ;;
         --rl-checkpoint-interval) RL_CHECKPOINT_INTERVAL="$2"; shift 2 ;;
-        --rl-max-pool-size) RL_MAX_POOL_SIZE="$2"; shift 2 ;;
         --rl-value-head) RL_VALUE_HEAD=1; shift ;;
         --rl-value-coef) RL_VALUE_COEF="$2"; shift 2 ;;
         --rl-gamma) RL_GAMMA="$2"; shift 2 ;;
         --rl-reward-schema) RL_REWARD_SCHEMA="$2"; shift 2 ;;
-        --rl-clip-grad-norm) RL_CLIP_GRAD_NORM="$2"; shift 2 ;;
         --rl-normalize-advantages) RL_NORMALIZE_ADVANTAGES=1; shift ;;
         --rl-no-normalize-advantages) RL_NORMALIZE_ADVANTAGES=0; shift ;;
-        --rl-ppo) RL_PPO=1; shift ;;
-        --rl-no-ppo) RL_PPO=0; shift ;;
+        --rl-ppo-max-epochs) RL_PPO_MAX_EPOCHS="$2"; shift 2 ;;
         --rl-moving-average-window) RL_MOVING_AVERAGE_WINDOW="$2"; shift 2 ;;
         --rl-seed) RL_SEED="$2"; shift 2 ;;
         --rl-device) RL_DEVICE="$2"; shift 2 ;;
@@ -272,11 +256,6 @@ while [[ $# -gt 0 ]]; do
         --sl-lr-decay-factor) SL_LR_DECAY_FACTOR="$2"; shift 2 ;;
         --sl-lr-decay-patience) SL_LR_DECAY_PATIENCE="$2"; shift 2 ;;
         --sl-no-lr-decay) SL_NO_LR_DECAY=1; shift ;;
-        --sl-no-training-plateau-stop) SL_TRAINING_PLATEAU_STOP=0; shift ;;
-        --sl-training-plateau-window) SL_TRAINING_PLATEAU_WINDOW="$2"; shift 2 ;;
-        --sl-training-plateau-patience) SL_TRAINING_PLATEAU_PATIENCE="$2"; shift 2 ;;
-        --sl-training-plateau-min-epochs) SL_TRAINING_PLATEAU_MIN_EPOCHS="$2"; shift 2 ;;
-        --sl-training-plateau-min-relative-improvement) SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT="$2"; shift 2 ;;
         --weight-decay) WEIGHT_DECAY="$2"; shift 2 ;;
         --dropout) DROPOUT="$2"; shift 2 ;;
         --sl-device) SL_DEVICE="$2"; shift 2 ;;
@@ -360,10 +339,6 @@ else
         --sl-device "$SL_DEVICE"
         --sl-memory-reserve-mb "$SL_MEMORY_RESERVE_MB"
         --sl-gpu-memory-reserve-mb "$SL_GPU_MEMORY_RESERVE_MB"
-        --sl-training-plateau-window "$SL_TRAINING_PLATEAU_WINDOW"
-        --sl-training-plateau-patience "$SL_TRAINING_PLATEAU_PATIENCE"
-        --sl-training-plateau-min-epochs "$SL_TRAINING_PLATEAU_MIN_EPOCHS"
-        --sl-training-plateau-min-relative-improvement "$SL_TRAINING_PLATEAU_MIN_RELATIVE_IMPROVEMENT"
         --sl-batch-size "$SL_BATCH_SIZE"
         --hidden-layers "$HIDDEN_LAYERS"
     )
@@ -383,9 +358,6 @@ else
     else
         SL_EXTRA_ARGS+=(--lr-decay "$SL_LR_DECAY_FACTOR")
     fi
-    if [[ "$SL_TRAINING_PLATEAU_STOP" -eq 0 ]]; then
-        SL_EXTRA_ARGS+=(--sl-no-training-plateau-stop)
-    fi
     if [[ -n "$WEIGHT_DECAY" ]]; then
         SL_EXTRA_ARGS+=(--weight-decay "$WEIGHT_DECAY")
     fi
@@ -397,7 +369,7 @@ else
     fi
 
     section "Step 2/4: training supervised policy (${SL_EXTRA_ARGS[*]} -> models/domino_sl_weights.npz)"
-    "$PYTHON_BIN" -u -m training.supervised.training_loop "${SL_EXTRA_ARGS[@]}"
+    "$PYTHON_BIN" -u -m training.supervised.cli "${SL_EXTRA_ARGS[@]}"
 fi
 
 if [[ "$SKIP_RL" -eq 1 ]]; then
@@ -418,10 +390,6 @@ else
     if [[ -n "$RL_ITERATIONS" ]]; then
         BUDGET_ARGS=(--iterations "$RL_ITERATIONS")
     fi
-    PPO_FLAG="--ppo"
-    if [[ "$RL_PPO" -eq 0 ]]; then
-        PPO_FLAG="--no-ppo"
-    fi
     RL_SEED_ARGS=()
     if [[ -n "$RL_SEED" ]]; then
         RL_SEED_ARGS+=(--seed "$RL_SEED")
@@ -433,29 +401,27 @@ else
     if [[ -n "$DROPOUT" ]]; then
         RL_REGULARIZATION_ARGS+=(--dropout "$DROPOUT")
     fi
-    "$PYTHON_BIN" -u -m training.rl.self_play \
+    "$PYTHON_BIN" -u -m training.rl.cli \
         "${BUDGET_ARGS[@]}" \
-        --training-opponent "$RL_TRAINING_OPPONENT" \
+        --opponent-buckets "$RL_OPPONENT_BUCKETS" \
+        --difficulty-weight "$RL_DIFFICULTY_WEIGHT" \
         --learning-rate "$RL_LEARNING_RATE" \
         --entropy-coef "$RL_ENTROPY_COEF" \
         --log-interval "$RL_LOG_INTERVAL" \
         --checkpoint-interval "$RL_CHECKPOINT_INTERVAL" \
-        --max-pool-size "$RL_MAX_POOL_SIZE" \
         --sl-weights-path "$RL_SL_WEIGHTS_PATH" \
         --rl-weights-path "$RL_WEIGHTS_FILE" \
-        --adaptive-tuning-path "${RL_WEIGHTS_FILE%.npz}_adaptive_tuning.json" \
         --fresh-from-sl \
         --value-coef "$RL_VALUE_COEF" \
         --gamma "$RL_GAMMA" \
         --reward-schema "$RL_REWARD_SCHEMA" \
-        --clip-grad-norm "$RL_CLIP_GRAD_NORM" \
         --moving-average-window "$RL_MOVING_AVERAGE_WINDOW" \
         --device "$RL_DEVICE" \
         --rl-workers "$RL_WORKERS" \
         --rl-memory-reserve-mb "$RL_MEMORY_RESERVE_MB" \
         --rl-estimated-worker-mb "$RL_ESTIMATED_WORKER_MB" \
         --rl-max-worker-rss-mb "$RL_MAX_WORKER_RSS_MB" \
-        "$PPO_FLAG" \
+        --ppo-max-epochs "$RL_PPO_MAX_EPOCHS" \
         "${NORMALIZE_ARGS[@]}" \
         "${RL_REGULARIZATION_ARGS[@]}" \
         "${RL_SEED_ARGS[@]}" \

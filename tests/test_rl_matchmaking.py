@@ -14,6 +14,7 @@ from training.rl.config import (
 )
 from training.rl.matchmaking import (
     OpponentPerformanceTracker,
+    aggregate_match_results,
     build_match_plan,
     difficulty_from_win_rate,
 )
@@ -104,7 +105,7 @@ def test_performance_prior_smoothing_and_decay_return_toward_half():
     tracker.ensure(("opponent",))
     assert tracker.estimated_win_rate("opponent") == 0.5
     tracker.update(("opponent",), {
-        "opponent": {"wins": 1, "losses": 0, "draws": 0},
+        "opponent": {"wins": 1, "losses": 0},
     })
     after_one_game = tracker.estimated_win_rate("opponent")
     assert 0.5 < after_one_game < 0.55
@@ -112,6 +113,32 @@ def test_performance_prior_smoothing_and_decay_return_toward_half():
         tracker.update(("opponent",), {})
     assert tracker.estimated_win_rate("opponent") < after_one_game
     assert tracker.estimated_win_rate("opponent") > 0.5
+
+
+def test_performance_tracker_accepts_only_consistent_win_loss_outcomes():
+    tracker = OpponentPerformanceTracker()
+    tracker.ensure(("opponent",))
+    tracker.update(("opponent",), {
+        "opponent": {"games": 3, "wins": 2, "losses": 1},
+    })
+    performance = tracker.performance("opponent")
+    assert performance.lifetime_wins == 2
+    assert performance.lifetime_losses == 1
+    assert set(tracker.export_state()["opponents"]["opponent"]) == {
+        "decayed_wins",
+        "decayed_losses",
+        "lifetime_wins",
+        "lifetime_losses",
+    }
+
+    with pytest.raises(ValueError, match="unsupported outcome fields"):
+        tracker.update(("opponent",), {
+            "opponent": {"wins": 1, "losses": 0, "draws": 0},
+        })
+    with pytest.raises(ValueError, match="wins plus losses"):
+        tracker.update(("opponent",), {
+            "opponent": {"games": 2, "wins": 1, "losses": 0},
+        })
 
 
 @pytest.mark.parametrize(
@@ -179,6 +206,50 @@ def test_match_plan_hash_is_repeatable_and_partial_budget_is_exact():
     assert first.difficulty_budget == 19
 
 
+def test_match_results_have_only_wins_and_losses_and_reject_invalid_winner():
+    _network_value, bank, pool = _pool(("random",))
+    try:
+        plan = build_match_plan(
+            opponent_pool=pool,
+            performance_tracker=_tracker(pool),
+            selected_buckets=("random",),
+            difficulty_weight=0.5,
+            iteration=1,
+            first_absolute_game=0,
+            game_count=2,
+            base_seed=42,
+        )
+        results = []
+        for index, assignment in enumerate(plan.assignments):
+            learner_position = index
+            results.append({
+                "game_index": assignment.game_index,
+                "bucket_name": assignment.bucket_name,
+                "opponent_id": assignment.opponent_id,
+                "opponent_kind": assignment.opponent_kind,
+                "bank_slot": assignment.bank_slot,
+                "winner": 0,
+                "learner_position": learner_position,
+            })
+        by_opponent, by_bucket = aggregate_match_results(plan, results)
+        assert by_opponent[RANDOM_OPPONENT_ID] == {
+            "games": 2,
+            "wins": 1,
+            "losses": 1,
+        }
+        assert by_bucket["random"] == {
+            "games": 2,
+            "wins": 1,
+            "losses": 1,
+        }
+
+        results[0]["winner"] = None
+        with pytest.raises(ValueError, match="game-result draws do not exist"):
+            aggregate_match_results(plan, results)
+    finally:
+        bank.close()
+
+
 def test_recent_fifo_is_logical_and_heuristic_consumes_no_slot():
     network, bank, pool = _pool()
     try:
@@ -244,7 +315,7 @@ def test_pool_export_restore_preserves_ids_order_weights_and_performance():
         tracker = _tracker(pool)
         tracker.update(
             (record.opponent_id for record in pool.active_opponents()),
-            {HEURISTIC_OPPONENT_ID: {"wins": 3, "losses": 2, "draws": 0}},
+            {HEURISTIC_OPPONENT_ID: {"wins": 3, "losses": 2}},
         )
         state = pool.export_state()
         weights = pool.export_weights()

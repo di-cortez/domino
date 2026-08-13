@@ -19,7 +19,7 @@ from training.rl.pool import (
 from training.utils.seeding import stable_seed
 
 
-MATCHMAKING_POLICY_VERSION = 1
+MATCHMAKING_POLICY_VERSION = 2
 DIFFICULTY_WIN_RATE_LOWER = 0.375
 DIFFICULTY_WIN_RATE_UPPER = 0.625
 DIFFICULTY_PRIOR_GAMES = 20.0
@@ -40,9 +40,11 @@ def matchmaking_policy_manifest():
         ),
         "difficulty_evidence_decay": _EVIDENCE_DECAY,
         "new_opponent_win_rate": 0.5,
-        "draw_points": 0.5,
+        "game_result_outcomes": ["learner_win", "learner_loss"],
         "integer_rounding": "round_half_up_then_largest_remainder",
-        "tie_breaking": "bucket_registry_order_then_opponent_id",
+        "integer_allocation_tie_breaking": (
+            "bucket_registry_order_then_opponent_id"
+        ),
         "assignment_order": "stable_seeded_shuffle",
     }
 
@@ -59,21 +61,21 @@ def difficulty_from_win_rate(win_rate):
 
 @dataclass
 class OpponentPerformance:
-    """Smoothed recent evidence plus auditable lifetime outcome counters."""
+    """Smoothed win/loss evidence plus auditable lifetime outcome counters."""
 
-    decayed_learner_points: float = 0.0
-    decayed_games: float = 0.0
-    lifetime_games: int = 0
+    decayed_wins: float = 0.0
+    decayed_losses: float = 0.0
     lifetime_wins: int = 0
     lifetime_losses: int = 0
-    lifetime_draws: int = 0
 
     @property
     def estimated_win_rate(self):
         return (
-            self.decayed_learner_points + 0.5 * DIFFICULTY_PRIOR_GAMES
+            self.decayed_wins + 0.5 * DIFFICULTY_PRIOR_GAMES
         ) / (
-            self.decayed_games + DIFFICULTY_PRIOR_GAMES
+            self.decayed_wins
+            + self.decayed_losses
+            + DIFFICULTY_PRIOR_GAMES
         )
 
     @property
@@ -81,22 +83,18 @@ class OpponentPerformance:
         return difficulty_from_win_rate(self.estimated_win_rate)
 
     def decay(self):
-        self.decayed_learner_points *= _EVIDENCE_DECAY
-        self.decayed_games *= _EVIDENCE_DECAY
+        self.decayed_wins *= _EVIDENCE_DECAY
+        self.decayed_losses *= _EVIDENCE_DECAY
 
-    def add(self, *, wins=0, losses=0, draws=0):
+    def add(self, *, wins=0, losses=0):
         wins = int(wins)
         losses = int(losses)
-        draws = int(draws)
-        if min(wins, losses, draws) < 0:
+        if min(wins, losses) < 0:
             raise ValueError("Opponent outcomes cannot be negative")
-        games = wins + losses + draws
-        self.decayed_learner_points += wins + 0.5 * draws
-        self.decayed_games += games
-        self.lifetime_games += games
+        self.decayed_wins += wins
+        self.decayed_losses += losses
         self.lifetime_wins += wins
         self.lifetime_losses += losses
-        self.lifetime_draws += draws
 
 
 class OpponentPerformanceTracker:
@@ -130,10 +128,22 @@ class OpponentPerformanceTracker:
                 raise ValueError(
                     f"Iteration returned inactive opponent {opponent_id!r}"
                 )
+            unexpected = set(result) - {"games", "wins", "losses"}
+            if unexpected:
+                raise ValueError(
+                    "Opponent result contains unsupported outcome fields: "
+                    + ", ".join(sorted(unexpected))
+                )
+            wins = int(result.get("wins", 0))
+            losses = int(result.get("losses", 0))
+            if "games" in result and int(result["games"]) != wins + losses:
+                raise ValueError(
+                    "Opponent games must equal wins plus losses; game-result "
+                    "draws do not exist in this ruleset"
+                )
             self._values[opponent_id].add(
-                wins=result.get("wins", 0),
-                losses=result.get("losses", 0),
-                draws=result.get("draws", 0),
+                wins=wins,
+                losses=losses,
             )
 
     def retain_only(self, opponent_ids):
@@ -211,6 +221,18 @@ class MatchPlan:
 
 def _round_half_up(value):
     return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def matchmaking_component_budgets(game_count, difficulty_weight):
+    """Return exact uniform/difficulty budgets for one iteration game count."""
+    game_count = int(game_count)
+    difficulty_weight = float(difficulty_weight)
+    if game_count < 0:
+        raise ValueError("Matchmaking game count cannot be negative")
+    if not 0.0 <= difficulty_weight <= 1.0:
+        raise ValueError("difficulty_weight must be between 0 and 1")
+    difficulty_budget = _round_half_up(difficulty_weight * game_count)
+    return game_count - difficulty_budget, difficulty_budget
 
 
 def _largest_remainder(total, keys, weights):
@@ -347,8 +369,10 @@ def build_match_plan(
         record.opponent_id for record in opponent_pool.active_opponents()
     )
 
-    difficulty_budget = _round_half_up(alpha * game_count)
-    uniform_budget = game_count - difficulty_budget
+    uniform_budget, difficulty_budget = matchmaking_component_budgets(
+        game_count,
+        alpha,
+    )
     uniform = _component_allocation(
         opponent_pool,
         performance_tracker,
@@ -484,7 +508,6 @@ def aggregate_match_results(plan, rollout_results):
             "games": 0,
             "wins": 0,
             "losses": 0,
-            "draws": 0,
         }
         for allocation in plan.allocations
     }
@@ -493,7 +516,6 @@ def aggregate_match_results(plan, rollout_results):
             "games": 0,
             "wins": 0,
             "losses": 0,
-            "draws": 0,
         }
         for allocation in plan.allocations
     }
@@ -510,13 +532,19 @@ def aggregate_match_results(plan, rollout_results):
                     f"Rollout result changed assignment field {field!r} for "
                     f"game {game_index}"
                 )
-        winner = int(result["winner"])
-        learner_position = int(result["learner_position"])
-        outcome = (
-            "draws" if winner not in (0, 1)
-            else "wins" if winner == learner_position
-            else "losses"
-        )
+        winner = result["winner"]
+        learner_position = result["learner_position"]
+        if winner not in (0, 1):
+            raise ValueError(
+                f"Game {game_index} returned invalid winner {winner!r}; "
+                "game-result draws do not exist in this ruleset"
+            )
+        if learner_position not in (0, 1):
+            raise ValueError(
+                f"Game {game_index} returned invalid learner position "
+                f"{learner_position!r}"
+            )
+        outcome = "wins" if winner == learner_position else "losses"
         opponent_row = by_opponent[assignment.opponent_id]
         bucket_row = by_bucket[assignment.bucket_name]
         for row in (opponent_row, bucket_row):
@@ -525,47 +553,3 @@ def aggregate_match_results(plan, rollout_results):
     if seen != set(expected):
         raise ValueError("Rollout did not complete every MatchPlan game")
     return by_opponent, by_bucket
-
-
-def matchmaking_metrics(plan, by_opponent, by_bucket):
-    """Return compact auditable allocation and outcome provenance."""
-    bucket_payload = {
-        bucket_name: {
-            **dict(value),
-            "allocations": [],
-        }
-        for bucket_name, value in by_bucket.items()
-    }
-    opponent_payload = {}
-    for allocation in plan.allocations:
-        membership = {
-            "opponent_id": allocation.opponent_id,
-            "opponent_kind": allocation.opponent_kind,
-            "game_count": allocation.game_count,
-            "uniform_games": allocation.uniform_games,
-            "difficulty_games": allocation.difficulty_games,
-            "estimated_win_rate": allocation.estimated_win_rate,
-            "difficulty": allocation.difficulty,
-        }
-        bucket_payload[allocation.bucket_name]["allocations"].append(membership)
-        opponent = opponent_payload.setdefault(allocation.opponent_id, {
-            "opponent_id": allocation.opponent_id,
-            "opponent_kind": allocation.opponent_kind,
-            "game_count": 0,
-            "uniform_games": 0,
-            "difficulty_games": 0,
-            "estimated_win_rate": allocation.estimated_win_rate,
-            "difficulty": allocation.difficulty,
-            "outcomes": dict(by_opponent[allocation.opponent_id]),
-        })
-        opponent["game_count"] += allocation.game_count
-        opponent["uniform_games"] += allocation.uniform_games
-        opponent["difficulty_games"] += allocation.difficulty_games
-    return {
-        "plan_sha256": plan.plan_sha256,
-        "difficulty_weight": plan.difficulty_weight,
-        "uniform_budget": plan.uniform_budget,
-        "difficulty_budget": plan.difficulty_budget,
-        "buckets": bucket_payload,
-        "opponents": list(opponent_payload.values()),
-    }

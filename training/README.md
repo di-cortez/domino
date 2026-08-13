@@ -6,6 +6,19 @@ This folder contains the full training pipeline:
 2. train a supervised neural policy;
 3. refine that policy through self-play reinforcement learning.
 
+## Game-result invariant
+
+The current two-player ruleset has exactly two terminal outcomes: player 0
+wins or player 1 wins. A blocked game is resolved by remaining pip total, then
+hand size, then the most recent valid tile play, so a game-result draw is
+impossible. Training, diagnostics, difficulty estimates, and persisted RL
+state must therefore contain only wins and losses; a missing or non-binary
+winner is an engine-contract error.
+
+This is separate from the `DRAW` action, which means taking a tile from the
+stock. Tile draws, passes, their event counters, and optional RL reward shaping
+remain valid gameplay concepts and must not be confused with a drawn game.
+
 From the repository root, the canonical pipeline runs the full sequence:
 
 ```bash

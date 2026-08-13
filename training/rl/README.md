@@ -166,14 +166,21 @@ requested/effective minibatches, optimizer steps, epochs, KL stops, clipping,
 entropy, gradient norms, buffer location/bytes, rollout time, and update time.
 Every iteration is also appended to `<weights>_training_metrics.jsonl`.
 
-That JSONL uses compact schema version 2. Its first line is a header object with
-the ordered column list, complete training configuration, and canonical
-configuration SHA-256. Each later line is an array in that column order. The
-format preserves full JSON numeric precision and every PPO iteration, including
-KL values, KL early-stop state, completed epochs, minibatch sizes, optimizer
-steps, entropy, clipping, and gradient norms, while avoiding repeated field
-names and duplicate aliases in every row. Exact resume validates the header
-hash and truncates any uncommitted tail beyond the checkpoint.
+That JSONL uses compact schema version 5. Its first line is a header object with
+the ordered metric columns, complete training configuration, canonical
+configuration SHA-256, ordered opponent-bucket names, bucket-result columns,
+and nominal uniform/difficulty budgets. Each later line is an array in metric
+column order. Its `bucket_results` value is itself a name-free numeric matrix:
+one `[games, wins, losses]` row per header bucket. Per-opponent identities,
+difficulty evidence, and allocations belong to exact resume state and are not
+duplicated into every historical metrics row.
+
+The format preserves full JSON numeric precision and every PPO iteration,
+including KL values, KL early-stop state, completed epochs, minibatch sizes,
+optimizer steps, entropy, clipping, and gradient norms. Exact resume validates
+the header hash and stream-copies only committed rows through the selected
+checkpoint into a replacement file. It never materializes the complete JSONL
+or its decoded per-iteration objects merely to truncate an uncommitted tail.
 
 Canonical runs additionally maintain
 `models/rl/<run>/diagnostics/runtime_profile.json`. The report is written
@@ -209,6 +216,12 @@ tile plays are forced actions, so `RLAgent` returns them directly without
 calling the network or saving a trajectory step. Each saved step carries the
 legal-action mask and decision turn. Sampling and gradient calculation use the
 same masked policy distribution.
+
+`DRAW` in this paragraph means buying a tile from the stock. There is no drawn
+game in the current ruleset: every terminal state has player 0 or player 1 as
+its winner, including blocked games. Matchmaking difficulty evidence and its
+resume state consequently store only learner wins and learner losses. Any
+other terminal winner value is rejected as an engine-contract violation.
 
 `PolicyNetwork` uses masked PPO by default with the critic disabled. At the
 start of an iteration, one policy is frozen for all rollouts. Every real

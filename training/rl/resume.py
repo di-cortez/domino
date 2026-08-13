@@ -32,7 +32,7 @@ from training.rl.pool import pool_policy_manifest
 from utils.repository import current_git_commit
 
 
-RESUME_STATE_VERSION = 6
+RESUME_STATE_VERSION = 7
 SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 

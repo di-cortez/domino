@@ -20,7 +20,6 @@ from training.rl.ppo import (
 from training.rl.matchmaking import (
     aggregate_match_results,
     build_match_plan,
-    matchmaking_metrics,
 )
 from training.rl.reporting import (
     build_iteration_metrics_row,
@@ -461,11 +460,6 @@ def run_iteration(context, state, iteration):
         "checkpoint_archive_update",
         time.perf_counter() - section_started,
     )
-    matchmaking = matchmaking_metrics(
-        match_plan,
-        opponent_results,
-        bucket_results,
-    )
     if ppo_metrics is not None:
         state.ppo_window.append({
             **{
@@ -537,7 +531,7 @@ def run_iteration(context, state, iteration):
         checkpoint_written=checkpoint_written,
         checkpoint_path=checkpoint_path,
         iteration_started=iteration_started,
-        matchmaking=matchmaking,
+        bucket_results=bucket_results,
     )
     context.runtime_profile.add(
         "metrics_payload_construction",

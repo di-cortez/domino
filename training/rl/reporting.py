@@ -24,13 +24,17 @@ from training.rl.ppo import (
     ppo_is_enabled,
 )
 from training.rl.resume import resume_state_path
-from training.rl.matchmaking import matchmaking_policy_manifest
+from training.rl.matchmaking import (
+    matchmaking_component_budgets,
+    matchmaking_policy_manifest,
+)
 from utils.resource_limits import MIB
 from utils.runtime_status import format_duration, print_memory_report
 
 
 TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"
-TRAINING_METRICS_VERSION = 3
+TRAINING_METRICS_VERSION = 5
+BUCKET_RESULT_COLUMNS = ("games", "wins", "losses")
 TRAINING_METRIC_COLUMNS = (
     "iteration",
     "total_iterations",
@@ -69,7 +73,7 @@ TRAINING_METRIC_COLUMNS = (
     "selected_workers",
     "opponent_count",
     "unique_neural_opponent_count",
-    "matchmaking",
+    "bucket_results",
     "rollout_seconds",
     "update_seconds",
     "iteration_seconds",
@@ -143,7 +147,7 @@ def build_iteration_metrics_row(
     checkpoint_written,
     checkpoint_path,
     iteration_started,
-    matchmaking,
+    bucket_results,
 ):
     """Build the complete in-memory metrics row for one RL iteration."""
     moving_value_loss = (
@@ -199,7 +203,13 @@ def build_iteration_metrics_row(
         "unique_neural_opponent_count": int(
             context.runner.opponent_pool.unique_neural_opponent_count
         ),
-        "matchmaking": matchmaking,
+        "bucket_results": [
+            [
+                int(bucket_results[name][column])
+                for column in BUCKET_RESULT_COLUMNS
+            ]
+            for name in context.training.opponent_buckets
+        ],
         "rollout_seconds": float(rollout_elapsed),
         "ppo_seconds": float(update_elapsed if ppo_metrics else 0.0),
         "rollout_duration_s": float(rollout_elapsed),
@@ -776,11 +786,26 @@ def _print_ppo_window(rows):
 
 
 def _metrics_header(metadata):
+    metadata = dict(metadata or {})
+    training = metadata.get("training", {})
+    bucket_order = list(training.get("opponent_buckets", ()))
+    games_per_iteration = int(training.get("games_per_iteration", 0))
+    difficulty_weight = float(training.get("difficulty_weight", 0.0))
+    uniform_budget, difficulty_budget = matchmaking_component_budgets(
+        games_per_iteration,
+        difficulty_weight,
+    )
     return {
         "format": TRAINING_METRICS_FORMAT,
         "version": TRAINING_METRICS_VERSION,
         "columns": list(TRAINING_METRIC_COLUMNS),
-        "metadata": dict(metadata or {}),
+        "bucket_results": {
+            "bucket_order": bucket_order,
+            "columns": list(BUCKET_RESULT_COLUMNS),
+            "nominal_uniform_budget": uniform_budget,
+            "nominal_difficulty_budget": difficulty_budget,
+        },
+        "metadata": metadata,
     }
 
 
@@ -834,7 +859,7 @@ def _metric_values(row):
         "unique_neural_opponent_count": row[
             "unique_neural_opponent_count"
         ],
-        "matchmaking": row["matchmaking"],
+        "bucket_results": row["bucket_results"],
         "rollout_seconds": row["rollout_seconds"],
         "update_seconds": row["update_duration_s"],
         "iteration_seconds": row["iteration_duration_s"],
@@ -845,90 +870,139 @@ def _metric_values(row):
     return [values[column] for column in TRAINING_METRIC_COLUMNS]
 
 
-def read_training_metrics(path):
-    """Read the current metrics header and decode per-iteration dictionaries."""
-    path = Path(path)
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if not lines:
+def _read_training_metrics_header(stream, path):
+    """Read and validate one metrics header from an already-open stream."""
+    line = stream.readline()
+    if not line:
         raise ValueError(f"Training metrics file is empty: {path}.")
     try:
-        header = json.loads(lines[0])
+        header = json.loads(line)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Training metrics header is invalid: {path}.") from exc
+    bucket_schema = header.get("bucket_results", {}) if isinstance(header, dict) else {}
     if (
         not isinstance(header, dict)
         or header.get("format") != TRAINING_METRICS_FORMAT
         or header.get("version") != TRAINING_METRICS_VERSION
         or header.get("columns") != list(TRAINING_METRIC_COLUMNS)
+        or bucket_schema.get("columns") != list(BUCKET_RESULT_COLUMNS)
+        or not isinstance(bucket_schema.get("bucket_order"), list)
+        or not bucket_schema["bucket_order"]
+        or len(set(bucket_schema["bucket_order"]))
+        != len(bucket_schema["bucket_order"])
     ):
         raise ValueError(
             f"Unsupported training metrics format in {path}; "
             f"expected v{TRAINING_METRICS_VERSION}."
         )
-    rows = []
-    for line_number, line in enumerate(lines[1:], start=2):
+    return header
+
+
+def _iter_training_metric_values(stream, path, bucket_count):
+    """Yield validated rows while holding at most one JSON line in memory."""
+    for line_number, line in enumerate(stream, start=2):
         if not line.strip():
             continue
         try:
             values = json.loads(line)
-        except json.JSONDecodeError:
-            if line_number == len(lines):
+        except json.JSONDecodeError as exc:
+            if not line.endswith("\n"):
                 break
             raise ValueError(
                 f"Training metrics row {line_number} is invalid."
-            )
+            ) from exc
         if not isinstance(values, list) or len(values) != len(
             TRAINING_METRIC_COLUMNS
         ):
             raise ValueError(
                 f"Training metrics row {line_number} has the wrong column count."
             )
-        rows.append(dict(zip(TRAINING_METRIC_COLUMNS, values)))
+        bucket_results = values[TRAINING_METRIC_COLUMNS.index("bucket_results")]
+        if (
+            not isinstance(bucket_results, list)
+            or len(bucket_results) != bucket_count
+            or any(
+                not isinstance(result, list)
+                or len(result) != len(BUCKET_RESULT_COLUMNS)
+                or any(type(value) is not int or value < 0 for value in result)
+                or result[0] != result[1] + result[2]
+                for result in bucket_results
+            )
+            or sum(result[0] for result in bucket_results)
+            != values[TRAINING_METRIC_COLUMNS.index("games")]
+        ):
+            raise ValueError(
+                f"Training metrics row {line_number} has invalid bucket results."
+            )
+        yield values
+
+
+def read_training_metrics(path):
+    """Decode metrics incrementally, without first copying the whole text."""
+    path = Path(path)
+    rows = []
+    with open(path, encoding="utf-8") as stream:
+        header = _read_training_metrics_header(stream, path)
+        bucket_count = len(header["bucket_results"]["bucket_order"])
+        for values in _iter_training_metric_values(stream, path, bucket_count):
+            rows.append(dict(zip(TRAINING_METRIC_COLUMNS, values)))
     return header, rows
 
 
 def _prepare_metrics_file(path, start_iteration, metadata=None):
-    """Create a current trace or truncate it to the exact resumed iteration."""
+    """Create or stream-truncate a trace to the exact resumed iteration."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     header = _metrics_header(metadata)
-    retained = []
-    if start_iteration and path.is_file():
-        existing_header, existing_rows = read_training_metrics(path)
-        existing_hash = existing_header.get("metadata", {}).get(
-            "run_configuration_sha256"
-        )
-        requested_hash = header.get("metadata", {}).get(
-            "run_configuration_sha256"
-        )
-        if existing_hash != requested_hash:
-            raise ValueError(
-                "Training metrics configuration hash does not match the "
-                "resumed run."
-            )
-        header = existing_header
-        for row in existing_rows:
-            if int(row["iteration"]) <= int(start_iteration):
-                retained.append(row)
     temporary = path.with_name(
         f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
     )
+    source = None
     try:
-        with open(temporary, "w", encoding="utf-8") as stream:
-            stream.write(
+        with open(temporary, "w", encoding="utf-8") as output:
+            if start_iteration and path.is_file():
+                source = open(path, encoding="utf-8")
+                existing_header = _read_training_metrics_header(source, path)
+                existing_hash = existing_header.get("metadata", {}).get(
+                    "run_configuration_sha256"
+                )
+                requested_hash = header.get("metadata", {}).get(
+                    "run_configuration_sha256"
+                )
+                if existing_hash != requested_hash:
+                    raise ValueError(
+                        "Training metrics configuration hash does not match "
+                        "the resumed run."
+                    )
+                header = existing_header
+            output.write(
                 json.dumps(header, separators=(",", ":"), allow_nan=False)
                 + "\n"
             )
-            for row in retained:
-                values = [row[column] for column in TRAINING_METRIC_COLUMNS]
-                stream.write(
-                    json.dumps(values, separators=(",", ":"), allow_nan=False)
-                    + "\n"
-                )
-            stream.flush()
-            os.fsync(stream.fileno())
+            if source is not None:
+                iteration_index = TRAINING_METRIC_COLUMNS.index("iteration")
+                bucket_count = len(header["bucket_results"]["bucket_order"])
+                for values in _iter_training_metric_values(
+                    source,
+                    path,
+                    bucket_count,
+                ):
+                    if int(values[iteration_index]) > int(start_iteration):
+                        break
+                    output.write(
+                        json.dumps(
+                            values,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        )
+                        + "\n"
+                    )
+            output.flush()
+            os.fsync(output.fileno())
         os.replace(temporary, path)
     finally:
+        if source is not None:
+            source.close()
         temporary.unlink(missing_ok=True)
     return path
 

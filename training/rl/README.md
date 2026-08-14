@@ -296,7 +296,8 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 |---|---|---:|
 | `--fresh-from-sl` / `--continue-existing-rl` | Force initialization from SL or allow a compatible existing RL checkpoint | continue existing RL (standalone); canonical continuation uses `--resume` |
 | `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
-| `--reward-schema` | Named preset for the terminal/event reward constants: `default` (the table below), `sparse` (win/loss only, no draw/pass shaping or pip penalty), or `shaped` (doubles the draw/pass shaping rewards) | `default` |
+| `--alpha` | Convex mix of the two reward components per decision: `0` trains on the terminal outcome alone, `1` on local draw/pass shaping alone | `0.5` |
+| `--event-reward-decay` | Per-turn decay crediting a draw/pass event back to the real decisions preceding it (`0` credits only the immediately preceding decision) | `0.90` |
 | `--ppo-max-epochs` | `1` selects one-update REINFORCE; `2`–`16` select masked PPO | `4` standalone/finite, `16` forever |
 | `--value-head` | Train a linear critic with PPO or REINFORCE | off |
 | `--weight-decay [COEFFICIENT]` | Decoupled L2 shrink on every weight matrix and `Wv` after clipping; shared with supervised training | off (`0.0001`) |
@@ -310,7 +311,7 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 | `--device` | Array backend: `auto` matches `GPU_ENABLED` exactly (CuPy when installed, else NumPy); `cpu`/`gpu` force one backend regardless of what's installed/enabled globally | `auto` |
 
 ```bash
-python -m training.rl.cli --gamma 0.97 --reward-schema shaped --seed 42
+python -m training.rl.cli --gamma 0.97 --alpha 0.3 --event-reward-decay 0.8 --seed 42
 ```
 
 A point-in-time value loss or win rate is dominated by batch noise; the
@@ -376,24 +377,35 @@ draw/pass shaping. For each real decision at turn `d_i`, a later event at turn
 c_e * EVENT_REWARD_DECAY ** (t_e - d_i - 1)
 ```
 
-with `EVENT_REWARD_DECAY = 0.90`. An immediately following event therefore has
-exponent `0` and receives the full event reward. By default (`--gamma 1.0`)
-the terminal result is not discounted and is applied uniformly to every real
-decision in the game; passing `--gamma` below `1.0` discounts it per
-remaining real decision instead (see "Optional RL controls" above).
+with `EVENT_REWARD_DECAY = 0.90` by default, tunable through
+`--event-reward-decay`. An immediately following event therefore has exponent
+`0` and receives the full event reward.
 
-Reward constants (the `default` reward schema; `--reward-schema` selects an
-alternate preset, see above):
+The two components are then combined into the total reward of each decision:
+
+```text
+R_T = (1 - ALPHA) * DEFAULT_GAMMA ** k * R_f + ALPHA * R_l
+```
+
+where `R_f` is the terminal reward, `k` the number of real decisions still
+remaining after this one, and `R_l` the summed decayed local event reward.
+By default (`--gamma 1.0`) the terminal result is not discounted and is
+applied uniformly to every real decision in the game; passing `--gamma` below
+`1.0` discounts it per remaining real decision instead. `--alpha` trades the
+two components off against each other: `0` trains on the terminal outcome
+alone and `1` on local shaping alone (see "Optional RL controls" above).
+
+Reward constants:
 
 | Event | Reward |
 |---|---:|
-| terminal win | `+0.50` |
-| terminal loss | `-0.50` |
-| opponent draw | `+0.02` |
+| terminal win | `+1.00` |
+| terminal loss | `-1.00` |
+| opponent draw | `+0.20` |
 | opponent pass | `+0.10` |
-| learner draw | `-0.02` |
+| learner draw | `-0.20` |
 | learner pass | `-0.10` |
-| final remaining pips | `-0.001 * remaining_pips` |
+| final remaining pips | `-0.05 * remaining_pips` |
 
 Multiple local events are summed. A learner draw/pass penalty is applied to all
 earlier real decisions with the same decay rule, not just to the most recent

@@ -9,58 +9,44 @@ from agents.heuristic_agent import StrategicAgent
 from agents.rl_agent import RLAgent
 from middleware.domino_engine import DominoEngine
 
+TERMINAL_WIN_REWARD = 1
+TERMINAL_LOSS_REWARD = -TERMINAL_WIN_REWARD
+FINAL_PIP_PENALTY = TERMINAL_WIN_REWARD/20
 
-TERMINAL_WIN_REWARD = 0.50
-TERMINAL_LOSS_REWARD = -0.50
-FINAL_PIP_PENALTY = 0.001
+OPPONENT_DRAW_REWARD = TERMINAL_WIN_REWARD/5
+LEARNER_DRAW_PENALTY = -OPPONENT_DRAW_REWARD
+OPPONENT_PASS_REWARD = OPPONENT_DRAW_REWARD/2
+LEARNER_PASS_PENALTY = -OPPONENT_PASS_REWARD
 
-OPPONENT_DRAW_REWARD = 0.02
-LEARNER_DRAW_PENALTY = -0.02
-OPPONENT_PASS_REWARD = 0.10
-LEARNER_PASS_PENALTY = -0.10
+# Per-turn decay applied to a local event reward as it is credited backwards to
+# the real decisions that preceded the event.
 EVENT_REWARD_DECAY = 0.90
-
-REWARD_ZERO_EPSILON = 1e-8
-
-# Named presets for terminal and local event rewards. The values and mutable
-# mapping shape remain part of the historical self-play compatibility surface.
-REWARD_SCHEMAS = {
-    "default": {
-        "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_loss": TERMINAL_LOSS_REWARD,
-        "final_pip_penalty": FINAL_PIP_PENALTY,
-        "opponent_draw": OPPONENT_DRAW_REWARD,
-        "learner_draw": LEARNER_DRAW_PENALTY,
-        "opponent_pass": OPPONENT_PASS_REWARD,
-        "learner_pass": LEARNER_PASS_PENALTY,
-        "event_decay": EVENT_REWARD_DECAY,
-    },
-    "sparse": {
-        "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_loss": TERMINAL_LOSS_REWARD,
-        "final_pip_penalty": 0.0,
-        "opponent_draw": 0.0,
-        "learner_draw": 0.0,
-        "opponent_pass": 0.0,
-        "learner_pass": 0.0,
-        "event_decay": EVENT_REWARD_DECAY,
-    },
-    "shaped": {
-        "terminal_win": TERMINAL_WIN_REWARD,
-        "terminal_loss": TERMINAL_LOSS_REWARD,
-        "final_pip_penalty": FINAL_PIP_PENALTY,
-        "opponent_draw": OPPONENT_DRAW_REWARD * 2.0,
-        "learner_draw": LEARNER_DRAW_PENALTY * 2.0,
-        "opponent_pass": OPPONENT_PASS_REWARD * 2.0,
-        "learner_pass": LEARNER_PASS_PENALTY * 2.0,
-        "event_decay": EVENT_REWARD_DECAY,
-    },
-}
-DEFAULT_REWARD_SCHEMA = "default"
 
 # Terminal-reward discount applied per remaining real decision (1.0 keeps the
 # historical undiscounted terminal outcome).
 DEFAULT_GAMMA = 1.0
+
+# Convex mixture weight between the two reward components of one decision:
+# 0.0 trains on the terminal outcome alone, 1.0 on local event shaping alone.
+ALPHA = 0.5
+
+REWARD_ZERO_EPSILON = 1e-8
+
+# The single set of terminal and local event reward constants. The mutable
+# mapping shape remains part of the historical self-play compatibility surface:
+# it is copied per run, overridden with the tunables resolved from the CLI, and
+# shipped unchanged to every rollout worker.
+REWARD_SCHEMAS = {
+    "terminal_win": TERMINAL_WIN_REWARD,
+    "terminal_loss": TERMINAL_LOSS_REWARD,
+    "final_pip_penalty": FINAL_PIP_PENALTY,
+    "opponent_draw": OPPONENT_DRAW_REWARD,
+    "learner_draw": LEARNER_DRAW_PENALTY,
+    "opponent_pass": OPPONENT_PASS_REWARD,
+    "learner_pass": LEARNER_PASS_PENALTY,
+    "event_decay": EVENT_REWARD_DECAY,
+    "alpha": ALPHA,
+}
 
 
 @dataclass
@@ -107,7 +93,7 @@ def _event_reward_for_action(
 ):
     """Return the local event reward for draw/pass actions and update counts."""
     if schema is None:
-        schema = REWARD_SCHEMAS[DEFAULT_REWARD_SCHEMA]
+        schema = REWARD_SCHEMAS
     if current_player != learner_position:
         if action == ("DRAW", None):
             event_stats.opponent_draws += 1
@@ -144,22 +130,37 @@ def _terminal_reward(engine, learner_position, schema):
 
 
 def _finish_episode_with_rewards(
-    learner_agent, terminal_reward, gamma=DEFAULT_GAMMA
+    learner_agent, terminal_reward, gamma=DEFAULT_GAMMA, alpha=ALPHA
 ):
     """Finalize one learner trajectory into policy-gradient training samples.
 
-    ``gamma`` discounts the terminal-reward component per remaining real
-    decision, so earlier decisions in the trajectory receive a more heavily
-    discounted share of the final outcome than the last one. Local event
-    rewards already carry their own temporal decay and are not affected.
+    Each decision's total reward is the convex combination
+
+        R_T = (1 - alpha) * gamma ** k * R_f + alpha * R_l
+
+    where ``R_f`` is the episode's terminal reward, ``k`` the number of real
+    decisions still remaining after this one, and ``R_l`` the decayed local
+    event reward already accumulated on the step. ``gamma`` therefore discounts
+    the terminal component per remaining decision, so earlier decisions receive
+    a more heavily discounted share of the final outcome than the last one,
+    while ``alpha`` trades the two components off against each other:
+    ``alpha=0`` trains on the terminal outcome alone and ``alpha=1`` on local
+    event shaping alone.
+
+    The stored ``terminal_reward`` and ``local_reward`` components are the
+    scaled halves, so ``policy_reward == terminal_reward + local_reward``
+    remains an identity for the PPO buffer and the reward diagnostics.
     """
     finished_steps = learner_agent.finish_episode(terminal_reward)
     step_count = len(finished_steps)
     samples = []
     for index, step in enumerate(finished_steps):
         remaining_after = step_count - 1 - index
-        discounted_terminal = step.terminal_reward * (gamma ** remaining_after)
-        raw_reward = discounted_terminal + step.local_reward
+        discounted_terminal = (1.0 - alpha) * step.terminal_reward * (
+            gamma ** remaining_after
+        )
+        scaled_local = alpha * step.local_reward
+        raw_reward = discounted_terminal + scaled_local
         samples.append(
             TrainingSample(
                 x=step.x,
@@ -168,7 +169,7 @@ def _finish_episode_with_rewards(
                 old_log_prob=step.old_log_prob,
                 policy_reward=raw_reward,
                 raw_reward=raw_reward,
-                local_reward=step.local_reward,
+                local_reward=scaled_local,
                 terminal_reward=discounted_terminal,
             )
         )
@@ -361,7 +362,9 @@ def _collect_steps_vs_snapshot(
     )
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
-    samples = _finish_episode_with_rewards(learner, reward, gamma)
+    samples = _finish_episode_with_rewards(
+        learner, reward, gamma, schema["alpha"]
+    )
     _profile_worker_section(
         runtime_profile,
         "terminal_reward_and_trajectory_finalization",
@@ -440,7 +443,9 @@ def _collect_steps_vs_heuristic(
     )
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
-    samples = _finish_episode_with_rewards(learner, reward, gamma)
+    samples = _finish_episode_with_rewards(
+        learner, reward, gamma, schema["alpha"]
+    )
     _profile_worker_section(
         runtime_profile,
         "terminal_reward_and_trajectory_finalization",
@@ -479,7 +484,9 @@ def _collect_steps_vs_random(
     )
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
-    samples = _finish_episode_with_rewards(learner, reward, gamma)
+    samples = _finish_episode_with_rewards(
+        learner, reward, gamma, schema["alpha"]
+    )
     _profile_worker_section(
         runtime_profile,
         "terminal_reward_and_trajectory_finalization",

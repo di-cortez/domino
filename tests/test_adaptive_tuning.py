@@ -118,7 +118,7 @@ def _tuning_kwargs(network, **overrides):
         "base_seed": 42,
         "opponent_buckets": ("heuristic", "recent"),
         "difficulty_weight": 0.5,
-        "schema": REWARD_SCHEMAS["default"],
+        "schema": dict(REWARD_SCHEMAS),
         "gamma": 1.0,
         "safety": ParallelSafetyConfig(memory_reserve_mb=0),
     }
@@ -149,7 +149,7 @@ def test_worker_benchmark_uses_exact_one_percent_with_partial_final_block():
             base_seed=42,
             opponent_buckets=("heuristic", "recent"),
             difficulty_weight=0.5,
-            schema=REWARD_SCHEMAS["default"],
+            schema=dict(REWARD_SCHEMAS),
             gamma=1.0,
             safety=ParallelSafetyConfig(memory_reserve_mb=0),
         )
@@ -191,7 +191,7 @@ def test_worker_benchmark_stops_below_ten_percent_and_keeps_previous():
             base_seed=42,
             opponent_buckets=("heuristic", "recent"),
             difficulty_weight=0.5,
-            schema=REWARD_SCHEMAS["default"],
+            schema=dict(REWARD_SCHEMAS),
             gamma=1.0,
             safety=ParallelSafetyConfig(memory_reserve_mb=0),
             status_callback=messages.append,

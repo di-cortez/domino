@@ -51,7 +51,8 @@ Important RL options are:
 | `--rl-iterations` | Legacy fixed iteration budget using the default GPI | unset |
 | `--rl-learning-rate` | Learning rate | `0.001` |
 | `--rl-gamma` | Terminal-reward discount | `1.0` |
-| `--rl-reward-schema` | `default`, `sparse`, or `shaped` | `default` |
+| `--rl-alpha` | Convex mix of local vs terminal reward (`0` = terminal only, `1` = local only) | `0.5` |
+| `--rl-event-reward-decay` | Per-turn decay crediting a draw/pass event to earlier decisions | `0.90` |
 | `--rl-workers` | CPU rollout workers or `auto` | `auto` |
 | `--rl-value-head` | Enable the value head with PPO or REINFORCE | off |
 | `--weight-decay` | L2 decay forwarded to both the SL and the RL stage | off |

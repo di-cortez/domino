@@ -28,7 +28,6 @@ from middleware.middleware import GameManager
 from training.datagen.parallel import generate_dataset_game
 from training.rl.rollout import (
     DEFAULT_GAMMA,
-    DEFAULT_REWARD_SCHEMA,
     REWARD_SCHEMAS,
     _collect_steps_vs_snapshot,
 )
@@ -302,7 +301,7 @@ class HeadlessEngineStepTests(unittest.TestCase):
             random_seed=7,
             device="cpu",
         )
-        schema = REWARD_SCHEMAS[DEFAULT_REWARD_SCHEMA]
+        schema = dict(REWARD_SCHEMAS)
 
         random.seed(54321)
         np.random.seed(54321)

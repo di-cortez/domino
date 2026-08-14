@@ -32,7 +32,11 @@ from training.rl.pool import pool_policy_manifest
 from utils.repository import current_git_commit
 
 
-RESUME_STATE_VERSION = 8
+# Version 9 replaced the ``reward_schema`` preset name with the explicit
+# ``alpha``/``event_reward_decay`` tunables and rescaled the reward constants,
+# so a version 8 checkpoint would silently resume against a different reward
+# function.
+RESUME_STATE_VERSION = 9
 SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
@@ -54,7 +58,8 @@ class RLTrainingConfiguration:
     use_value_head: bool
     value_coef: float
     gamma: float
-    reward_schema: str
+    alpha: float
+    event_reward_decay: float
     normalize_advantages: bool
     weight_decay: float
     dropout_rate: float
@@ -125,7 +130,8 @@ class RLTrainingConfiguration:
             "use_value_head": bool(rl["use_value_head"]),
             "value_coef": float(rl["value_coef"]),
             "gamma": float(rl["gamma"]),
-            "reward_schema": rl["reward_schema"],
+            "alpha": float(rl["alpha"]),
+            "event_reward_decay": float(rl["event_reward_decay"]),
             "normalize_advantages": bool(rl["normalize_advantages"]),
             "weight_decay": float(rl["weight_decay"]),
             "dropout_rate": float(rl["dropout_rate"]),

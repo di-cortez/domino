@@ -19,8 +19,9 @@ from training.rl.ppo import (
     validate_ppo_max_epochs,
 )
 from training.rl.rollout import (
+    ALPHA,
     DEFAULT_GAMMA,
-    DEFAULT_REWARD_SCHEMA,
+    EVENT_REWARD_DECAY,
     REWARD_SCHEMAS,
 )
 
@@ -59,7 +60,8 @@ class RLTrainingOptions:
     use_value_head: bool = False
     value_coef: float = VALUE_COEF
     gamma: float = DEFAULT_GAMMA
-    reward_schema: str = DEFAULT_REWARD_SCHEMA
+    alpha: float = ALPHA
+    event_reward_decay: float = EVENT_REWARD_DECAY
     normalize_advantages: bool | None = DEFAULT_NORMALIZE_ADVANTAGES
     seed: int | None = None
     ppo_max_epochs: int = DEFAULT_PPO_MAX_EPOCHS
@@ -175,8 +177,15 @@ def resolve_training_options(training, resources, execution):
     difficulty_weight = float(training.difficulty_weight)
     if not 0.0 <= difficulty_weight <= 1.0:
         raise ValueError("difficulty_weight must be between 0 and 1")
-    if training.reward_schema not in REWARD_SCHEMAS:
-        raise ValueError(f"Unknown reward_schema {training.reward_schema!r}.")
+    gamma = float(training.gamma)
+    if not 0.0 <= gamma <= 1.0:
+        raise ValueError("gamma must be between 0 and 1")
+    alpha = float(training.alpha)
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must be between 0 and 1")
+    event_reward_decay = float(training.event_reward_decay)
+    if not 0.0 <= event_reward_decay <= 1.0:
+        raise ValueError("event_reward_decay must be between 0 and 1")
     if float(training.value_coef) < 0:
         raise ValueError("value_coef must be non-negative")
     if float(training.weight_decay) < 0:
@@ -208,6 +217,9 @@ def resolve_training_options(training, resources, execution):
         total_training_games=total_training_games,
         opponent_buckets=opponent_buckets,
         difficulty_weight=difficulty_weight,
+        gamma=gamma,
+        alpha=alpha,
+        event_reward_decay=event_reward_decay,
         normalize_advantages=normalize_advantages,
         ppo_max_epochs=ppo_max_epochs,
     )
@@ -222,5 +234,9 @@ def resolve_training_options(training, resources, execution):
         execution=execution,
         tuning_training_games=tuning_training_games,
         algorithm=algorithm,
-        schema=REWARD_SCHEMAS[training.reward_schema],
+        schema={
+            **REWARD_SCHEMAS,
+            "event_decay": event_reward_decay,
+            "alpha": alpha,
+        },
     )

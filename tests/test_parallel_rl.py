@@ -124,7 +124,7 @@ class ParallelRLTests(unittest.TestCase):
         runner = RLRolloutRunner(
             network,
             opponent_buckets=opponent_buckets,
-            schema=REWARD_SCHEMAS["default"],
+            schema=dict(REWARD_SCHEMAS),
             gamma=1.0,
             safety=self.safety,
         )
@@ -842,7 +842,7 @@ class ParallelRLTests(unittest.TestCase):
         runner = RLRolloutRunner(
             network,
             opponent_buckets=("heuristic", "recent"),
-            schema=REWARD_SCHEMAS["default"],
+            schema=dict(REWARD_SCHEMAS),
             gamma=1.0,
             safety=safety,
         )

@@ -22,7 +22,7 @@
 #   python -m training.supervised.cli
 #
 # Stage 3 wraps `python -m training.rl.cli`, which does accept CLI flags
-# (exact games, learning rate, reward schema, gamma,
+# (exact games, learning rate, gamma/alpha/event-reward-decay,
 # value-head/critic toggle, ...). Stage 4 wraps `python -m diagnostics.evaluate`,
 # passing the RL/SL weights this run used so the report evaluates the correct
 # checkpoints rather than falling back to `diagnostics.pairwise`'s hardcoded
@@ -63,7 +63,8 @@ RL_CHECKPOINT_INTERVAL=50
 RL_VALUE_HEAD=0
 RL_VALUE_COEF=0.5
 RL_GAMMA=1.0
-RL_REWARD_SCHEMA="default"
+RL_ALPHA=0.5
+RL_EVENT_REWARD_DECAY=0.90
 
 # Convergence monitoring uses trailing averages because a point-in-time value
 # loss or win rate is dominated by batch noise. Gradient clipping and optional
@@ -160,7 +161,8 @@ training.rl.cli):
   --rl-value-head              Turn the critic ON for PPO or REINFORCE
   --rl-value-coef F            Value-loss coefficient, only used when --rl-value-head is set (default: $RL_VALUE_COEF)
   --rl-gamma F                 Terminal-reward discount per remaining real decision, 1.0 = no discount (default: $RL_GAMMA)
-  --rl-reward-schema NAME      "default", "sparse", or "shaped" reward preset (default: $RL_REWARD_SCHEMA)
+  --rl-alpha F                 Convex mix of local vs terminal reward, 0 = terminal only, 1 = local only (default: $RL_ALPHA)
+  --rl-event-reward-decay F    Per-turn decay crediting a draw/pass event back to earlier decisions (default: $RL_EVENT_REWARD_DECAY)
   --rl-workers N|auto          CPU-only rollout workers with isolated tuning (default: $RL_WORKERS, maximum 20)
   --rl-memory-reserve-mb N     Host RAM kept free during rollouts (default: $RL_MEMORY_RESERVE_MB)
   --rl-estimated-worker-mb N   Preflight RAM estimate per worker (default: $RL_ESTIMATED_WORKER_MB)
@@ -217,7 +219,7 @@ Examples:
   # Batch run: only vary RL hyperparameters, reuse existing dataset/SL weights;
   # diagnostics land in diagnostics/results/domino_rl_weights_lr0005_gamma097_shaped/
   train_script/run_training_pipeline.sh --skip-dataset --skip-sl \\
-      --rl-learning-rate 0.0005 --rl-gamma 0.97 --rl-reward-schema shaped \\
+      --rl-learning-rate 0.0005 --rl-gamma 0.97 --rl-alpha 0.3 \\
       --rl-weights-file models/domino_rl_weights_lr0005_gamma097_shaped.npz
 
   # Same, with the critic (value head) turned on
@@ -241,7 +243,8 @@ while [[ $# -gt 0 ]]; do
         --rl-value-head) RL_VALUE_HEAD=1; shift ;;
         --rl-value-coef) RL_VALUE_COEF="$2"; shift 2 ;;
         --rl-gamma) RL_GAMMA="$2"; shift 2 ;;
-        --rl-reward-schema) RL_REWARD_SCHEMA="$2"; shift 2 ;;
+        --rl-alpha) RL_ALPHA="$2"; shift 2 ;;
+        --rl-event-reward-decay) RL_EVENT_REWARD_DECAY="$2"; shift 2 ;;
         --rl-normalize-advantages) RL_NORMALIZE_ADVANTAGES=1; shift ;;
         --rl-no-normalize-advantages) RL_NORMALIZE_ADVANTAGES=0; shift ;;
         --rl-ppo-max-epochs) RL_PPO_MAX_EPOCHS="$2"; shift 2 ;;
@@ -414,7 +417,8 @@ else
         --fresh-from-sl \
         --value-coef "$RL_VALUE_COEF" \
         --gamma "$RL_GAMMA" \
-        --reward-schema "$RL_REWARD_SCHEMA" \
+        --alpha "$RL_ALPHA" \
+        --event-reward-decay "$RL_EVENT_REWARD_DECAY" \
         --moving-average-window "$RL_MOVING_AVERAGE_WINDOW" \
         --device "$RL_DEVICE" \
         --rl-workers "$RL_WORKERS" \

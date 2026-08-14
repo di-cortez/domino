@@ -33,7 +33,6 @@ from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import DominoEngine
 from training.rl.rollout import (
     DEFAULT_GAMMA,
-    DEFAULT_REWARD_SCHEMA,
     REWARD_SCHEMAS,
     _collect_steps_vs_snapshot,
 )
@@ -189,7 +188,7 @@ def _run_rl_rollouts(game_count: int, base_seed: int, optimized: bool):
         str(ROOT / "models" / "domino_rl_weights.npz"),
         device="cpu",
     )
-    schema = REWARD_SCHEMAS[DEFAULT_REWARD_SCHEMA]
+    schema = dict(REWARD_SCHEMAS)
     digest = hashlib.sha256()
 
     with _count_engine_calls(force_default_step=not optimized) as counters:

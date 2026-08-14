@@ -31,7 +31,7 @@ from training.rl.parallel import (
     DEFAULT_RL_WORKERS,
     worker_count as parse_rl_worker_count,
 )
-from training.rl.rollout import DEFAULT_GAMMA, DEFAULT_REWARD_SCHEMA, REWARD_SCHEMAS
+from training.rl.rollout import ALPHA, DEFAULT_GAMMA, EVENT_REWARD_DECAY
 from training.rl.resume import load_resume_state
 from training.utils.cli_args import add_regularization_arguments, positive_int
 from utils.runtime_status import format_duration
@@ -45,19 +45,27 @@ def parse_opponent_buckets(value):
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
-def parse_difficulty_weight(value):
-    """Parse the closed unit interval used by deterministic matchmaking."""
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise argparse.ArgumentTypeError(
-            "difficulty weight must be a number between 0 and 1"
-        ) from exc
-    if not 0.0 <= parsed <= 1.0:
-        raise argparse.ArgumentTypeError(
-            "difficulty weight must be between 0 and 1"
-        )
-    return parsed
+def unit_interval_parser(name):
+    """Build a parser for one closed [0, 1] hyperparameter named ``name``."""
+
+    def parse(value):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise argparse.ArgumentTypeError(
+                f"{name} must be a number between 0 and 1"
+            ) from exc
+        if not 0.0 <= parsed <= 1.0:
+            raise argparse.ArgumentTypeError(f"{name} must be between 0 and 1")
+        return parsed
+
+    return parse
+
+
+parse_difficulty_weight = unit_interval_parser("difficulty weight")
+parse_gamma = unit_interval_parser("gamma")
+parse_alpha = unit_interval_parser("alpha")
+parse_event_reward_decay = unit_interval_parser("event reward decay")
 
 
 def add_optional_rl_arguments(
@@ -192,15 +200,30 @@ def add_optional_rl_arguments(
     group.add_argument("--value-coef", type=float, default=VALUE_COEF)
     group.add_argument(
         "--gamma",
-        type=float,
+        type=parse_gamma,
         default=DEFAULT_GAMMA,
         help="Terminal-reward discount per remaining real decision (1.0 = no discount).",
     )
     group.add_argument(
-        "--reward-schema",
-        choices=tuple(REWARD_SCHEMAS),
-        default=DEFAULT_REWARD_SCHEMA,
-        help="Named preset for the terminal/event reward constants.",
+        "--alpha",
+        type=parse_alpha,
+        default=ALPHA,
+        help=(
+            "Convex mix of the two reward components per decision: "
+            "R = (1 - alpha) * gamma**k * terminal + alpha * local. "
+            "0 trains on the terminal outcome alone, 1 on local event "
+            "shaping alone."
+        ),
+    )
+    group.add_argument(
+        "--event-reward-decay",
+        type=parse_event_reward_decay,
+        default=EVENT_REWARD_DECAY,
+        help=(
+            "Per-turn decay applied to a draw/pass event reward as it is "
+            "credited backwards to the real decisions preceding the event "
+            "(0 credits only the immediately preceding decision)."
+        ),
     )
     group.add_argument(
         "--normalize-advantages",
@@ -307,7 +330,8 @@ def training_options_from_args(args):
         use_value_head=args.value_head,
         value_coef=args.value_coef,
         gamma=args.gamma,
-        reward_schema=args.reward_schema,
+        alpha=args.alpha,
+        event_reward_decay=args.event_reward_decay,
         normalize_advantages=args.normalize_advantages,
         seed=args.seed,
         ppo_max_epochs=args.ppo_max_epochs,

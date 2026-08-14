@@ -21,6 +21,8 @@ from training.rl.matchmaking import (
 from training.rl.pool import (
     HEURISTIC_OPPONENT_ID,
     K_RECENT,
+    MEDIUM_TERM_CAPACITY,
+    MEDIUM_TERM_INTERVAL_ITERATIONS,
     OpponentPool,
     RANDOM_OPPONENT_ID,
     SharedPolicyBank,
@@ -57,10 +59,13 @@ def _tracker(pool):
 
 
 def test_bucket_configuration_is_named_canonical_and_strict():
-    assert canonicalize_bucket_names("recent,random,heuristic") == (
+    assert canonicalize_bucket_names(
+        "medium_term,recent,random,heuristic"
+    ) == (
         "heuristic",
         "random",
         "recent",
+        "medium_term",
     )
     assert canonicalize_bucket_names("recent,heuristic") == (
         "heuristic",
@@ -273,6 +278,165 @@ def test_recent_fifo_is_logical_and_heuristic_consumes_no_slot():
         bank.close()
 
 
+def test_medium_term_admission_uses_absolute_successful_iteration_cadence():
+    network, bank, pool = _pool(("medium_term",))
+    try:
+        initial_id = pool.bucket_members("medium_term")[0]
+        assert pool.opponent(initial_id).introduced_iteration == 0
+        for iteration in range(1, MEDIUM_TERM_INTERVAL_ITERATIONS):
+            assert pool.consider_updated_policy(
+                network,
+                iteration=iteration,
+                completed_games=iteration * 2000,
+                has_samples=True,
+            ) is None
+        assert pool.bucket_members("medium_term") == (initial_id,)
+
+        assert pool.consider_updated_policy(
+            network,
+            iteration=10,
+            completed_games=20_000,
+            has_samples=False,
+        ) is None
+        assert pool.bucket_members("medium_term") == (initial_id,)
+        admitted = pool.consider_updated_policy(
+            network,
+            iteration=20,
+            completed_games=40_000,
+            has_samples=True,
+        )
+        assert pool.bucket_members("medium_term") == (
+            initial_id,
+            admitted.opponent_id,
+        )
+        assert pool.last_completed_rl_iteration == 20
+    finally:
+        bank.close()
+
+
+def test_medium_term_capacity_fifo_and_four_million_game_horizon():
+    network, bank, pool = _pool(("medium_term",))
+    try:
+        initial_id = pool.bucket_members("medium_term")[0]
+        for iteration in range(
+            MEDIUM_TERM_INTERVAL_ITERATIONS,
+            (MEDIUM_TERM_CAPACITY + 1) * MEDIUM_TERM_INTERVAL_ITERATIONS,
+            MEDIUM_TERM_INTERVAL_ITERATIONS,
+        ):
+            pool.consider_updated_policy(
+                network,
+                iteration=iteration,
+                completed_games=iteration * 2000,
+                has_samples=True,
+            )
+        members = pool.bucket_members("medium_term")
+        status = pool.observability(games_per_iteration=2000)["buckets"][
+            "medium_term"
+        ]
+        assert len(members) == MEDIUM_TERM_CAPACITY
+        assert initial_id not in members
+        assert pool.opponent(members[0]).introduced_iteration == 10
+        assert pool.opponent(members[-1]).introduced_iteration == 2000
+        assert status["nominal_historical_span_games"] == 4_000_000
+        assert status["exact_historical_span_games"] == 3_980_000
+        assert status["fifo_evictions"] == 1
+    finally:
+        bank.close()
+
+
+def test_recent_and_medium_term_share_identity_slot_and_tracker():
+    network, bank, pool = _pool(("recent", "medium_term"))
+    try:
+        initial_id = pool.bucket_members("recent")[0]
+        assert pool.bucket_members("medium_term") == (initial_id,)
+        assert pool.unique_neural_opponent_count == 1
+        admitted = pool.consider_updated_policy(
+            network,
+            iteration=10,
+            completed_games=20_000,
+            has_samples=True,
+        )
+        assert pool.bucket_members("recent")[-1] == admitted.opponent_id
+        assert pool.bucket_members("medium_term")[-1] == admitted.opponent_id
+        assert pool.bank_slot(admitted.opponent_id) is not None
+        assert pool.unique_neural_opponent_count == 2
+        assert pool.observability()["recent_medium_term_overlap_count"] == 2
+
+        tracker = _tracker(pool)
+        tracker.update(
+            (record.opponent_id for record in pool.active_opponents()),
+            {admitted.opponent_id: {"games": 2, "wins": 1, "losses": 1}},
+        )
+        assert tracker.performance(admitted.opponent_id).lifetime_wins == 1
+        assert tracker.performance(admitted.opponent_id).lifetime_losses == 1
+    finally:
+        bank.close()
+
+
+def test_recent_eviction_does_not_release_a_medium_term_member():
+    network, bank, pool = _pool(("recent", "medium_term"))
+    try:
+        initial_id = pool.bucket_members("recent")[0]
+        initial_slot = pool.bank_slot(initial_id)
+        for iteration in range(1, K_RECENT + 1):
+            pool.consider_updated_policy(
+                network,
+                iteration=iteration,
+                completed_games=iteration * 2000,
+                has_samples=True,
+            )
+        assert initial_id not in pool.bucket_members("recent")
+        assert initial_id in pool.bucket_members("medium_term")
+        assert pool.bank_slot(initial_id) == initial_slot
+        assert bank.allocated_opponent_count == 201
+    finally:
+        bank.close()
+
+
+def test_medium_term_match_plan_is_exact_and_preserves_source_buckets():
+    _network_value, bank, pool = _pool(
+        ("heuristic", "recent", "medium_term")
+    )
+    try:
+        plan = build_match_plan(
+            opponent_pool=pool,
+            performance_tracker=_tracker(pool),
+            selected_buckets=("heuristic", "recent", "medium_term"),
+            difficulty_weight=0.5,
+            iteration=1,
+            first_absolute_game=0,
+            game_count=2000,
+            base_seed=42,
+        )
+        repeated = build_match_plan(
+            opponent_pool=pool,
+            performance_tracker=_tracker(pool),
+            selected_buckets=("heuristic", "recent", "medium_term"),
+            difficulty_weight=0.5,
+            iteration=1,
+            first_absolute_game=0,
+            game_count=2000,
+            base_seed=42,
+        )
+        assert repeated == plan
+        assert len(plan.assignments) == 2000
+        assert sum(item.game_count for item in plan.allocations) == 2000
+        assert {item.bucket_name for item in plan.allocations} == {
+            "heuristic",
+            "recent",
+            "medium_term",
+        }
+        neural_id = pool.bucket_members("recent")[0]
+        sources = {
+            item.bucket_name
+            for item in plan.allocations
+            if item.opponent_id == neural_id and item.game_count
+        }
+        assert sources == {"recent", "medium_term"}
+    finally:
+        bank.close()
+
+
 def test_random_bucket_is_fixed_and_consumes_no_policy_bank_slot():
     _network_value, bank, pool = _pool(("random",))
     try:
@@ -343,6 +507,51 @@ def test_pool_export_restore_preserves_ids_order_weights_and_performance():
             copied = restored.export_weights()[opponent_id]
             for name in original:
                 np.testing.assert_array_equal(copied[name], original[name])
+    finally:
+        bank.close()
+        if restored_bank is not None:
+            restored_bank.close()
+
+
+def test_medium_term_resume_restores_order_overlap_and_next_absolute_cadence():
+    network, bank, pool = _pool(("recent", "medium_term"))
+    restored_bank = None
+    try:
+        for iteration in range(1, 10):
+            pool.consider_updated_policy(
+                network,
+                iteration=iteration,
+                completed_games=iteration * 2000,
+                has_samples=True,
+            )
+        state = pool.export_state()
+        weights = pool.export_weights()
+        restored_network = _network(seed=4)
+        restored_bank = SharedPolicyBank(
+            restored_network,
+            unique_neural_capacity(("recent", "medium_term")),
+        )
+        restored = OpponentPool(
+            restored_bank,
+            selected_buckets=("recent", "medium_term"),
+            initial_network=restored_network,
+        )
+        restored.restore_state(state, weights)
+        before = restored.bucket_members("medium_term")
+        milestone = restored.consider_updated_policy(
+            restored_network,
+            iteration=10,
+            completed_games=20_000,
+            has_samples=True,
+        )
+        assert restored.bucket_members("medium_term") == (
+            *before,
+            milestone.opponent_id,
+        )
+        assert restored.bucket_members("recent")[-1] == milestone.opponent_id
+        assert restored.observability()[
+            "recent_medium_term_overlap_count"
+        ] == 2
     finally:
         bank.close()
         if restored_bank is not None:

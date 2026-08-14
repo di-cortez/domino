@@ -199,6 +199,27 @@ class ParallelRLTests(unittest.TestCase):
             {None},
         )
 
+    def test_medium_term_rollouts_are_invariant_to_worker_count(self):
+        buckets = ("heuristic", "recent", "medium_term")
+        one_worker, _one_info = self._collect(
+            1,
+            game_count=18,
+            opponent_buckets=buckets,
+        )
+        two_workers, _two_info = self._collect(
+            2,
+            game_count=18,
+            opponent_buckets=buckets,
+        )
+        self.assertEqual(
+            _rollout_fingerprint(one_worker),
+            _rollout_fingerprint(two_workers),
+        )
+        self.assertEqual(
+            {row["bucket_name"] for row in one_worker},
+            set(buckets),
+        )
+
     def test_random_only_training_reports_one_slotless_opponent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             summary = self._train(
@@ -353,9 +374,94 @@ class ParallelRLTests(unittest.TestCase):
             for value in metadata["opponent_pool_state"]["opponents"]
             if value["introduced_iteration"] == 10
         )
-        archived = archive["checkpoints"][0]
+        archived = next(
+            value
+            for value in archive["checkpoints"]
+            if value["completed_iteration"] == 10
+        )
         self.assertEqual(archived["opponent_id"], admitted["opponent_id"])
         self.assertEqual(archived["checkpoint_id"], admitted["checkpoint_id"])
+
+    def test_medium_term_resume_preserves_cadence_deduplication_and_archive(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            full_base = root / "full.npz"
+            resumed_base = root / "resumed.npz"
+            common = {
+                "iterations": 12,
+                "gpi": 1,
+                "opponent_buckets": ("recent", "medium_term"),
+                "difficulty_weight": 0.5,
+                "checkpoint_interval": 3,
+                "seed": 1010,
+                "device": "cpu",
+                "workers": 1,
+                "safety_config": self.safety,
+                "numbered_checkpoints": True,
+                "fresh_from_sl": True,
+                "quiet": True,
+            }
+            full = self._train(
+                rl_weights_path=str(full_base),
+                **common,
+            )
+            self._train(
+                rl_weights_path=str(resumed_base),
+                stop_after_training_games=9,
+                **common,
+            )
+            partial_weights = numbered_checkpoint_path(resumed_base, 9)
+            resume_options = {**common, "fresh_from_sl": False}
+            resumed = self._train(
+                rl_weights_path=str(resumed_base),
+                resume_weights_path=str(partial_weights),
+                resume_state_file=str(resume_state_path(partial_weights)),
+                **resume_options,
+            )
+
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
+
+            metadata, weights = load_resume_state(
+                resumed["rl_weights_path"],
+                resumed["resume_state_path"],
+            )
+            pool_state = metadata["opponent_pool_state"]
+            medium_ids = pool_state["buckets"]["medium_term"]["member_ids"]
+            iterations = {
+                value["opponent_id"]: value["introduced_iteration"]
+                for value in pool_state["opponents"]
+            }
+            self.assertEqual([iterations[value] for value in medium_ids], [0, 10])
+            recent_ids = pool_state["buckets"]["recent"]["member_ids"]
+            self.assertEqual(set(medium_ids) & set(recent_ids), set(medium_ids))
+            self.assertEqual(len(weights), len(set(recent_ids) | set(medium_ids)))
+
+            archive = json.loads(
+                (root / "checkpoint_archive" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                [value["completed_iteration"] for value in archive["checkpoints"]],
+                [0, 10],
+            )
+            self.assertTrue(all(value["pinned"] for value in archive["checkpoints"]))
+            milestone = next(
+                value for value in archive["checkpoints"]
+                if value["completed_iteration"] == 10
+            )
+            with np.load(
+                root / "checkpoint_archive" / milestone["filename"],
+                allow_pickle=False,
+            ) as archived_weights:
+                for name in archived_weights.files:
+                    np.testing.assert_array_equal(
+                        archived_weights[name],
+                        weights[milestone["opponent_id"]][name],
+                    )
 
     def test_fresh_from_sl_ignores_existing_rl_checkpoint(self):
         with tempfile.TemporaryDirectory() as temp_dir:

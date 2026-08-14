@@ -86,7 +86,9 @@ aliases `latest_weights.npz`, `optimizer_state.npz`, `rng_state.json`, and
 resume restores policy, optimizer, RNG state, opponent identities/bucket order,
 difficulty evidence, adaptive selection, algorithm-specific update history,
 and cumulative counters. The independent `checkpoint_archive/` keeps a bounded,
-progressively thinned policy history for analysis and future buckets. Examples:
+progressively thinned policy history. The optional `medium_term` opponent
+bucket references 200 of its ten-iteration milestones without duplicating
+weights and pins those active records against thinning. Examples:
 
 The marker advances at the normal numbered-checkpoint interval, not only at a
 100,000-game diagnostic boundary. Superseded non-milestone latest payloads are

@@ -433,8 +433,28 @@ def prepare_training_session(training=None, resources=None, execution=None):
             inputs.pool_weights,
             inputs.performance_state,
         )
+        if (
+            runner.opponent_pool.last_completed_rl_iteration
+            != inputs.start_iteration
+        ):
+            raise ValueError(
+                "Resume opponent-pool iteration counter does not match the "
+                "selected exact checkpoint"
+            )
     checkpoint_archive = CheckpointArchive(resources.artifact_directory)
     checkpoint_archive.reconcile(inputs.start_iteration)
+    medium_term_checkpoint_ids = (
+        runner.opponent_pool.checkpoint_ids_for_bucket("medium_term")
+    )
+    if inputs.pool_state is None:
+        checkpoint_archive.consider_snapshot(
+            network,
+            runner.opponent_pool.initial_snapshot_record,
+            iteration=0,
+            completed_games=0,
+            pinned=bool(medium_term_checkpoint_ids),
+        )
+    checkpoint_archive.set_pinned_checkpoint_ids(medium_term_checkpoint_ids)
     actual_workers, was_capped, cap_reason = runner.set_workers(selected_workers)
     if was_capped:
         reporter.worker_cap(selected_workers, actual_workers, cap_reason)

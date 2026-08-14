@@ -156,3 +156,44 @@ def test_archive_reconciliation_removes_abandoned_descendants(tmp_path):
     )
     assert recreated.sha256 == removed[0].sha256
     assert archive.manifest()["abandoned_descendants"] == []
+
+
+def test_pinned_medium_term_records_survive_thinning_and_can_be_unpinned(
+    tmp_path,
+):
+    network = _network()
+    probe = CheckpointArchive(tmp_path / "probe")
+    first = probe.consider_snapshot(
+        network,
+        _record(10),
+        iteration=10,
+        completed_games=1000,
+    )
+    archive = CheckpointArchive(
+        tmp_path / "pinned",
+        maximum_bytes=first.file_size * 3,
+    )
+    for iteration in (10, 20, 30, 40):
+        archive.consider_snapshot(
+            network,
+            _record(iteration),
+            iteration=iteration,
+            completed_games=iteration * 100,
+            pinned=iteration == 20,
+        )
+    assert archive.lookup("checkpoint:0000000020").pinned
+    assert archive.manifest()["pinned_checkpoint_count"] == 1
+
+    archive.set_pinned_checkpoint_ids(())
+    for iteration in (50, 60):
+        archive.consider_snapshot(
+            network,
+            _record(iteration),
+            iteration=iteration,
+            completed_games=iteration * 100,
+        )
+    assert archive.lookup("checkpoint:0000000020") is None
+    counters = archive.manifest()["lifecycle_counters"]
+    assert counters["pins"] == 1
+    assert counters["unpins"] == 1
+    assert counters["thinned"] >= 1

@@ -342,6 +342,11 @@ def build_training_summary(
         ),
         "ppo_configuration": fixed_ppo_policy(training.ppo_max_epochs),
         "opponent_pool": context.runner.opponent_pool.manifest(),
+        "opponent_pool_final_state": (
+            context.runner.opponent_pool.observability(
+                games_per_iteration=context.selected_gpi
+            )
+        ),
         "checkpoint_archive": context.checkpoint_archive.manifest(),
         "runtime_profile_delta": runtime_profile_delta,
         "duration_s": elapsed_time,
@@ -494,6 +499,7 @@ class RLTrainingReporter:
         difficulty_weight,
         opponent_count,
         unique_neural_opponent_count,
+        opponent_pool_state,
         bucket_results,
         gradient_metrics,
         use_value_head,
@@ -527,6 +533,16 @@ class RLTrainingReporter:
         print(
             "  Matchmaking: buckets " + ",".join(opponent_buckets)
             + f" | difficulty weight {difficulty_weight:g} | {bucket_text}"
+        )
+        membership_text = ", ".join(
+            f"{name} {value['membership_count']}/{value['capacity']}"
+            for name, value in opponent_pool_state["buckets"].items()
+        )
+        print(
+            f"  Opponent pool: memberships {membership_text} | "
+            f"{opponent_pool_state['unique_neural_opponent_count']} unique "
+            "neural policies | recent/medium_term overlap "
+            f"{opponent_pool_state['recent_medium_term_overlap_count']}"
         )
         value_predictions = gradient_metrics.get("value_predictions_before_update")
         if use_value_head and value_predictions is not None:

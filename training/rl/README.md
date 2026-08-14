@@ -32,6 +32,7 @@ python -m training.rl.cli --gpi 1000
 python -m training.rl.cli --fresh-from-sl
 python -m training.rl.cli --fresh-from-sl --opponent-buckets random --difficulty-weight 0
 python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,random,recent
+python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,recent,medium_term
 python -m training.rl.cli --dropout 0.1 --weight-decay
 ```
 
@@ -84,10 +85,18 @@ the default bucket selection.
 `recent` begins with a frozen copy of the initial learner, admits every
 non-empty completed update, and retains the latest 200 snapshots with logical
 FIFO eviction. The current mutable learner is never a bucket member.
+`medium_term` references that same initial snapshot and then one successful
+learner milestone at each absolute multiple of 10 completed RL iterations. It
+retains 200 milestones in oldest-to-newest FIFO order. At GPI 2,000 this is a
+nominal four-million-game horizon (3,980,000 games between the oldest and
+newest members when full). A milestone shared by `recent` and `medium_term`
+has one durable identity, one difficulty tracker, and one physical shared-memory
+weight slot; each bucket keeps only its own membership reference.
 
 `--opponent-buckets` accepts any non-empty combination of `heuristic`, `random`,
-and `recent` as a comma-separated selection. Input order is canonicalized,
-while duplicates, unknown names, and an empty selection are rejected.
+`recent`, and `medium_term` as a comma-separated selection. Input order is
+canonicalized, while duplicates, unknown names, and an empty selection are
+rejected.
 `--difficulty-weight` controls the exact
 convex allocation: `0` is entirely uniform, `0.5` is half uniform and half
 difficulty-based, and `1` is entirely difficulty-based. GPI remains the single
@@ -347,12 +356,17 @@ weight. Bucket capacity, difficulty calibration/smoothing, retention, archive
 cadence, and integer tie-breaking are internal versioned policies and appear in
 metrics/resume manifests rather than as flags.
 
-Every tenth completed update also writes the same admitted policy identity to
-`checkpoint_archive/`. This archive is independent of exact resume: it has a
-1-GiB internal limit and deterministically thins old history in exponentially
-widening tiers while retaining dense recent coverage, its baseline, newest,
-and any pinned entries. Resume reconciles away archive descendants newer than
-the selected exact checkpoint.
+The iteration-zero frozen policy is the archive baseline. Every successful
+update at an absolute multiple of ten iterations writes the same admitted
+policy identity to `checkpoint_archive/`. This archive is independent of exact
+resume: it has a 1-GiB internal limit and deterministically thins old history in
+exponentially widening tiers while retaining dense recent coverage, its
+baseline, newest, and any pinned entries. Active `medium_term` identities are
+pinned; FIFO eviction unpins them unless another active member still needs the
+identity. Exact resume restores all active weights from its own state and then
+rebuilds archive pins, so it never depends on a thinned archive file. Resume
+also reconciles away archive descendants newer than the selected exact
+checkpoint.
 
 The RL reward now uses a uniform terminal reward plus temporally decayed local
 draw/pass shaping. For each real decision at turn `d_i`, a later event at turn

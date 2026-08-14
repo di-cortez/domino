@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -12,12 +12,13 @@ from pathlib import Path
 
 import numpy as np
 
+from training.rl.pool import MEDIUM_TERM_INTERVAL_ITERATIONS
 from utils.myrandom import unique_token
 
 
-ARCHIVE_FORMAT_VERSION = 1
-ARCHIVE_POLICY_VERSION = 1
-ARCHIVE_INTERVAL_ITERATIONS = 10
+ARCHIVE_FORMAT_VERSION = 2
+ARCHIVE_POLICY_VERSION = 2
+ARCHIVE_INTERVAL_ITERATIONS = MEDIUM_TERM_INTERVAL_ITERATIONS
 CHECKPOINT_ARCHIVE_MAX_BYTES = 1 * 1024**3
 ARCHIVE_DENSE_TIER_WIDTH = 8
 
@@ -101,7 +102,11 @@ class CheckpointArchive:
         if self.maximum_bytes < 1:
             raise ValueError("Checkpoint archive maximum_bytes must be positive")
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.records, self.abandoned_descendants = self._load_manifest()
+        (
+            self.records,
+            self.abandoned_descendants,
+            self.lifecycle_counters,
+        ) = self._load_manifest()
 
     def _policy(self):
         policy = archive_policy_manifest()
@@ -110,7 +115,12 @@ class CheckpointArchive:
 
     def _load_manifest(self):
         if not self.manifest_path.is_file():
-            return [], []
+            return [], [], {
+                "writes": 0,
+                "pins": 0,
+                "unpins": 0,
+                "thinned": 0,
+            }
         try:
             value = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -155,7 +165,15 @@ class CheckpointArchive:
             )
             for record in value.get("abandoned_descendants", ())
         ]
-        return records, abandoned
+        counters = value.get("lifecycle_counters", {})
+        expected_counters = {"writes", "pins", "unpins", "thinned"}
+        if set(counters) != expected_counters:
+            raise ValueError(
+                "Checkpoint archive lifecycle counters are incomplete"
+            )
+        return records, abandoned, {
+            name: int(counters[name]) for name in expected_counters
+        }
 
     def _manifest(self, records=None):
         records = self.records if records is None else records
@@ -164,6 +182,10 @@ class CheckpointArchive:
             "policy": self._policy(),
             "retained_bytes": sum(record.file_size for record in records),
             "checkpoint_count": len(records),
+            "pinned_checkpoint_count": sum(
+                bool(record.pinned) for record in records
+            ),
+            "lifecycle_counters": dict(self.lifecycle_counters),
             "checkpoints": [asdict(record) for record in records],
             "abandoned_descendants": [
                 asdict(record) for record in self.abandoned_descendants
@@ -195,6 +217,8 @@ class CheckpointArchive:
                     "Checkpoint archive abandoned identity has conflicting hashes"
                 )
             known[record.checkpoint_id] = record
+            if record.pinned:
+                self.lifecycle_counters["unpins"] += 1
         self.abandoned_descendants = sorted(
             known.values(),
             key=lambda item: item.completed_iteration,
@@ -217,7 +241,15 @@ class CheckpointArchive:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def consider_snapshot(self, network, record, *, iteration, completed_games):
+    def consider_snapshot(
+        self,
+        network,
+        record,
+        *,
+        iteration,
+        completed_games,
+        pinned=False,
+    ):
         """Archive the admitted identity at the internal fixed cadence."""
         iteration = int(iteration)
         if iteration % ARCHIVE_INTERVAL_ITERATIONS:
@@ -254,6 +286,18 @@ class CheckpointArchive:
                     "Checkpoint archive identity/hash conflict at iteration "
                     f"{iteration}"
                 )
+            if bool(existing.pinned) != bool(pinned):
+                pinned_ids = {
+                    item.checkpoint_id
+                    for item in self.records
+                    if item.pinned
+                }
+                if pinned:
+                    pinned_ids.add(existing.checkpoint_id)
+                else:
+                    pinned_ids.discard(existing.checkpoint_id)
+                self.set_pinned_checkpoint_ids(pinned_ids)
+                return self.lookup(existing.checkpoint_id)
             return existing
         self._save_weights(path, weights)
         checkpoint_sha256 = _file_sha256(path)
@@ -286,11 +330,40 @@ class CheckpointArchive:
             created_at=datetime.now(timezone.utc).isoformat(),
             weight_names=tuple(weights),
             weight_shapes=tuple(tuple(value.shape) for value in weights.values()),
+            pinned=bool(pinned),
         )
         self.records.append(archived)
         self.records.sort(key=lambda item: item.completed_iteration)
+        self.lifecycle_counters["writes"] += 1
+        if archived.pinned:
+            self.lifecycle_counters["pins"] += 1
         self._prune()
         return archived
+
+    def set_pinned_checkpoint_ids(self, checkpoint_ids):
+        """Synchronize archive pins with active long-horizon memberships."""
+        requested = set(checkpoint_ids)
+        retained_ids = {record.checkpoint_id for record in self.records}
+        missing = requested - retained_ids
+        if missing:
+            raise ValueError(
+                "Cannot pin checkpoint(s) absent from the archive: "
+                + ", ".join(sorted(missing))
+            )
+        changed = False
+        updated = []
+        for record in self.records:
+            should_pin = record.checkpoint_id in requested
+            if record.pinned != should_pin:
+                counter = "pins" if should_pin else "unpins"
+                self.lifecycle_counters[counter] += 1
+                record = replace(record, pinned=should_pin)
+                changed = True
+            updated.append(record)
+        if changed:
+            self.records = updated
+            self._prune()
+        return changed
 
     @staticmethod
     def _tier_for_age(age):
@@ -342,6 +415,7 @@ class CheckpointArchive:
             if level > math.ceil(math.log2(max(2, len(self.records)))) + 2:
                 raise RuntimeError("Checkpoint archive cannot satisfy its byte limit")
         removed = [record for record in self.records if record not in retained]
+        self.lifecycle_counters["thinned"] += len(removed)
         # Publish the replacement manifest first. A crash before deletion leaves
         # harmless orphans rather than a manifest that references missing files.
         _atomic_json(self.manifest_path, self._manifest(retained))

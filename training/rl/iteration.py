@@ -450,11 +450,27 @@ def run_iteration(context, state, iteration):
     )
     section_started = time.perf_counter()
     if admitted_record is not None:
+        medium_term_checkpoint_ids = (
+            context.runner.opponent_pool.checkpoint_ids_for_bucket(
+                "medium_term"
+            )
+        )
+        context.checkpoint_archive.set_pinned_checkpoint_ids(
+            checkpoint_id
+            for checkpoint_id in medium_term_checkpoint_ids
+            if context.checkpoint_archive.lookup(checkpoint_id) is not None
+        )
         context.checkpoint_archive.consider_snapshot(
             context.network,
             admitted_record,
             iteration=iteration,
             completed_games=state.completed_training_games,
+            pinned=(
+                admitted_record.checkpoint_id in medium_term_checkpoint_ids
+            ),
+        )
+        context.checkpoint_archive.set_pinned_checkpoint_ids(
+            medium_term_checkpoint_ids
         )
     context.runtime_profile.add(
         "checkpoint_archive_update",
@@ -502,6 +518,9 @@ def run_iteration(context, state, iteration):
         opponent_count=context.runner.opponent_pool.size,
         unique_neural_opponent_count=(
             context.runner.opponent_pool.unique_neural_opponent_count
+        ),
+        opponent_pool_state=context.runner.opponent_pool.observability(
+            games_per_iteration=context.selected_gpi
         ),
         bucket_results=bucket_results,
         gradient_metrics=gradient_metrics,

@@ -58,4 +58,4 @@ models/*
 references/*
 temporary/*
 domino_opponent_pool_cache_benchmark/*
-train_script/run_reward_grid_search.sh
+train_script/grid_search_results/

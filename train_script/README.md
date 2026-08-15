@@ -77,13 +77,50 @@ Each diagnostics run is written below
 `diagnostics/results/<rl-weights-basename>/`. Existing directories are
 validated against the requested model and configuration before reuse.
 
+## Reward grid search
+
+`run_reward_grid_search.sh` sweeps the three reward tunables, running one
+`python -m training.pipeline forever` per grid point with a distinct
+`--run-name` so each point gets its own run directory under `models/rl/`.
+
+A parameter is swept only where it can change the reward
+(`R_T = (1 - alpha) * gamma ** k * R_f + alpha * R_l`), which is 15 points:
+
+| alpha | Swept | Points |
+|---|---|---:|
+| `0` | `--gamma` only; the local term is zeroed | 3 |
+| `0.5` | `--gamma` x `--event-reward-decay` | 9 |
+| `1` | `--event-reward-decay` only; the terminal term is zeroed | 3 |
+
+Because `forever` has no game target, each point is capped by wall clock.
+The timer starts when the pipeline prints its `Canonical RL run` banner, so
+the dataset and supervised stages at the front of the first point are not
+charged against any point's RL budget. The cap is delivered as SIGTERM, which
+the pipeline's own shutdown flag turns into a boundary checkpoint before a
+clean exit; if that does not land within `--grace`, the script escalates to a
+second SIGTERM and then SIGKILL, and records the point as `hard-stopped`.
+Keep `--grace` above one RL iteration so the graceful path is the one taken.
+
+```bash
+train_script/run_reward_grid_search.sh --dry-run     # plan only
+train_script/run_reward_grid_search.sh               # 15 points, 2h RL each
+train_script/run_reward_grid_search.sh --only 'a05_*'
+```
+
+Completed points are recorded in `grid_search_results/grid_state.tsv` and
+skipped on re-invocation, so an interrupted sweep continues where it stopped;
+`--force` re-runs them. Per-point pipeline output goes to
+`grid_search_results/<run-name>.log`.
+
 ## Validation
 
 For script-only changes, run at least:
 
 ```bash
 bash -n train_script/run_training_pipeline.sh
+bash -n train_script/run_reward_grid_search.sh
 train_script/run_training_pipeline.sh --help
+train_script/run_reward_grid_search.sh --dry-run
 python -m train_script.run_pipeline --help
 ```
 

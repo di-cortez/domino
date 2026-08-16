@@ -34,12 +34,12 @@ from training.rl.pool import pool_policy_manifest
 from utils.repository import current_git_commit
 
 
-# Version 9 replaced the ``reward_schema`` preset name with the explicit
-# ``alpha``/``event_reward_decay`` tunables and rescaled the reward constants,
-# so a version 8 checkpoint would silently resume against a different reward
-# function.
-RESUME_STATE_VERSION = 10
-SUPPORTED_RESUME_STATE_VERSIONS = (9, RESUME_STATE_VERSION)
+# Version 11 adds the locked opponent-decision-restart semantic and cumulative
+# restart counters. Version 10 remains readable for the REINFORCE path with the
+# missing flag resolved to false. Its ``ppo_v1`` identity is intentionally
+# rejected by the new decision-minibatch ``ppo_v2`` algorithm.
+RESUME_STATE_VERSION = 11
+SUPPORTED_RESUME_STATE_VERSIONS = (10, RESUME_STATE_VERSION)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
 
@@ -221,6 +221,7 @@ def _load_initial_network(
     weight_decay=0.0,
     dropout_rate=DISABLED_DROPOUT_RATE,
     ruleset=DEFAULT_RULESET_NAME,
+    initialization_seed=None,
 ):
     """Load RL/SL weights or create a compatible random policy as fallback.
 
@@ -271,15 +272,43 @@ def _load_initial_network(
         except FileNotFoundError:
             pass
 
-    network = PolicyNetwork.load_from_sl(
-        sl_weights_path,
-        learning_rate=learning_rate,
-        use_value_head=use_value_head,
-        device=device,
-        weight_decay=weight_decay,
-        dropout_rate=dropout_rate,
-    )
     encoder = DominoEncoder(ruleset)
+    try:
+        network = PolicyNetwork.load_from_sl(
+            sl_weights_path,
+            learning_rate=learning_rate,
+            use_value_head=use_value_head,
+            device=device,
+            weight_decay=weight_decay,
+            dropout_rate=dropout_rate,
+        )
+    except FileNotFoundError:
+        architecture = architecture_for_ruleset(ruleset)
+        network = PolicyNetwork(
+            input_size=architecture.input_size,
+            output_size=architecture.output_size,
+            hidden_sizes=architecture.hidden_sizes,
+            learning_rate=learning_rate,
+            random_seed=(
+                None
+                if initialization_seed is None
+                else int(initialization_seed) & 0xFFFFFFFF
+            ),
+            use_value_head=use_value_head,
+            device=device,
+            weight_decay=weight_decay,
+            dropout_rate=dropout_rate,
+        )
+        if expected_training_algorithm is not None:
+            network.rl_training_algorithm = expected_training_algorithm
+        if not quiet:
+            print(
+                f"Supervised weights not found at {sl_weights_path}; "
+                "initializing a random RL policy with default "
+                f"{encoder.ruleset.name} architecture "
+                f"{architecture.hidden_sizes}."
+            )
+        return network
     if not _checkpoint_matches_encoder(network, ruleset):
         input_size, output_size = _checkpoint_shape(network)
         raise ValueError(

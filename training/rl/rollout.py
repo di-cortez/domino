@@ -191,6 +191,29 @@ def _profile_worker_start(runtime_profile):
     return time.perf_counter() if runtime_profile is not None else None
 
 
+def _capture_opponent_decision(
+    captures,
+    engine,
+    learner_position,
+    current_player,
+    tile_actions,
+):
+    """Capture one exact pre-action opponent choice without consuming RNG."""
+    if (
+        captures is None
+        or current_player == learner_position
+        or len(tile_actions) < 2
+    ):
+        return
+    captures.append(CapturedOpponentDecision(
+        snapshot_ordinal=len(captures),
+        source_turn=int(engine.turn),
+        original_learner_position=int(learner_position),
+        source_legal_tile_action_count=len(tile_actions),
+        engine_state=engine.export_restart_state(),
+    ))
+
+
 def _play_training_game_unprofiled(
     agents,
     learner_position,
@@ -201,11 +224,19 @@ def _play_training_game_unprofiled(
     """Profiler-free rollout hot path for non-sampled games."""
     engine = DominoEngine(player_count=len(agents), ruleset=ruleset_name)
     event_stats = EventStats()
+    captures = [] if capture_opponent_decision_restarts else None
     while not engine.game_over:
         state = engine._get_state()
         current_player = state["current_player"]
         legal_actions = engine.valid_actions(current_player)
         tile_actions = _tile_play_actions(legal_actions)
+        _capture_opponent_decision(
+            captures,
+            engine,
+            learner_position,
+            current_player,
+            tile_actions,
+        )
         if current_player == learner_position and len(tile_actions) == 1:
             action = tile_actions[0]
         else:
@@ -228,7 +259,7 @@ def _play_training_game_unprofiled(
             return_state=False,
             legal_actions=legal_actions,
         )
-    return engine, event_stats
+    return engine, event_stats, captures
 
 
 def _play_training_game(
@@ -251,6 +282,7 @@ def _play_training_game(
     section_started = _profile_worker_start(runtime_profile)
     engine = DominoEngine(player_count=len(agents), ruleset=ruleset_name)
     event_stats = EventStats()
+    captures = [] if capture_opponent_decision_restarts else None
     _profile_worker_section(
         runtime_profile,
         "engine_initialization",
@@ -263,6 +295,13 @@ def _play_training_game(
         current_player = state["current_player"]
         legal_actions = engine.valid_actions(current_player)
         tile_actions = _tile_play_actions(legal_actions)
+        _capture_opponent_decision(
+            captures,
+            engine,
+            learner_position,
+            current_player,
+            tile_actions,
+        )
         _profile_worker_section(
             runtime_profile,
             "state_and_legal_action_generation",
@@ -322,7 +361,7 @@ def _play_training_game(
             section_started,
         )
 
-    return engine, event_stats
+    return engine, event_stats, captures
 
 
 def _collect_steps_vs_snapshot(
@@ -364,7 +403,7 @@ def _collect_steps_vs_snapshot(
     agents[1 - learner_position] = opponent
     _profile_worker_section(runtime_profile, "agent_setup", section_started)
 
-    engine, event_stats = _play_training_game(
+    engine, event_stats, captures = _play_training_game(
         agents,
         learner_position,
         learner,
@@ -382,7 +421,10 @@ def _collect_steps_vs_snapshot(
         "terminal_reward_and_trajectory_finalization",
         section_started,
     )
-    return samples, event_stats, engine.winner, learner_position
+    result = (samples, event_stats, engine.winner, learner_position)
+    if capture_opponent_decision_restarts:
+        return (*result, tuple(captures))
+    return result
 
 
 def collect_steps_for_assignment(
@@ -455,7 +497,7 @@ def _collect_steps_vs_heuristic(
     agents[1 - learner_position] = StrategicAgent(ruleset=ruleset_name)
     _profile_worker_section(runtime_profile, "agent_setup", section_started)
 
-    engine, event_stats = _play_training_game(
+    engine, event_stats, captures = _play_training_game(
         agents,
         learner_position,
         learner,
@@ -473,7 +515,10 @@ def _collect_steps_vs_heuristic(
         "terminal_reward_and_trajectory_finalization",
         section_started,
     )
-    return samples, event_stats, engine.winner, learner_position
+    result = (samples, event_stats, engine.winner, learner_position)
+    if capture_opponent_decision_restarts:
+        return (*result, tuple(captures))
+    return result
 
 
 def _collect_steps_vs_random(
@@ -502,7 +547,7 @@ def _collect_steps_vs_random(
     agents[1 - learner_position] = RandomAgent()
     _profile_worker_section(runtime_profile, "agent_setup", section_started)
 
-    engine, event_stats = _play_training_game(
+    engine, event_stats, captures = _play_training_game(
         agents,
         learner_position,
         learner,
@@ -519,5 +564,86 @@ def _collect_steps_vs_random(
         runtime_profile,
         "terminal_reward_and_trajectory_finalization",
         section_started,
+    )
+    result = (samples, event_stats, engine.winner, learner_position)
+    if capture_opponent_decision_restarts:
+        return (*result, tuple(captures))
+    return result
+
+
+def collect_steps_from_restart(
+    learner_network,
+    opponent_kind,
+    opponent_network,
+    restart,
+    schema,
+    gamma,
+    runtime_profile=None,
+    ruleset_name=DEFAULT_RULESET_NAME,
+):
+    """Continue one captured state with the learner in the opponent's seat."""
+    engine = DominoEngine.from_restart_state(restart.engine_state)
+    if engine.ruleset.name != ruleset_name:
+        raise ValueError("Restart state ruleset does not match the rollout runner.")
+    learner_position = restart.restart_learner_position
+    if engine.current_player != learner_position:
+        raise ValueError("Restart learner must act first from the captured state.")
+    if len(_tile_play_actions(engine.valid_actions(learner_position))) < 2:
+        raise ValueError("Restart state is not a genuine tile-play decision.")
+
+    learner_policy_profile = (
+        runtime_profile.setdefault("learner_policy", {})
+        if runtime_profile is not None
+        else None
+    )
+    opponent_policy_profile = (
+        runtime_profile.setdefault("opponent_policy", {})
+        if runtime_profile is not None
+        else None
+    )
+    learner = RLAgent(
+        learner_network,
+        mode="training",
+        runtime_profile=learner_policy_profile,
+        ruleset=ruleset_name,
+    )
+    if opponent_kind == "policy_snapshot":
+        if opponent_network is None:
+            raise ValueError("A policy restart requires its source bank slot.")
+        counterpart = RLAgent(
+            opponent_network,
+            mode="stochastic_evaluation",
+            runtime_profile=opponent_policy_profile,
+            ruleset=ruleset_name,
+        )
+    elif opponent_kind == "heuristic":
+        if opponent_network is not None:
+            raise ValueError("A heuristic restart cannot carry neural weights.")
+        counterpart = StrategicAgent(ruleset=ruleset_name)
+    elif opponent_kind == "random":
+        if opponent_network is not None:
+            raise ValueError("A random restart cannot carry neural weights.")
+        counterpart = RandomAgent()
+    else:
+        raise ValueError(f"Unknown RL opponent kind: {opponent_kind!r}")
+
+    agents = [None, None]
+    agents[learner_position] = learner
+    agents[restart.original_learner_position] = counterpart
+    engine, event_stats, _captures = _play_training_game(
+        agents,
+        learner_position,
+        learner,
+        schema,
+        runtime_profile=runtime_profile,
+        ruleset_name=ruleset_name,
+        engine=engine,
+    )
+    reward = _terminal_reward(engine, learner_position, schema)
+    samples = _finish_episode_with_rewards(
+        learner,
+        reward,
+        gamma,
+        schema["alpha"],
     )
     return samples, event_stats, engine.winner, learner_position

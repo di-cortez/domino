@@ -13,6 +13,7 @@ import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.network_architecture import (
+    architecture_for_ruleset,
     hidden_layer_count_from_weights,
     policy_layer_names,
 )
@@ -55,6 +56,7 @@ class RLTrainingConfiguration:
     moving_average_window: int
     opponent_buckets: tuple[str, ...]
     difficulty_weight: float
+    opponent_decision_restarts: bool
     learning_rate: float
     entropy_coef: float
     use_value_head: bool
@@ -93,6 +95,7 @@ class RLTrainingConfiguration:
         data["ruleset_name"] = resolve_ruleset(data["ruleset_name"]).name
         data.setdefault("run_configuration_sha256", None)
         data.setdefault("git_commit", None)
+        data.setdefault("opponent_decision_restarts", False)
         data["opponent_buckets"] = tuple(data["opponent_buckets"])
         configuration = cls(**{
             field.name: data[field.name]
@@ -133,6 +136,9 @@ class RLTrainingConfiguration:
             "moving_average_window": int(rl["moving_average_window"]),
             "opponent_buckets": tuple(rl["opponent_buckets"]),
             "difficulty_weight": float(rl["difficulty_weight"]),
+            "opponent_decision_restarts": bool(
+                rl.get("opponent_decision_restarts", False)
+            ),
             "learning_rate": float(rl["learning_rate"]),
             "entropy_coef": float(rl["entropy_coef"]),
             "use_value_head": bool(rl["use_value_head"]),
@@ -216,11 +222,12 @@ def _load_initial_network(
     dropout_rate=DISABLED_DROPOUT_RATE,
     ruleset=DEFAULT_RULESET_NAME,
 ):
-    """Load an RL checkpoint or initialize from compatible SL weights.
+    """Load RL/SL weights or create a compatible random policy as fallback.
 
     ``fresh_from_sl=True`` ignores ``rl_weights_path`` as an initialization
     source while leaving that file intact until the completed new model
-    atomically replaces it.
+    atomically replaces it. If the requested SL checkpoint does not exist, a
+    ruleset-default architecture is initialized from ``initialization_seed``.
     """
     if rl_weights_path is not None and not fresh_from_sl:
         try:
@@ -600,6 +607,10 @@ def _training_state_payload(
     value_loss_window,
     ppo_window,
     total_decision_samples,
+    total_normal_decision_samples,
+    total_restart_decision_samples,
+    total_restart_episodes,
+    total_restart_duration_s,
     policy_updates_completed,
     clipped_iteration_count,
     total_rollout_duration_s,
@@ -612,6 +623,10 @@ def _training_state_payload(
         "ppo_window": list(ppo_window),
         "total_decision_samples": int(total_decision_samples),
         "trainable_decisions_seen": int(total_decision_samples),
+        "total_normal_decision_samples": int(total_normal_decision_samples),
+        "total_restart_decision_samples": int(total_restart_decision_samples),
+        "total_restart_episodes": int(total_restart_episodes),
+        "total_restart_duration_s": float(total_restart_duration_s),
         "policy_updates_completed": int(policy_updates_completed),
         "clipped_iteration_count": int(clipped_iteration_count),
         "total_rollout_duration_s": float(total_rollout_duration_s),

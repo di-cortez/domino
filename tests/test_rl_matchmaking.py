@@ -526,6 +526,11 @@ def test_medium_term_resume_restores_order_overlap_and_next_absolute_cadence():
             )
         state = pool.export_state()
         weights = pool.export_weights()
+        # Each full bank owns 401 shared-memory descriptors. Close the source
+        # before constructing the independent restored bank so the test stays
+        # below ordinary per-process file-descriptor limits.
+        bank.close()
+        bank = None
         restored_network = _network(seed=4)
         restored_bank = SharedPolicyBank(
             restored_network,
@@ -553,6 +558,7 @@ def test_medium_term_resume_restores_order_overlap_and_next_absolute_cadence():
             "recent_medium_term_overlap_count"
         ] == 2
     finally:
-        bank.close()
+        if bank is not None:
+            bank.close()
         if restored_bank is not None:
             restored_bank.close()

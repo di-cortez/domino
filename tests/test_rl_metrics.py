@@ -69,7 +69,7 @@ def _row(iteration):
         "checkpoint_written": False,
         "checkpoint_path": None,
         "elapsed_training_s": 2.0 * iteration,
-        "rl_training_algorithm": "ppo_v1",
+        "rl_training_algorithm": "ppo_v2_decision_minibatches",
     }
 
 

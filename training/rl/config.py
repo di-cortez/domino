@@ -56,6 +56,7 @@ class RLTrainingOptions:
     gpi: int = DEFAULT_GPI
     opponent_buckets: tuple[str, ...] = DEFAULT_OPPONENT_BUCKETS
     difficulty_weight: float = DEFAULT_DIFFICULTY_WEIGHT
+    opponent_decision_restarts: bool = False
     learning_rate: float = 0.001
     entropy_coef: float = 0.01
     weight_decay: float = DISABLED_WEIGHT_DECAY
@@ -222,6 +223,7 @@ def resolve_training_options(training, resources, execution):
         total_training_games=total_training_games,
         opponent_buckets=opponent_buckets,
         difficulty_weight=difficulty_weight,
+        opponent_decision_restarts=bool(training.opponent_decision_restarts),
         gamma=gamma,
         alpha=alpha,
         event_reward_decay=event_reward_decay,

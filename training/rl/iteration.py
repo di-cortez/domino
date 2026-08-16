@@ -72,6 +72,10 @@ class IterationState:
     value_loss_window: Any
     ppo_window: Any
     total_decision_samples: int
+    total_normal_decision_samples: int
+    total_restart_decision_samples: int
+    total_restart_episodes: int
+    total_restart_duration_s: float
     policy_updates_completed: int
     clipped_iteration_count: int
     total_rollout_duration_s: float
@@ -93,6 +97,20 @@ def _value_prediction_summary(values):
         "std": float(np.std(flattened)),
         "min": float(np.min(flattened)),
         "max": float(np.max(flattened)),
+    }
+
+
+def _event_totals(results):
+    """Sum the four rollout event counters without mixing result domains."""
+    names = (
+        "opponent_draws",
+        "opponent_passes",
+        "learner_draws",
+        "learner_passes",
+    )
+    return {
+        name: sum(int(result["event_stats"][name]) for result in results)
+        for name in names
     }
 
 
@@ -152,7 +170,7 @@ def _reinforce_policy_update(
     return metrics
 
 
-def _update_policy(context, state, batch, games, iteration):
+def _update_policy(context, state, batch, iteration):
     """Update the policy once and return gradient/PPO metrics and duration."""
     if not batch:
         return None, None, 0.0
@@ -184,7 +202,6 @@ def _update_policy(context, state, batch, games, iteration):
         ppo_result = update_from_samples(
             context.network,
             batch,
-            actual_games=games,
             base_seed=context.effective_seed,
             iteration=iteration,
             entropy_coef=training.entropy_coef,
@@ -200,7 +217,9 @@ def _update_policy(context, state, batch, games, iteration):
         profile.add("ppo_update", ppo_result.update_seconds)
         ppo_metrics = ppo_result.metrics
         profile.merge_ppo_metrics(ppo_metrics)
-        gradient_metrics = ppo_metrics
+        gradient_metrics = (
+            None if ppo_metrics.get("insufficient_decisions") else ppo_metrics
+        )
     else:
         reinforce_started = time.perf_counter()
         gradient_metrics = _reinforce_policy_update(
@@ -220,11 +239,12 @@ def _update_policy(context, state, batch, games, iteration):
     update_elapsed = time.perf_counter() - update_started
     state.total_update_duration_s += update_elapsed
     state.total_decision_samples += len(batch)
-    if gradient_metrics["grad_clipped"]:
+    if gradient_metrics is not None and gradient_metrics["grad_clipped"]:
         state.clipped_iteration_count += 1
-    if training.use_value_head:
+    if training.use_value_head and gradient_metrics is not None:
         state.value_loss_window.append(gradient_metrics["value_loss"])
-    state.policy_updates_completed += 1
+    if gradient_metrics is not None:
+        state.policy_updates_completed += 1
     return gradient_metrics, ppo_metrics, update_elapsed
 
 
@@ -238,6 +258,10 @@ def _checkpoint(context, state, iteration):
         value_loss_window=state.value_loss_window,
         ppo_window=state.ppo_window,
         total_decision_samples=state.total_decision_samples,
+        total_normal_decision_samples=state.total_normal_decision_samples,
+        total_restart_decision_samples=state.total_restart_decision_samples,
+        total_restart_episodes=state.total_restart_episodes,
+        total_restart_duration_s=state.total_restart_duration_s,
         policy_updates_completed=state.policy_updates_completed,
         clipped_iteration_count=state.clipped_iteration_count,
         total_rollout_duration_s=state.total_rollout_duration_s,
@@ -369,13 +393,16 @@ def run_iteration(context, state, iteration):
     rollout_results, rollout_info = context.runner.collect_games(
         match_plan,
         context.effective_seed,
+        capture_opponent_decision_restarts=(
+            context.training.opponent_decision_restarts
+        ),
     )
     rollout_elapsed = time.perf_counter() - rollout_started
     context.runtime_profile.add("rollout_game_execution", rollout_elapsed)
     context.runtime_profile.merge_rollout_worker(
         context.runner.last_runtime_profile
     )
-    state.total_rollout_duration_s += rollout_elapsed
+    normal_rollout_elapsed = rollout_elapsed
 
     section_started = time.perf_counter()
     _merge_parallel_summary(
@@ -386,9 +413,9 @@ def run_iteration(context, state, iteration):
     )
     if rollout_info.fallback_count:
         context.reporter.rollout_fallback(iteration, rollout_info)
-    batch = []
+    normal_batch = []
     for result in rollout_results:
-        batch.extend(result["samples"])
+        normal_batch.extend(result["samples"])
     opponent_results, bucket_results = aggregate_match_results(
         match_plan,
         rollout_results,
@@ -412,6 +439,60 @@ def run_iteration(context, state, iteration):
         "opponent_performance_update",
         time.perf_counter() - section_started,
     )
+
+    restart_results = []
+    restart_elapsed = 0.0
+    restart_info = None
+    if context.training.opponent_decision_restarts:
+        restart_started = time.perf_counter()
+        restart_results, restart_info = context.runner.collect_restarts(
+            rollout_results,
+            context.effective_seed,
+            iteration,
+        )
+        restart_elapsed = time.perf_counter() - restart_started
+        context.runtime_profile.add(
+            "opponent_decision_restart_execution",
+            restart_elapsed,
+        )
+        context.runtime_profile.merge_rollout_worker(
+            context.runner.last_runtime_profile
+        )
+        _merge_parallel_summary(
+            context.parallel_summary,
+            restart_info,
+            phase="opponent_decision_restarts",
+            iteration=iteration,
+        )
+        if restart_info.fallback_count:
+            context.reporter.rollout_fallback(iteration, restart_info)
+
+    restart_batch = []
+    for result in restart_results:
+        restart_batch.extend(result["samples"])
+    batch = [*normal_batch, *restart_batch]
+    rollout_elapsed = normal_rollout_elapsed + restart_elapsed
+    state.total_rollout_duration_s += rollout_elapsed
+    state.total_normal_decision_samples += len(normal_batch)
+    state.total_restart_decision_samples += len(restart_batch)
+    state.total_restart_episodes += len(restart_results)
+    state.total_restart_duration_s += restart_elapsed
+    restart_wins = sum(
+        result["winner"] == result["learner_position"]
+        for result in restart_results
+    )
+    restart_summary = {
+        "enabled": bool(context.training.opponent_decision_restarts),
+        "captured_states": int(len(restart_results)),
+        "continuation_episodes": int(len(restart_results)),
+        "wins": int(restart_wins),
+        "losses": int(len(restart_results) - restart_wins),
+        "normal_decisions": int(len(normal_batch)),
+        "restart_decisions": int(len(restart_batch)),
+        "normal_events": _event_totals(rollout_results),
+        "restart_events": _event_totals(restart_results),
+        "seconds": float(restart_elapsed),
+    }
     section_started = time.perf_counter()
     reward_summary = (
         _reward_signal_summary(batch, context.network.xp) if batch else None
@@ -424,7 +505,6 @@ def run_iteration(context, state, iteration):
         context,
         state,
         batch,
-        games,
         iteration,
     )
 
@@ -436,7 +516,7 @@ def run_iteration(context, state, iteration):
         context.network,
         iteration=iteration,
         completed_games=state.completed_training_games,
-        has_samples=bool(batch),
+        has_samples=gradient_metrics is not None,
     )
     active_opponent_ids = tuple(
         record.opponent_id
@@ -476,7 +556,7 @@ def run_iteration(context, state, iteration):
         "checkpoint_archive_update",
         time.perf_counter() - section_started,
     )
-    if ppo_metrics is not None:
+    if ppo_metrics is not None and not ppo_metrics.get("insufficient_decisions"):
         state.ppo_window.append({
             **{
                 name: value
@@ -488,8 +568,12 @@ def run_iteration(context, state, iteration):
             },
             "games": int(games),
             "decisions": int(len(batch)),
+            "normal_decisions": int(len(normal_batch)),
+            "restart_decisions": int(len(restart_batch)),
+            "restart_episodes": int(len(restart_results)),
             "ppo_seconds": float(update_elapsed),
-            "rollout_seconds": float(rollout_elapsed),
+            "rollout_seconds": float(normal_rollout_elapsed),
+            "restart_seconds": float(restart_elapsed),
         })
 
     section_started = time.perf_counter()
@@ -528,6 +612,7 @@ def run_iteration(context, state, iteration):
         value_loss_window=state.value_loss_window,
         ppo_window=state.ppo_window,
         ppo_max_epochs=context.training.ppo_max_epochs,
+        restart_summary=restart_summary,
     )
     context.runtime_profile.add(
         "console_logging",
@@ -540,6 +625,11 @@ def run_iteration(context, state, iteration):
         iteration=iteration,
         games=games,
         batch_size=len(batch),
+        normal_batch_size=len(normal_batch),
+        restart_batch_size=len(restart_batch),
+        restart_episode_count=len(restart_results),
+        restart_elapsed=restart_elapsed,
+        restart_summary=restart_summary,
         wins=wins,
         moving_win_rate=moving_win_rate,
         reward_summary=reward_summary,

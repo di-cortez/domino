@@ -33,14 +33,31 @@ from utils.runtime_status import format_duration, print_memory_report
 
 
 TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"
-TRAINING_METRICS_VERSION = 5
+TRAINING_METRICS_VERSION = 6
 BUCKET_RESULT_COLUMNS = ("games", "wins", "losses")
+EVENT_RESULT_COLUMNS = (
+    "opponent_draws",
+    "opponent_passes",
+    "learner_draws",
+    "learner_passes",
+)
 TRAINING_METRIC_COLUMNS = (
     "iteration",
     "total_iterations",
     "games",
     "cumulative_games",
     "decisions",
+    "normal_decisions",
+    "restart_decisions",
+    "restart_captured_states",
+    "restart_continuation_episodes",
+    "cumulative_normal_decisions",
+    "cumulative_restart_decisions",
+    "cumulative_restart_episodes",
+    "restart_wins",
+    "restart_losses",
+    "normal_event_stats",
+    "restart_event_stats",
     "wins_in_batch",
     "batch_win_rate",
     "moving_average_win_rate",
@@ -59,6 +76,9 @@ TRAINING_METRIC_COLUMNS = (
     "moving_average_value_loss",
     "requested_minibatches",
     "effective_minibatches",
+    "target_decisions_per_minibatch",
+    "min_decisions_per_minibatch",
+    "decisions_omitted_per_epoch",
     "minibatch_sizes",
     "epochs_completed",
     "stopped_by_kl",
@@ -75,6 +95,7 @@ TRAINING_METRIC_COLUMNS = (
     "unique_neural_opponent_count",
     "bucket_results",
     "rollout_seconds",
+    "restart_seconds",
     "update_seconds",
     "iteration_seconds",
     "checkpoint_written",
@@ -106,6 +127,9 @@ def build_training_metrics_header(
             "games_per_iteration": int(context.selected_gpi),
             "opponent_buckets": list(training.opponent_buckets),
             "difficulty_weight": float(training.difficulty_weight),
+            "opponent_decision_restarts": bool(
+                training.opponent_decision_restarts
+            ),
             "learning_rate": float(training.learning_rate),
             "entropy_coef": float(training.entropy_coef),
             "use_value_head": bool(training.use_value_head),
@@ -132,6 +156,13 @@ def build_training_metrics_header(
     }
 
 
+def _optional_float(mapping, key):
+    """Return one optional numeric metric without coercing ``None``."""
+    if mapping is None or mapping.get(key) is None:
+        return None
+    return float(mapping[key])
+
+
 def build_iteration_metrics_row(
     context,
     state,
@@ -139,6 +170,11 @@ def build_iteration_metrics_row(
     iteration,
     games,
     batch_size,
+    normal_batch_size,
+    restart_batch_size,
+    restart_episode_count,
+    restart_elapsed,
+    restart_summary,
     wins,
     moving_win_rate,
     reward_summary,
@@ -167,6 +203,27 @@ def build_iteration_metrics_row(
         "games_per_iteration": int(context.selected_gpi),
         "decision_sample_count": int(batch_size),
         "decisions": int(batch_size),
+        "normal_decisions": int(normal_batch_size),
+        "restart_decisions": int(restart_batch_size),
+        "restart_captured_states": int(restart_episode_count),
+        "restart_continuation_episodes": int(restart_episode_count),
+        "cumulative_normal_decisions": int(
+            state.total_normal_decision_samples
+        ),
+        "cumulative_restart_decisions": int(
+            state.total_restart_decision_samples
+        ),
+        "cumulative_restart_episodes": int(state.total_restart_episodes),
+        "restart_wins": int(restart_summary["wins"]),
+        "restart_losses": int(restart_summary["losses"]),
+        "normal_event_stats": [
+            int(restart_summary["normal_events"][name])
+            for name in EVENT_RESULT_COLUMNS
+        ],
+        "restart_event_stats": [
+            int(restart_summary["restart_events"][name])
+            for name in EVENT_RESULT_COLUMNS
+        ],
         "wins_in_batch": int(wins),
         "batch_win_rate": float(wins / games),
         "moving_average_win_rate": float(moving_win_rate),
@@ -185,19 +242,28 @@ def build_iteration_metrics_row(
         "moving_average_value_loss": moving_value_loss,
         "requested_minibatches": None if ppo_metrics is None else int(ppo_metrics["requested_minibatches"]),
         "effective_minibatches": None if ppo_metrics is None else int(ppo_metrics["effective_minibatches"]),
+        "target_decisions_per_minibatch": None if ppo_metrics is None else int(
+            ppo_metrics["target_decisions_per_minibatch"]
+        ),
+        "min_decisions_per_minibatch": None if ppo_metrics is None else int(
+            ppo_metrics["min_decisions_per_minibatch"]
+        ),
+        "decisions_omitted_per_epoch": None if ppo_metrics is None else int(
+            ppo_metrics["decisions_omitted_per_epoch"]
+        ),
         "minibatch_sizes": None if ppo_metrics is None else ppo_metrics["minibatch_sizes"],
         "epochs_completed": None if ppo_metrics is None else int(ppo_metrics["epochs_completed"]),
         "stopped_by_kl": False if ppo_metrics is None else bool(ppo_metrics["stopped_by_kl"]),
         "optimizer_steps": 0 if gradient_metrics is None else int(
             ppo_metrics["optimizer_steps"] if ppo_metrics is not None else 1
         ),
-        "final_approx_kl": None if ppo_metrics is None else float(ppo_metrics["final_approx_kl"]),
-        "max_approx_kl": None if ppo_metrics is None else float(ppo_metrics["max_approx_kl"]),
-        "final_clip_fraction": None if ppo_metrics is None else float(ppo_metrics["final_clip_fraction"]),
-        "final_entropy": None if ppo_metrics is None else float(ppo_metrics["final_entropy"]),
-        "final_policy_loss": None if ppo_metrics is None else float(ppo_metrics["final_policy_loss"]),
-        "gradient_norm_mean": None if ppo_metrics is None else float(ppo_metrics["gradient_norm_mean"]),
-        "gradient_norm_max": None if ppo_metrics is None else float(ppo_metrics["gradient_norm_max"]),
+        "final_approx_kl": _optional_float(ppo_metrics, "final_approx_kl"),
+        "max_approx_kl": _optional_float(ppo_metrics, "max_approx_kl"),
+        "final_clip_fraction": _optional_float(ppo_metrics, "final_clip_fraction"),
+        "final_entropy": _optional_float(ppo_metrics, "final_entropy"),
+        "final_policy_loss": _optional_float(ppo_metrics, "final_policy_loss"),
+        "gradient_norm_mean": _optional_float(ppo_metrics, "gradient_norm_mean"),
+        "gradient_norm_max": _optional_float(ppo_metrics, "gradient_norm_max"),
         "buffer_location": None if ppo_metrics is None else ppo_metrics["buffer_location"],
         "buffer_bytes": 0 if ppo_metrics is None else int(ppo_metrics["buffer_bytes"]),
         "selected_workers": int(context.runner.worker_count),
@@ -213,6 +279,7 @@ def build_iteration_metrics_row(
             for name in context.training.opponent_buckets
         ],
         "rollout_seconds": float(rollout_elapsed),
+        "restart_seconds": float(restart_elapsed),
         "ppo_seconds": float(update_elapsed if ppo_metrics else 0.0),
         "rollout_duration_s": float(rollout_elapsed),
         "update_duration_s": float(update_elapsed),
@@ -287,6 +354,9 @@ def build_training_summary(
         "shutdown_requested": bool(stopped_by_shutdown),
         "opponent_buckets": list(training.opponent_buckets),
         "difficulty_weight": float(training.difficulty_weight),
+        "opponent_decision_restarts": bool(
+            training.opponent_decision_restarts
+        ),
         "learning_rate": training.learning_rate,
         "entropy_coef": training.entropy_coef,
         "use_value_head": training.use_value_head,
@@ -318,6 +388,14 @@ def build_training_summary(
         "numbered_checkpoints": bool(execution.numbered_checkpoints),
         "total_decision_samples": int(state.total_decision_samples),
         "trainable_decisions_seen": int(state.total_decision_samples),
+        "total_normal_decision_samples": int(
+            state.total_normal_decision_samples
+        ),
+        "total_restart_decision_samples": int(
+            state.total_restart_decision_samples
+        ),
+        "total_restart_episodes": int(state.total_restart_episodes),
+        "total_restart_duration_s": float(state.total_restart_duration_s),
         "policy_updates_completed": int(state.policy_updates_completed),
         "decisions_per_game": float(
             state.total_decision_samples / max(1, state.completed_training_games)
@@ -397,6 +475,7 @@ class RLTrainingReporter:
         gpi,
         opponent_buckets,
         difficulty_weight,
+        opponent_decision_restarts,
     ):
         """Describe the selected fixed algorithm policy once per invocation."""
         policy = fixed_ppo_policy(ppo_max_epochs)
@@ -405,6 +484,11 @@ class RLTrainingReporter:
         self.status(
             "Opponent buckets: " + ", ".join(opponent_buckets)
             + f" | difficulty weight: {float(difficulty_weight):g}."
+        )
+        self.status(
+            "Opponent-decision restarts: "
+            + ("on" if opponent_decision_restarts else "off")
+            + "."
         )
         self.status("RL update configuration:")
         self.status(
@@ -428,8 +512,10 @@ class RLTrainingReporter:
                 f"{fixed['target_kl']:.3f} | stop KL: {fixed['stop_kl']:.3f}"
             )
             self.status(
-                f"  max epochs: {ppo_max_epochs} | minibatches: adaptive, "
-                f"{fixed['min_minibatches']} to {fixed['max_minibatches']} | "
+                f"  max epochs: {ppo_max_epochs} | minibatches: target "
+                f"{fixed['target_decisions_per_minibatch']} decisions, minimum "
+                f"{fixed['min_decisions_per_minibatch']}, maximum "
+                f"{fixed['max_minibatches']} | "
                 "preferred buffer: GPU | fallback: RAM"
             )
         else:
@@ -510,6 +596,7 @@ class RLTrainingReporter:
         value_loss_window,
         ppo_window,
         ppo_max_epochs,
+        restart_summary,
     ):
         if self.quiet or iteration % log_interval:
             return
@@ -538,6 +625,14 @@ class RLTrainingReporter:
             "  Matchmaking: buckets " + ",".join(opponent_buckets)
             + f" | difficulty weight {difficulty_weight:g} | {bucket_text}"
         )
+        if restart_summary["enabled"]:
+            print(
+                "  Opponent-decision restarts: "
+                f"{restart_summary['captured_states']} states/continuations | "
+                f"{restart_summary['restart_decisions']} restart decisions + "
+                f"{restart_summary['normal_decisions']} normal | "
+                f"{restart_summary['seconds']:.2f}s"
+            )
         membership_text = ", ".join(
             f"{name} {value['membership_count']}/{value['capacity']}"
             for name, value in opponent_pool_state["buckets"].items()
@@ -548,7 +643,10 @@ class RLTrainingReporter:
             "neural policies | recent/medium_term overlap "
             f"{opponent_pool_state['recent_medium_term_overlap_count']}"
         )
-        value_predictions = gradient_metrics.get("value_predictions_before_update")
+        value_predictions = (
+            None if gradient_metrics is None else
+            gradient_metrics.get("value_predictions_before_update")
+        )
         if use_value_head and value_predictions is not None:
             print(
                 "  Value head: pre-update V(s) mean/std/min/max "
@@ -688,6 +786,8 @@ def _reward_signal_summary(samples, xp=None):
 
 def _gradient_log_text(metrics):
     """Return a compact gradient-norm string for the iteration log."""
+    if metrics is None:
+        return "not updated"
     suffix = " clipped" if metrics.get("grad_clipped") else ""
     return f"{metrics['grad_norm']:.2f}{suffix}"
 
@@ -742,7 +842,8 @@ def _merge_parallel_summary(summary, run_info, *, phase, iteration):
         summary["memory_monitoring_available"]
         and run_info.memory_monitoring_available
     )
-    summary[f"{phase}_batches"] += 1
+    key = f"{phase}_batches"
+    summary[key] = summary.get(key, 0) + 1
 
 
 def _print_ppo_window(rows):
@@ -758,9 +859,19 @@ def _print_ppo_window(rows):
         f"  PPO/{count}: GPI {rows[-1]['games']} | decisions "
         f"{sum(row['decisions'] for row in rows)} total/"
         f"{np.mean([row['decisions'] for row in rows]):.1f} avg | "
-        f"minibatches requested {np.mean([row['requested_minibatches'] for row in rows]):.1f} avg, "
-        f"effective {np.mean(effective):.1f}/{min(effective)}/{max(effective)} avg/min/max"
+        f"minibatches requested "
+        f"{np.mean([row['requested_minibatches'] for row in rows]):.1f} avg, "
+        f"effective {np.mean(effective):.1f}/{min(effective)}/{max(effective)} "
+        "avg/min/max | omitted decisions/epoch "
+        f"{np.mean([row['decisions_omitted_per_epoch'] for row in rows]):.1f} avg"
     )
+    restart_episodes = sum(row.get("restart_episodes", 0) for row in rows)
+    if restart_episodes:
+        print(
+            f"  PPO/{count}: opponent-decision restarts {restart_episodes} | "
+            f"restart decisions {sum(row.get('restart_decisions', 0) for row in rows)} | "
+            f"restart wall time {sum(row.get('restart_seconds', 0.0) for row in rows):.2f}s"
+        )
     print(
         f"  PPO/{count}: optimizer steps {sum(row['optimizer_steps'] for row in rows)} total/"
         f"{np.mean([row['optimizer_steps'] for row in rows]):.1f} avg | epochs "
@@ -825,6 +936,10 @@ def _metrics_header(metadata):
             "nominal_uniform_budget": uniform_budget,
             "nominal_difficulty_budget": difficulty_budget,
         },
+        "event_results": {
+            "columns": list(EVENT_RESULT_COLUMNS),
+            "domains": ["normal", "opponent_decision_restarts"],
+        },
         "metadata": metadata,
     }
 
@@ -837,6 +952,25 @@ def _metric_values(row):
         "games": row["games"],
         "cumulative_games": row["cumulative_games"],
         "decisions": row["decisions"],
+        "normal_decisions": row.get("normal_decisions", row["decisions"]),
+        "restart_decisions": row.get("restart_decisions", 0),
+        "restart_captured_states": row.get("restart_captured_states", 0),
+        "restart_continuation_episodes": row[
+            "restart_continuation_episodes"
+        ] if "restart_continuation_episodes" in row else 0,
+        "cumulative_normal_decisions": row.get(
+            "cumulative_normal_decisions", row["decisions"]
+        ),
+        "cumulative_restart_decisions": row.get(
+            "cumulative_restart_decisions", 0
+        ),
+        "cumulative_restart_episodes": row.get(
+            "cumulative_restart_episodes", 0
+        ),
+        "restart_wins": row.get("restart_wins", 0),
+        "restart_losses": row.get("restart_losses", 0),
+        "normal_event_stats": row.get("normal_event_stats", [0, 0, 0, 0]),
+        "restart_event_stats": row.get("restart_event_stats", [0, 0, 0, 0]),
         "wins_in_batch": row["wins_in_batch"],
         "batch_win_rate": row["batch_win_rate"],
         "moving_average_win_rate": row["moving_average_win_rate"],
@@ -863,6 +997,15 @@ def _metric_values(row):
         "moving_average_value_loss": row["moving_average_value_loss"],
         "requested_minibatches": row["requested_minibatches"],
         "effective_minibatches": row["effective_minibatches"],
+        "target_decisions_per_minibatch": row.get(
+            "target_decisions_per_minibatch", 512
+        ),
+        "min_decisions_per_minibatch": row.get(
+            "min_decisions_per_minibatch", 256
+        ),
+        "decisions_omitted_per_epoch": row.get(
+            "decisions_omitted_per_epoch", 0
+        ),
         "minibatch_sizes": row["minibatch_sizes"],
         "epochs_completed": row["epochs_completed"],
         "stopped_by_kl": row["stopped_by_kl"],
@@ -881,6 +1024,7 @@ def _metric_values(row):
         ],
         "bucket_results": row["bucket_results"],
         "rollout_seconds": row["rollout_seconds"],
+        "restart_seconds": row.get("restart_seconds", 0.0),
         "update_seconds": row["update_duration_s"],
         "iteration_seconds": row["iteration_duration_s"],
         "checkpoint_written": row["checkpoint_written"],
@@ -900,12 +1044,14 @@ def _read_training_metrics_header(stream, path):
     except json.JSONDecodeError as exc:
         raise ValueError(f"Training metrics header is invalid: {path}.") from exc
     bucket_schema = header.get("bucket_results", {}) if isinstance(header, dict) else {}
+    event_schema = header.get("event_results", {}) if isinstance(header, dict) else {}
     if (
         not isinstance(header, dict)
         or header.get("format") != TRAINING_METRICS_FORMAT
         or header.get("version") != TRAINING_METRICS_VERSION
         or header.get("columns") != list(TRAINING_METRIC_COLUMNS)
         or bucket_schema.get("columns") != list(BUCKET_RESULT_COLUMNS)
+        or event_schema.get("columns") != list(EVENT_RESULT_COLUMNS)
         or not isinstance(bucket_schema.get("bucket_order"), list)
         or not bucket_schema["bucket_order"]
         or len(set(bucket_schema["bucket_order"]))
@@ -954,6 +1100,20 @@ def _iter_training_metric_values(stream, path, bucket_count):
             raise ValueError(
                 f"Training metrics row {line_number} has invalid bucket results."
             )
+        for column in ("normal_event_stats", "restart_event_stats"):
+            event_values = values[TRAINING_METRIC_COLUMNS.index(column)]
+            if (
+                not isinstance(event_values, list)
+                or len(event_values) != len(EVENT_RESULT_COLUMNS)
+                or any(
+                    type(value) is not int or value < 0
+                    for value in event_values
+                )
+            ):
+                raise ValueError(
+                    f"Training metrics row {line_number} has invalid "
+                    f"{column}."
+                )
         yield values
 
 

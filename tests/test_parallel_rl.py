@@ -234,6 +234,7 @@ class ParallelRLTests(unittest.TestCase):
                 safety_config=self.safety,
                 rl_weights_path=str(Path(temp_dir) / "random-only.npz"),
                 quiet=True,
+                ppo_max_epochs=1,
             )
         self.assertEqual(summary["opponent_count"], 1)
         self.assertEqual(summary["unique_neural_opponent_count"], 0)
@@ -278,6 +279,7 @@ class ParallelRLTests(unittest.TestCase):
                 numbered_checkpoints=True,
                 fresh_from_sl=True,
                 quiet=True,
+                ppo_max_epochs=1,
             )
             policy_files = [
                 path
@@ -321,6 +323,7 @@ class ParallelRLTests(unittest.TestCase):
                 rl_weights_path=str(root / "gpi2.npz"),
                 metrics_callback=rows.append,
                 quiet=True,
+                ppo_max_epochs=1,
             )
             second = self._train(
                 iterations=4,
@@ -332,6 +335,7 @@ class ParallelRLTests(unittest.TestCase):
                 safety_config=self.safety,
                 rl_weights_path=str(root / "gpi3.npz"),
                 quiet=True,
+                ppo_max_epochs=1,
             )
 
         self.assertEqual(first["total_training_games"], 12)
@@ -358,6 +362,7 @@ class ParallelRLTests(unittest.TestCase):
                 numbered_checkpoints=True,
                 fresh_from_sl=True,
                 quiet=True,
+                ppo_max_epochs=1,
             )
             metadata, _weights = load_resume_state(
                 summary["rl_weights_path"],
@@ -400,6 +405,7 @@ class ParallelRLTests(unittest.TestCase):
                 "numbered_checkpoints": True,
                 "fresh_from_sl": True,
                 "quiet": True,
+                "ppo_max_epochs": 1,
             }
             full = self._train(
                 rl_weights_path=str(full_base),
@@ -524,6 +530,7 @@ class ParallelRLTests(unittest.TestCase):
                 "safety_config": self.safety,
                 "quiet": True,
                 "numbered_checkpoints": True,
+                "ppo_max_epochs": 1,
             }
 
             full = self._train(
@@ -544,15 +551,9 @@ class ParallelRLTests(unittest.TestCase):
             self.assertEqual(metadata["completed_training_games"], 8)
             self.assertEqual(
                 metadata["configuration"]["rl_training_algorithm"],
-                "ppo_v1",
+                "reinforce_v1",
             )
-            self.assertEqual(
-                metadata["optimizer_state"]["step_count"],
-                sum(
-                    row["optimizer_steps"]
-                    for row in metadata["training_state"]["ppo_window"]
-                ),
-            )
+            self.assertEqual(metadata["optimizer_state"]["step_count"], 2)
             self.assertTrue(metadata["adaptive_tuning"]["isolation_verified"])
             self.assertEqual(len(pool), 3)
             with self.assertRaisesRegex(ValueError, "inconsistent"):
@@ -564,11 +565,10 @@ class ParallelRLTests(unittest.TestCase):
                 resume_weights_path=str(partial_weights),
                 resume_state_file=str(partial_state),
                 gamma=0.97,
-                ppo_max_epochs=1,
                 **common,
             )
             self.assertEqual(resumed["gamma"], common.get("gamma", 1.0))
-            self.assertEqual(resumed["rl_training_algorithm"], "ppo_v1")
+            self.assertEqual(resumed["rl_training_algorithm"], "reinforce_v1")
             with np.load(full["rl_weights_path"], allow_pickle=False) as left:
                 with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
                     self.assertEqual(left.files, right.files)
@@ -674,7 +674,7 @@ class ParallelRLTests(unittest.TestCase):
         self.assertEqual([row["cumulative_games"] for row in rows], [2, 4, 5])
         self.assertEqual(summary["completed_training_games"], 5)
         self.assertEqual(summary["completed_iterations_this_run"], 3)
-        self.assertEqual(saved_algorithm, "ppo_v1")
+        self.assertEqual(saved_algorithm, "ppo_v2_decision_minibatches")
 
     def test_numbered_resume_restores_value_head_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:

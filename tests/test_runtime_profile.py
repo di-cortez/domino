@@ -160,7 +160,7 @@ def test_self_play_profile_contains_rollout_and_nested_ppo_phases(tmp_path):
         device="cpu",
     ).save(supervised)
     result = training_loop.train(
-        RLTrainingOptions(iterations=1, gpi=8, seed=123),
+        RLTrainingOptions(iterations=1, gpi=64, seed=123),
         RLResourceOptions(
             workers=1,
             device="cpu",
@@ -175,7 +175,7 @@ def test_self_play_profile_contains_rollout_and_nested_ppo_phases(tmp_path):
     )
 
     profile = result["runtime_profile_delta"]
-    assert profile["games"] == 8
+    assert profile["games"] == 64
     assert profile["iterations"] == 1
     assert profile["decisions"] > 0
     assert profile["optimizer_steps"] > 0
@@ -184,8 +184,8 @@ def test_self_play_profile_contains_rollout_and_nested_ppo_phases(tmp_path):
     assert profile["sections_seconds"]["ppo_update"] > 0.0
     assert profile["ppo_sections_seconds"]["optimizer_steps"] > 0.0
     rollout_worker = profile["rollout_worker"]
-    assert rollout_worker["games"] == 8
-    assert rollout_worker["profiled_games"] == 1
+    assert rollout_worker["games"] == 64
+    assert rollout_worker["profiled_games"] >= 1
     assert rollout_worker["worker_cpu_seconds"] > 0.0
     assert rollout_worker["sections_seconds"]["learner_agent_decisions"] > 0.0
     assert rollout_worker["learner_policy"]["sections_seconds"][

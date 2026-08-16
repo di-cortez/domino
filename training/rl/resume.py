@@ -13,6 +13,7 @@ import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.network_architecture import (
+    architecture_for_ruleset,
     hidden_layer_count_from_weights,
     policy_layer_names,
 )
@@ -220,12 +221,14 @@ def _load_initial_network(
     weight_decay=0.0,
     dropout_rate=DISABLED_DROPOUT_RATE,
     ruleset=DEFAULT_RULESET_NAME,
+    initialization_seed=None,
 ):
-    """Load an RL checkpoint or initialize from compatible SL weights.
+    """Load RL/SL weights or create a compatible random policy as fallback.
 
     ``fresh_from_sl=True`` ignores ``rl_weights_path`` as an initialization
     source while leaving that file intact until the completed new model
-    atomically replaces it.
+    atomically replaces it. If the requested SL checkpoint does not exist, a
+    ruleset-default architecture is initialized from ``initialization_seed``.
     """
     if rl_weights_path is not None and not fresh_from_sl:
         try:
@@ -269,15 +272,43 @@ def _load_initial_network(
         except FileNotFoundError:
             pass
 
-    network = PolicyNetwork.load_from_sl(
-        sl_weights_path,
-        learning_rate=learning_rate,
-        use_value_head=use_value_head,
-        device=device,
-        weight_decay=weight_decay,
-        dropout_rate=dropout_rate,
-    )
     encoder = DominoEncoder(ruleset)
+    try:
+        network = PolicyNetwork.load_from_sl(
+            sl_weights_path,
+            learning_rate=learning_rate,
+            use_value_head=use_value_head,
+            device=device,
+            weight_decay=weight_decay,
+            dropout_rate=dropout_rate,
+        )
+    except FileNotFoundError:
+        architecture = architecture_for_ruleset(ruleset)
+        network = PolicyNetwork(
+            input_size=architecture.input_size,
+            output_size=architecture.output_size,
+            hidden_sizes=architecture.hidden_sizes,
+            learning_rate=learning_rate,
+            random_seed=(
+                None
+                if initialization_seed is None
+                else int(initialization_seed) & 0xFFFFFFFF
+            ),
+            use_value_head=use_value_head,
+            device=device,
+            weight_decay=weight_decay,
+            dropout_rate=dropout_rate,
+        )
+        if expected_training_algorithm is not None:
+            network.rl_training_algorithm = expected_training_algorithm
+        if not quiet:
+            print(
+                f"Supervised weights not found at {sl_weights_path}; "
+                "initializing a random RL policy with default "
+                f"{encoder.ruleset.name} architecture "
+                f"{architecture.hidden_sizes}."
+            )
+        return network
     if not _checkpoint_matches_encoder(network, ruleset):
         input_size, output_size = _checkpoint_shape(network)
         raise ValueError(

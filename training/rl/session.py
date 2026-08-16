@@ -168,14 +168,23 @@ def _resume_inputs(training, resources, execution, reporter):
     )
 
 
-def _initialization_source(metadata, execution, initial_rl_weights_path):
+def _initialization_source(
+    metadata,
+    execution,
+    initial_rl_weights_path,
+    supervised_weights_path,
+):
     if metadata is not None:
         return "numbered_rl_resume"
-    if execution.fresh_from_sl or initial_rl_weights_path is None:
-        return "supervised"
-    if Path(initial_rl_weights_path).exists():
+    if (
+        not execution.fresh_from_sl
+        and initial_rl_weights_path is not None
+        and Path(initial_rl_weights_path).exists()
+    ):
         return "existing_rl"
-    return "supervised"
+    if Path(supervised_weights_path).exists():
+        return "supervised"
+    return "random"
 
 
 def _resume_configuration(
@@ -329,6 +338,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         inputs.metadata,
         execution,
         initial_weights,
+        resources.sl_weights_path,
     )
     network = _load_initial_network(
         training.learning_rate,
@@ -342,6 +352,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         weight_decay=training.weight_decay,
         dropout_rate=training.dropout_rate,
         ruleset=training.ruleset_name,
+        initialization_seed=effective_seed,
     )
     if inputs.metadata is not None:
         network.load_optimizer_state_dict(inputs.metadata["optimizer_state"])

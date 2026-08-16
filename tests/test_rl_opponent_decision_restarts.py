@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from agents.encoder import DominoEncoder
+from agents.network_architecture import default_hidden_sizes
 from agents.rl_nn import PolicyNetwork
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from middleware.domino_engine import DominoEngine
@@ -17,7 +18,8 @@ from training.rl.config import (
     RLResourceOptions,
     RLTrainingOptions,
 )
-from training.rl.resume import resume_state_path
+from training.rl.ppo import PPO_TRAINING_ALGORITHM
+from training.rl.resume import _load_initial_network, resume_state_path
 from training.rl.restarts import OpponentDecisionRestart
 from training.rl.rollout import (
     REWARD_SCHEMAS,
@@ -42,6 +44,57 @@ def test_restart_flag_is_optional_in_standalone_and_canonical_clis():
         "forever",
         "--opponent-decision-restarts",
     ]).opponent_decision_restarts is True
+
+
+def test_missing_supervised_checkpoint_builds_seeded_ruleset_default_policy(
+    tmp_path,
+):
+    missing = tmp_path / "missing_supervised.npz"
+    first = _load_initial_network(
+        0.001,
+        missing,
+        None,
+        quiet=True,
+        fresh_from_sl=True,
+        device="cpu",
+        ruleset=RULESET,
+        initialization_seed=123,
+        expected_training_algorithm=PPO_TRAINING_ALGORITHM,
+    )
+    second = _load_initial_network(
+        0.001,
+        missing,
+        None,
+        quiet=True,
+        fresh_from_sl=True,
+        device="cpu",
+        ruleset=RULESET,
+        initialization_seed=123,
+        expected_training_algorithm=PPO_TRAINING_ALGORITHM,
+    )
+    different = _load_initial_network(
+        0.001,
+        missing,
+        None,
+        quiet=True,
+        fresh_from_sl=True,
+        device="cpu",
+        ruleset=RULESET,
+        initialization_seed=124,
+        expected_training_algorithm=PPO_TRAINING_ALGORITHM,
+    )
+    assert first.hidden_sizes == default_hidden_sizes(RULESET)
+    assert first.W1.shape[1] == DominoEncoder(RULESET).vector_size
+    assert getattr(first, f"W{first.layer_count}").shape[0] == (
+        DominoEncoder(RULESET).action_size
+    )
+    for name in first.weight_names:
+        np.testing.assert_array_equal(getattr(first, name), getattr(second, name))
+    assert any(
+        not np.array_equal(getattr(first, name), getattr(different, name))
+        for name in first.weight_names
+    )
+    assert first.rl_training_algorithm == PPO_TRAINING_ALGORITHM
 
 
 def _network():
@@ -302,9 +355,10 @@ def _train_restart_run(
     callback=None,
     gpi=20,
     ppo_max_epochs=1,
+    create_supervised=True,
 ):
     sl_path = Path(root) / "supervised.npz"
-    if not sl_path.exists():
+    if create_supervised and not sl_path.exists():
         _save_supervised(sl_path)
     return train(
         RLTrainingOptions(
@@ -361,6 +415,18 @@ def test_iteration_keeps_gpi_counters_separate_from_restart_augmentation(tmp_pat
     assert rows[0]["decisions"] == (
         rows[0]["normal_decisions"] + rows[0]["restart_decisions"]
     )
+
+
+def test_training_reports_random_initialization_when_supervised_is_missing(
+    tmp_path,
+):
+    summary = _train_restart_run(
+        tmp_path,
+        total_games=20,
+        create_supervised=False,
+    )
+    assert summary["initialization_source"] == "random"
+    assert Path(summary["rl_weights_path"]).is_file()
 
 
 def test_combined_normal_and_restart_buffer_receives_one_ppo_update(tmp_path):

@@ -174,7 +174,9 @@ def add_optional_rl_arguments(
         default=fresh_from_sl_default,
         help=(
             "Initialize the policy from --sl-weights-path even when the RL "
-            "output already exists; replace that output only after success."
+            "output already exists. If SL weights do not exist, initialize a "
+            "random policy with the ruleset-default architecture. Replace the "
+            "RL output only after success."
         ),
     )
     initialization.add_argument(

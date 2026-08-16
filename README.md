@@ -241,7 +241,9 @@ python -m diagnostics.evaluate --games 10000 --seed 123
 
 The standalone RL command defaults to
 continuing a compatible RL checkpoint when one exists; `--fresh-from-sl`
-forces a new RL run from the supervised checkpoint.
+forces a new RL run from the supervised checkpoint. If that checkpoint is
+absent, it instead creates a seeded random policy with the selected ruleset's
+default architecture.
 
 ## Diagnostics
 

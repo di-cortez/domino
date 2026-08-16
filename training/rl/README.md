@@ -43,6 +43,8 @@ Default behavior:
 
 - if a compatible `models/domino_rl_weights.npz` exists, resume from it;
 - otherwise warm-start from a compatible `models/domino_sl_weights.npz`;
+- if `--fresh-from-sl` is requested but that file does not exist, create a
+  seeded random policy using the selected ruleset's default hidden sizes;
 - train against the fixed heuristic and the 200 most recent frozen learner
   snapshots, splitting half the games uniformly and half by measured
   difficulty;
@@ -61,7 +63,9 @@ weights are never converted across variants.
 That compatibility-first policy is the default for the standalone module.
 Pass `--fresh-from-sl` to ignore an older RL checkpoint and start from the SL
 weights, or `--continue-existing-rl` to state the historical behavior
-explicitly. A new canonical pipeline run always starts from its compatible
+explicitly. A missing SL path now means a clean random-policy start rather than
+an error; `--seed` makes those initial random weights reproducible. A new
+canonical pipeline run always starts from its compatible
 seed-addressed supervised checkpoint. Canonical continuation is deliberately
 separate and complete: use `--resume` or `--resume-from`, never the
 weights-only `--continue-existing-rl` path.

@@ -20,6 +20,7 @@ from training.utils.encoding import ENCODED_FEATURE_VERSION
 from utils.artifacts import atomic_write_json, file_sha256
 from utils.myrandom import DEFAULT_BIT_GENERATOR, DERIVATION_SCHEME
 from utils.repository import current_git_commit
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
 
 FORMAT_VERSION = 1
@@ -72,10 +73,14 @@ class ArtifactCheck:
         )
 
 
-def canonical_asset_paths(root, seed):
+def canonical_asset_paths(root, seed, ruleset=DEFAULT_RULESET_NAME):
     """Return canonical dataset/cache/weights paths for one seed."""
     root = Path(root)
-    suffix = f"standard_seed{int(seed)}"
+    ruleset = resolve_ruleset(ruleset)
+    ruleset_prefix = (
+        "" if ruleset.name == DEFAULT_RULESET_NAME else f"{ruleset.name}_"
+    )
+    suffix = f"{ruleset_prefix}standard_seed{int(seed)}"
     dataset = root / "dataset" / f"supervised_dataset_{suffix}.jsonl"
     weights = root / "models" / f"domino_sl_{suffix}.npz"
     return CanonicalAssetPaths(
@@ -108,10 +113,18 @@ def _json_value(value):
     return json.loads(json.dumps(value))
 
 
-def canonical_generation_config(*, dataset_games, workers, tuning, safety):
+def canonical_generation_config(
+    *,
+    dataset_games,
+    workers,
+    tuning,
+    safety,
+    ruleset=DEFAULT_RULESET_NAME,
+):
     """Build the structural/configuration identity of a canonical dataset."""
     return _json_value({
         "dataset_games": int(dataset_games),
+        "ruleset_name": resolve_ruleset(ruleset).name,
         "workers": workers,
         "autotune_fraction": float(tuning["fraction"]),
         "autotune_minimum_gain": float(tuning["minimum_gain"]),
@@ -233,7 +246,14 @@ def _resolved_supervised_execution(training_summary):
     }
 
 
-def inspect_canonical_dataset(paths, *, seed, dataset_games, generation_config):
+def inspect_canonical_dataset(
+    paths,
+    *,
+    seed,
+    dataset_games,
+    generation_config,
+    ruleset=DEFAULT_RULESET_NAME,
+):
     """Validate dataset metadata, structural versions, configuration, and hash."""
     if not paths.dataset.exists():
         reasons = () if not paths.dataset_meta.exists() else (
@@ -243,13 +263,22 @@ def inspect_canonical_dataset(paths, *, seed, dataset_games, generation_config):
     metadata, error = _load_metadata(paths.dataset_meta)
     if error:
         return ArtifactCheck(False, "incompatible", (error,), metadata, None)
+    ruleset = resolve_ruleset(ruleset)
+    encoder = DominoEncoder(ruleset)
+    metadata = dict(metadata)
+    if ruleset.name == DEFAULT_RULESET_NAME:
+        metadata.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
+        stored_generation = dict(metadata.get("generation_config") or {})
+        stored_generation.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
+        metadata["generation_config"] = stored_generation
     expected = {
         "format_version": FORMAT_VERSION,
         "artifact_type": "supervised_dataset",
         "seed": int(seed),
         "dataset_games": int(dataset_games),
-        "encoder_size": DominoEncoder.VECTOR_SIZE,
-        "action_count": DominoEncoder.ACTION_SIZE,
+        "ruleset_name": ruleset.name,
+        "encoder_size": encoder.vector_size,
+        "action_count": encoder.action_size,
         "dataset_format": DATASET_FORMAT,
         "dataset_generator_version": DATASET_GENERATOR_VERSION,
         "ruleset_version": RULESET_VERSION,
@@ -281,8 +310,11 @@ def write_dataset_metadata(
     dataset_games,
     dataset_summary,
     generation_config,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Publish complete metadata for a newly generated canonical dataset."""
+    ruleset = resolve_ruleset(ruleset)
+    encoder = DominoEncoder(ruleset)
     digest = file_sha256(paths.dataset)
     metadata = {
         "format_version": FORMAT_VERSION,
@@ -290,8 +322,9 @@ def write_dataset_metadata(
         "seed": int(seed),
         "dataset_games": int(dataset_games),
         "dataset_examples": int(dataset_summary["saved_turn_count"]),
-        "encoder_size": DominoEncoder.VECTOR_SIZE,
-        "action_count": DominoEncoder.ACTION_SIZE,
+        "ruleset_name": ruleset.name,
+        "encoder_size": encoder.vector_size,
+        "action_count": encoder.action_size,
         "dataset_format": DATASET_FORMAT,
         "dataset_generator_version": DATASET_GENERATOR_VERSION,
         "ruleset_version": RULESET_VERSION,
@@ -330,6 +363,7 @@ def inspect_canonical_weights(
     dataset_metadata,
     training_config,
     architecture=DEFAULT_NETWORK_ARCHITECTURE,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Validate supervised weights, origin dataset, architecture, and hash."""
     if not paths.weights.exists():
@@ -340,15 +374,21 @@ def inspect_canonical_weights(
     metadata, error = _load_metadata(paths.weights_meta)
     if error:
         return ArtifactCheck(False, "incompatible", (error,), metadata, None)
+    ruleset = resolve_ruleset(ruleset)
+    encoder = DominoEncoder(ruleset)
     hyperparameters, randomization, execution = (
         _split_supervised_training_config(training_config)
     )
+    model_metadata = metadata.setdefault("model", {})
+    if ruleset.name == DEFAULT_RULESET_NAME:
+        model_metadata.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
     comparisons = {
         "format_version": SUPERVISED_WEIGHTS_FORMAT_VERSION,
         "artifact.type": "supervised_weights",
         "dataset": _weights_dataset_section(dataset_metadata),
-        "model.encoder_size": DominoEncoder.VECTOR_SIZE,
-        "model.action_count": DominoEncoder.ACTION_SIZE,
+        "model.ruleset_name": ruleset.name,
+        "model.encoder_size": encoder.vector_size,
+        "model.action_count": encoder.action_size,
         "model.network_architecture": architecture.as_dict(),
         "training.hyperparameters": hyperparameters,
         "training.randomization": {"root_seed": int(seed), **randomization},
@@ -391,8 +431,11 @@ def write_weights_metadata(
     training_config,
     training_summary,
     architecture=DEFAULT_NETWORK_ARCHITECTURE,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Publish provenance and convergence metadata for supervised weights."""
+    ruleset = resolve_ruleset(ruleset)
+    encoder = DominoEncoder(ruleset)
     digest = file_sha256(paths.weights)
     hyperparameters, randomization, execution = (
         _split_supervised_training_config(training_config)
@@ -405,8 +448,9 @@ def write_weights_metadata(
         },
         "dataset": _weights_dataset_section(dataset_metadata),
         "model": {
-            "encoder_size": DominoEncoder.VECTOR_SIZE,
-            "action_count": DominoEncoder.ACTION_SIZE,
+            "ruleset_name": ruleset.name,
+            "encoder_size": encoder.vector_size,
+            "action_count": encoder.action_size,
             "network_architecture": architecture.as_dict(),
         },
         "training": {

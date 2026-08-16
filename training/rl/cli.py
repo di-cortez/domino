@@ -35,6 +35,11 @@ from training.rl.rollout import ALPHA, DEFAULT_GAMMA, EVENT_REWARD_DECAY
 from training.rl.resume import load_resume_state
 from training.utils.cli_args import add_regularization_arguments, positive_int
 from utils.runtime_status import format_duration
+from middleware.rulesets import DEFAULT_RULESET_NAME, RULESET_NAMES
+from utils.ruleset_paths import (
+    default_rl_weights_path,
+    default_sl_weights_path,
+)
 
 
 def parse_opponent_buckets(value):
@@ -84,6 +89,12 @@ def add_optional_rl_arguments(
     :func:`training.supervised.cli.add_optional_training_arguments`.
     """
     group = parser.add_argument_group("optional reinforcement-learning controls")
+    group.add_argument(
+        "--ruleset",
+        choices=RULESET_NAMES,
+        default=DEFAULT_RULESET_NAME,
+        help="Named compact domino ruleset.",
+    )
     group.add_argument(
         "--iterations",
         type=int,
@@ -144,8 +155,8 @@ def add_optional_rl_arguments(
         add_regularization_arguments(group)
     group.add_argument("--log-interval", type=int, default=10)
     group.add_argument("--checkpoint-interval", type=int, default=50)
-    group.add_argument("--sl-weights-path", default=SL_WEIGHTS)
-    group.add_argument("--rl-weights-path", default=RL_WEIGHTS)
+    group.add_argument("--sl-weights-path", default=None)
+    group.add_argument("--rl-weights-path", default=None)
     initialization = group.add_mutually_exclusive_group()
     initialization.add_argument(
         "--fresh-from-sl",
@@ -311,6 +322,7 @@ def training_options_from_args(args):
     """Translate CLI arguments into the three public RL option groups."""
     training = RLTrainingOptions(
         iterations=args.iterations,
+        ruleset_name=args.ruleset,
         total_training_games=(
             args.total_training_games
             if args.iterations is not None
@@ -337,8 +349,12 @@ def training_options_from_args(args):
         ppo_max_epochs=args.ppo_max_epochs,
     )
     resources = RLResourceOptions(
-        sl_weights_path=args.sl_weights_path,
-        rl_weights_path=args.rl_weights_path,
+        sl_weights_path=(
+            args.sl_weights_path or default_sl_weights_path(args.ruleset)
+        ),
+        rl_weights_path=(
+            args.rl_weights_path or default_rl_weights_path(args.ruleset)
+        ),
         device=args.device,
         workers=args.rl_workers,
         safety_config=ParallelSafetyConfig(

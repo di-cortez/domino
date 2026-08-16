@@ -2,6 +2,8 @@
 
 import random
 
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+
 
 RULESET_VERSION = 2
 WIN_REASON_EMPTY_HAND = "empty_hand"
@@ -56,10 +58,24 @@ class DominoEngine:
 
     _next_game_id = 0
 
-    def __init__(self, player_count=2, rng=None):
+    def __init__(
+        self,
+        player_count=2,
+        rng=None,
+        *,
+        ruleset=DEFAULT_RULESET_NAME,
+    ):
         self.player_count = player_count
         self.rng = rng
-        self.all_tiles = [(i, j) for i in range(7) for j in range(i, 7)]
+        self.ruleset = resolve_ruleset(ruleset)
+        required_tiles = int(player_count) * self.ruleset.hand_size
+        if required_tiles > self.ruleset.tile_count:
+            raise ValueError(
+                f"Cannot deal {self.ruleset.hand_size} tiles to "
+                f"{player_count} players from the {self.ruleset.name} "
+                f"{self.ruleset.tile_count}-tile deck."
+            )
+        self.all_tiles = list(self.ruleset.all_tiles)
         self.reset()
 
     @classmethod
@@ -81,13 +97,14 @@ class DominoEngine:
         else:
             self.rng.shuffle(shuffled_tiles)
 
+        hand_size = self.ruleset.hand_size
         self.hands = [
-            shuffled_tiles[i * 7:(i + 1) * 7]
+            shuffled_tiles[i * hand_size:(i + 1) * hand_size]
             for i in range(self.player_count)
         ]
         self.initial_hands = [hand.copy() for hand in self.hands]
         self.drawn_tiles_by_player = [[] for _ in range(self.player_count)]
-        self.stock = shuffled_tiles[self.player_count * 7:]
+        self.stock = shuffled_tiles[self.player_count * hand_size:]
         self.board_history = []
         self.ends = []
         self.winner = None
@@ -297,6 +314,8 @@ class DominoEngine:
 
         return {
             "game_id": self.game_id,
+            "ruleset_name": self.ruleset.name,
+            "initial_hand_size": self.ruleset.hand_size,
             "ends": list(self.ends),
             "current_player_hand": [list(tile) for tile in self.hands[self.current_player]],
             "current_player_initial_hand": [
@@ -339,5 +358,6 @@ class DominoEngine:
             "winner": self.winner,
             "win_reason": self.win_reason,
             "last_valid_tile_player": self.last_valid_tile_player,
+            "ruleset_name": self.ruleset.name,
             "ruleset_version": RULESET_VERSION,
         }

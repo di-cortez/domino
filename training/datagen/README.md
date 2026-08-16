@@ -16,6 +16,7 @@ Run:
 python -m training.datagen.generator
 python -m training.datagen.generator --workers auto --seed 123
 python -m training.datagen.generator --workers 4 --games 5000
+python -m training.datagen.generator --ruleset double-three --games 1000 --seed 123
 ```
 
 The generator records `(state, target_action)` pairs from games played by
@@ -34,6 +35,9 @@ does not seed process-global Python, NumPy, or CuPy state. Fixed-worker and
 automatic runs therefore produce byte-identical JSONL for the same `--seed`,
 regardless of scheduling or a runtime fallback. Use `--help` for benchmark
 fractions, RAM reserve, per-worker RSS, and estimated-worker-memory controls.
+Workers receive only the canonical ruleset name and resolve the immutable game
+geometry locally. Every row includes that name and initial hand size; compact
+outputs use ruleset-specific default filenames.
 
 Each successful generation also writes
 `<dataset-stem>.random_manifest.json` beside the JSONL. It records the root

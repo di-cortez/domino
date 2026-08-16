@@ -28,6 +28,7 @@ from training.utils.cli_args import (
     nonnegative_int,
     positive_int,
 )
+from middleware.rulesets import DEFAULT_RULESET_NAME, RULESET_NAMES
 
 
 def add_architecture_arguments(group):
@@ -51,7 +52,8 @@ def add_architecture_arguments(group):
             metavar="N",
             help=(
                 f"Neurons in hidden layer {position} "
-                f"(default: {default_hidden_size(position)}). Requires "
+                "(the first two defaults depend on --ruleset; "
+                f"double-six uses {default_hidden_size(position)}). Requires "
                 f"--hidden-layers of at least {position}."
             ),
         )
@@ -67,6 +69,7 @@ def resolve_architecture_arguments(args):
             for position in range(1, MAX_HIDDEN_LAYER_COUNT + 1)
         ],
         maximum=MAX_HIDDEN_LAYER_COUNT,
+        ruleset=getattr(args, "ruleset", DEFAULT_RULESET_NAME),
     )
     for position in range(1, MAX_HIDDEN_LAYER_COUNT + 1):
         setattr(
@@ -172,6 +175,12 @@ def parse_args(argv=None):
         description="Train the supervised-learning domino policy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument(
+        "--ruleset",
+        choices=RULESET_NAMES,
+        default=DEFAULT_RULESET_NAME,
+        help="Named compact domino ruleset.",
+    )
     add_optional_training_arguments(parser, include_device_alias=True)
     args = parser.parse_args(argv)
     try:
@@ -196,6 +205,7 @@ def main(argv=None):
         memory_reserve_mb=args.sl_memory_reserve_mb,
         gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
         seed=args.sl_seed,
+        ruleset=args.ruleset,
     )
 
 

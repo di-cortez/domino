@@ -8,6 +8,7 @@ from agents.agent import RandomAgent
 from agents.heuristic_agent import StrategicAgent
 from agents.rl_agent import RLAgent
 from middleware.domino_engine import DominoEngine
+from middleware.rulesets import DEFAULT_RULESET_NAME
 
 TERMINAL_WIN_REWARD = 1
 TERMINAL_LOSS_REWARD = -TERMINAL_WIN_REWARD
@@ -195,9 +196,10 @@ def _play_training_game_unprofiled(
     learner_position,
     learner_agent,
     schema,
+    ruleset_name=DEFAULT_RULESET_NAME,
 ):
     """Profiler-free rollout hot path for non-sampled games."""
-    engine = DominoEngine(player_count=len(agents))
+    engine = DominoEngine(player_count=len(agents), ruleset=ruleset_name)
     event_stats = EventStats()
     while not engine.game_over:
         state = engine._get_state()
@@ -235,6 +237,7 @@ def _play_training_game(
     learner_agent,
     schema,
     runtime_profile=None,
+    ruleset_name=DEFAULT_RULESET_NAME,
 ):
     """Play one RL training game and attach decayed local event rewards."""
     if runtime_profile is None:
@@ -243,9 +246,10 @@ def _play_training_game(
             learner_position,
             learner_agent,
             schema,
+            ruleset_name,
         )
     section_started = _profile_worker_start(runtime_profile)
-    engine = DominoEngine(player_count=len(agents))
+    engine = DominoEngine(player_count=len(agents), ruleset=ruleset_name)
     event_stats = EventStats()
     _profile_worker_section(
         runtime_profile,
@@ -322,7 +326,12 @@ def _play_training_game(
 
 
 def _collect_steps_vs_snapshot(
-    network, opponent_network, schema, gamma, runtime_profile=None
+    network,
+    opponent_network,
+    schema,
+    gamma,
+    runtime_profile=None,
+    ruleset_name=DEFAULT_RULESET_NAME,
 ):
     """Play against one already-selected frozen neural opponent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -342,11 +351,13 @@ def _collect_steps_vs_snapshot(
         network,
         mode="training",
         runtime_profile=learner_policy_profile,
+        ruleset=ruleset_name,
     )
     opponent = RLAgent(
         opponent_network,
         mode="stochastic_evaluation",
         runtime_profile=opponent_policy_profile,
+        ruleset=ruleset_name,
     )
     agents = [None, None]
     agents[learner_position] = learner
@@ -359,6 +370,7 @@ def _collect_steps_vs_snapshot(
         learner,
         schema,
         runtime_profile=runtime_profile,
+        ruleset_name=ruleset_name,
     )
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
@@ -380,6 +392,7 @@ def collect_steps_for_assignment(
     schema,
     gamma,
     runtime_profile=None,
+    ruleset_name=DEFAULT_RULESET_NAME,
 ):
     """Dispatch one preselected assignment without knowing pool policy."""
     if opponent_kind == "policy_snapshot":
@@ -391,6 +404,7 @@ def collect_steps_for_assignment(
             schema,
             gamma,
             runtime_profile=runtime_profile,
+            ruleset_name=ruleset_name,
         )
     if opponent_kind == "heuristic":
         if opponent_network is not None:
@@ -400,6 +414,7 @@ def collect_steps_for_assignment(
             schema,
             gamma,
             runtime_profile=runtime_profile,
+            ruleset_name=ruleset_name,
         )
     if opponent_kind == "random":
         if opponent_network is not None:
@@ -409,12 +424,17 @@ def collect_steps_for_assignment(
             schema,
             gamma,
             runtime_profile=runtime_profile,
+            ruleset_name=ruleset_name,
         )
     raise ValueError(f"Unknown RL opponent kind: {opponent_kind!r}")
 
 
 def _collect_steps_vs_heuristic(
-    network, schema, gamma, runtime_profile=None
+    network,
+    schema,
+    gamma,
+    runtime_profile=None,
+    ruleset_name=DEFAULT_RULESET_NAME,
 ):
     """Play one training game against the fixed heuristic agent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -428,10 +448,11 @@ def _collect_steps_vs_heuristic(
         network,
         mode="training",
         runtime_profile=learner_policy_profile,
+        ruleset=ruleset_name,
     )
     agents = [None, None]
     agents[learner_position] = learner
-    agents[1 - learner_position] = StrategicAgent()
+    agents[1 - learner_position] = StrategicAgent(ruleset=ruleset_name)
     _profile_worker_section(runtime_profile, "agent_setup", section_started)
 
     engine, event_stats = _play_training_game(
@@ -440,6 +461,7 @@ def _collect_steps_vs_heuristic(
         learner,
         schema,
         runtime_profile=runtime_profile,
+        ruleset_name=ruleset_name,
     )
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
@@ -455,7 +477,11 @@ def _collect_steps_vs_heuristic(
 
 
 def _collect_steps_vs_random(
-    network, schema, gamma, runtime_profile=None
+    network,
+    schema,
+    gamma,
+    runtime_profile=None,
+    ruleset_name=DEFAULT_RULESET_NAME,
 ):
     """Play one training game against the fixed uniform-random agent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -469,6 +495,7 @@ def _collect_steps_vs_random(
         network,
         mode="training",
         runtime_profile=learner_policy_profile,
+        ruleset=ruleset_name,
     )
     agents = [None, None]
     agents[learner_position] = learner
@@ -481,6 +508,7 @@ def _collect_steps_vs_random(
         learner,
         schema,
         runtime_profile=runtime_profile,
+        ruleset_name=ruleset_name,
     )
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)

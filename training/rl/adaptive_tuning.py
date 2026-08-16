@@ -38,6 +38,7 @@ from utils.resource_limits import (
     process_rss_bytes,
 )
 from utils.repository import current_git_commit
+from middleware.rulesets import DEFAULT_RULESET_NAME
 
 
 TUNING_VERSION = 5
@@ -260,6 +261,7 @@ def _new_runner(
     opponent_buckets,
     schema,
     gamma,
+    ruleset_name=DEFAULT_RULESET_NAME,
     safety,
     pool_state,
     pool_weights,
@@ -270,6 +272,7 @@ def _new_runner(
         opponent_buckets=opponent_buckets,
         schema=schema,
         gamma=gamma,
+        ruleset_name=ruleset_name,
         safety=safety,
     )
     if pool_state is not None:
@@ -298,6 +301,7 @@ def benchmark_worker_candidates(
     difficulty_weight,
     schema,
     gamma,
+    ruleset_name=DEFAULT_RULESET_NAME,
     safety,
     pool_state=None,
     pool_weights=None,
@@ -320,6 +324,7 @@ def benchmark_worker_candidates(
         opponent_buckets=opponent_buckets,
         schema=schema,
         gamma=gamma,
+        ruleset_name=ruleset_name,
         safety=safety,
         pool_state=pool_state,
         pool_weights=pool_weights,
@@ -542,6 +547,7 @@ def run_worker_tuning(
     difficulty_weight,
     schema,
     gamma,
+    ruleset_name=DEFAULT_RULESET_NAME,
     safety,
     pool_state=None,
     pool_weights=None,
@@ -570,6 +576,8 @@ def run_worker_tuning(
             and not retune_workers
             and int(saved_tuning.get("version", -1)) == TUNING_VERSION
             and (saved_gpi is None or int(saved_gpi) == int(gpi))
+            and saved_tuning.get("ruleset_name", DEFAULT_RULESET_NAME)
+            == ruleset_name
             and tuple(saved_tuning.get("opponent_buckets", ()))
             == tuple(opponent_buckets)
             and float(saved_tuning.get("difficulty_weight", -1.0))
@@ -608,6 +616,7 @@ def run_worker_tuning(
                 difficulty_weight=difficulty_weight,
                 schema=schema,
                 gamma=gamma,
+                ruleset_name=ruleset_name,
                 safety=safety,
                 pool_state=pool_state,
                 pool_weights=pool_weights,
@@ -630,6 +639,7 @@ def run_worker_tuning(
             "base_seed": int(base_seed),
             "total_training_games": int(total_training_games),
             "gpi": int(gpi),
+            "ruleset_name": ruleset_name,
             "opponent_buckets": list(opponent_buckets),
             "difficulty_weight": float(difficulty_weight),
             "pool_policy": pool_policy_manifest(opponent_buckets),

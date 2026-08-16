@@ -18,6 +18,7 @@ from training.supervised.runtime import (
 from training.utils.encoding import ENCODED_FEATURE_VERSION
 from utils.artifacts import file_sha256
 from utils.resource_limits import MIB, MemorySafetyError, host_allocation_status
+from middleware.rulesets import validate_state_ruleset
 
 
 ENCODED_CACHE_FILE = "dataset/supervised_dataset_encoded.npz"
@@ -77,8 +78,9 @@ def _dataset_metadata(file_path, encoder):
     return {
         "source_sha256": file_sha256(file_path),
         "source_size": stat.st_size,
-        "encoder_vector_size": encoder.VECTOR_SIZE,
-        "encoder_action_size": len(encoder.all_actions),
+        "ruleset_name": encoder.ruleset.name,
+        "encoder_vector_size": encoder.vector_size,
+        "encoder_action_size": encoder.action_size,
         "feature_version": ENCODED_FEATURE_VERSION,
     }
 
@@ -105,7 +107,7 @@ def _mmap_cache_paths(cache_file):
     )
 
 
-def _scan_dataset(file_path):
+def _scan_dataset(file_path, encoder):
     """Count usable examples without retaining decoded JSON records."""
     counts = {
         "example_count": 0,
@@ -117,6 +119,7 @@ def _scan_dataset(file_path):
             if not line.strip():
                 continue
             record = json.loads(line)
+            validate_state_ruleset(record["state"], encoder.ruleset)
             action = _normalize_action(record["target_action"])
             if action is None:
                 counts["skipped_draw_pass"] += 1
@@ -158,7 +161,7 @@ def _fill_encoded_arrays(file_path, encoder, x, y, expected_count):
 def _encoded_bytes(example_count, encoder):
     return int(
         example_count
-        * (encoder.VECTOR_SIZE + len(encoder.all_actions))
+        * (encoder.vector_size + encoder.action_size)
         * np.dtype(DATASET_DTYPE).itemsize
     )
 
@@ -175,9 +178,9 @@ def _host_dataset_working_set_bytes(
         + train_count * np.dtype(np.int64).itemsize
         + estimate_supervised_workspace_bytes(
             min(DEFAULT_SUPERVISED_BATCH_SIZE, train_count),
-            encoder.VECTOR_SIZE,
+            encoder.vector_size,
             architecture.hidden_sizes,
-            len(encoder.all_actions),
+            encoder.action_size,
         )
     )
 
@@ -249,13 +252,13 @@ def _build_mmap_cache(file_path, encoder, cache_file, source_metadata, counts):
             temporary_x,
             mode="w+",
             dtype=DATASET_DTYPE,
-            shape=(encoder.VECTOR_SIZE, example_count),
+            shape=(encoder.vector_size, example_count),
         )
         y = np.lib.format.open_memmap(
             temporary_y,
             mode="w+",
             dtype=DATASET_DTYPE,
-            shape=(len(encoder.all_actions), example_count),
+            shape=(encoder.action_size, example_count),
         )
         _fill_encoded_arrays(file_path, encoder, x, y, example_count)
         x.flush()
@@ -267,8 +270,8 @@ def _build_mmap_cache(file_path, encoder, cache_file, source_metadata, counts):
             **source_metadata,
             "example_count": example_count,
             "dtype": np.dtype(DATASET_DTYPE).name,
-            "x_shape": [encoder.VECTOR_SIZE, example_count],
-            "y_shape": [len(encoder.all_actions), example_count],
+            "x_shape": [encoder.vector_size, example_count],
+            "y_shape": [encoder.action_size, example_count],
             "x_file_size": x_path.stat().st_size,
             "y_file_size": y_path.stat().st_size,
         }
@@ -298,7 +301,7 @@ def load_dataset(
     """Encode a JSONL dataset directly into preallocated float32 RAM arrays."""
     if not quiet:
         print(f"Scanning dataset from {file_path}...")
-    counts = _scan_dataset(file_path)
+    counts = _scan_dataset(file_path, encoder)
     required = _host_dataset_working_set_bytes(
         counts["example_count"],
         encoder,
@@ -313,8 +316,8 @@ def load_dataset(
             f"{status['available_bytes'] / MIB:.1f} MiB is available."
         )
     count = counts["example_count"]
-    x = np.empty((encoder.VECTOR_SIZE, count), dtype=DATASET_DTYPE)
-    y = np.empty((len(encoder.all_actions), count), dtype=DATASET_DTYPE)
+    x = np.empty((encoder.vector_size, count), dtype=DATASET_DTYPE)
+    y = np.empty((encoder.action_size, count), dtype=DATASET_DTYPE)
     _fill_encoded_arrays(file_path, encoder, x, y, count)
     if not quiet:
         print(f"Dataset loaded. X: {x.shape}, Y: {y.shape}")
@@ -338,7 +341,7 @@ def load_or_build_dataset(
 ):
     """Return a validated RAM or mmap encoded cache without unsafe allocation."""
     source_metadata = _dataset_metadata(file_path, encoder)
-    counts = _scan_dataset(file_path)
+    counts = _scan_dataset(file_path, encoder)
     example_count = counts["example_count"]
     required = _host_dataset_working_set_bytes(
         example_count,

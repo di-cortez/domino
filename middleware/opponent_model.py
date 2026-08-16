@@ -6,9 +6,9 @@ hand. At the end of the first non-terminal public turn where ``comb(|U|, h)``
 is at most ``SWITCH_TO_MU_MAX_HANDS``, the model converts once to an exact
 ``mu(H)`` distribution over hidden hands and remains there for the game.
 
-The exported probabilities have direct presence semantics:
+The exported probabilities have direct presence semantics for each pip value:
 
-    p[s] = P(the opponent currently holds at least one tile containing suit s)
+    p[s] = P(the opponent currently holds at least one tile containing pip s)
 
 Thus ``0.0`` means known absence and ``1.0`` means known presence. The exact
 path never creates particles or silently changes to an approximate posterior.
@@ -25,25 +25,89 @@ from math import comb
 from time import perf_counter
 from typing import Iterable, Sequence
 
+from middleware.rulesets import (
+    DEFAULT_RULESET_NAME,
+    DominoRuleset,
+    resolve_ruleset,
+    validate_state_ruleset,
+)
+
 SWITCH_TO_MU_MAX_HANDS = 500
 PROFILE_ASSIGNMENT_CACHE_SIZE = 8_192
 MODEL_VERSION = "slots-mu-exact-v1"
 
-ALL_TILES = [(i, j) for i in range(7) for j in range(i, 7)]
-SUIT_COUNT = 7
-INITIAL_HAND_SIZE = 7
+@dataclass(frozen=True)
+class OpponentDomain:
+    """Ruleset-local bit-mask geometry used by an exact opponent belief."""
 
-TILE_TO_INDEX = {tile: index for index, tile in enumerate(ALL_TILES)}
-INDEX_TO_TILE = {index: tile for tile, index in TILE_TO_INDEX.items()}
-ALL_MASK = (1 << len(ALL_TILES)) - 1
+    ruleset: DominoRuleset
+    all_tiles: tuple[tuple[int, int], ...]
+    tile_to_index: dict[tuple[int, int], int]
+    index_to_tile: dict[int, tuple[int, int]]
+    all_mask: int
+    suit_masks: tuple[int, ...]
 
-SUIT_MASKS: list[int] = []
-for suit in range(SUIT_COUNT):
-    mask = 0
-    for tile, index in TILE_TO_INDEX.items():
-        if suit in tile:
-            mask |= 1 << index
-    SUIT_MASKS.append(mask)
+    @property
+    def suit_count(self) -> int:
+        return self.ruleset.pip_count
+
+    @property
+    def initial_hand_size(self) -> int:
+        return self.ruleset.hand_size
+
+    def tile_bit(self, tile: Sequence[int]) -> int:
+        return 1 << self.tile_to_index[_normalize_tile(tile)]
+
+    def mask_from_tiles(self, tiles: Iterable[Sequence[int]]) -> int:
+        mask = 0
+        for tile in tiles:
+            mask |= self.tile_bit(tile)
+        return mask
+
+    def legal_mask(self, left_end: int, right_end: int) -> int:
+        return self.suit_masks[int(left_end)] | self.suit_masks[int(right_end)]
+
+
+@lru_cache(maxsize=4)
+def _opponent_domain_by_name(ruleset_name: str) -> OpponentDomain:
+    ruleset = resolve_ruleset(ruleset_name)
+    all_tiles = ruleset.all_tiles
+    tile_to_index = {tile: index for index, tile in enumerate(all_tiles)}
+    index_to_tile = {index: tile for tile, index in tile_to_index.items()}
+    suit_masks = []
+    for suit in range(ruleset.pip_count):
+        mask = 0
+        for tile, index in tile_to_index.items():
+            if suit in tile:
+                mask |= 1 << index
+        suit_masks.append(mask)
+    return OpponentDomain(
+        ruleset=ruleset,
+        all_tiles=all_tiles,
+        tile_to_index=tile_to_index,
+        index_to_tile=index_to_tile,
+        all_mask=(1 << len(all_tiles)) - 1,
+        suit_masks=tuple(suit_masks),
+    )
+
+
+def opponent_domain(
+    ruleset: str | DominoRuleset | None = None,
+) -> OpponentDomain:
+    """Return immutable mask geometry for one named compact ruleset."""
+    resolved = resolve_ruleset(ruleset)
+    return _opponent_domain_by_name(resolved.name)
+
+
+# Stable double-six names kept for callers that use the low-level legacy API.
+_DEFAULT_DOMAIN = opponent_domain(DEFAULT_RULESET_NAME)
+ALL_TILES = list(_DEFAULT_DOMAIN.all_tiles)
+SUIT_COUNT = _DEFAULT_DOMAIN.suit_count
+INITIAL_HAND_SIZE = _DEFAULT_DOMAIN.initial_hand_size
+TILE_TO_INDEX = _DEFAULT_DOMAIN.tile_to_index
+INDEX_TO_TILE = _DEFAULT_DOMAIN.index_to_tile
+ALL_MASK = _DEFAULT_DOMAIN.all_mask
+SUIT_MASKS = list(_DEFAULT_DOMAIN.suit_masks)
 
 
 class ProbabilityStage(Enum):
@@ -139,7 +203,7 @@ def _is_tile_play(action) -> bool:
 
 
 def _tile_bit(tile: Sequence[int]) -> int:
-    return 1 << TILE_TO_INDEX[_normalize_tile(tile)]
+    return _DEFAULT_DOMAIN.tile_bit(tile)
 
 
 def _indices_from_mask(mask: int) -> Iterable[int]:
@@ -165,14 +229,11 @@ def _mask_from_indices(indices: Iterable[int]) -> int:
 
 def mask_from_tiles(tiles: Iterable[Sequence[int]]) -> int:
     """Return a bit mask containing ``tiles``."""
-    mask = 0
-    for tile in tiles:
-        mask |= _tile_bit(tile)
-    return mask
+    return _DEFAULT_DOMAIN.mask_from_tiles(tiles)
 
 
 def _legal_mask(left_end: int, right_end: int) -> int:
-    return SUIT_MASKS[int(left_end)] | SUIT_MASKS[int(right_end)]
+    return _DEFAULT_DOMAIN.legal_mask(left_end, right_end)
 
 
 def _raw_hand_upper_bound(unknown_mask: int, hand_size: int) -> int:
@@ -351,7 +412,9 @@ class MuOpponentBelief:
         unknown_mask: int,
         opponent_hand_size: int,
         weights: dict[int, int],
+        domain: OpponentDomain | None = None,
     ):
+        self.domain = domain or _DEFAULT_DOMAIN
         self.unknown_mask = int(unknown_mask)
         self.opponent_hand_size = int(opponent_hand_size)
         self.weights = dict(weights)
@@ -364,10 +427,17 @@ class MuOpponentBelief:
     def from_initial(
         cls,
         observer_initial_hand: Sequence[Sequence[int]],
-        opponent_hand_size: int = INITIAL_HAND_SIZE,
+        opponent_hand_size: int | None = None,
+        *,
+        ruleset: str | DominoRuleset | None = None,
     ) -> "MuOpponentBelief":
         """Enumerate the independent uniform initial hand distribution."""
-        unknown_mask = ALL_MASK & ~mask_from_tiles(observer_initial_hand)
+        domain = opponent_domain(ruleset)
+        if opponent_hand_size is None:
+            opponent_hand_size = domain.initial_hand_size
+        unknown_mask = domain.all_mask & ~domain.mask_from_tiles(
+            observer_initial_hand
+        )
         unknown_indices = list(_indices_from_mask(unknown_mask))
         weights = {
             _mask_from_indices(indices): 1
@@ -377,6 +447,7 @@ class MuOpponentBelief:
             unknown_mask=unknown_mask,
             opponent_hand_size=opponent_hand_size,
             weights=weights,
+            domain=domain,
         )
 
     @classmethod
@@ -386,12 +457,14 @@ class MuOpponentBelief:
         unknown_mask: int,
         opponent_hand_size: int,
         weights: dict[int, int],
+        domain: OpponentDomain | None = None,
     ) -> "MuOpponentBelief":
         """Build a belief from exact slot-conversion weights without re-enumeration."""
         return cls(
             unknown_mask=unknown_mask,
             opponent_hand_size=opponent_hand_size,
             weights=dict(weights),
+            domain=domain,
         )
 
     def _invalidate_cache(self) -> None:
@@ -414,7 +487,7 @@ class MuOpponentBelief:
                 raise ValueError("A mu hand has an incompatible tile count.")
 
     def condition_no_legal(self, left_end: int, right_end: int) -> None:
-        legal_mask = _legal_mask(left_end, right_end)
+        legal_mask = self.domain.legal_mask(left_end, right_end)
         self.weights = {
             hand_mask: weight
             for hand_mask, weight in self.weights.items()
@@ -424,7 +497,7 @@ class MuOpponentBelief:
         self.assert_consistent()
 
     def _observer_known_tile(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
+        bit = self.domain.tile_bit(tile)
         if not self.unknown_mask & bit:
             return
         self.weights = {
@@ -443,7 +516,7 @@ class MuOpponentBelief:
         self._observer_known_tile(tile)
 
     def opponent_reveals_and_plays(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
+        bit = self.domain.tile_bit(tile)
         if not self.unknown_mask & bit:
             raise ValueError(
                 f"Revealed opponent tile {_normalize_tile(tile)} is not unknown."
@@ -487,14 +560,14 @@ class MuOpponentBelief:
                     if hand_mask & suit_mask
                 )
                 / total_weight
-                for suit_mask in SUIT_MASKS
+                for suit_mask in self.domain.suit_masks
             )
         return list(self._probability_cache)
 
     def probability_can_play(self, ends: Sequence[int]) -> float:
         if not ends:
             return 1.0
-        legal_mask = _legal_mask(ends[0], ends[1])
+        legal_mask = self.domain.legal_mask(ends[0], ends[1])
         cached = self._response_probability_cache.get(legal_mask)
         if cached is not None:
             return cached
@@ -537,10 +610,15 @@ class SlotOpponentBelief:
     def __init__(
         self,
         observer_initial_hand: Sequence[Sequence[int]],
-        opponent_hand_size: int = INITIAL_HAND_SIZE,
+        opponent_hand_size: int | None = None,
+        *,
+        ruleset: str | DominoRuleset | None = None,
     ):
-        own_initial_mask = mask_from_tiles(observer_initial_hand)
-        self.unknown_mask = ALL_MASK & ~own_initial_mask
+        self.domain = opponent_domain(ruleset)
+        if opponent_hand_size is None:
+            opponent_hand_size = self.domain.initial_hand_size
+        own_initial_mask = self.domain.mask_from_tiles(observer_initial_hand)
+        self.unknown_mask = self.domain.all_mask & ~own_initial_mask
         self.opponent_hand_size = int(opponent_hand_size)
         initial_profile = tuple([self.unknown_mask] * self.opponent_hand_size)
         self.profiles: dict[tuple[int, ...], int] = {initial_profile: 1}
@@ -558,9 +636,11 @@ class SlotOpponentBelief:
         unknown_mask: int,
         opponent_hand_size: int,
         profiles: dict[tuple[int, ...], int],
+        domain: OpponentDomain | None = None,
     ) -> "SlotOpponentBelief":
         """Build a small exact slot state for tests and controlled conversions."""
         belief = cls.__new__(cls)
+        belief.domain = domain or _DEFAULT_DOMAIN
         belief.unknown_mask = int(unknown_mask)
         belief.opponent_hand_size = int(opponent_hand_size)
         canonical_profiles: dict[tuple[int, ...], int] = defaultdict(int)
@@ -651,7 +731,7 @@ class SlotOpponentBelief:
         self.assert_consistent()
 
     def condition_no_legal(self, left_end: int, right_end: int) -> None:
-        legal_mask = _legal_mask(left_end, right_end)
+        legal_mask = self.domain.legal_mask(left_end, right_end)
         new_profiles: dict[tuple[int, ...], int] = defaultdict(int)
 
         for profile, weight in self.profiles.items():
@@ -664,7 +744,7 @@ class SlotOpponentBelief:
         self._replace_profiles(dict(new_profiles))
 
     def _observer_known_tile(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
+        bit = self.domain.tile_bit(tile)
         if not self.unknown_mask & bit:
             return
 
@@ -689,7 +769,7 @@ class SlotOpponentBelief:
         self._observer_known_tile(tile)
 
     def opponent_reveals_and_plays(self, tile: Sequence[int]) -> None:
-        bit = _tile_bit(tile)
+        bit = self.domain.tile_bit(tile)
         if not self.unknown_mask & bit:
             raise ValueError(
                 f"Revealed opponent tile {_normalize_tile(tile)} is not unknown."
@@ -737,11 +817,11 @@ class SlotOpponentBelief:
     def suit_probabilities(self) -> list[float]:
         if self._probability_cache is None:
             denominator = self.assignment_weight
-            numerators = [0] * SUIT_COUNT
+            numerators = [0] * self.domain.suit_count
 
             for profile, profile_weight in self.profiles.items():
                 total_assignments = self._count_profile_assignments(profile)
-                for suit, suit_mask in enumerate(SUIT_MASKS):
+                for suit, suit_mask in enumerate(self.domain.suit_masks):
                     without_suit = tuple(
                         sorted(domain & ~suit_mask for domain in profile)
                     )
@@ -758,7 +838,7 @@ class SlotOpponentBelief:
     def probability_can_play(self, ends: Sequence[int]) -> float:
         if not ends:
             return 1.0
-        legal_mask = _legal_mask(ends[0], ends[1])
+        legal_mask = self.domain.legal_mask(ends[0], ends[1])
         cached = self._response_probability_cache.get(legal_mask)
         if cached is not None:
             return cached
@@ -821,6 +901,7 @@ class HybridExactOpponentModel:
     def __init__(
         self,
         *,
+        ruleset: str | DominoRuleset | None = None,
         switch_to_mu_max_hands: int = SWITCH_TO_MU_MAX_HANDS,
         trace_history_limit: int = 256,
         record_traces: bool = True,
@@ -842,6 +923,8 @@ class HybridExactOpponentModel:
             names = ", ".join(sorted(unsupported))
             raise TypeError(f"Unexpected opponent-model options: {names}.")
 
+        self.ruleset = resolve_ruleset(ruleset)
+        self.domain = opponent_domain(self.ruleset)
         self.switch_to_mu_max_hands = int(switch_to_mu_max_hands)
         self.trace_history_limit = int(trace_history_limit)
         self.record_traces = bool(record_traces)
@@ -892,7 +975,7 @@ class HybridExactOpponentModel:
         self._switch_conversion_time_ms = None
 
     def update(self, state: dict) -> list[float]:
-        """Process new history and return the current seven probabilities."""
+        """Process new history and return the ruleset-sized probabilities."""
         return list(self._update_state(state))
 
     def update_detailed(self, state: dict) -> OpponentModelUpdate:
@@ -1011,6 +1094,7 @@ class HybridExactOpponentModel:
         )
 
     def _validate_state(self, state: dict) -> None:
+        validate_state_ruleset(state, self.ruleset)
         missing: list[str] = []
         if len(state.get("hand_sizes", [])) != 2:
             missing.append("exactly two hand sizes")
@@ -1018,6 +1102,12 @@ class HybridExactOpponentModel:
             missing.append("current_player_initial_hand")
         if state.get("current_player_drawn_tiles") is None:
             missing.append("current_player_drawn_tiles")
+        if int(state.get("initial_hand_size", self.ruleset.hand_size)) != (
+            self.ruleset.hand_size
+        ):
+            missing.append(
+                f"initial_hand_size={self.ruleset.hand_size} for {self.ruleset.name}"
+            )
         if missing:
             raise ValueError(
                 "Opponent model requires a complete two-player observer state. "
@@ -1032,8 +1122,9 @@ class HybridExactOpponentModel:
         self._belief = SlotOpponentBelief(
             state["current_player_initial_hand"],
             opponent_hand_size=int(
-                state.get("initial_hand_size", INITIAL_HAND_SIZE)
+                state.get("initial_hand_size", self.ruleset.hand_size)
             ),
+            ruleset=self.ruleset,
         )
         self._game_id = state.get("game_id")
         self._observer_player = observer_player
@@ -1239,6 +1330,7 @@ class HybridExactOpponentModel:
             unknown_mask=self._belief.unknown_mask,
             opponent_hand_size=self._belief.opponent_hand_size,
             weights=weights,
+            domain=self.domain,
         )
         conversion_time_ms = (perf_counter() - started) * 1000.0
 
@@ -1259,7 +1351,7 @@ class HybridExactOpponentModel:
 
     def suit_probabilities(self) -> list[float]:
         if self._belief is None:
-            return [0.0] * SUIT_COUNT
+            return [0.0] * self.domain.suit_count
         return self._belief.suit_probabilities()
 
     def probability_can_play(self, ends: Sequence[int]) -> float:
@@ -1352,7 +1444,10 @@ def compute_opponent_suit_probabilities(state: dict) -> list[float]:
     game. This one-shot wrapper intentionally ignores probability values already
     stored in ``state`` so stale output cannot suppress new history processing.
     """
-    model = HybridExactOpponentModel(record_traces=False)
+    model = HybridExactOpponentModel(
+        ruleset=state.get("ruleset_name", DEFAULT_RULESET_NAME),
+        record_traces=False,
+    )
     return model.update(state)
 
 

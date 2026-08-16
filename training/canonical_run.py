@@ -29,10 +29,11 @@ from utils.artifacts import (
     file_sha256,
 )
 from utils.repository import current_git_commit
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
 
 RUN_FORMAT_VERSION = 4
-CONFIG_HASH_VERSION = 3
+CONFIG_HASH_VERSION = 4
 MILESTONE_RESUME_RETENTION = 5
 SUPPORTED_TRAINING_ALGORITHMS = frozenset((
     PPO_TRAINING_ALGORITHM,
@@ -66,9 +67,20 @@ def _validated_run_label(value, label):
     return value
 
 
-def canonical_run_dir(root, level, seed, execution_id=None, run_name=None):
+def canonical_run_dir(
+    root,
+    level,
+    seed,
+    execution_id=None,
+    run_name=None,
+    ruleset=DEFAULT_RULESET_NAME,
+):
     """Return a stable canonical path or a unique run-scoped path."""
-    name = f"domino_rl_{level}_seed{int(seed)}"
+    ruleset = resolve_ruleset(ruleset)
+    ruleset_part = (
+        "" if ruleset.name == DEFAULT_RULESET_NAME else f"{ruleset.name}_"
+    )
+    name = f"domino_rl_{ruleset_part}{level}_seed{int(seed)}"
     if run_name is not None:
         name = f"{name}_run{_validated_run_label(run_name, 'run_name')}"
     if execution_id is not None:
@@ -104,8 +116,11 @@ def _validated_algorithm(algorithm):
 
 def configuration_sha256(configuration):
     """Return the canonical SHA-256 for one path-independent run identity."""
+    hash_version = int(configuration.get("config_hash_version", 3))
+    if hash_version not in (3, CONFIG_HASH_VERSION):
+        raise ValueError(f"Unsupported config hash version: {hash_version}.")
     payload = {
-        "config_hash_version": CONFIG_HASH_VERSION,
+        "config_hash_version": hash_version,
         "pipeline_level": configuration["pipeline_level"],
         "run_name": configuration.get("run_name"),
         "seed": int(configuration["seed"]),
@@ -123,6 +138,8 @@ def configuration_sha256(configuration):
         "diagnostic_config": configuration["diagnostic_config"],
         "locked_arguments": configuration.get("locked_arguments", {}),
     }
+    if hash_version >= 4:
+        payload["ruleset_name"] = configuration["ruleset_name"]
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -153,6 +170,8 @@ def load_run_config(run_dir):
         raise ValueError(
             f"Run configuration hash is inconsistent at {path}."
         )
+    if "ruleset_name" not in value:
+        value = {**value, "ruleset_name": DEFAULT_RULESET_NAME}
     return value
 
 
@@ -264,9 +283,12 @@ def create_run_config(
     locked_arguments=None,
     machine=None,
     network_architecture=DEFAULT_NETWORK_ARCHITECTURE,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Atomically publish the immutable identity and requested target of a run."""
     algorithm = _validated_algorithm(algorithm)
+    ruleset = resolve_ruleset(ruleset)
+    encoder = DominoEncoder(ruleset)
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     for child in (
@@ -287,9 +309,10 @@ def create_run_config(
             None if target_rl_games is None else int(target_rl_games)
         ),
         "unbounded": target_rl_games is None,
+        "ruleset_name": ruleset.name,
         "ruleset_version": RULESET_VERSION,
-        "encoder_size": DominoEncoder.VECTOR_SIZE,
-        "action_count": DominoEncoder.ACTION_SIZE,
+        "encoder_size": encoder.vector_size,
+        "action_count": encoder.action_size,
         "network_architecture": network_architecture.as_list(),
         "algorithm": algorithm,
         "supervised_weights_path": str(supervised_weights_path),
@@ -308,9 +331,9 @@ def create_run_config(
         existing = load_run_config(run_dir)
         immutable_keys = (
             "format_version",
-            "config_hash_version",
             "run_name",
             "seed",
+            "ruleset_name",
             "ruleset_version",
             "encoder_size",
             "action_count",
@@ -365,8 +388,9 @@ def load_resume_point(run_dir):
     differences = []
     expected = {
         "seed": int(run_config["seed"]),
-        "encoder_size": DominoEncoder.VECTOR_SIZE,
-        "action_count": DominoEncoder.ACTION_SIZE,
+        "ruleset_name": run_config.get("ruleset_name", DEFAULT_RULESET_NAME),
+        "encoder_size": int(run_config["encoder_size"]),
+        "action_count": int(run_config["action_count"]),
         "network_architecture": run_config["network_architecture"],
         "algorithm": run_config["algorithm"],
         "supervised_weights_sha256": run_config["supervised_weights_sha256"],
@@ -374,7 +398,10 @@ def load_resume_point(run_dir):
         "configuration_sha256": configuration_hash,
     }
     for key, expected_value in expected.items():
-        checkpoint_value = state.get(key)
+        checkpoint_value = state.get(
+            key,
+            DEFAULT_RULESET_NAME if key == "ruleset_name" else None,
+        )
         if checkpoint_value != expected_value:
             differences.append(
                 f"{key}: checkpoint={checkpoint_value!r}, "
@@ -673,6 +700,7 @@ def publish_checkpoint(
     state = {
         "format_version": RUN_FORMAT_VERSION,
         "configuration_sha256": configuration_hash,
+        "ruleset_name": run_config.get("ruleset_name", DEFAULT_RULESET_NAME),
         "ruleset_version": RULESET_VERSION,
         "algorithm": algorithm,
         "pipeline_level": pipeline_level,
@@ -682,8 +710,8 @@ def publish_checkpoint(
             None if target_rl_games is None else int(target_rl_games)
         ),
         "unbounded": target_rl_games is None,
-        "encoder_size": DominoEncoder.VECTOR_SIZE,
-        "action_count": DominoEncoder.ACTION_SIZE,
+        "encoder_size": int(run_config["encoder_size"]),
+        "action_count": int(run_config["action_count"]),
         "network_architecture": run_config["network_architecture"],
         "rl_games_completed": completed_games,
         "rl_iterations_completed": completed_iterations,

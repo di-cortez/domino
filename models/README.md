@@ -15,6 +15,12 @@ by Git and can be regenerated through the training pipeline.
 | `rl/domino_rl_<level>_seed<seed>/` | Canonical RL run state, exact checkpoints, opponent pool, bounded historical checkpoint archive, and diagnostics. |
 | `rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Run-local quick-profile dataset, cache, SL checkpoint, metadata, and loss plot; never reused by another invocation. |
 
+Compact variants insert their canonical ruleset name in standalone, canonical,
+and run-directory names. For example, double-four uses
+`domino_sl_double-four_weights.npz` and
+`rl/domino_rl_double-four_forever_seed42/`. Double-six filenames stay exactly
+as listed above.
+
 Both NPZ files store policy arrays `W1`, `b1`, `W2`, `b2`, `W3`, and `b3` with
 `numpy.savez`. RL training is policy-only by default. Runs started with
 `--value-head` additionally store the training baseline arrays `Wv` and `bv`;
@@ -25,7 +31,7 @@ Regenerate in order:
 ```bash
 python -m training.datagen.generator
 python -m training.supervised.cli
-python -m training.rl.self_play --fresh-from-sl
+python -m training.rl.cli --fresh-from-sl
 ```
 
 For normal full training, prefer the canonical command. `default` creates
@@ -47,6 +53,10 @@ The separate `checkpoint_archive/` retains a bounded multi-resolution learner
 history and is not used as an exact-resume checkpoint pair.
 Forever runs also persist `periodic_diagnostic_tuning.json`, so the periodic
 RL-vs-random worker benchmark is selected once and reused after resume.
+
+Checkpoints are ruleset-specific because input, hidden, and output dimensions
+are compact. Metadata and resume state record the name; loaders reject a
+different ruleset and perform no padding, remapping, or transfer learning.
 
 Evaluate checkpoints with:
 

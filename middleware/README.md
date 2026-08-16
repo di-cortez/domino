@@ -5,6 +5,7 @@ belongs to `agents/`.
 
 | File | Purpose |
 |---|---|
+| `rulesets.py` | Closed immutable registry for double-six, double-five, double-four, and double-three geometry. |
 | `domino_engine.py` | Stateful two-player domino engine: deal, legal actions, draw/pass, game-over rules, serialized state. |
 | `middleware.py` | `Agent` protocol and `GameManager`, which asks agents for moves and records supervised-training history. |
 | `opponent_model.py` | Exact two-player opponent inference using temporal slots and integer hand weights. |
@@ -15,15 +16,28 @@ deals do not consume process-global random state. Callers not yet migrated omit
 the generator and retain the historical standard-library shuffle during the
 staged repository-wide migration.
 
-## Opponent Suit Probabilities
+## Ruleset identity
+
+`DominoEngine(..., ruleset=...)` resolves one immutable registry entry and
+derives its tile list, hand size, stock, deal, and opening double from it.
+Serialized states include `ruleset_name` and `initial_hand_size`, while
+`to_dict()` also includes the name. Missing identity is accepted only as the
+legacy double-six format; a compact persistent model/encoder rejects it.
+
+The opponent model owns a separate immutable bit-mask domain per ruleset, so
+different variants can run simultaneously without changing module globals.
+The exact slots-to-`mu(H)` threshold remains 500 for every variant.
+
+## Opponent pip-presence probabilities
 
 `opponent_model.py` exports `compute_opponent_suit_probabilities(state)`, which
-returns seven suit-presence probabilities from the acting player's perspective.
+returns one pip-presence probability per value in the active ruleset from the
+acting player's perspective (seven for double-six, four for double-three).
 It replays the public action history without looking at the real opponent hand.
 The meaning is direct:
 
-- `0.0`: the observer knows the opponent does not currently hold that suit;
-- `1.0`: the observer knows the opponent currently holds that suit.
+- `0.0`: the observer knows the opponent holds no tile with that pip value;
+- `1.0`: the observer knows the opponent holds at least one such tile.
 
 The strict temporal model requires `current_player_initial_hand`,
 `current_player_drawn_tiles`, and exactly two public hand sizes. Missing private
@@ -71,7 +85,7 @@ remain unchanged.
 
 ## Draw-Turn Traces
 
-`update(state)` preserves the old API and returns only seven floats.
+`update(state)` preserves the old API and returns only the ruleset-sized vector.
 `update_detailed(state)` additionally returns labelled snapshots and completed
 public-turn traces. For an opponent `DRAW -> PASS` turn, the stages are:
 
@@ -85,7 +99,7 @@ with unchanged history is idempotent. `consume_new_snapshots()` lets a UI or
 logger consume only snapshots it has not seen before.
 
 Direct construction keeps trace recording enabled. Built-in consumers that
-need only the final seven-vector construct the model with
+need only the final ruleset-sized vector construct the model with
 `record_traces=False`; this skips intermediate snapshots and turn-trace
 allocation while preserving the exact final inference and invoking the same
 slot-to-`mu(H)` transition at the same completed public-turn boundary. Calling

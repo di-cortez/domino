@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 
 from middleware.domino_engine import DominoEngine
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+from utils.ruleset_paths import default_rl_weights_path, default_sl_weights_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,13 +35,26 @@ def normalize_agent_name(agent_name):
     return normalized
 
 
-def resolve_weights_path(agent_name, weights_path=None):
+def resolve_weights_path(
+    agent_name,
+    weights_path=None,
+    ruleset=DEFAULT_RULESET_NAME,
+):
     """Return an existing checkpoint path for a checkpoint-backed agent."""
     agent_name = normalize_agent_name(agent_name)
     if agent_name not in DEFAULT_WEIGHTS:
         return None
 
-    path = Path(weights_path or DEFAULT_WEIGHTS[agent_name])
+    if weights_path is None:
+        path = (
+            default_rl_weights_path(ruleset)
+            if agent_name == "rl"
+            else default_sl_weights_path(ruleset)
+        )
+        if not path.is_absolute():
+            path = ROOT / path
+    else:
+        path = Path(weights_path)
     if not path.exists():
         raise FileNotFoundError(
             f"Missing {agent_name} checkpoint: {path}. "
@@ -54,27 +69,36 @@ def _checkpoint_has_value_head(path):
         return all(name in weights.files for name in VALUE_WEIGHT_NAMES)
 
 
-def create_agent(agent_name, weights_path=None):
+def create_agent(
+    agent_name,
+    weights_path=None,
+    ruleset=DEFAULT_RULESET_NAME,
+):
     """Create an agent by name, importing checkpoint-backed classes only when used."""
     agent_name = normalize_agent_name(agent_name)
+    ruleset = resolve_ruleset(ruleset)
 
     if agent_name == "rl":
         from agents.rl_agent import RLAgent
 
-        path = resolve_weights_path("rl", weights_path)
+        path = resolve_weights_path("rl", weights_path, ruleset)
         return RLAgent.load(
             str(path),
             mode="evaluation",
             use_value_head=_checkpoint_has_value_head(path),
+            ruleset=ruleset,
         )
     if agent_name == "neural":
         from agents.neural_agent import NeuralAgent
 
-        return NeuralAgent.load(str(resolve_weights_path("neural", weights_path)))
+        return NeuralAgent.load(
+            str(resolve_weights_path("neural", weights_path, ruleset)),
+            ruleset=ruleset,
+        )
     if agent_name == "heuristic":
         from agents.heuristic_agent import StrategicAgent
 
-        return StrategicAgent()
+        return StrategicAgent(ruleset=ruleset)
     if agent_name == "random":
         from agents.agent import RandomAgent
 
@@ -188,12 +212,18 @@ def _game_runtime_start(runtime_profile):
     return time.perf_counter() if runtime_profile is not None else None
 
 
-def _play_game_unprofiled(agent, opponent, agent_position, suppress_agent_output):
+def _play_game_unprofiled(
+    agent,
+    opponent,
+    agent_position,
+    suppress_agent_output,
+    ruleset=DEFAULT_RULESET_NAME,
+):
     """Profiler-free diagnostic hot path for non-sampled games."""
     agents = [None, None]
     agents[agent_position] = agent
     agents[1 - agent_position] = opponent
-    engine = DominoEngine(player_count=2)
+    engine = DominoEngine(player_count=2, ruleset=ruleset)
     choice_stats = empty_choice_stats()
     value_head_stats = _new_value_head_stats(agent)
     while not engine.game_over:
@@ -247,6 +277,7 @@ def play_game(
     agent_position,
     suppress_agent_output=True,
     runtime_profile=None,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Play one game and return the outcome from the evaluated agent's view."""
     if runtime_profile is None:
@@ -255,13 +286,14 @@ def play_game(
             opponent,
             agent_position,
             suppress_agent_output,
+            ruleset,
         )
     section_started = _game_runtime_start(runtime_profile)
     agents = [None, None]
     agents[agent_position] = agent
     agents[1 - agent_position] = opponent
 
-    engine = DominoEngine(player_count=2)
+    engine = DominoEngine(player_count=2, ruleset=ruleset)
     choice_stats = empty_choice_stats()
     value_head_stats = _new_value_head_stats(agent)
     _add_game_runtime(

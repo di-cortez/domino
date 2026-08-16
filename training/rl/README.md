@@ -29,6 +29,7 @@ python -m training.rl.cli --compact
 python -m training.rl.cli --rl-workers auto --seed 123
 python -m training.rl.cli --rl-workers 4 --device cpu
 python -m training.rl.cli --gpi 1000
+python -m training.rl.cli --ruleset double-three --fresh-from-sl
 python -m training.rl.cli --fresh-from-sl
 python -m training.rl.cli --fresh-from-sl --opponent-buckets random --difficulty-weight 0
 python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,random,recent
@@ -47,6 +48,13 @@ Default behavior:
   discarded benchmarks;
 - update the policy with masked PPO minibatches for at most four epochs;
 - save `models/domino_rl_weights.npz`.
+
+`--ruleset` accepts the four registry names and defaults to double-six.
+Compact standalone paths include the name (for example
+`models/domino_rl_double-three_weights.npz`). The ruleset is durable resume
+identity and is propagated to every engine, learner, heuristic, snapshot,
+worker, pool member, and checkpoint. Resume cannot switch it, and policy
+weights are never converted across variants.
 
 That compatibility-first policy is the default for the standalone module.
 Pass `--fresh-from-sl` to ignore an older RL checkpoint and start from the SL

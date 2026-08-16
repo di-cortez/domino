@@ -17,6 +17,7 @@ Run:
 
 ```bash
 python -m training.supervised.cli
+python -m training.supervised.cli --ruleset double-four
 ```
 
 The loop:
@@ -179,7 +180,9 @@ python -m training.pipeline small \
 
 ## Hidden-layer depth and width
 
-The policy architecture defaults to `168 -> 256 -> 128 -> 56`. Both the number
+The default policy architecture follows the selected ruleset: double-six uses
+`168 -> 256 -> 128 -> 56`, double-five `130 -> 192 -> 96 -> 42`, double-four
+`97 -> 128 -> 64 -> 30`, and double-three `69 -> 96 -> 48 -> 20`. Both the number
 of hidden layers and each width come from `agents/network_architecture.py` and
 are selected once for supervised training and the canonical pipeline:
 
@@ -190,9 +193,8 @@ are selected once for supervised training and the canonical pipeline:
 | `--hidden2-size N` | Width of hidden layer 2 | `128` |
 | `--hidden3-size N` ... `--hidden8-size N` | Width of hidden layer 3 through 8 | `128` |
 
-An omitted width falls back to the default for that position, which keeps the
-historical 256 and 128 for the first two layers and uses 128 for every deeper
-layer. Sizing a layer the requested depth does not have is rejected instead of
+An omitted width falls back to the ruleset default for the first two positions
+and uses 128 for every deeper layer. Sizing a layer the requested depth does not have is rejected instead of
 silently ignored, so `--hidden-layers 2 --hidden3-size 64` is an error.
 
 ```bash
@@ -214,6 +216,8 @@ pre-existing artifact loads unchanged.
 Architecture is part of supervised compatibility metadata and the immutable
 RL resume identity. A run cannot resume with different dimensions, and changing
 depth or width against reusable assets requires `--retrain-supervised`.
+Datasets, encoded caches, and weights carry `ruleset_name`; compact checkpoints
+cannot be loaded across rulesets and no transfer mapping is attempted.
 
 Only the command line stops at eight layers, because one `--hidden<n>-size`
 option has to exist per layer. Nothing in the networks, checkpoints, resume

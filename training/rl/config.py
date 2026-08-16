@@ -24,6 +24,8 @@ from training.rl.rollout import (
     EVENT_REWARD_DECAY,
     REWARD_SCHEMAS,
 )
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+from utils.ruleset_paths import default_rl_weights_path, default_sl_weights_path
 
 
 # The array backend is resolved once inside train() and always matches the
@@ -49,6 +51,7 @@ class RLTrainingOptions:
     """Values that define the learning problem and update behavior."""
 
     iterations: int | None = None
+    ruleset_name: str = DEFAULT_RULESET_NAME
     total_training_games: int | None = None
     gpi: int = DEFAULT_GPI
     opponent_buckets: tuple[str, ...] = DEFAULT_OPPONENT_BUCKETS
@@ -71,8 +74,8 @@ class RLTrainingOptions:
 class RLResourceOptions:
     """Model files, compute resources, and worker-tuning controls."""
 
-    sl_weights_path: str | Path = SL_WEIGHTS
-    rl_weights_path: str | Path = RL_WEIGHTS
+    sl_weights_path: str | Path | None = None
+    rl_weights_path: str | Path | None = None
     device: str = DEFAULT_DEVICE
     workers: int | str = DEFAULT_RL_WORKERS
     safety_config: ParallelSafetyConfig = field(
@@ -138,6 +141,7 @@ class ResolvedTrainingOptions:
 
 def resolve_training_options(training, resources, execution):
     """Normalize and validate the three public RL option groups."""
+    ruleset_name = resolve_ruleset(training.ruleset_name).name
     gpi = int(training.gpi)
     if gpi < 1:
         raise ValueError("gpi must be positive")
@@ -213,6 +217,7 @@ def resolve_training_options(training, resources, execution):
             )
     resolved_training = replace(
         training,
+        ruleset_name=ruleset_name,
         gpi=gpi,
         total_training_games=total_training_games,
         opponent_buckets=opponent_buckets,
@@ -225,6 +230,12 @@ def resolve_training_options(training, resources, execution):
     )
     resolved_resources = replace(
         resources,
+        sl_weights_path=(
+            resources.sl_weights_path or default_sl_weights_path(ruleset_name)
+        ),
+        rl_weights_path=(
+            resources.rl_weights_path or default_rl_weights_path(ruleset_name)
+        ),
         workers=workers,
         retune_workers=bool(resources.retune_workers),
     )

@@ -22,6 +22,12 @@ from training.rl.resume import (
     _validate_resume_configuration,
     load_resume_state,
 )
+from training.run_artifacts import (
+    existing_run_config_path,
+    migrate_legacy_compact_diagnostics,
+    run_compact_diagnostics_dir,
+    run_config_path,
+)
 from utils.artifacts import (
     atomic_copy,
     atomic_savez,
@@ -152,7 +158,7 @@ def configuration_sha256(configuration):
 
 def load_run_config(run_dir):
     """Load and validate the immutable configuration for a canonical run."""
-    path = Path(run_dir) / "run_config.json"
+    path = existing_run_config_path(run_dir)
     try:
         with open(path, "r", encoding="utf-8") as stream:
             value = json.load(stream)
@@ -299,6 +305,8 @@ def create_run_config(
         "diagnostics",
     ):
         (run_dir / child).mkdir(parents=True, exist_ok=True)
+    run_compact_diagnostics_dir(run_dir).mkdir(parents=True, exist_ok=True)
+    migrate_legacy_compact_diagnostics(run_dir)
     value = {
         "format_version": RUN_FORMAT_VERSION,
         "config_hash_version": CONFIG_HASH_VERSION,
@@ -326,8 +334,8 @@ def create_run_config(
         "created_at": _utc_now(),
     }
     value["configuration_sha256"] = configuration_sha256(value)
-    config_path = run_dir / "run_config.json"
-    if config_path.exists():
+    config_path = run_config_path(run_dir)
+    if existing_run_config_path(run_dir).is_file():
         existing = load_run_config(run_dir)
         immutable_keys = (
             "format_version",
@@ -363,6 +371,8 @@ def create_run_config(
             raise ValueError(
                 "Existing canonical run_config.json is incompatible in: " + fields
             )
+        if not config_path.is_file():
+            atomic_write_json(config_path, existing)
         return existing
     atomic_write_json(config_path, value)
     return value

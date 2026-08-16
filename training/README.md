@@ -19,6 +19,24 @@ This is separate from the `DRAW` action, which means taking a tile from the
 stock. Tile draws, passes, their event counters, and optional RL reward shaping
 remain valid gameplay concepts and must not be confused with a drawn game.
 
+## Ruleset contract
+
+All stages accept `--ruleset` with exactly `double-six`, `double-five`,
+`double-four`, or `double-three`; double-six is the default. The compact
+policy dimensions are:
+
+| Ruleset | Tiles | Hand | Stock | Input | Hidden defaults | Output |
+|---|---:|---:|---:|---:|---:|---:|
+| `double-six` | 28 | 7 | 14 | 168 | 256 x 128 | 56 |
+| `double-five` | 21 | 6 | 9 | 130 | 192 x 96 | 42 |
+| `double-four` | 15 | 5 | 5 | 97 | 128 x 64 | 30 |
+| `double-three` | 10 | 4 | 2 | 69 | 96 x 48 | 20 |
+
+Dataset/cache/model metadata records the canonical name. Compact canonical
+asset and run names include it; historical double-six names are unchanged.
+Resume locks the ruleset, and cross-ruleset checkpoint loading is rejected.
+There is no weight padding, remapping, or transfer-learning path.
+
 From the repository root, the canonical pipeline runs the full sequence:
 
 ```bash
@@ -202,26 +220,13 @@ first.
 | Self-play RL | `python -m training.rl.cli` |
 | Full canonical pipeline | `python -m training.pipeline <level>` |
 
-## Important Shape Change
+## Compact encoder shape
 
-The neural encoder now uses a 168-feature input vector and a 56-action output
-space. The policy only chooses real tile-play decisions. Draw, pass, and
-single-option tile plays are forced rule actions and bypass training.
-
-The last seven input features are now opponent suit-presence probabilities:
-`0.0` means known absence and `1.0` means known presence. This replaces the old
-absence-confidence feature. Any encoded cache or model trained with the old
-feature semantics should be treated as stale even though the array shapes still
-match.
-
-Old checkpoints trained with the previous 86-input/58-output encoder are not
-compatible. After copying these files into the repo, run the pipeline again:
-
-```bash
-python -m training.datagen.generator
-python -m training.supervised.cli
-python -m training.rl.cli
-```
+For `T` tiles and `S` pip values the encoder uses `5T + 3S + 7` inputs and
+`2T` policy outputs. The policy only chooses real tile-play decisions; draw,
+pass, and single-option tile plays bypass training. Its final `S` features are
+exact opponent pip-presence probabilities in `[0, 1]`. Legacy records without
+an explicit name are interpreted as double-six only.
 
 ## Worker controls
 

@@ -100,6 +100,7 @@ def build_training_metrics_header(
         "run_configuration": dict(execution.run_configuration or {}),
         "training": {
             "effective_seed": int(context.effective_seed),
+            "ruleset_name": training.ruleset_name,
             "algorithm": context.algorithm,
             "total_training_games": int(training.total_training_games),
             "games_per_iteration": int(context.selected_gpi),
@@ -269,6 +270,7 @@ def build_training_summary(
     execution = context.execution
     return {
         "iterations": int(actual_final_iteration),
+        "ruleset_name": training.ruleset_name,
         "rl_iterations_completed": int(actual_final_iteration),
         "completed_iterations_this_run": int(
             state.completed_iterations_this_invocation

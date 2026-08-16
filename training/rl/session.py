@@ -119,6 +119,7 @@ def _resume_inputs(training, resources, execution, reporter):
         training=replace(
             training,
             iterations=None,
+            ruleset_name=saved.ruleset_name,
             total_training_games=saved.total_training_games,
             gpi=saved.selected_gpi,
             opponent_buckets=saved.opponent_buckets,
@@ -215,6 +216,7 @@ def _resume_configuration(
         )
     return RLTrainingConfiguration.from_mapping({
         "total_training_games": int(training.total_training_games),
+        "ruleset_name": training.ruleset_name,
         "selected_gpi": int(training.gpi),
         "selected_workers": int(selected_workers),
         "rl_training_algorithm": algorithm,
@@ -335,6 +337,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         expected_training_algorithm=resolved.algorithm,
         weight_decay=training.weight_decay,
         dropout_rate=training.dropout_rate,
+        ruleset=training.ruleset_name,
     )
     if inputs.metadata is not None:
         network.load_optimizer_state_dict(inputs.metadata["optimizer_state"])
@@ -372,6 +375,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         difficulty_weight=training.difficulty_weight,
         schema=resolved.schema,
         gamma=training.gamma,
+        ruleset_name=training.ruleset_name,
         safety=resources.safety_config,
         pool_state=inputs.pool_state,
         pool_weights=inputs.pool_weights,
@@ -427,6 +431,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         opponent_buckets=training.opponent_buckets,
         schema=resolved.schema,
         gamma=training.gamma,
+        ruleset_name=training.ruleset_name,
         safety=resources.safety_config,
     )
     if inputs.pool_state is not None:

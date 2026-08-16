@@ -15,8 +15,8 @@ import numpy as np
 
 from agents.encoder import DominoEncoder
 from agents.network_architecture import (
-    DEFAULT_HIDDEN_SIZES,
     architecture_from_hidden_sizes,
+    default_hidden_sizes,
 )
 from agents.nn import (
     DISABLED_DROPOUT_RATE,
@@ -44,6 +44,12 @@ from utils.myrandom import (
     DERIVATION_SCHEME,
     SeedPlan,
     fresh_root_seed,
+)
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+from utils.ruleset_paths import (
+    default_dataset_path,
+    default_encoded_dataset_path,
+    default_sl_weights_path,
 )
 
 
@@ -104,10 +110,10 @@ def _is_gpu_startup_failure(exc):
 def train_supervised(
     epochs=EPOCHS,
     batch_size=DEFAULT_SUPERVISED_BATCH_SIZE,
-    hidden_sizes=DEFAULT_HIDDEN_SIZES,
-    dataset_file="dataset/supervised_dataset.jsonl",
-    weights_file="models/domino_sl_weights.npz",
-    cache_file=ENCODED_CACHE_FILE,
+    hidden_sizes=None,
+    dataset_file=None,
+    weights_file=None,
+    cache_file=None,
     quiet=False,
     progress_callback=None,
     weight_decay=DISABLED_WEIGHT_DECAY,
@@ -119,17 +125,27 @@ def train_supervised(
     memory_reserve_mb=DATASET_MEMORY_RESERVE_MB,
     gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
     seed=None,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Train a fresh policy and return scheduler, storage, batch, and memory data."""
     if epochs < 1:
         raise ValueError("epochs must be positive")
-    architecture = architecture_from_hidden_sizes(hidden_sizes)
+    ruleset = resolve_ruleset(ruleset)
+    dataset_file = dataset_file or default_dataset_path(ruleset)
+    weights_file = weights_file or default_sl_weights_path(ruleset)
+    cache_file = cache_file or default_encoded_dataset_path(ruleset)
+    if hidden_sizes is None:
+        hidden_sizes = default_hidden_sizes(ruleset)
+    architecture = architecture_from_hidden_sizes(
+        hidden_sizes,
+        ruleset=ruleset,
+    )
     started = time.time()
     seed = int(seed) if seed is not None else fresh_root_seed()
     reporter = SupervisedTrainingReporter(quiet)
     reporter.startup()
 
-    encoder = DominoEncoder()
+    encoder = DominoEncoder(ruleset)
     dataset = load_or_build_dataset(
         dataset_file,
         encoder,
@@ -391,6 +407,7 @@ def train_supervised(
         "requested_batch_size": requested_batch_size,
         "selected_batch_size": selected_batch_size,
         "network_architecture": architecture.as_dict(),
+        "ruleset_name": ruleset.name,
         "effective_seed": seed,
         "random_bit_generator": DEFAULT_BIT_GENERATOR,
         "random_derivation_scheme": DERIVATION_SCHEME,

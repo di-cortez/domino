@@ -12,6 +12,9 @@ from importing every concrete agent implementation directly.
 
 import random
 
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+from utils.ruleset_paths import default_rl_weights_path, default_sl_weights_path
+
 
 AGENT_TYPES = ("neural", "heuristic", "random", "human", "rl")
 
@@ -48,22 +51,26 @@ def agent_type_name(agent_type):
     return names.get(agent_type, agent_type.capitalize())
 
 
-def create_agent_by_type(agent_type):
+def create_agent_by_type(agent_type, ruleset=DEFAULT_RULESET_NAME):
     """
     Build the agent instance selected in the UI menu.
 
     Imports stay inside the function so that unused neural/RL dependencies are
     not loaded when the user chooses a simpler agent type.
     """
+    ruleset = resolve_ruleset(ruleset)
     if agent_type == "neural":
         from agents.neural_agent import NeuralAgent
 
-        return NeuralAgent.load("models/domino_sl_weights.npz")
+        return NeuralAgent.load(
+            default_sl_weights_path(ruleset),
+            ruleset=ruleset,
+        )
 
     if agent_type == "heuristic":
         from agents.heuristic_agent import StrategicAgent
 
-        return StrategicAgent()
+        return StrategicAgent(ruleset=ruleset)
 
     if agent_type == "random":
         return RandomUIAgent()
@@ -78,12 +85,14 @@ def create_agent_by_type(agent_type):
         # The UI uses greedy evaluation mode. Stochastic exploration belongs to
         # self-play training in `training/rl/training_loop.py`.
         try:
-            network = PolicyNetwork.load("models/domino_rl_weights.npz")
+            network = PolicyNetwork.load(default_rl_weights_path(ruleset))
         except FileNotFoundError:
             # If RL has not been trained yet, warm-start from supervised weights
             # so the menu option remains usable.
-            network = PolicyNetwork.load_from_sl("models/domino_sl_weights.npz")
+            network = PolicyNetwork.load_from_sl(
+                default_sl_weights_path(ruleset)
+            )
 
-        return RLAgent(network, mode="evaluation")
+        return RLAgent(network, mode="evaluation", ruleset=ruleset)
 
     raise ValueError(f"Invalid agent type: {agent_type}")

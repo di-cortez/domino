@@ -43,6 +43,7 @@ Useful options:
 python -m diagnostics.evaluate --help
 python -m diagnostics.evaluate --seed 123
 python -m diagnostics.evaluate --games 5000 --seed 123
+python -m diagnostics.evaluate --ruleset double-four --games 5000 --seed 123
 python -m diagnostics.evaluate --no-pair-plots
 python -m diagnostics.evaluate --output /tmp/domino_all_pairs
 python -m diagnostics.evaluate --neural-weights models/domino_sl_weights.npz
@@ -96,6 +97,11 @@ mean/std/min/max of `V(s)` over RL's real decision states. It also reports the
 95% worst-case percentage margin of error as
 `sqrt(0.9604 / n)`, rounded to two significant digits, where `n` is the games
 per matchup.
+
+Every standalone diagnostic accepts the same closed `--ruleset` choices as
+training. Engines and neural checkpoints are validated against that selection;
+reports and aggregate CSV rows include `ruleset_name`. Default weight paths are
+ruleset-specific, and different rulesets are never merged into one report.
 
 Win-rate cells use red-to-blue intensity bands at five-percentage-point
 intervals: `<30%`, `30–35%`, ..., `65–70%`, and `≥70%`. This makes both weak

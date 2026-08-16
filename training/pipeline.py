@@ -73,6 +73,7 @@ from utils.runtime_status import (
     machine_summary,
     pipeline_compute_report,
 )
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
 try:
     from tqdm.auto import tqdm
@@ -248,6 +249,7 @@ def _pipeline_run_dir(root, config, args):
         args.seed,
         execution_id=args.execution_id,
         run_name=args.run_name,
+        ruleset=args.ruleset,
     )
 
 
@@ -293,12 +295,19 @@ def _locked_run_arguments(args):
     }
 
 
-def _forever_active_pointer(root):
-    return Path(root) / "models" / "rl" / FOREVER_ACTIVE_RUN_FILE
+def _forever_active_pointer(root, ruleset=DEFAULT_RULESET_NAME):
+    ruleset = resolve_ruleset(ruleset)
+    filename = (
+        FOREVER_ACTIVE_RUN_FILE
+        if ruleset.name == DEFAULT_RULESET_NAME
+        else f"active_forever_run_{ruleset.name}.json"
+    )
+    return Path(root) / "models" / "rl" / filename
 
 
-def _read_forever_active_run(root):
-    path = _forever_active_pointer(root)
+def _read_forever_active_run(root, ruleset=DEFAULT_RULESET_NAME):
+    ruleset = resolve_ruleset(ruleset)
+    path = _forever_active_pointer(root, ruleset)
     if not path.is_file():
         return None
     try:
@@ -309,6 +318,12 @@ def _read_forever_active_run(root):
         raise ValueError(
             f"Unsupported forever active-run pointer version in {path}."
         )
+    stored_ruleset = value.get("ruleset_name", DEFAULT_RULESET_NAME)
+    if stored_ruleset != ruleset.name:
+        raise ValueError(
+            f"Forever pointer {path} belongs to {stored_ruleset!r}, not "
+            f"{ruleset.name!r}."
+        )
     run_dir = Path(value["run_dir"])
     if not run_dir.is_absolute():
         run_dir = Path(root) / run_dir
@@ -316,7 +331,8 @@ def _read_forever_active_run(root):
 
 
 def _write_forever_active_run(root, run_dir, run_config):
-    path = _forever_active_pointer(root)
+    ruleset_name = run_config.get("ruleset_name", DEFAULT_RULESET_NAME)
+    path = _forever_active_pointer(root, ruleset_name)
     run_dir = Path(run_dir)
     try:
         stored_run_dir = str(run_dir.relative_to(Path(root)))
@@ -326,6 +342,7 @@ def _write_forever_active_run(root, run_dir, run_config):
         "format_version": FOREVER_ACTIVE_RUN_FORMAT_VERSION,
         "run_dir": stored_run_dir,
         "run_name": run_config.get("run_name"),
+        "ruleset_name": ruleset_name,
         "seed": int(run_config["seed"]),
         "configuration_sha256": run_config["configuration_sha256"],
         "updated_at": run_config.get("created_at"),
@@ -389,7 +406,7 @@ def _apply_saved_run_arguments(parser, args, explicit, selected_run):
 def _hydrate_forever_arguments(parser, args, explicit):
     """Select and hydrate an existing forever run before defaults are applied."""
     root = Path(args.artifact_root).resolve()
-    active_run = _read_forever_active_run(root)
+    active_run = _read_forever_active_run(root, args.ruleset)
 
     if args.restart_rl:
         if active_run is not None and not ({"seed", "run_name"} & explicit):
@@ -420,6 +437,7 @@ def _hydrate_forever_arguments(parser, args, explicit):
             "forever",
             selected_seed,
             run_name=args.run_name,
+            ruleset=args.ruleset,
         )
         if not (selected_run / "run_config.json").is_file():
             return args
@@ -431,6 +449,7 @@ def _hydrate_forever_arguments(parser, args, explicit):
             "forever",
             PIPELINE_LEVELS["forever"].default_seed,
             run_name=args.run_name,
+            ruleset=args.ruleset,
         )
         if not (selected_run / "run_config.json").is_file():
             return args
@@ -489,6 +508,7 @@ def _dataset_generation_identity(args, dataset_games):
             "minimum_gain": args.dataset_autotune_min_gain,
         },
         safety=_dataset_safety(args),
+        ruleset=args.ruleset,
     )
 
 
@@ -514,7 +534,8 @@ def _supervised_training_identity(args, max_epochs):
 def _network_architecture(args):
     """Return the one architecture selected for supervised and RL stages."""
     return architecture_from_hidden_sizes(
-        supervised_cli.hidden_sizes_from_args(args)
+        supervised_cli.hidden_sizes_from_args(args),
+        ruleset=args.ruleset,
     )
 
 
@@ -551,7 +572,7 @@ def ensure_canonical_supervised_assets(root, config, args):
     dataset_games = int(args.dataset_games or config.dataset_games)
     max_epochs = int(args.supervised_max_epochs or config.supervised_epochs)
     if config.reuse_supervised_assets:
-        paths = canonical_asset_paths(root, seed)
+        paths = canonical_asset_paths(root, seed, ruleset=args.ruleset)
     else:
         paths = run_scoped_asset_paths(_pipeline_run_dir(root, config, args))
     generation_config = _dataset_generation_identity(args, dataset_games)
@@ -571,6 +592,7 @@ def ensure_canonical_supervised_assets(root, config, args):
         seed=seed,
         dataset_games=dataset_games,
         generation_config=generation_config,
+        ruleset=args.ruleset,
     )
     dataset_check.require_compatible_or_missing(
         rebuild=rebuild_dataset,
@@ -595,6 +617,7 @@ def ensure_canonical_supervised_assets(root, config, args):
                 autotune_minimum_gain=args.dataset_autotune_min_gain,
                 seed=seed,
                 status_callback=_status,
+                ruleset=args.ruleset,
             )
         dataset_metadata = write_dataset_metadata(
             paths,
@@ -603,6 +626,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             dataset_games=dataset_games,
             dataset_summary=dataset_summary,
             generation_config=generation_config,
+            ruleset=args.ruleset,
         )
         dataset_status = "generated"
         retrain_weights = True
@@ -614,6 +638,7 @@ def ensure_canonical_supervised_assets(root, config, args):
         dataset_metadata=dataset_metadata,
         training_config=training_config,
         architecture=architecture,
+        ruleset=args.ruleset,
     )
     weights_check.require_compatible_or_missing(
         rebuild=retrain_weights,
@@ -645,6 +670,7 @@ def ensure_canonical_supervised_assets(root, config, args):
                 memory_reserve_mb=args.sl_memory_reserve_mb,
                 gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
                 seed=seed,
+                ruleset=args.ruleset,
             )
         weights_metadata = write_weights_metadata(
             paths,
@@ -654,6 +680,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             training_config=training_config,
             training_summary=supervised_summary,
             architecture=architecture,
+            ruleset=args.ruleset,
         )
         weights_status = "trained"
 
@@ -1092,6 +1119,7 @@ def run_rl_pipeline(root, config, args, assets):
         locked_arguments=locked_arguments,
         machine=recorded_machine,
         network_architecture=architecture,
+        ruleset=args.ruleset,
     )
     if config.unbounded:
         _write_forever_active_run(root, run_dir, run_configuration)
@@ -1480,11 +1508,13 @@ def run_final_diagnostics(root, config, args, assets, rl_result):
         autotune_fraction=args.diagnostic_autotune_fraction,
         autotune_minimum_gain=args.diagnostic_autotune_min_gain,
         status_callback=_status,
+        ruleset=args.ruleset,
         run_metadata={
             "configuration_sha256": run_configuration[
                 "configuration_sha256"
             ],
             "ruleset_version": run_configuration["ruleset_version"],
+            "ruleset_name": args.ruleset,
             "machine": run_configuration["machine"],
             "seed": run_configuration["seed"],
             "run_name": run_configuration.get("run_name"),
@@ -1639,6 +1669,7 @@ def parse_args(argv=None):
                 args.scale,
                 selected_seed,
                 run_name=args.run_name,
+                ruleset=args.ruleset,
             )
         )
         if not (selected_run / "run_config.json").is_file():
@@ -1728,7 +1759,8 @@ def main(argv=None):
         "unbounded" if effective_rl_target is None else f"{effective_rl_target:,}"
     )
     print(
-        f"Canonical pipeline: level={config.scale_name}, seed={args.seed}, "
+        f"Canonical pipeline: level={config.scale_name}, ruleset={args.ruleset}, "
+        f"seed={args.seed}, "
         f"dataset={effective_dataset_games:,} games, supervised max="
         f"{effective_supervised_epochs:,} epochs, RL target={target_text} games, "
         f"algorithm={_rl_algorithm(args)}."

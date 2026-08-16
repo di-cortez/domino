@@ -24,6 +24,12 @@ actions but never redefine the rules. Training and diagnostics create games
 through the same engine and agents used by the UI. Generated artifacts are
 outputs of those layers, not inputs to source control.
 
+`middleware.rulesets` is the dependency-free, closed source of truth for
+double-six, double-five, double-four, and double-three geometry. One immutable
+ruleset name flows downward through the engine, exact opponent domain, encoder,
+agents, workers, artifacts, diagnostics, and UI. Persistent states and files
+record that identity; missing legacy identity means double-six only.
+
 ## Rules and orchestration
 
 `middleware.domino_engine.DominoEngine` owns dealing, turns, board ends, stock,
@@ -58,7 +64,7 @@ not inherit earlier negative evidence. At the first eligible non-terminal turn
 boundary it converts once to integer-weighted exact hand masks `mu(H)` and
 never falls back to particles.
 
-The model returns seven suit-presence probabilities for the acting player:
+The model returns one pip-presence probability per value in the active ruleset:
 `0.0` means known absence and `1.0` known presence. Response probabilities use
 the exact joint hand posterior, not independent suit marginals. The model stays
 on CPU because its workload is irregular branching over bitmasks and
@@ -78,13 +84,14 @@ All concrete agents inherit `middleware.middleware.Agent`:
 | `NeuralAgent` | Supervised MLP checkpoint with legal-action masking. |
 | `RLAgent` | Supervised-initialized policy refined by on-policy self-play. |
 
-`DominoEncoder` is shared by supervised and RL paths. It produces 168
-public-information features and maps real tile decisions to 56 outputs: 28
-tiles times two board ends. Draw, pass, and single-option tile plays are forced
+`DominoEncoder` is shared by supervised and RL paths. For `T` tiles and `S` pip
+values it produces `5T + 3S + 7` public-information features and maps real tile
+decisions to `2T` outputs. Draw, pass, and single-option tile plays are forced
 by the engine and bypass neural inference and policy-gradient sampling.
 
-`SupervisedNeuralNetwork` is a float32 MLP whose default policy shape is
-`168 -> 256 -> 128 -> 56`. The hidden-layer count and every width have a single
+`SupervisedNeuralNetwork` is a float32 compact MLP. Defaults are
+`168-256-128-56`, `130-192-96-42`, `97-128-64-30`, and `69-96-48-20` from
+double-six through double-three. The hidden-layer count and every width have a single
 source of truth in `agents/network_architecture.py` and are configurable from
 the supervised and canonical pipeline CLIs with `--hidden-layers` and
 `--hidden1-size` through `--hidden8-size`; the networks themselves accept any
@@ -226,7 +233,9 @@ Treat these as persistent external contracts unless a change is explicitly
 approved and documented:
 
 - action shapes and `DominoEngine.step` return shape;
-- the 168-feature/56-action encoder and checkpoint array names;
+- ruleset-derived encoder/action dimensions and checkpoint array names;
+- double-six's historical 168-feature/56-action layout and filenames;
+- ruleset identity in new datasets, checkpoints, runs, and resume state;
 - float64 checkpoint loading and optional value-head arrays;
 - deterministic seed-to-game mapping;
 - numbered checkpoint plus `.resume.npz` pairing and validation;

@@ -25,6 +25,39 @@ The project runs on CPU without CuPy. For NVIDIA GPU training, follow
 [`docs/GPU_SETUP.md`](docs/GPU_SETUP.md); dataset workers, rollout workers, and
 diagnostic workers intentionally remain CPU-only.
 
+## Named compact rulesets
+
+Every game-producing entry point accepts one of four closed names through
+`--ruleset`: `double-six` (the unchanged default), `double-five`,
+`double-four`, or `double-three`. Network dimensions shrink with the deck:
+
+| Ruleset | Tiles | Hand | Stock | Input | Default hidden | Output |
+|---|---:|---:|---:|---:|---:|---:|
+| `double-six` | 28 | 7 | 14 | 168 | 256 x 128 | 56 |
+| `double-five` | 21 | 6 | 9 | 130 | 192 x 96 | 42 |
+| `double-four` | 15 | 5 | 5 | 97 | 128 x 64 | 30 |
+| `double-three` | 10 | 4 | 2 | 69 | 96 x 48 | 20 |
+
+Datasets, encoded caches, checkpoints, canonical runs, and `forever` pointers
+are ruleset-specific. A compact checkpoint cannot be loaded into another
+ruleset and no padding, remapping, or transfer learning is performed. Legacy
+states/artifacts without a ruleset name are interpreted as `double-six` only.
+Compact canonical run directories include the name, for example
+`models/rl/domino_rl_double-four_forever_seed42`; double-six keeps every
+historical default filename.
+
+```bash
+python -m training.pipeline small --ruleset double-three --seed 123
+python -m training.pipeline forever --ruleset double-four
+python -m diagnostics.pairwise --ruleset double-five \
+  --agent heuristic --opponent random --games 1000
+python -m ui.visual_main --ruleset double-four
+```
+
+Resume reloads and locks the ruleset from `run_config.json`; start another run
+to change it. Explicit hidden-width flags remain available and override the
+compact defaults.
+
 ## Run the visual simulator
 
 ```bash
@@ -120,10 +153,12 @@ python -m training.pipeline forever --value-head --run-name critic
 python -m training.pipeline forever
 ```
 
-The network defaults to two hidden layers of 256 and 128 neurons.
+The network defaults to the two ruleset-specific hidden layers in the table
+above (256 and 128 for the default double-six game).
 `--hidden-layers N` selects between 1 and 8 hidden layers, and
 `--hidden1-size` through `--hidden8-size` size them individually. An omitted
-width uses the default for that position (256, then 128 for every later layer),
+width uses the ruleset default for the first two positions and 128 for every
+later layer,
 and sizing a layer the requested depth does not have is an error. The choice
 applies consistently to the supervised and RL stages:
 

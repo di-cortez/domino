@@ -168,6 +168,47 @@ class ParallelDiagnosticsTests(unittest.TestCase):
         self.assertTrue(metadata["parallel"]["workers_cpu_only"])
         self.assertLessEqual(metadata["parallel"]["initial_workers"], 2)
 
+    def test_compact_parallel_results_and_output_metadata_are_ruleset_local(self):
+        safety = ParallelSafetyConfig(
+            memory_reserve_mb=0,
+            estimated_worker_mb=1,
+        )
+        single = evaluate_pair(
+            "random",
+            "random",
+            game_count=12,
+            seed=20260816,
+            workers=1,
+            ruleset="double-three",
+        )
+        parallel, metadata = evaluate_pair(
+            "random",
+            "random",
+            game_count=12,
+            seed=20260816,
+            workers=2,
+            return_run_info=True,
+            safety_config=safety,
+            ruleset="double-three",
+        )
+        self.assertEqual(single, parallel)
+        self.assertEqual(metadata["ruleset_name"], "double-three")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = run_pairwise(
+                "random",
+                "random",
+                game_count=4,
+                seed=121,
+                workers=1,
+                safety_config=safety,
+                ruleset="double-three",
+                output_dir=Path(temp_dir) / "pair",
+                generate_plots=False,
+                print_console_summary=False,
+                save_game_records=False,
+            )
+        self.assertEqual(result["summary"]["ruleset_name"], "double-three")
+
     def test_value_head_predictions_are_reported_by_pairwise_diagnostics(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

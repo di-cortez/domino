@@ -8,6 +8,7 @@ engine; all game changes go through `GameController`.
 import pygame
 
 from middleware.opponent_model import ExactOpponentModel
+from middleware.rulesets import DEFAULT_RULESET_NAME
 from ui.primitives import (
     begin_2d,
     draw_domino_2d,
@@ -37,15 +38,15 @@ class HudRenderer:
     _MENU_HEADER_H = 68
     _MENU_FOOTER_H = 30
 
-    def __init__(self):
+    def __init__(self, ruleset=DEFAULT_RULESET_NAME):
         self._fonts_ready = False
         self._title_font = None
         self._normal_font = None
         self._hint_font = None
         self._probability_cache = {}
         self._opponent_models = {
-            0: ExactOpponentModel(record_traces=False),
-            1: ExactOpponentModel(record_traces=False),
+            0: ExactOpponentModel(ruleset=ruleset, record_traces=False),
+            1: ExactOpponentModel(ruleset=ruleset, record_traces=False),
         }
 
     def _init_fonts(self):

@@ -53,6 +53,7 @@ from diagnostics.parallel_runner import (
 )
 from utils.resource_limits import ensure_ram_available
 from utils.runtime_status import format_duration, print_memory_report
+from middleware.rulesets import DEFAULT_RULESET_NAME, RULESET_NAMES, resolve_ruleset
 
 try:
     from tqdm.auto import tqdm
@@ -96,6 +97,7 @@ def evaluate_pair(
     game_indices=None,
     effective_seed=None,
     return_run_info=False,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Run deterministically seeded games in one or more CPU-only workers."""
     agent_name = normalize_agent_name(agent_name)
@@ -107,8 +109,13 @@ def evaluate_pair(
         raise ValueError(
             f"workers must be between 1 and {MAX_DIAGNOSTIC_WORKERS}"
         )
-    resolved_weights = resolve_weights_path(agent_name, weights)
-    resolved_opponent_weights = resolve_weights_path(opponent_name, opponent_weights)
+    ruleset = resolve_ruleset(ruleset)
+    resolved_weights = resolve_weights_path(agent_name, weights, ruleset)
+    resolved_opponent_weights = resolve_weights_path(
+        opponent_name,
+        opponent_weights,
+        ruleset,
+    )
     effective_seed = _effective_seed(seed) if effective_seed is None else int(effective_seed)
     indices = list(range(game_count)) if game_indices is None else [int(i) for i in game_indices]
     if any(index < 0 or index >= game_count for index in indices):
@@ -127,11 +134,13 @@ def evaluate_pair(
         suppress_agent_output=suppress_agent_output,
         progress_callback=progress_callback,
         safety=safety_config or ParallelSafetyConfig(),
+        ruleset_name=ruleset.name,
     )
 
     metadata = {
         "requested_seed": seed,
         "effective_seed": effective_seed,
+        "ruleset_name": ruleset.name,
         "parallel": run_info.to_dict(),
     }
     if return_run_info:
@@ -340,6 +349,7 @@ def run_pairwise(
     effective_seed=None,
     display_output_dir=None,
     save_game_records=True,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Run one matchup and atomically write its requested artifacts.
 
@@ -358,6 +368,7 @@ def run_pairwise(
 
     agent_name = normalize_agent_name(agent_name)
     opponent_name = normalize_agent_name(opponent_name)
+    ruleset = resolve_ruleset(ruleset)
     if game_count < 1:
         raise ValueError("game_count must be positive")
     workers = int(workers)
@@ -450,6 +461,7 @@ def run_pairwise(
                 game_indices=missing_indices,
                 effective_seed=effective_seed,
                 return_run_info=True,
+                ruleset=ruleset,
             )
         else:
             new_games = []
@@ -457,6 +469,7 @@ def run_pairwise(
             execution_metadata = {
                 "requested_seed": seed,
                 "effective_seed": resolved_seed,
+                "ruleset_name": ruleset.name,
                 "parallel": ParallelRunInfo(
                     requested_workers=workers,
                     initial_workers=workers,
@@ -489,6 +502,7 @@ def run_pairwise(
     summary["requested_seed"] = execution_metadata["requested_seed"]
     summary["effective_seed"] = execution_metadata["effective_seed"]
     summary["parallel"] = execution_metadata["parallel"]
+    summary["ruleset_name"] = ruleset.name
     summary["precomputed_games"] = len(precomputed_games)
     summary = add_choice_summary(summary, games)
     summary = add_value_head_summary(summary, games)
@@ -604,6 +618,11 @@ def main():
     parser.add_argument("--opponent-weights", type=Path, default=DEFAULT_OPPONENT_WEIGHTS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument(
+        "--ruleset",
+        choices=RULESET_NAMES,
+        default=DEFAULT_RULESET_NAME,
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
@@ -642,6 +661,7 @@ def main():
         generate_plots=not args.no_plots,
         suppress_agent_output=not args.show_agent_output,
         workers=args.workers,
+        ruleset=args.ruleset,
     )
 
 

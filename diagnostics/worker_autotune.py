@@ -19,6 +19,7 @@ from diagnostics.parallel_runner import (
 )
 from utils.resource_limits import MemorySafetyError, ensure_ram_available
 from utils.runtime_status import format_duration
+from middleware.rulesets import DEFAULT_RULESET_NAME
 
 
 DEFAULT_AUTOTUNE_FRACTION = 0.01
@@ -34,6 +35,7 @@ class MatchupSpec:
     opponent: str
     weights: str | Path | None = None
     opponent_weights: str | Path | None = None
+    ruleset_name: str = DEFAULT_RULESET_NAME
 
     @property
     def key(self):
@@ -219,6 +221,7 @@ def autotune_diagnostic_workers(
                     suppress_agent_output=suppress_agent_output,
                     progress_callback=pair_progress,
                     safety=safety,
+                    ruleset_name=matchup.ruleset_name,
                 )
             except DiagnosticExecutionError as exc:
                 records = exc.records

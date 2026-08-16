@@ -1,46 +1,89 @@
-"""Shared state and action encoder for all neural domino agents.
+"""Ruleset-aware state and action encoder for neural domino agents.
 
 The neural policy only chooses voluntary tile plays. Forced draw/pass actions are
 handled by the agent wrapper and are deliberately absent from the policy output.
 """
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from middleware.opponent_model import (
-    ALL_TILES,
     compute_opponent_suit_probabilities,
     reconstruct_public_actions,
+)
+from middleware.rulesets import (
+    DEFAULT_RULESET_NAME,
+    DominoRuleset,
+    resolve_ruleset,
+    validate_state_ruleset,
 )
 
 
 MAX_TURN = 52
+DEFAULT_VECTOR_SIZE = 168
+DEFAULT_ACTION_SIZE = 56
+
+
+@dataclass(frozen=True)
+class EncoderLayout:
+    """Derived feature offsets for one compact domino ruleset."""
+
+    hand: int
+    played: int
+    played_turn: int
+    played_by_me: int
+    played_by_opponent: int
+    left_end: int
+    right_end: int
+    hand_size: int
+    stock_size: int
+    draw_count: int
+    pass_count: int
+    opponent_suit_probability: int
+    vector_size: int
+
+    @classmethod
+    def for_ruleset(cls, ruleset: DominoRuleset) -> "EncoderLayout":
+        tile_count = ruleset.tile_count
+        suit_count = ruleset.pip_count
+        return cls(
+            hand=0,
+            played=tile_count,
+            played_turn=2 * tile_count,
+            played_by_me=3 * tile_count,
+            played_by_opponent=4 * tile_count,
+            left_end=5 * tile_count,
+            right_end=5 * tile_count + suit_count,
+            hand_size=5 * tile_count + 2 * suit_count,
+            stock_size=5 * tile_count + 2 * suit_count + 2,
+            draw_count=5 * tile_count + 2 * suit_count + 3,
+            pass_count=5 * tile_count + 2 * suit_count + 5,
+            opponent_suit_probability=5 * tile_count + 2 * suit_count + 7,
+            vector_size=5 * tile_count + 3 * suit_count + 7,
+        )
 
 
 class DominoEncoder:
-    """Map public engine states to fixed-size vectors and tile plays to indices.
+    """Map states to compact ruleset-sized features and policy actions.
 
-    Feature layout, total size 168:
+    For ``T`` tiles and ``S`` pip values the feature size is ``5T + 3S + 7``.
+    Its blocks are, in order: tiles in hand, tiles played, normalized play turn,
+    tiles played by each side, two ``S``-wide board-end one-hots, two hand
+    sizes, stock size, two draw counts, two pass counts, and ``S`` exact-model
+    pip-presence probabilities. The action space is ``2T``: every tile on the
+    left followed by every tile on the right. Forced draw/pass actions are not
+    neural-policy actions.
 
-    * 0..27: current player's hand, one bit per tile;
-    * 28..55: tiles already played on the board;
-    * 56..83: normalized turn when each tile was played, or 0 if unplayed;
-    * 84..111: tiles played by the current player;
-    * 112..139: tiles played by the opponent;
-    * 140..146: left end one-hot;
-    * 147..153: right end one-hot;
-    * 154..155: hand sizes for player 0 and player 1, divided by 7;
-    * 156: stock size divided by 14;
-    * 157..158: draw counts for player 0 and player 1, divided by 14;
-    * 159..160: pass counts for player 0 and player 1, divided by MAX_TURN;
-    * 161..167: opponent suit-presence probabilities in [0, 1].
-
-    The action space has 56 actions: 28 possible tiles on the left end followed
-    by 28 possible tiles on the right end. Draw and pass are forced rule actions,
-    not neural-policy actions.
+    The historical double-six layout is therefore 168 features and 56 actions;
+    its class-level size/offset aliases remain available for legacy callers.
+    Generic code must use the ruleset-local instance attributes.
     """
 
-    VECTOR_SIZE = 168
-    ACTION_SIZE = 56
+    # Legacy double-six aliases. Generic code must use the instance attributes
+    # ``vector_size`` and ``action_size`` instead.
+    VECTOR_SIZE = DEFAULT_VECTOR_SIZE
+    ACTION_SIZE = DEFAULT_ACTION_SIZE
     MAX_TURN = MAX_TURN
 
     HAND_OFFSET = 0
@@ -56,27 +99,52 @@ class DominoEncoder:
     PASS_COUNT_OFFSET = 159
     OPPONENT_SUIT_PROBABILITY_OFFSET = 161
 
-    def __init__(self):
-        self.all_tiles = list(ALL_TILES)
+    def __init__(self, ruleset=DEFAULT_RULESET_NAME):
+        self.ruleset = resolve_ruleset(ruleset)
+        self.layout = EncoderLayout.for_ruleset(self.ruleset)
+        self.all_tiles = list(self.ruleset.all_tiles)
+        self.tile_to_index = {
+            tile: index for index, tile in enumerate(self.all_tiles)
+        }
+        self.vector_size = self.layout.vector_size
+        self.action_size = 2 * self.ruleset.tile_count
+
+        # Instance offsets keep existing consumers readable while making their
+        # values ruleset-local.
+        self.HAND_OFFSET = self.layout.hand
+        self.PLAYED_OFFSET = self.layout.played
+        self.PLAYED_TURN_OFFSET = self.layout.played_turn
+        self.PLAYED_BY_ME_OFFSET = self.layout.played_by_me
+        self.PLAYED_BY_OPPONENT_OFFSET = self.layout.played_by_opponent
+        self.LEFT_END_OFFSET = self.layout.left_end
+        self.RIGHT_END_OFFSET = self.layout.right_end
+        self.HAND_SIZE_OFFSET = self.layout.hand_size
+        self.STOCK_SIZE_OFFSET = self.layout.stock_size
+        self.DRAW_COUNT_OFFSET = self.layout.draw_count
+        self.PASS_COUNT_OFFSET = self.layout.pass_count
+        self.OPPONENT_SUIT_PROBABILITY_OFFSET = (
+            self.layout.opponent_suit_probability
+        )
 
         self.all_actions = []
         for tile in self.all_tiles:
-            self.all_actions.append((tile, 0))  # 0-27: play on the left end
+            self.all_actions.append((tile, 0))
         for tile in self.all_tiles:
-            self.all_actions.append((tile, 1))  # 28-55: play on the right end
+            self.all_actions.append((tile, 1))
 
         self.action_to_index = {action: idx for idx, action in enumerate(self.all_actions)}
 
     def encode_state(self, state):
-        """Convert a game state dictionary into a ``(168, 1)`` feature vector."""
+        """Convert a compatible state into a ruleset-sized feature vector."""
+        validate_state_ruleset(state, self.ruleset)
         # float32 matches the network weights and the supervised dataset, so no
         # consumer has to re-cast and no matrix is promoted during inference.
-        vector = np.zeros((self.VECTOR_SIZE, 1), dtype=np.float32)
+        vector = np.zeros((self.vector_size, 1), dtype=np.float32)
         current_player = state.get("current_player", 0)
 
         for tile in state.get("current_player_hand", []):
             tile = tuple(tile)
-            vector[self.HAND_OFFSET + self.all_tiles.index(tile), 0] = 1.0
+            vector[self.HAND_OFFSET + self.tile_to_index[tile], 0] = 1.0
 
         draw_counts = [0, 0]
         pass_counts = [0, 0]
@@ -96,7 +164,7 @@ class DominoEncoder:
                 continue
 
             tile, _side = action
-            tile_index = self.all_tiles.index(tuple(tile))
+            tile_index = self.tile_to_index[tuple(tile)]
             normalized_turn = min(turn_index + 1, self.MAX_TURN) / self.MAX_TURN
 
             vector[self.PLAYED_OFFSET + tile_index, 0] = 1.0
@@ -114,12 +182,19 @@ class DominoEncoder:
 
         hand_sizes = state.get("hand_sizes", [])
         for i in range(min(2, len(hand_sizes))):
-            vector[self.HAND_SIZE_OFFSET + i, 0] = hand_sizes[i] / 7.0
+            vector[self.HAND_SIZE_OFFSET + i, 0] = (
+                hand_sizes[i] / self.ruleset.hand_size
+            )
 
-        vector[self.STOCK_SIZE_OFFSET, 0] = state.get("stock_size", 0) / 14.0
+        initial_stock_size = self.ruleset.initial_stock_size(player_count=2)
+        vector[self.STOCK_SIZE_OFFSET, 0] = (
+            state.get("stock_size", 0) / initial_stock_size
+        )
 
         for i in range(2):
-            vector[self.DRAW_COUNT_OFFSET + i, 0] = draw_counts[i] / 14.0
+            vector[self.DRAW_COUNT_OFFSET + i, 0] = (
+                draw_counts[i] / initial_stock_size
+            )
             vector[self.PASS_COUNT_OFFSET + i, 0] = pass_counts[i] / self.MAX_TURN
 
         # Persistent agents place the exact result in the state immediately
@@ -127,6 +202,12 @@ class DominoEncoder:
         probabilities = state.get("opponent_suit_probabilities")
         if probabilities is None:
             probabilities = compute_opponent_suit_probabilities(state)
+        if len(probabilities) != self.ruleset.pip_count:
+            raise ValueError(
+                "opponent_suit_probabilities has "
+                f"{len(probabilities)} values, expected "
+                f"{self.ruleset.pip_count} for {self.ruleset.name}."
+            )
         for suit, value in enumerate(probabilities):
             vector[self.OPPONENT_SUIT_PROBABILITY_OFFSET + suit, 0] = value
 
@@ -149,8 +230,8 @@ class DominoEncoder:
         return self.action_to_index[move]
 
     def policy_action_mask(self, legal_actions):
-        """Return a ``(56, 1)`` mask marking legal neural-policy actions."""
-        mask = np.zeros((self.ACTION_SIZE, 1), dtype=np.float32)
+        """Return an ``(action_size, 1)`` legal neural-policy mask."""
+        mask = np.zeros((self.action_size, 1), dtype=np.float32)
 
         for move in legal_actions:
             if self.is_policy_action(move):
@@ -168,7 +249,7 @@ class DominoEncoder:
         if not policy_actions:
             return legal_actions[0] if legal_actions else None
 
-        masked_scores = np.full(self.ACTION_SIZE, -np.inf)
+        masked_scores = np.full(self.action_size, -np.inf)
         for move in policy_actions:
             masked_scores[self._action_index(move)] = probabilities[self._action_index(move), 0]
 

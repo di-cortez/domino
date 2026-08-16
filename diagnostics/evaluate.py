@@ -52,6 +52,7 @@ from diagnostics.plots import (
 )
 from utils.artifacts import file_sha256
 from utils.runtime_status import format_duration, print_memory_report
+from middleware.rulesets import DEFAULT_RULESET_NAME, RULESET_NAMES, resolve_ruleset
 from diagnostics.worker_autotune import (
     DEFAULT_AUTOTUNE_FRACTION,
     DEFAULT_MINIMUM_GAIN,
@@ -86,6 +87,7 @@ def _matrix_rows(summaries):
         rates = summary["rates"]
         values = summary.get("value_head_predictions", {})
         rows.append({
+            "ruleset_name": summary["ruleset_name"],
             "agent": summary["agent"],
             "opponent": summary["opponent"],
             "games": summary["game_count"],
@@ -107,6 +109,7 @@ def _matrix_rows(summaries):
 def _save_matrix_csv(rows, path):
     """Write one row per evaluated matchup."""
     fields = [
+        "ruleset_name",
         "agent",
         "opponent",
         "games",
@@ -250,6 +253,7 @@ def run_all_pairs(
     autotune_minimum_gain=DEFAULT_MINIMUM_GAIN,
     status_callback=None,
     run_metadata=None,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Evaluate canonical agents and write aggregate artifacts.
 
@@ -257,6 +261,7 @@ def run_all_pairs(
     agent is still evaluated only against the random baseline. When omitted,
     all four canonical agents are evaluated.
     """
+    ruleset = resolve_ruleset(ruleset)
     if game_count < 1:
         raise ValueError("game_count must be positive")
     if agents is None:
@@ -300,8 +305,13 @@ def run_all_pairs(
         matchup_specs.append(MatchupSpec(
             agent=agent,
             opponent=opponent,
-            weights=resolve_weights_path(agent, agent_weights),
-            opponent_weights=resolve_weights_path(opponent, resolved_opponent_weights),
+            weights=resolve_weights_path(agent, agent_weights, ruleset),
+            opponent_weights=resolve_weights_path(
+                opponent,
+                resolved_opponent_weights,
+                ruleset,
+            ),
+            ruleset_name=ruleset.name,
         ))
     matchup_specs = tuple(matchup_specs)
     network_metadata = _network_metadata(agents, matchup_specs)
@@ -414,6 +424,7 @@ def run_all_pairs(
                 display_output_dir=(
                     final_output_dir / "pairs" / f"{agent}_vs_{opponent}"
                 ),
+                ruleset=ruleset,
             )
         except BaseException:
             shutil.rmtree(output_dir, ignore_errors=True)
@@ -425,6 +436,7 @@ def run_all_pairs(
     choice_opportunities = _aggregate_choice_opportunities(summaries)
     report = {
         "run": dict(run_metadata or {}),
+        "ruleset_name": ruleset.name,
         "choice_opportunities": choice_opportunities,
         "comparison_opponent": RANDOM_BASELINE_OPPONENT,
         "report_layout": "single_row",
@@ -509,6 +521,11 @@ def main():
         help="Number of games per evaluated matchup.",
     )
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--ruleset",
+        choices=RULESET_NAMES,
+        default=DEFAULT_RULESET_NAME,
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--rl-weights", type=Path, default=None)
     parser.add_argument("--neural-weights", type=Path, default=None)
@@ -549,6 +566,7 @@ def main():
         ),
         autotune_fraction=args.autotune_fraction,
         autotune_minimum_gain=args.autotune_min_gain,
+        ruleset=args.ruleset,
     )
 
     print("\n===== Agent-vs-random diagnostics complete =====")

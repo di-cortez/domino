@@ -24,9 +24,12 @@ from ui.scene_renderer import visual_chain_from_state
 from ui.visual_main import _window_caption
 
 
-def _new_controller(agent_types=None, interval_ms=1000):
-    engine = DominoEngine(player_count=2)
-    agents = [StrategicAgent(), StrategicAgent()]
+def _new_controller(agent_types=None, interval_ms=1000, ruleset="double-six"):
+    engine = DominoEngine(player_count=2, ruleset=ruleset)
+    agents = [
+        StrategicAgent(ruleset=ruleset),
+        StrategicAgent(ruleset=ruleset),
+    ]
     manager = GameManager(engine, agents)
 
     if agent_types is None:
@@ -522,6 +525,21 @@ def test_human_vs_human_shows_only_current_hand():
     )
 
 
+def test_compact_controller_and_caption_preserve_ruleset():
+    engine, controller = _new_controller(ruleset="double-three")
+
+    assert engine._get_state()["ruleset_name"] == "double-three"
+    assert _window_caption(controller.agent_types, engine.ruleset.name) == (
+        "Domino [double-three] - Heuristic vs Heuristic"
+    )
+    controller._restart_game()
+    assert engine.ruleset.name == "double-three"
+    assert all(
+        agent.ruleset.name == "double-three"
+        for agent in controller.manager.agents
+    )
+
+
 def main():
     tests = [
         ("AI advances automatically", test_ai_advances_automatically),
@@ -557,6 +575,7 @@ def main():
         ("AI vs AI visibility", test_ai_vs_ai_keeps_hands_visible),
         ("human vs AI visibility", test_human_vs_ai_visibility),
         ("human vs human visibility", test_human_vs_human_shows_only_current_hand),
+        ("compact ruleset controller", test_compact_controller_and_caption_preserve_ruleset),
     ]
 
     for name, fn in tests:

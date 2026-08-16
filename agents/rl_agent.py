@@ -9,6 +9,8 @@ from agents.encoder import DominoEncoder
 from agents.rl_nn import PolicyNetwork
 from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+from utils.ruleset_paths import default_rl_weights_path
 
 
 @dataclass
@@ -49,16 +51,47 @@ class RLAgent(Agent):
 
     VALID_MODES = {"training", "stochastic_evaluation", "evaluation"}
 
-    def __init__(self, network, mode="training", runtime_profile=None):
+    def __init__(
+        self,
+        network,
+        mode="training",
+        runtime_profile=None,
+        *,
+        ruleset=DEFAULT_RULESET_NAME,
+    ):
         if mode not in self.VALID_MODES:
             raise ValueError(
                 f"Unknown RLAgent mode {mode!r}; expected one of "
                 f"{sorted(self.VALID_MODES)}."
             )
+        self.ruleset = resolve_ruleset(ruleset)
         self.network = network
         self.mode = mode
-        self.encoder = DominoEncoder()
-        self.opponent_model = ExactOpponentModel(record_traces=False)
+        self.encoder = DominoEncoder(self.ruleset)
+        first_weight = getattr(network, "W1", None)
+        layer_count = getattr(network, "layer_count", None)
+        output_weight = (
+            None
+            if layer_count is None
+            else getattr(network, f"W{layer_count}", None)
+        )
+        if first_weight is not None and output_weight is not None:
+            actual_input = int(first_weight.shape[1])
+            actual_output = int(output_weight.shape[0])
+            if (
+                actual_input != self.encoder.vector_size
+                or actual_output != self.encoder.action_size
+            ):
+                raise ValueError(
+                    f"RL policy shape input={actual_input}, output={actual_output} "
+                    f"does not match ruleset {self.ruleset.name!r}: "
+                    f"input={self.encoder.vector_size}, "
+                    f"output={self.encoder.action_size}."
+                )
+        self.opponent_model = ExactOpponentModel(
+            ruleset=self.ruleset,
+            record_traces=False,
+        )
         self.trajectory = []
         # Optional low-overhead accumulator used by rollout/diagnostic workers.
         # Keeping it injectable avoids changing the normal public-agent output.
@@ -75,16 +108,18 @@ class RLAgent(Agent):
     @classmethod
     def load(
         cls,
-        weights_path="models/domino_rl_weights.npz",
+        weights_path=None,
         mode="evaluation",
         use_value_head=False,
+        ruleset=DEFAULT_RULESET_NAME,
     ):
         """Load an RL policy and optionally restore its persisted value head."""
+        weights_path = weights_path or default_rl_weights_path(ruleset)
         network = PolicyNetwork.load(
             weights_path,
             use_value_head=use_value_head,
         )
-        return cls(network, mode=mode)
+        return cls(network, mode=mode, ruleset=ruleset)
 
     def choose_move(self, state, legal_actions):
         if self.runtime_profile is None:
@@ -113,12 +148,14 @@ class RLAgent(Agent):
 
         if self.mode in {"training", "stochastic_evaluation"}:
             host_legal_mask = np.zeros(
-                self.encoder.ACTION_SIZE,
+                self.encoder.action_size,
                 dtype=np.bool_,
             )
             for action in policy_actions:
                 host_legal_mask[self.encoder._action_index(action)] = True
-            logits = getattr(self.network, "cache", {}).get("Z3")
+            logits = getattr(self.network, "cache", {}).get(
+                getattr(self.network, "logits_key", "Z3")
+            )
             if logits is None:
                 legal_probabilities = np.asarray(
                     probabilities[host_legal_mask, 0],
@@ -234,12 +271,14 @@ class RLAgent(Agent):
             section_started = time.perf_counter() if profiling else None
             if self.mode in {"training", "stochastic_evaluation"}:
                 host_legal_mask = np.zeros(
-                    self.encoder.ACTION_SIZE,
+                    self.encoder.action_size,
                     dtype=np.bool_,
                 )
                 for action in policy_actions:
                     host_legal_mask[self.encoder._action_index(action)] = True
-                logits = getattr(self.network, "cache", {}).get("Z3")
+                logits = getattr(self.network, "cache", {}).get(
+                    getattr(self.network, "logits_key", "Z3")
+                )
                 if logits is None:
                     legal_probabilities = np.asarray(
                         probabilities[host_legal_mask, 0],

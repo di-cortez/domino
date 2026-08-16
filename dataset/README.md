@@ -11,6 +11,11 @@ ignored by Git.
 | `supervised_dataset_standard_seed<seed>.jsonl` | Reusable long-run pipeline dataset for that seed. |
 | `supervised_dataset_standard_seed<seed>.meta.json` | Structural identity, generation configuration, provenance, example count, and SHA-256. |
 
+Double-six keeps these historical names. Compact standalone and canonical
+datasets insert the ruleset name, such as
+`supervised_dataset_double-four.jsonl` and
+`supervised_dataset_double-four_standard_seed42.jsonl`.
+
 The first two names belong to standalone training commands. The `big`, `huge`,
 and `forever` pipeline levels generate 100,000 games for the seed-addressed
 dataset and reuse it only after its metadata, encoder/action dimensions,
@@ -37,6 +42,7 @@ opponent model:
 - `current_player_initial_hand`;
 - `current_player_drawn_tiles`;
 - `opponent_suit_probabilities`.
+- `ruleset_name` and `initial_hand_size`.
 
 The probability vector has direct presence semantics: `0.0` means known absence
 of that suit in the opponent hand, and `1.0` means known presence.
@@ -47,6 +53,7 @@ Generate the default dataset:
 python -m training.datagen.generator
 python -m training.datagen.generator --workers auto --seed 123
 python -m training.datagen.generator --workers 4 --games 5000
+python -m training.datagen.generator --ruleset double-three --games 1000
 ```
 
 Use `--games` and `--output` for smaller tests or larger training datasets; no
@@ -64,3 +71,5 @@ modification time. It is rebuilt automatically when that hash, the encoder
 dimensions, or the feature-version tag changes. The canonical dataset and
 supervised metadata likewise omit creation timestamps and machine-local paths,
 so identical generation in different checkouts has identical metadata.
+Explicit cross-ruleset datasets/caches are rejected; missing identity is legacy
+double-six only.

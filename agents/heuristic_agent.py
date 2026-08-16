@@ -2,6 +2,7 @@
 
 from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
 
 class StrategicAgent(Agent):
@@ -15,10 +16,20 @@ class StrategicAgent(Agent):
     4. preserve the stable ``legal_actions`` order for exact ties.
     """
 
-    def __init__(self, response_tolerance=0.10, mobility_tolerance=0.10):
+    def __init__(
+        self,
+        response_tolerance=0.10,
+        mobility_tolerance=0.10,
+        *,
+        ruleset=DEFAULT_RULESET_NAME,
+    ):
+        self.ruleset = resolve_ruleset(ruleset)
         self.response_tolerance = float(response_tolerance)
         self.mobility_tolerance = float(mobility_tolerance)
-        self.opponent_model = ExactOpponentModel(record_traces=False)
+        self.opponent_model = ExactOpponentModel(
+            ruleset=self.ruleset,
+            record_traces=False,
+        )
 
     def choose_move(self, state, legal_actions):
         if not legal_actions:

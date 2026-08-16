@@ -54,7 +54,8 @@ python -m diagnostics.pairwise --ruleset double-five \
 python -m ui.visual_main --ruleset double-four
 ```
 
-Resume reloads and locks the ruleset from `run_config.json`; start another run
+Resume reloads and locks the ruleset from
+`run_compact_diagnostics/run_config.json`; start another run
 to change it. Explicit hidden-width flags remain available and override the
 compact defaults.
 
@@ -189,7 +190,7 @@ controls existed keep working: a missing field is read as the disabled value.
 See [`training/utils/README.md`](training/utils/README.md#shared-regularization) for the
 complete behavior, including the PPO ratio caveat when dropout is enabled.
 
-For `forever`, `run_config.json` records the full locked configuration and its
+For `forever`, `run_compact_diagnostics/run_config.json` records the full locked configuration and its
 SHA-256, the ruleset, optional run name, supervised origin, and the machine on
 which the run started. A checkpoint must carry the same hash. A conflicting
 training or asset argument on a resume invocation produces a warning, is

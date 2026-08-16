@@ -25,6 +25,11 @@ from training.rl.config import (
     RLResourceOptions,
     RLTrainingOptions,
 )
+from training.run_artifacts import (
+    periodic_diagnostics_path,
+    rl_progress_csv_path,
+    rl_progress_png_path,
+)
 
 
 def test_runtime_profile_accumulates_sessions_without_estimating_history(tmp_path):
@@ -257,7 +262,7 @@ def test_periodic_profile_separates_reports_from_pairwise_work(tmp_path, monkeyp
     assert profile["sections_seconds"]["progress_csv_rebuild"] > 0.0
     assert profile["pairwise_sections_seconds"] == {"new_game_execution": 0.008}
     assert pairwise_options["save_game_records"] is False
-    persisted = read_periodic_history(tmp_path / "periodic_diagnostics.jsonl")
+    persisted = read_periodic_history(periodic_diagnostics_path(tmp_path))
     assert "runtime_profile_delta" not in persisted[-1]
 
 
@@ -293,7 +298,7 @@ def test_real_periodic_history_is_compact_and_counts_diagnostic_time(tmp_path):
         **common,
     )
 
-    history_path = tmp_path / "periodic_diagnostics.jsonl"
+    history_path = periodic_diagnostics_path(tmp_path)
     raw = [
         json.loads(line)
         for line in history_path.read_text(encoding="utf-8").splitlines()
@@ -310,10 +315,10 @@ def test_real_periodic_history_is_compact_and_counts_diagnostic_time(tmp_path):
     assert rows[-1]["progress_elapsed_seconds"] == pytest.approx(expected)
     assert rows[-1]["progress_elapsed_seconds"] > rows[-1]["rl_elapsed_seconds"]
     with open(
-        tmp_path / "rl_vs_random_progress.csv",
+        rl_progress_csv_path(tmp_path),
         newline="",
         encoding="utf-8",
     ) as stream:
         csv_rows = list(csv.DictReader(stream))
     assert list(csv_rows[0]) == list(CSV_FIELDS)
-    assert (tmp_path / "rl_vs_random_progress.png").is_file()
+    assert rl_progress_png_path(tmp_path).is_file()

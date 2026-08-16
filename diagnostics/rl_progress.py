@@ -25,6 +25,12 @@ from diagnostics.worker_autotune import (
     autotune_diagnostic_workers,
 )
 from training.canonical_run import load_run_config
+from training.run_artifacts import (
+    periodic_diagnostics_path,
+    rl_progress_csv_path,
+    rl_progress_png_path,
+    run_dir_from_compact_diagnostic_path,
+)
 from training.utils.seeding import stable_seed
 from utils.artifacts import atomic_write_json, atomic_write_text, file_sha256
 from middleware.rulesets import DEFAULT_RULESET_NAME
@@ -231,7 +237,7 @@ def _history_header(rows):
 
 def _checkpoint_path_for_storage(path, history_path):
     """Return a checkpoint path relative to the history's checkpoints folder."""
-    run_dir = Path(history_path).parent.resolve()
+    run_dir = run_dir_from_compact_diagnostic_path(history_path).resolve()
     checkpoint_base = run_dir / HISTORY_CHECKPOINT_BASE
     checkpoint = Path(path)
     if not checkpoint.is_absolute():
@@ -243,7 +249,7 @@ def _checkpoint_path_from_storage(path, history_path, checkpoint_base):
     """Resolve one stored checkpoint path for existing in-memory consumers."""
     return str(
         (
-            Path(history_path).parent
+            run_dir_from_compact_diagnostic_path(history_path)
             / checkpoint_base
             / str(path)
         ).resolve()
@@ -519,7 +525,7 @@ def rebuild_progress_csv(run_dir):
     """Rebuild the derived CSV from JSONL, which remains the source of truth."""
     run_dir = Path(run_dir)
     rows = sorted(
-        read_periodic_history(run_dir / "periodic_diagnostics.jsonl"),
+        read_periodic_history(periodic_diagnostics_path(run_dir)),
         key=lambda row: int(row["rl_games"]),
     )
     stream = io.StringIO(newline="")
@@ -538,7 +544,7 @@ def rebuild_progress_csv(run_dir):
                 f"{100.0 * row['ci95_win_rate_high']:.3f}"
             ),
         })
-    return atomic_write_text(run_dir / "rl_vs_random_progress.csv", stream.getvalue())
+    return atomic_write_text(rl_progress_csv_path(run_dir), stream.getvalue())
 
 
 def rebuild_progress_plot(run_dir, *, log_x=False):
@@ -548,7 +554,7 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
 
     run_dir = Path(run_dir)
     rows = sorted(
-        read_periodic_history(run_dir / "periodic_diagnostics.jsonl"),
+        read_periodic_history(periodic_diagnostics_path(run_dir)),
         key=lambda row: int(row["rl_games"]),
     )
     if not rows:
@@ -681,8 +687,7 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
         fontsize=7,
     )
     figure.tight_layout(rect=(0, 0.095, 1, 1))
-    filename = "rl_vs_random_progress_logx.png" if log_x else "rl_vs_random_progress.png"
-    output = run_dir / filename
+    output = rl_progress_png_path(run_dir, log_x=log_x)
     temporary = output.with_name(
         f".{output.stem}.tmp-{os.getpid()}-{time.time_ns()}.png"
     )
@@ -735,7 +740,7 @@ def _update_best(run_dir, row):
 def rebuild_best_checkpoint(run_dir):
     """Rebuild the best pointer from JSONL without changing latest state."""
     rows = sorted(
-        read_periodic_history(Path(run_dir) / "periodic_diagnostics.jsonl"),
+        read_periodic_history(periodic_diagnostics_path(run_dir)),
         key=lambda row: int(row["rl_games"]),
     )
     if not rows:
@@ -802,7 +807,7 @@ def run_periodic_diagnostic(
         "opponent": "random",
         "ruleset_name": ruleset_name,
     }
-    history_path = run_dir / "periodic_diagnostics.jsonl"
+    history_path = periodic_diagnostics_path(run_dir)
     existing_history = read_periodic_history(history_path)
     _repair_final_partial_line(history_path, existing_history)
     runtime_sections["identity_hash_and_history_read"] = (

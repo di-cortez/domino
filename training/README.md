@@ -58,8 +58,8 @@ seed-addressed 100,000-game assets and metadata-validated reuse:
 
 | Level | Dataset games | Default seed/assets | Cumulative RL games | Final games/matchup | Periodic monitor | Resume |
 |---|---:|---|---:|---:|---|---|
-| `small` | 10,000 | Random, run-local | 100,000 | 10,000 | No | Not exposed |
-| `default` | 50,000 | Random, run-local | 500,000 | 10,000 | No | Not exposed |
+| `small` | 10,000 | Random, run-local | 100,000 | 10,000 | 100,000 RL games, 10,000 games/point | Not exposed |
+| `default` | 50,000 | Random, run-local | 500,000 | 10,000 | 100,000 RL games, 10,000 games/point | Not exposed |
 | `big` | 100,000 | 42, reusable | 2,000,000 | 1,000,000 | 100,000 RL games | Yes |
 | `huge` | 100,000 | 42, reusable | 10,000,000 | 1,000,000 | 100,000 RL games | Yes |
 | `forever` | 100,000 | 42, reusable | Unbounded | None | 100,000 RL games | Yes |
@@ -97,7 +97,9 @@ later invocation never selects them as inputs. Both quick and long-run
 profiles retain the 5,000-epoch maximum; their plateau rules normally finish
 earlier.
 
-RL output lives at `models/rl/domino_rl_<level>_seed<seed>/`. `big`, `huge`,
+RL output lives at `models/rl/domino_rl_<level>_seed<seed>/`. Its compact
+analysis bundle (`run_config.json`, periodic JSONL, progress CSV and progress
+PNG) lives together under `run_compact_diagnostics/`. `big`, `huge`,
 and `forever` publish immutable exact resume generations plus the convenience
 aliases `latest_weights.npz`, `optimizer_state.npz`, `rng_state.json`, and
 `opponent_pool/pool_manifest.json`. `training_state.json` is the commit marker;
@@ -163,7 +165,7 @@ canonical pipeline and direct self-play expose `--gpi` with choices
 is unchanged. A boundary iteration is shortened so a periodic or final target
 is never exceeded.
 
-On the first `forever` start, `run_config.json` stores every locked argument,
+On the first `forever` start, `run_compact_diagnostics/run_config.json` stores every locked argument,
 the full canonical configuration, its SHA-256, ruleset version, optional run
 name, supervised origin, and start-machine metadata. The active-run pointer
 lets a later bare `python -m training.pipeline forever` find that run. Supply a

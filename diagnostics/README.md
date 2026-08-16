@@ -110,18 +110,23 @@ numeric percentages.
 
 ## Canonical RL Progress Monitor
 
-The `big`, `huge`, and `forever` pipelines evaluate only RL versus `random` at
+Every pipeline level evaluates only RL versus `random` at
 0, 100,000, 200,000, ... cumulative RL games. Point zero is the canonical
-supervised checkpoint. Every point uses the same seed namespace and the same
-100,000 game identities, so checkpoints are compared on a paired monitor set.
-The final four-matchup evaluation uses a separate holdout namespace.
+supervised checkpoint, and a finite run also records its final checkpoint when
+its custom target is not a 100,000-game boundary. Quick `small` and `default`
+runs use 10,000 games per monitor point; long-run levels use 100,000. Every
+point within a run uses the same seed namespace and game identities, so its
+checkpoints are compared on a paired monitor set. The final four-matchup
+evaluation uses a separate holdout namespace.
 
-Each milestone is saved before evaluation. Diagnostics use separate RNG state
+Each monitor point is saved before evaluation. Diagnostics use separate RNG state
 and cannot change policy weights, optimizer, opponent pool, counters, GPI, or
-rollout workers. The RL run directory receives:
+rollout workers. The compact run-analysis bundle lives at
+`<RL run>/run_compact_diagnostics/` and contains:
 
 | File | Contents |
 |---|---|
+| `run_config.json` | Immutable run identity, ruleset, hyperparameters, supervised origin, machine and configuration hash used by exact resume. |
 | `periodic_diagnostics.jsonl` | Atomic compact source of truth: one static header followed by deduplicated data arrays. |
 | `rl_vs_random_progress.csv` | Six-column derived learning curve with cumulative RL-plus-diagnostic hours, win rate, and 95% interval. |
 | `rl_vs_random_progress.png` | Linear cumulative RL-plus-diagnostic-hours curve with point zero and 95% intervals. Its footer reports the value head, the hidden-layer count with every width (`4 layers 512x256x128x64`), and both regularizers. |

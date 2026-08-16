@@ -85,6 +85,11 @@ from training.pipeline import (
     parse_args,
     validate_args,
 )
+from training.run_artifacts import (
+    periodic_diagnostics_path,
+    run_compact_diagnostics_dir,
+    run_config_path,
+)
 from training.rl.ppo import (
     PPO_TRAINING_ALGORITHM,
     REINFORCE_TRAINING_ALGORITHM,
@@ -240,7 +245,7 @@ def _periodic_row(games, checkpoint_hash="a", diagnostic_seed=7):
 
 def test_quick_and_long_run_level_policies_are_distinct(monkeypatch):
     seeds = iter((101, 202))
-    tokens = iter(("aaaaaaaa", "bbbbbbbb", "cccccccc"))
+    tokens = iter(("aaaaaaaa", "bbbbbbbb", "cccccccc", "dddddddd"))
     monkeypatch.setattr(
         "training.pipeline.secrets.randbits",
         lambda bits: next(seeds) if bits == 32 else None,
@@ -253,6 +258,13 @@ def test_quick_and_long_run_level_policies_are_distinct(monkeypatch):
     first_quick = parse_args(["default"])
     second_quick = parse_args(["default"])
     explicit_quick = parse_args(["small", "--seed", "7"])
+    overridden_quick = parse_args([
+        "small",
+        "--seed",
+        "8",
+        "--periodic-diagnostic-games",
+        "321",
+    ])
     long_run = parse_args(["big"])
 
     assert first_quick.seed == 101
@@ -269,7 +281,13 @@ def test_quick_and_long_run_level_policies_are_distinct(monkeypatch):
     assert PIPELINE_LEVELS["forever"].dataset_games == 100_000
     assert not PIPELINE_LEVELS["small"].reuse_supervised_assets
     assert not PIPELINE_LEVELS["default"].reuse_supervised_assets
+    assert PIPELINE_LEVELS["small"].periodic_diagnostics
+    assert PIPELINE_LEVELS["default"].periodic_diagnostics
     assert PIPELINE_LEVELS["big"].reuse_supervised_assets
+    assert first_quick.periodic_diagnostic_games == 10_000
+    assert explicit_quick.periodic_diagnostic_games == 10_000
+    assert overridden_quick.periodic_diagnostic_games == 321
+    assert long_run.periodic_diagnostic_games == 100_000
     assert PIPELINE_LEVELS["small"].supervised_epochs == 5_000
     assert PIPELINE_LEVELS["default"].supervised_epochs == 5_000
     assert PIPELINE_LEVELS["big"].supervised_epochs == 5_000
@@ -496,7 +514,7 @@ def test_forever_periodic_workers_are_recovered_once_and_then_persisted(tmp_path
         "--artifact-root",
         str(tmp_path),
     ])
-    history = tmp_path / "periodic_diagnostics.jsonl"
+    history = periodic_diagnostics_path(tmp_path)
     first = _periodic_row(
         0,
         diagnostic_seed=periodic_diagnostic_seed(args.seed),
@@ -798,6 +816,9 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
     }
     first = create_run_config(run_dir, **values)
     second = create_run_config(run_dir, **values)
+    assert run_config_path(run_dir).is_file()
+    assert run_config_path(run_dir).parent == run_compact_diagnostics_dir(run_dir)
+    assert not (run_dir / "run_config.json").exists()
     assert second["created_at"] == first["created_at"]
     assert first["algorithm"] == PPO_TRAINING_ALGORITHM
 
@@ -820,6 +841,42 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
     extended.update(pipeline_level="huge", target_rl_games=10_000_000)
     with pytest.raises(ValueError, match="target_rl_games"):
         create_run_config(run_dir, **extended)
+
+
+def test_legacy_run_root_analysis_files_are_copied_to_compact_bundle(tmp_path):
+    run_dir = canonical_run_dir(tmp_path, "big", 42)
+    run_dir.mkdir(parents=True)
+    legacy_history = run_dir / "periodic_diagnostics.jsonl"
+    legacy_csv = run_dir / "rl_vs_random_progress.csv"
+    legacy_png = run_dir / "rl_vs_random_progress.png"
+    legacy_history.write_text("legacy history\n", encoding="utf-8")
+    legacy_csv.write_text("legacy,csv\n", encoding="utf-8")
+    legacy_png.write_bytes(b"legacy png")
+
+    values = {
+        "root": ROOT,
+        "pipeline_level": "big",
+        "seed": 42,
+        "target_rl_games": 2_000_000,
+        "supervised_weights_path": "models/sl.npz",
+        "supervised_weights_sha256": "abc",
+        "ppo_config": {"clip_epsilon": 0.2},
+        "rl_config": {"gamma": 1.0},
+    }
+    create_run_config(run_dir, **values)
+
+    bundle = run_compact_diagnostics_dir(run_dir)
+    assert (bundle / legacy_history.name).read_text(encoding="utf-8") == (
+        "legacy history\n"
+    )
+    assert (bundle / legacy_csv.name).read_text(encoding="utf-8") == (
+        "legacy,csv\n"
+    )
+    assert (bundle / legacy_png.name).read_bytes() == b"legacy png"
+    assert run_config_path(run_dir).is_file()
+    assert legacy_history.is_file()
+    assert legacy_csv.is_file()
+    assert legacy_png.is_file()
 
 
 def test_run_config_requires_exact_rl_fields_without_legacy_defaults(tmp_path):
@@ -1129,7 +1186,8 @@ def test_periodic_and_final_seed_namespaces_are_separate_and_stable():
 
 
 def test_jsonl_repairs_partial_tail_deduplicates_and_rebuilds_reports(tmp_path):
-    history = tmp_path / "periodic_diagnostics.jsonl"
+    history = periodic_diagnostics_path(tmp_path)
+    history.parent.mkdir(parents=True)
     first = _periodic_row(0, checkpoint_hash="zero")
     first["format_version"] = 2
     first["checkpoint_path"] = str(

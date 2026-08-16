@@ -51,6 +51,12 @@ from training.canonical_run import (
     publish_checkpoint,
     update_diagnostic_markers,
 )
+from training.run_artifacts import (
+    periodic_diagnostics_path,
+    rl_progress_png_path,
+    run_compact_diagnostics_dir,
+    run_config_exists,
+)
 from training.rl.ppo import (
     POLICY_GRADIENT_CLIP_NORM,
     PPO_TRAINING_ALGORITHM,
@@ -152,7 +158,7 @@ EPHEMERAL_PIPELINE_LEVELS = {
         scale_name="small",
         total_rl_games=100_000,
         diagnostic_games=10_000,
-        periodic_diagnostics=False,
+        periodic_diagnostics=True,
         resume_supported=False,
         final_all_pairs=True,
         default_seed=None,
@@ -163,7 +169,7 @@ EPHEMERAL_PIPELINE_LEVELS = {
         scale_name="default",
         total_rl_games=500_000,
         diagnostic_games=10_000,
-        periodic_diagnostics=False,
+        periodic_diagnostics=True,
         resume_supported=False,
         final_all_pairs=True,
         default_seed=None,
@@ -236,6 +242,12 @@ def _resolve_execution_identity(args):
     )
     if getattr(args, "ppo_max_epochs", None) is None:
         args.ppo_max_epochs = int(config.ppo_max_epochs)
+    if (
+        not config.reuse_supervised_assets
+        and "periodic_diagnostic_games"
+        not in getattr(args, "_explicit_destinations", ())
+    ):
+        args.periodic_diagnostic_games = int(config.diagnostic_games)
     return args
 
 
@@ -439,7 +451,7 @@ def _hydrate_forever_arguments(parser, args, explicit):
             run_name=args.run_name,
             ruleset=args.ruleset,
         )
-        if not (selected_run / "run_config.json").is_file():
+        if not run_config_exists(selected_run):
             return args
     elif active_run is not None:
         selected_run = active_run
@@ -451,10 +463,10 @@ def _hydrate_forever_arguments(parser, args, explicit):
             run_name=args.run_name,
             ruleset=args.ruleset,
         )
-        if not (selected_run / "run_config.json").is_file():
+        if not run_config_exists(selected_run):
             return args
 
-    if not (selected_run / "run_config.json").is_file():
+    if not run_config_exists(selected_run):
         return args
     try:
         return _apply_saved_run_arguments(parser, args, explicit, selected_run)
@@ -920,7 +932,7 @@ def _resolve_periodic_diagnostic_workers(run_dir, level, args):
                 return selected, "saved forever selection"
         return "auto", "one-time forever autotune after configuration change"
 
-    history = read_periodic_history(Path(run_dir) / "periodic_diagnostics.jsonl")
+    history = read_periodic_history(periodic_diagnostics_path(run_dir))
     for row in reversed(history):
         try:
             matches_identity = (
@@ -1028,8 +1040,8 @@ def _run_periodic_point(
         f"{row['ci95_win_rate_high']:.2%}]"
     )
     print(f"Time: {format_duration(row['diagnostic_seconds'])}")
-    print(f"History: {Path(run_dir) / 'periodic_diagnostics.jsonl'}")
-    print(f"Graph: {Path(run_dir) / 'rl_vs_random_progress.png'}")
+    print(f"History: {periodic_diagnostics_path(run_dir)}")
+    print(f"Graph: {rl_progress_png_path(run_dir)}")
     print("-" * 70)
     if runtime_profiler is not None:
         profile = row["runtime_profile_delta"]
@@ -1067,7 +1079,7 @@ def run_rl_pipeline(root, config, args, assets):
     supervised_hash = assets["weights_metadata"]["artifact"]["sha256"]
     existing_run_config = (
         load_run_config(run_dir)
-        if (run_dir / "run_config.json").is_file()
+        if run_config_exists(run_dir)
         else None
     )
 
@@ -1139,7 +1151,7 @@ def run_rl_pipeline(root, config, args, assets):
         seed=seed,
         start_rl_games=completed,
     )
-    history = read_periodic_history(run_dir / "periodic_diagnostics.jsonl")
+    history = read_periodic_history(periodic_diagnostics_path(run_dir))
     last_periodic = max((int(row["rl_games"]) for row in history), default=0)
     next_boundary = next_training_stop(
         completed,
@@ -1173,6 +1185,7 @@ def run_rl_pipeline(root, config, args, assets):
     print(f"Resume: {'yes' if resuming else 'no'}")
     print(f"Games already completed: {completed:,}")
     print(f"Runtime profile: {runtime_profiler.path}")
+    print(f"Compact run diagnostics: {run_compact_diagnostics_dir(run_dir)}")
     if target is not None:
         print(f"Games remaining: {max(0, target - completed):,}")
     if config.periodic_diagnostics:
@@ -1385,6 +1398,11 @@ def run_rl_pipeline(root, config, args, assets):
             milestone = (
                 completed % int(args.periodic_diagnostic_every_games) == 0
             )
+            final_monitor_point = target is not None and completed >= target
+            diagnostic_point = (
+                config.periodic_diagnostics
+                and (milestone or final_monitor_point)
+            )
             next_periodic = (
                 (completed // int(args.periodic_diagnostic_every_games) + 1)
                 * int(args.periodic_diagnostic_every_games)
@@ -1404,7 +1422,7 @@ def run_rl_pipeline(root, config, args, assets):
                 summary=last_summary,
                 last_periodic_diagnostic_game=last_periodic,
                 next_periodic_diagnostic_game=next_periodic,
-                milestone=milestone and config.periodic_diagnostics,
+                milestone=diagnostic_point,
                 reason="shutdown" if (
                     last_summary["shutdown_requested"] or shutdown()
                 ) else (
@@ -1430,8 +1448,7 @@ def run_rl_pipeline(root, config, args, assets):
             if last_summary["shutdown_requested"] or shutdown():
                 break
             if (
-                milestone
-                and config.periodic_diagnostics
+                diagnostic_point
                 and not args.skip_periodic_diagnostics
             ):
                 checkpoint = run_dir / state["latest_milestone_checkpoint"]
@@ -1672,7 +1689,7 @@ def parse_args(argv=None):
                 ruleset=args.ruleset,
             )
         )
-        if not (selected_run / "run_config.json").is_file():
+        if not run_config_exists(selected_run):
             parser.error(f"No run configuration exists at {selected_run}.")
         args = _apply_saved_run_arguments(
             parser,

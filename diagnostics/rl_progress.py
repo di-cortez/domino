@@ -27,6 +27,7 @@ from diagnostics.worker_autotune import (
 from training.canonical_run import load_run_config
 from training.utils.seeding import stable_seed
 from utils.artifacts import atomic_write_json, atomic_write_text, file_sha256
+from middleware.rulesets import DEFAULT_RULESET_NAME
 
 
 FORMAT_VERSION = 3
@@ -50,6 +51,7 @@ HISTORY_RECORD_TYPE = "periodic_rl_vs_random_history"
 HISTORY_CHECKPOINT_BASE = "checkpoints"
 HISTORY_STATIC_FIELDS = (
     "pipeline_level",
+    "ruleset_name",
     "seed",
     "opponent",
     "diagnostic_games",
@@ -788,6 +790,7 @@ def run_periodic_diagnostic(
     except (FileNotFoundError, ValueError):
         run_config = {}
     checkpoint_path = Path(checkpoint_path).resolve()
+    ruleset_name = run_config.get("ruleset_name", DEFAULT_RULESET_NAME)
     diagnostic_seed = periodic_diagnostic_seed(seed)
     checkpoint_hash = file_sha256(checkpoint_path)
     identity = {
@@ -797,6 +800,7 @@ def run_periodic_diagnostic(
         "diagnostic_seed": int(diagnostic_seed),
         "diagnostic_games": int(diagnostic_games),
         "opponent": "random",
+        "ruleset_name": ruleset_name,
     }
     history_path = run_dir / "periodic_diagnostics.jsonl"
     existing_history = read_periodic_history(history_path)
@@ -853,6 +857,7 @@ def run_periodic_diagnostic(
                 agent="rl",
                 opponent="random",
                 weights=checkpoint_path,
+                ruleset_name=ruleset_name,
             )
             tuning = autotune_diagnostic_workers(
                 matchups=(matchup,),
@@ -899,6 +904,7 @@ def run_periodic_diagnostic(
             precomputed_duration_s=precomputed_duration,
             precomputed_runtime_profile=precomputed_runtime_profile,
             save_game_records=False,
+            ruleset=ruleset_name,
         )
         add_runtime("pairwise_evaluation", section_started)
     finally:

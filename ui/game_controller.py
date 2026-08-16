@@ -338,7 +338,10 @@ class GameController(HandVisibilityMixin, HumanControlMixin):
         if not hasattr(self.manager, "agents"):
             return
 
-        self.manager.agents[player] = create_agent_by_type(self.agent_types[player])
+        self.manager.agents[player] = create_agent_by_type(
+            self.agent_types[player],
+            self.engine.ruleset,
+        )
 
     def _cycle_player_type(self, player):
         index = _AGENT_TYPES.index(self.agent_types[player])
@@ -367,7 +370,7 @@ class GameController(HandVisibilityMixin, HumanControlMixin):
 
         self.engine.reset()
         new_agents = [
-            create_agent_by_type(agent_type)
+            create_agent_by_type(agent_type, self.engine.ruleset)
             for agent_type in self.agent_types
         ]
         self.manager = GameManager(self.engine, new_agents)

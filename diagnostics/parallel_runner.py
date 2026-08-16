@@ -25,6 +25,7 @@ import numpy as np
 
 from diagnostics.gameplay import create_agent, play_game
 from utils.resource_limits import MIB, available_ram_mb, process_rss_bytes
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
 
 MAX_PARALLEL_WORKERS = 20
@@ -41,6 +42,7 @@ DEEP_PROFILE_SAMPLE_INTERVAL = 32
 _WORKER_AGENT = None
 _WORKER_OPPONENT = None
 _WORKER_SUPPRESS_OUTPUT = True
+_WORKER_RULESET_NAME = DEFAULT_RULESET_NAME
 
 
 class DiagnosticMemoryPressure(RuntimeError):
@@ -186,13 +188,20 @@ def _worker_initializer(
     weights: str | None,
     opponent_weights: str | None,
     suppress_agent_output: bool,
+    ruleset_name: str,
 ) -> None:
     """Construct one reusable agent pair inside each diagnostic worker."""
     global _WORKER_AGENT, _WORKER_OPPONENT, _WORKER_SUPPRESS_OUTPUT
+    global _WORKER_RULESET_NAME
     ignore_parent_shutdown_signals()
     _force_cpu_environment()
-    _WORKER_AGENT = create_agent(agent_name, weights)
-    _WORKER_OPPONENT = create_agent(opponent_name, opponent_weights)
+    _WORKER_RULESET_NAME = resolve_ruleset(ruleset_name).name
+    _WORKER_AGENT = create_agent(agent_name, weights, _WORKER_RULESET_NAME)
+    _WORKER_OPPONENT = create_agent(
+        opponent_name,
+        opponent_weights,
+        _WORKER_RULESET_NAME,
+    )
     _WORKER_SUPPRESS_OUTPUT = suppress_agent_output
 
 
@@ -245,6 +254,7 @@ def _worker_play_games(jobs: tuple[tuple[int, int], ...]) -> dict:
             agent_position=game_index % 2,
             suppress_agent_output=_WORKER_SUPPRESS_OUTPUT,
             runtime_profile=game_profile,
+            ruleset=_WORKER_RULESET_NAME,
         )
         section_started = time.perf_counter() if profile_game else None
         record["game"] = game_index + 1
@@ -486,9 +496,11 @@ def evaluate_game_specs(
     suppress_agent_output: bool,
     progress_callback: Callable[[int, int], None] | None = None,
     safety: ParallelSafetyConfig | None = None,
+    ruleset_name: str = DEFAULT_RULESET_NAME,
 ) -> tuple[list[dict], ParallelRunInfo]:
     """Execute arbitrary absolute game ids, retaining work across pool fallbacks."""
     safety = safety or ParallelSafetyConfig()
+    ruleset_name = resolve_ruleset(ruleset_name).name
     specs = sorted((int(index), int(seed)) for index, seed in game_specs)
     if not specs:
         run_info = ParallelRunInfo(
@@ -526,6 +538,7 @@ def evaluate_game_specs(
         str(weights) if weights is not None else None,
         str(opponent_weights) if opponent_weights is not None else None,
         suppress_agent_output,
+        ruleset_name,
     )
 
     def store(record: dict) -> None:

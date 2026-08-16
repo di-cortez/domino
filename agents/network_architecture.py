@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agents.encoder import DominoEncoder
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
 
 DEFAULT_HIDDEN1_SIZE = 256
@@ -12,6 +13,12 @@ DEFAULT_HIDDEN2_SIZE = 128
 # The historical two-layer 256x128 network remains the default architecture.
 DEFAULT_HIDDEN_SIZES = (DEFAULT_HIDDEN1_SIZE, DEFAULT_HIDDEN2_SIZE)
 DEFAULT_HIDDEN_LAYER_COUNT = len(DEFAULT_HIDDEN_SIZES)
+_DEFAULT_HIDDEN_SIZES_BY_RULESET = {
+    "double-six": (256, 128),
+    "double-five": (192, 96),
+    "double-four": (128, 64),
+    "double-three": (96, 48),
+}
 # Depth is not limited by the network implementation: every forward pass,
 # gradient, checkpoint key, and metadata field is generated from the requested
 # hidden stack, so ``NetworkArchitecture`` and both network classes accept any
@@ -22,10 +29,15 @@ MAX_HIDDEN_LAYER_COUNT = 8
 FALLBACK_HIDDEN_SIZE = 128
 
 
-def default_hidden_size(position):
+def default_hidden_sizes(ruleset=DEFAULT_RULESET_NAME):
+    """Return the compact two-layer default for one named ruleset."""
+    return _DEFAULT_HIDDEN_SIZES_BY_RULESET[resolve_ruleset(ruleset).name]
+
+
+def default_hidden_size(position, ruleset=DEFAULT_RULESET_NAME):
     """Return the width used when ``--hidden<position>-size`` is omitted."""
     if 1 <= position <= DEFAULT_HIDDEN_LAYER_COUNT:
-        return DEFAULT_HIDDEN_SIZES[position - 1]
+        return default_hidden_sizes(ruleset)[position - 1]
     return FALLBACK_HIDDEN_SIZE
 
 
@@ -49,7 +61,13 @@ def validated_hidden_layer_count(value, maximum=None):
     return count
 
 
-def resolve_hidden_sizes(hidden_layer_count, requested_sizes=(), maximum=None):
+def resolve_hidden_sizes(
+    hidden_layer_count,
+    requested_sizes=(),
+    maximum=None,
+    *,
+    ruleset=DEFAULT_RULESET_NAME,
+):
     """Return the widths of ``hidden_layer_count`` hidden layers.
 
     ``requested_sizes`` is indexed by layer position: entry ``i`` is the
@@ -73,7 +91,7 @@ def resolve_hidden_sizes(hidden_layer_count, requested_sizes=(), maximum=None):
     for position in range(1, count + 1):
         size = requested[position - 1] if position <= len(requested) else None
         sizes.append(
-            default_hidden_size(position) if size is None else int(size)
+            default_hidden_size(position, ruleset) if size is None else int(size)
         )
     return tuple(sizes)
 
@@ -166,11 +184,27 @@ class NetworkArchitecture:
 DEFAULT_NETWORK_ARCHITECTURE = NetworkArchitecture()
 
 
-def architecture_from_hidden_sizes(*hidden_sizes):
-    """Build a policy architecture with the fixed encoder/action dimensions."""
+def architecture_from_hidden_sizes(
+    *hidden_sizes,
+    ruleset=DEFAULT_RULESET_NAME,
+):
+    """Build a policy architecture with one ruleset's policy dimensions."""
     if len(hidden_sizes) == 1 and not isinstance(hidden_sizes[0], int):
         hidden_sizes = tuple(hidden_sizes[0])
-    return NetworkArchitecture(hidden_sizes=hidden_sizes)
+    encoder = DominoEncoder(ruleset)
+    return NetworkArchitecture(
+        hidden_sizes=hidden_sizes,
+        input_size=encoder.vector_size,
+        output_size=encoder.action_size,
+    )
+
+
+def architecture_for_ruleset(ruleset=DEFAULT_RULESET_NAME, hidden_sizes=None):
+    """Return the compact default or an explicit hidden stack for a ruleset."""
+    resolved = resolve_ruleset(ruleset)
+    if hidden_sizes is None:
+        hidden_sizes = default_hidden_sizes(resolved)
+    return architecture_from_hidden_sizes(hidden_sizes, ruleset=resolved)
 
 
 def architecture_from_weights(weights):

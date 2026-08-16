@@ -28,6 +28,7 @@ from diagnostics.parallel_runner import (
 )
 from utils.myrandom import RandomNamespace, SeedPlan
 from utils.runtime_status import format_duration
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
 
 DEFAULT_DATASET_WORKER_CANDIDATES = (1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20)
@@ -83,22 +84,37 @@ def _is_real_decision_state(state):
     return len(_legal_tile_actions_from_state(state)) >= 2
 
 
-def generate_dataset_game(game_index: int, seed_plan: SeedPlan) -> dict:
+def generate_dataset_game(
+    game_index: int,
+    seed_plan: SeedPlan,
+    ruleset_name: str = DEFAULT_RULESET_NAME,
+) -> dict:
     """Play and serialize one deterministic heuristic training game."""
     if not isinstance(seed_plan, SeedPlan):
         raise TypeError("seed_plan must be utils.myrandom.SeedPlan")
     game_index = int(game_index)
+    ruleset_name = resolve_ruleset(ruleset_name).name
     game_rng = seed_plan.generator(RandomNamespace.DATASET_GAME, game_index)
 
     from agents.heuristic_agent import StrategicAgent
     from middleware.domino_engine import DominoEngine
     from middleware.middleware import GameManager
 
-    engine = DominoEngine(player_count=2, rng=game_rng)
+    engine = DominoEngine(
+        player_count=2,
+        rng=game_rng,
+        ruleset=ruleset_name,
+    )
     # Engine counters are process-local. Replacing the id before the first
     # observed state gives every dataset game a globally stable absolute id.
     engine.game_id = game_index + 1
-    manager = GameManager(engine, [StrategicAgent(), StrategicAgent()])
+    manager = GameManager(
+        engine,
+        [
+            StrategicAgent(ruleset=ruleset_name),
+            StrategicAgent(ruleset=ruleset_name),
+        ],
+    )
     _, game_history = manager.play_full_game()
 
     saved_records = []
@@ -129,10 +145,11 @@ def generate_dataset_game(game_index: int, seed_plan: SeedPlan) -> dict:
 def _dataset_worker_play_games(
     game_indices: tuple[int, ...],
     seed_plan: SeedPlan,
+    ruleset_name: str,
 ) -> list[dict]:
     """Execute one dynamically scheduled block inside a CPU-only worker."""
     return [
-        generate_dataset_game(game_index, seed_plan)
+        generate_dataset_game(game_index, seed_plan, ruleset_name)
         for game_index in game_indices
     ]
 
@@ -156,6 +173,7 @@ def _run_pending_jobs(
     queued_jobs: list[tuple[int, ...]],
     worker_count: int,
     seed_plan: SeedPlan,
+    ruleset_name: str,
     safety: ParallelSafetyConfig,
     on_result: Callable[[dict], None],
     run_info: ParallelRunInfo,
@@ -188,6 +206,7 @@ def _run_pending_jobs(
                     _dataset_worker_play_games,
                     job,
                     seed_plan,
+                    ruleset_name,
                 )
                 in_flight[future] = job
                 return True
@@ -269,6 +288,7 @@ def evaluate_dataset_games(
     game_indices: Iterable[int],
     seed_plan: SeedPlan,
     requested_workers: int,
+    ruleset_name: str = DEFAULT_RULESET_NAME,
     result_callback: Callable[[dict], None] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     safety: ParallelSafetyConfig | None = None,
@@ -278,6 +298,7 @@ def evaluate_dataset_games(
     if not isinstance(seed_plan, SeedPlan):
         raise TypeError("seed_plan must be utils.myrandom.SeedPlan")
     safety = safety or ParallelSafetyConfig()
+    ruleset_name = resolve_ruleset(ruleset_name).name
     indices = sorted(int(index) for index in game_indices)
     if len(set(indices)) != len(indices):
         raise ValueError("game_indices contains duplicate game ids")
@@ -329,6 +350,7 @@ def evaluate_dataset_games(
                 _chunk_pending_jobs(pending, worker_count, safety),
                 worker_count,
                 seed_plan,
+                ruleset_name,
                 safety,
                 store,
                 run_info,
@@ -382,6 +404,7 @@ def autotune_dataset_workers(
     *,
     game_count: int,
     seed_plan: SeedPlan,
+    ruleset_name: str = DEFAULT_RULESET_NAME,
     safety: ParallelSafetyConfig,
     result_callback: Callable[[dict], None],
     benchmark_fraction: float = DEFAULT_DATASET_AUTOTUNE_FRACTION,
@@ -401,6 +424,7 @@ def autotune_dataset_workers(
         raise ValueError("minimum_gain must be non-negative")
 
     emit = status_callback or (lambda message: print(message, flush=True))
+    ruleset_name = resolve_ruleset(ruleset_name).name
     candidate_counts = _candidate_counts(candidates, safety)
     games_per_test = max(1, math.ceil(game_count * benchmark_fraction))
     completed_ids = set()
@@ -447,6 +471,7 @@ def autotune_dataset_workers(
             _results, run_info = evaluate_dataset_games(
                 game_indices=planned,
                 seed_plan=seed_plan,
+                ruleset_name=ruleset_name,
                 requested_workers=workers,
                 result_callback=store,
                 safety=safety,

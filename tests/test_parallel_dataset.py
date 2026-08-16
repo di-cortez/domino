@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from diagnostics.parallel_runner import ParallelSafetyConfig
+from agents.encoder import DominoEncoder
 from training.datagen.generator import (
     dataset_random_manifest_path,
     generate_dataset,
@@ -30,6 +31,7 @@ from training.datagen.parallel import (
     evaluate_dataset_games,
     generate_dataset_game,
 )
+from training.supervised.dataset import load_or_build_dataset
 from utils.myrandom import SeedPlan
 
 
@@ -82,6 +84,78 @@ class ParallelDatasetTests(unittest.TestCase):
             self.assertGreater(len(expected), 0)
             self.assertEqual(paths[1].read_bytes(), expected)
             self.assertEqual(paths[2].read_bytes(), expected)
+
+    def test_compact_dataset_is_worker_invariant_and_identifies_ruleset(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            single = Path(temp_dir) / "single.jsonl"
+            parallel = Path(temp_dir) / "parallel.jsonl"
+            safety = ParallelSafetyConfig(
+                memory_reserve_mb=0,
+                estimated_worker_mb=1,
+            )
+            summaries = []
+            for path, workers in ((single, 1), (parallel, 2)):
+                summaries.append(generate_dataset(
+                    12,
+                    path,
+                    quiet=True,
+                    workers=workers,
+                    seed=20260816,
+                    safety_config=safety,
+                    ruleset="double-three",
+                ))
+
+            self.assertEqual(single.read_bytes(), parallel.read_bytes())
+            self.assertTrue(all(
+                summary["ruleset_name"] == "double-three"
+                for summary in summaries
+            ))
+            for line in single.read_text(encoding="utf-8").splitlines():
+                state = json.loads(line)["state"]
+                self.assertEqual(state["ruleset_name"], "double-three")
+                self.assertEqual(state["initial_hand_size"], 4)
+                self.assertTrue(all(
+                    max(tile) <= 3 for tile in state["current_player_hand"]
+                ))
+
+    def test_compact_encoded_cache_has_ruleset_dimensions_and_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset = Path(temp_dir) / "dataset.jsonl"
+            cache = Path(temp_dir) / "encoded.npz"
+            generate_dataset(
+                12,
+                dataset,
+                quiet=True,
+                workers=1,
+                seed=717,
+                safety_config=ParallelSafetyConfig(
+                    memory_reserve_mb=0,
+                    estimated_worker_mb=1,
+                ),
+                ruleset="double-three",
+            )
+            encoded = load_or_build_dataset(
+                dataset,
+                DominoEncoder("double-three"),
+                cache_file=cache,
+                quiet=True,
+                memory_reserve_mb=0,
+                return_info=True,
+            )
+
+            self.assertEqual(encoded.x.shape[0], 69)
+            self.assertEqual(encoded.y.shape[0], 20)
+            self.assertEqual(encoded.metadata["ruleset_name"], "double-three")
+            with np.load(cache, allow_pickle=False) as saved:
+                self.assertEqual(saved["ruleset_name"].item(), "double-three")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                load_or_build_dataset(
+                    dataset,
+                    DominoEncoder("double-six"),
+                    cache_file=cache,
+                    quiet=True,
+                    memory_reserve_mb=0,
+                )
 
     def test_one_game_does_not_consume_process_global_rng_state(self):
         random.seed(12345)

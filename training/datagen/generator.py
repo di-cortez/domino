@@ -30,6 +30,8 @@ from training.datagen.parallel import (
 )
 from utils.myrandom import SeedPlan, fresh_root_seed
 from utils.runtime_status import format_duration, print_memory_report
+from middleware.rulesets import DEFAULT_RULESET_NAME, RULESET_NAMES, resolve_ruleset
+from utils.ruleset_paths import default_dataset_path
 
 try:
     from tqdm.auto import tqdm
@@ -91,6 +93,7 @@ def generate_dataset(
     autotune_minimum_gain=DEFAULT_DATASET_MINIMUM_GAIN,
     seed=DEFAULT_DATASET_SEED,
     status_callback=None,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Generate an ordered JSONL dataset using retained CPU worker autotuning.
 
@@ -110,6 +113,7 @@ def generate_dataset(
     safety_config = safety_config or ParallelSafetyConfig()
     effective_seed = int(seed) if seed is not None else fresh_root_seed()
     seed_plan = SeedPlan(effective_seed)
+    ruleset_name = resolve_ruleset(ruleset).name
 
     output_path = Path(output_file)
     random_manifest_path = dataset_random_manifest_path(output_path)
@@ -199,6 +203,7 @@ def generate_dataset(
             tuning = autotune_dataset_workers(
                 game_count=game_count,
                 seed_plan=seed_plan,
+                ruleset_name=ruleset_name,
                 safety=safety_config,
                 result_callback=store_result,
                 benchmark_fraction=autotune_fraction,
@@ -237,6 +242,7 @@ def generate_dataset(
         _results, execution_info = evaluate_dataset_games(
             game_indices=missing_game_indices,
             seed_plan=seed_plan,
+            ruleset_name=ruleset_name,
             requested_workers=selected_workers,
             result_callback=store_result,
             safety=safety_config,
@@ -296,6 +302,7 @@ def generate_dataset(
 
     return {
         "game_count": game_count,
+        "ruleset_name": ruleset_name,
         "saved_turn_count": saved_turn_count,
         "skipped_turn_count": skipped_turn_count,
         "output_file": str(output_path),
@@ -317,7 +324,7 @@ def main(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-n", "--games", type=int, default=DEFAULT_GAME_COUNT)
-    parser.add_argument("--output", type=Path, default=Path(DEFAULT_OUTPUT_FILE))
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
         "-j",
         "--workers",
@@ -326,6 +333,11 @@ def main(argv=None):
         help=f"CPU-only workers or 'auto' (maximum {MAX_PARALLEL_WORKERS}).",
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_DATASET_SEED)
+    parser.add_argument(
+        "--ruleset",
+        choices=RULESET_NAMES,
+        default=DEFAULT_RULESET_NAME,
+    )
     parser.add_argument(
         "--autotune-fraction",
         type=float,
@@ -343,9 +355,10 @@ def main(argv=None):
 
     generate_dataset(
         game_count=args.games,
-        output_file=args.output,
+        output_file=args.output or default_dataset_path(args.ruleset),
         workers=args.workers,
         seed=args.seed,
+        ruleset=args.ruleset,
         autotune_fraction=args.autotune_fraction,
         autotune_minimum_gain=args.autotune_min_gain,
         safety_config=ParallelSafetyConfig(

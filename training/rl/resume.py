@@ -19,6 +19,7 @@ from agents.network_architecture import (
 from agents.nn import DISABLED_DROPOUT_RATE
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import RULESET_VERSION
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 from training.rl.ppo import (
     POLICY_GRADIENT_CLIP_NORM,
     PPO_TRAINING_ALGORITHM,
@@ -36,8 +37,8 @@ from utils.repository import current_git_commit
 # ``alpha``/``event_reward_decay`` tunables and rescaled the reward constants,
 # so a version 8 checkpoint would silently resume against a different reward
 # function.
-RESUME_STATE_VERSION = 9
-SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
+RESUME_STATE_VERSION = 10
+SUPPORTED_RESUME_STATE_VERSIONS = (9, RESUME_STATE_VERSION)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
 
@@ -46,6 +47,7 @@ class RLTrainingConfiguration:
     """Typed durable RL resume configuration and source provenance."""
 
     total_training_games: int
+    ruleset_name: str
     selected_gpi: int
     selected_workers: int
     log_interval: int
@@ -87,6 +89,8 @@ class RLTrainingConfiguration:
     def from_mapping(cls, value):
         """Build the typed configuration from a runtime/checkpoint mapping."""
         data = dict(value)
+        data.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
+        data["ruleset_name"] = resolve_ruleset(data["ruleset_name"]).name
         data.setdefault("run_configuration_sha256", None)
         data.setdefault("git_commit", None)
         data["opponent_buckets"] = tuple(data["opponent_buckets"])
@@ -118,6 +122,10 @@ class RLTrainingConfiguration:
         ppo = run_config["ppo_config"]
         configuration = cls.from_mapping({
             "total_training_games": int(total_training_games),
+            "ruleset_name": run_config.get(
+                "ruleset_name",
+                DEFAULT_RULESET_NAME,
+            ),
             "selected_gpi": int(rl["games_per_iteration"]),
             "selected_workers": int(selected_workers),
             "log_interval": int(rl["log_interval"]),
@@ -185,13 +193,13 @@ def _checkpoint_shape(network):
     return int(network.W1.shape[1]), int(output_layer.shape[0])
 
 
-def _checkpoint_matches_encoder(network):
+def _checkpoint_matches_encoder(network, ruleset=DEFAULT_RULESET_NAME):
     """Return True when a loaded checkpoint matches the current encoder shape."""
-    encoder = DominoEncoder()
+    encoder = DominoEncoder(ruleset)
     input_size, output_size = _checkpoint_shape(network)
     return (
-        input_size == encoder.VECTOR_SIZE
-        and output_size == len(encoder.all_actions)
+        input_size == encoder.vector_size
+        and output_size == encoder.action_size
     )
 
 
@@ -206,6 +214,7 @@ def _load_initial_network(
     expected_training_algorithm=None,
     weight_decay=0.0,
     dropout_rate=DISABLED_DROPOUT_RATE,
+    ruleset=DEFAULT_RULESET_NAME,
 ):
     """Load an RL checkpoint or initialize from compatible SL weights.
 
@@ -223,12 +232,14 @@ def _load_initial_network(
                 weight_decay=weight_decay,
                 dropout_rate=dropout_rate,
             )
-            if not _checkpoint_matches_encoder(network):
+            encoder = DominoEncoder(ruleset)
+            if not _checkpoint_matches_encoder(network, ruleset):
                 input_size, output_size = _checkpoint_shape(network)
                 raise ValueError(
                     f"RL checkpoint {rl_weights_path} has shape "
                     f"input={input_size}, output={output_size}, "
-                    "but the current encoder expects input=168, output=56."
+                    f"but ruleset {encoder.ruleset.name!r} expects "
+                    f"input={encoder.vector_size}, output={encoder.action_size}."
                 )
             saved_algorithm = getattr(network, "rl_training_algorithm", None)
             if expected_training_algorithm is not None:
@@ -261,12 +272,14 @@ def _load_initial_network(
         weight_decay=weight_decay,
         dropout_rate=dropout_rate,
     )
-    if not _checkpoint_matches_encoder(network):
+    encoder = DominoEncoder(ruleset)
+    if not _checkpoint_matches_encoder(network, ruleset):
         input_size, output_size = _checkpoint_shape(network)
         raise ValueError(
             f"SL checkpoint {sl_weights_path} has shape "
             f"input={input_size}, output={output_size}, "
-            "but the current encoder expects input=168, output=56. "
+            f"but ruleset {encoder.ruleset.name!r} expects "
+            f"input={encoder.vector_size}, output={encoder.action_size}. "
             "Regenerate the supervised dataset and retrain SL first."
         )
     if expected_training_algorithm is not None:
@@ -481,6 +494,7 @@ def _validate_resume_configuration(
 ):
     """Reject a resume that would silently continue a different experiment."""
     saved = dict(metadata.get("configuration") or {})
+    saved.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
     expected = expected.to_dict()
     if saved.get("git_commit") != expected.get("git_commit"):
         emit_status(

@@ -49,7 +49,8 @@ troubleshooting procedure.
 
 The hidden stack is configurable. `hidden_sizes` selects any number of hidden
 layers from one upwards, of any width; `agents/network_architecture.py` owns
-the defaults (256 then 128, with 128 for any deeper layer) and the CLI
+the compact first-two-layer defaults (256x128, 192x96, 128x64, or 96x48 by
+ruleset, with 128 for any deeper layer) and the CLI
 resolution used by `training/supervised/training_loop.py`. Only the command line is
 bounded, at `MAX_HIDDEN_LAYER_COUNT` (8), because one `--hidden<n>-size` option
 has to exist per layer. Weights are named `W1..W{L}`/`b1..b{L}` for `L`
@@ -70,26 +71,27 @@ workers set `DOMINO_FORCE_CPU=1`, so they never initialize a CUDA context.
 
 ## State Encoding
 
-`DominoEncoder` produces a 168-dimensional input vector:
+For `T` ruleset tiles and `S` pip values, `DominoEncoder` produces
+`5T + 3S + 7` inputs and `2T` outputs:
 
 | Slice | Meaning |
 |---|---|
-| `my_hand[28]` | Tiles currently held by the acting player. |
-| `played[28]` | Tiles already played on the board. |
-| `played_turn[28]` | Normalized turn when each tile was played, using `MAX_TURN = 52`; zero means unplayed. |
-| `played_by_me[28]` | Tiles played by the acting player. |
-| `played_by_opponent[28]` | Tiles played by the opponent. |
-| `left_end[7]` | One-hot encoding of the current left end. |
-| `right_end[7]` | One-hot encoding of the current right end. |
-| `hand_sizes[2]` | Player hand sizes divided by 7. |
-| `stock_size[1]` | Stock size divided by 14. |
-| `draw_count_by_player[2]` | Draw counts for players 0 and 1 divided by 14. |
+| `my_hand[T]` | Tiles currently held by the acting player. |
+| `played[T]` | Tiles already played on the board. |
+| `played_turn[T]` | Normalized turn when each tile was played, using `MAX_TURN = 52`; zero means unplayed. |
+| `played_by_me[T]` | Tiles played by the acting player. |
+| `played_by_opponent[T]` | Tiles played by the opponent. |
+| `left_end[S]` | One-hot encoding of the current left end. |
+| `right_end[S]` | One-hot encoding of the current right end. |
+| `hand_sizes[2]` | Player hand sizes divided by the ruleset initial hand size. |
+| `stock_size[1]` | Stock size divided by the ruleset initial stock. |
+| `draw_count_by_player[2]` | Draw counts divided by the ruleset initial stock. |
 | `pass_count_by_player[2]` | Pass counts for players 0 and 1 divided by `MAX_TURN`. |
-| `opponent_suit_probabilities[7]` | Probability that the opponent currently holds at least one tile of each suit/value. |
+| `opponent_suit_probabilities[S]` | Probability that the opponent currently holds at least one tile containing each pip value. |
 
 The opponent probability feature is bounded in `[0, 1]`: `0.0` means the
-opponent is known not to hold that suit, and `1.0` means the opponent is known
-to hold it. For two-player games, the model replays public history with the
+opponent is known to hold no tile with that pip value, and `1.0` means at least
+one such tile is known to be present. For two-player games, the model replays public history with the
 observer's private initial hand and draw history. States without those private
 observer fields are rejected because exact temporal reconstruction is not
 possible.
@@ -101,15 +103,15 @@ that the opponent can answer the resulting ends, then by near-best normalized
 mobility, then by highest pip sum, with deterministic legal-action order as the
 final tie-breaker. `StrategicAgent`, `NeuralAgent`, and `RLAgent` use persistent
 exact models with intermediate trace recording disabled
-because they consume only the current seven-vector. Direct opponent-model callers
+because they consume only the current ruleset-sized vector. Direct opponent-model callers
 still receive traces by default.
 
 ## Action Encoding
 
-The neural output space now has 56 actions:
+The neural output space has `2T` actions:
 
-- 28 tile actions on the left end;
-- 28 tile actions on the right end.
+- `T` tile actions on the left end;
+- `T` tile actions on the right end.
 
 Draw, pass, and single-option tile plays are forced by the current rules
 engine. `NeuralAgent` and `RLAgent` return them directly
@@ -143,10 +145,9 @@ Diagnostics detect those two arrays, load the optional head without changing
 the policy decision, and obtain `V(s)` from the hidden activation already
 computed for each real decision.
 
-Because the input/output shapes changed from the old 86/58 encoder to the new
-168/56 encoder, old `domino_sl_weights.npz` and `domino_rl_weights.npz`
-checkpoints are not compatible. Regenerate the supervised dataset, retrain SL,
-and then retrain RL.
+Checkpoints are ruleset-specific. Loaders validate input/output dimensions and
+never pad, copy, or remap policy weights between variants. Unnamed legacy
+checkpoints remain double-six only.
 
 Weights trained with the older absence-confidence feature also load by shape,
 but they are semantically stale. Archive them and retrain after regenerating the

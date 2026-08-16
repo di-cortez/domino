@@ -26,6 +26,7 @@ Run:
 
 ```bash
 python -m ui.visual_main
+python -m ui.visual_main --ruleset double-four
 ```
 
 ## Controls
@@ -54,6 +55,10 @@ During a human turn:
 The menu cycles each player through `Neural`, `Heuristic`, `Random`, `Human`,
 and `RL (self-play)`. Neural and RL selections load the
 default checkpoints from `models/`.
+The selected ruleset controls the engine and every heuristic/neural/RL agent;
+compact model selections use compact default paths. The window caption includes
+the non-default ruleset name, and replacing an agent from the menu preserves
+the current game's ruleset.
 
 The HUD also shows two compact opponent-suit probability rows near the bottom
 of the screen. `P0 opp` is P0's estimate that P1 has each suit; `P1 opp` is the

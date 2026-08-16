@@ -9,6 +9,8 @@ from agents.network_architecture import architecture_from_weights
 from agents.nn import SupervisedNeuralNetwork
 from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+from utils.ruleset_paths import default_sl_weights_path
 
 
 class NeuralAgent(Agent):
@@ -18,20 +20,32 @@ class NeuralAgent(Agent):
     bypass both opponent inference and the neural network.
     """
 
-    def __init__(self, network, epsilon=0.0):
+    def __init__(
+        self,
+        network,
+        epsilon=0.0,
+        *,
+        ruleset=DEFAULT_RULESET_NAME,
+    ):
+        self.ruleset = resolve_ruleset(ruleset)
         self.network = network
         self.epsilon = epsilon
-        self.encoder = DominoEncoder()
-        self.opponent_model = ExactOpponentModel(record_traces=False)
+        self.encoder = DominoEncoder(self.ruleset)
+        self.opponent_model = ExactOpponentModel(
+            ruleset=self.ruleset,
+            record_traces=False,
+        )
 
     @classmethod
     def load(
         cls,
-        weights_path="models/domino_sl_weights.npz",
+        weights_path=None,
         epsilon=0.0,
         device="auto",
+        ruleset=DEFAULT_RULESET_NAME,
     ):
         """Build an agent from a NumPy ``.npz`` checkpoint."""
+        weights_path = weights_path or default_sl_weights_path(ruleset)
         with np.load(weights_path, allow_pickle=False) as data:
             # The checkpoint is the single source of truth for depth and
             # widths, so a network trained with --hidden-layers loads here
@@ -40,11 +54,11 @@ class NeuralAgent(Agent):
             input_size = architecture.input_size
             output_size = architecture.output_size
 
-            encoder = DominoEncoder()
-            if input_size != encoder.VECTOR_SIZE:
+            encoder = DominoEncoder(ruleset)
+            if input_size != encoder.vector_size:
                 raise ValueError(
                     f"Checkpoint expects input_size={input_size}, "
-                    f"but DominoEncoder produces {encoder.VECTOR_SIZE}."
+                    f"but {encoder.ruleset.name} produces {encoder.vector_size}."
                 )
             if output_size != len(encoder.all_actions):
                 raise ValueError(
@@ -60,7 +74,7 @@ class NeuralAgent(Agent):
             )
             network.load_policy_weights(data)
 
-        return cls(network, epsilon=epsilon)
+        return cls(network, epsilon=epsilon, ruleset=ruleset)
 
     def choose_move(self, state, legal_actions):
         if not legal_actions:

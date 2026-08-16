@@ -49,6 +49,7 @@ from training.rl.pool import (
     unique_neural_capacity,
 )
 from training.rl.matchmaking import OpponentPerformanceTracker
+from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
 
 DEFAULT_RL_WORKERS = "auto"
@@ -104,6 +105,7 @@ _WORKER_CURRENT_POLICY = None
 _WORKER_POOL_POLICIES = ()
 _WORKER_SCHEMA = None
 _WORKER_GAMMA = None
+_WORKER_RULESET_NAME = DEFAULT_RULESET_NAME
 
 
 def _attach_policy(descriptor):
@@ -128,11 +130,13 @@ def _worker_initializer(
     pool_descriptors,
     schema,
     gamma,
+    ruleset_name,
 ):
     """Attach every reusable policy view inside one CPU-only worker."""
     global _WORKER_SHARED_HANDLES
     global _WORKER_CURRENT_POLICY, _WORKER_POOL_POLICIES
     global _WORKER_SCHEMA, _WORKER_GAMMA
+    global _WORKER_RULESET_NAME
 
     ignore_parent_shutdown_signals()
     # The environment is already set before spawn; repeating it here protects
@@ -152,6 +156,7 @@ def _worker_initializer(
     _WORKER_POOL_POLICIES = tuple(pool_policies)
     _WORKER_SCHEMA = dict(schema)
     _WORKER_GAMMA = float(gamma)
+    _WORKER_RULESET_NAME = resolve_ruleset(ruleset_name).name
 
 
 def _event_stats_dict(event_stats):
@@ -218,6 +223,7 @@ def _worker_collect_rollouts(job):
             _WORKER_SCHEMA,
             _WORKER_GAMMA,
             runtime_profile=game_profile,
+            ruleset_name=_WORKER_RULESET_NAME,
         )
         section_started = time.perf_counter() if profile_game else None
         results.append({
@@ -294,11 +300,13 @@ class RLRolloutRunner:
         opponent_buckets,
         schema,
         gamma,
+        ruleset_name=DEFAULT_RULESET_NAME,
         safety=None,
     ):
         self.safety = safety or ParallelSafetyConfig()
         self.schema = dict(schema)
         self.gamma = float(gamma)
+        self.ruleset_name = resolve_ruleset(ruleset_name).name
         self.bank = SharedPolicyBank(
             network,
             unique_neural_capacity(opponent_buckets),
@@ -385,6 +393,7 @@ class RLRolloutRunner:
                         self.bank.opponent_descriptors,
                         self.schema,
                         self.gamma,
+                        self.ruleset_name,
                     ),
                 )
                 # ProcessPoolExecutor starts children lazily. Submitting one

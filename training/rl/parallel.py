@@ -49,9 +49,7 @@ from training.rl.pool import (
     unique_neural_capacity,
 )
 from training.rl.matchmaking import OpponentPerformanceTracker
-from training.rl.restarts import OpponentDecisionRestart
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
-from training.utils.seeding import stable_seed
 
 
 DEFAULT_RL_WORKERS = "auto"
@@ -226,7 +224,6 @@ def _worker_collect_rollouts(job):
             _WORKER_GAMMA,
             runtime_profile=game_profile,
             ruleset_name=_WORKER_RULESET_NAME,
-            capture_opponent_decision_restarts=capture_restarts,
         )
         samples, events, winner, learner_position = collected[:4]
         captured_restarts = collected[4] if capture_restarts else ()

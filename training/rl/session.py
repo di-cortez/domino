@@ -352,7 +352,6 @@ def prepare_training_session(training=None, resources=None, execution=None):
         weight_decay=training.weight_decay,
         dropout_rate=training.dropout_rate,
         ruleset=training.ruleset_name,
-        initialization_seed=effective_seed,
     )
     if inputs.metadata is not None:
         network.load_optimizer_state_dict(inputs.metadata["optimizer_state"])

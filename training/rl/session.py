@@ -124,6 +124,7 @@ def _resume_inputs(training, resources, execution, reporter):
             gpi=saved.selected_gpi,
             opponent_buckets=saved.opponent_buckets,
             difficulty_weight=saved.difficulty_weight,
+            opponent_decision_restarts=saved.opponent_decision_restarts,
             learning_rate=saved.learning_rate,
             entropy_coef=saved.entropy_coef,
             weight_decay=saved.weight_decay,
@@ -225,6 +226,9 @@ def _resume_configuration(
         "moving_average_window": int(execution.moving_average_window),
         "opponent_buckets": tuple(training.opponent_buckets),
         "difficulty_weight": float(training.difficulty_weight),
+        "opponent_decision_restarts": bool(
+            training.opponent_decision_restarts
+        ),
         "learning_rate": float(training.learning_rate),
         "entropy_coef": float(training.entropy_coef),
         "use_value_head": bool(training.use_value_head),
@@ -396,6 +400,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         gpi=training.gpi,
         opponent_buckets=training.opponent_buckets,
         difficulty_weight=training.difficulty_weight,
+        opponent_decision_restarts=training.opponent_decision_restarts,
     )
     resume_configuration = _resume_configuration(
         inputs,
@@ -543,6 +548,18 @@ def prepare_training_session(training=None, resources=None, execution=None):
         ppo_window=ppo_window,
         total_decision_samples=int(
             restored_state.get("total_decision_samples", 0)
+        ),
+        total_normal_decision_samples=int(
+            restored_state.get("total_normal_decision_samples", 0)
+        ),
+        total_restart_decision_samples=int(
+            restored_state.get("total_restart_decision_samples", 0)
+        ),
+        total_restart_episodes=int(
+            restored_state.get("total_restart_episodes", 0)
+        ),
+        total_restart_duration_s=float(
+            restored_state.get("total_restart_duration_s", 0.0)
         ),
         policy_updates_completed=int(
             restored_state.get("policy_updates_completed", 0)

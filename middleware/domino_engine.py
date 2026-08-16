@@ -1,5 +1,6 @@
 """Domino rules engine shared by the UI, agents, and training code."""
 
+from dataclasses import dataclass
 import random
 
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
@@ -10,6 +11,48 @@ WIN_REASON_EMPTY_HAND = "empty_hand"
 WIN_REASON_BLOCKED_FEWEST_PIPS = "blocked_fewest_pips"
 WIN_REASON_BLOCKED_FEWEST_TILES = "blocked_fewest_tiles"
 WIN_REASON_BLOCKED_LAST_VALID_PLAY = "blocked_last_valid_play"
+
+
+@dataclass(frozen=True)
+class DominoRestartState:
+    """Deeply immutable, exact continuation state for one domino game.
+
+    This is deliberately separate from the compact agent observation and from
+    ``to_dict()``.  Every mutable gameplay field is copied into tuples so a
+    source game can continue without changing an already captured restart.
+    """
+
+    format_version: int
+    ruleset_name: str
+    ruleset_version: int
+    game_id: int
+    player_count: int
+    current_player: int
+    hands: tuple
+    initial_hands: tuple
+    drawn_tiles_by_player: tuple
+    stock: tuple
+    board_history: tuple
+    ends: tuple
+    turn: int
+    game_over: bool
+    winner: int | None
+    win_reason: str | None
+    consecutive_passes: int
+    drew_this_turn: tuple
+    last_valid_tile_player: int | None
+    last_valid_tile_turn_by_player: tuple
+    required_opening_tile: tuple | None
+    horizontal_direction: tuple
+
+
+RESTART_STATE_FORMAT_VERSION = 1
+
+
+def _freeze_action(action):
+    if action is None or action == ("DRAW", None):
+        return action
+    return (tuple(action[0]), int(action[1]))
 
 
 def _is_draw(action):
@@ -130,6 +173,104 @@ class DominoEngine:
             self.required_opening_tile = (highest_double, highest_double)
 
         return self._get_state()
+
+    def export_restart_state(self):
+        """Return a deep immutable snapshot sufficient for exact continuation."""
+        return DominoRestartState(
+            format_version=RESTART_STATE_FORMAT_VERSION,
+            ruleset_name=self.ruleset.name,
+            ruleset_version=RULESET_VERSION,
+            game_id=int(self.game_id),
+            player_count=int(self.player_count),
+            current_player=int(self.current_player),
+            hands=tuple(tuple(tuple(tile) for tile in hand) for hand in self.hands),
+            initial_hands=tuple(
+                tuple(tuple(tile) for tile in hand) for hand in self.initial_hands
+            ),
+            drawn_tiles_by_player=tuple(
+                tuple(tuple(tile) for tile in tiles)
+                for tiles in self.drawn_tiles_by_player
+            ),
+            stock=tuple(tuple(tile) for tile in self.stock),
+            board_history=tuple(_freeze_action(action) for action in self.board_history),
+            ends=tuple(self.ends),
+            turn=int(self.turn),
+            game_over=bool(self.game_over),
+            winner=self.winner,
+            win_reason=self.win_reason,
+            consecutive_passes=int(self.consecutive_passes),
+            drew_this_turn=tuple(
+                bool(self.drew_this_turn[player])
+                for player in range(self.player_count)
+            ),
+            last_valid_tile_player=self.last_valid_tile_player,
+            last_valid_tile_turn_by_player=tuple(
+                int(value) for value in self._last_valid_tile_turn_by_player
+            ),
+            required_opening_tile=(
+                None
+                if self.required_opening_tile is None
+                else tuple(self.required_opening_tile)
+            ),
+            horizontal_direction=tuple(self.horizontal_direction),
+        )
+
+    @classmethod
+    def from_restart_state(cls, state):
+        """Construct an engine at ``state`` without dealing or consuming RNG."""
+        if not isinstance(state, DominoRestartState):
+            raise TypeError("state must be a DominoRestartState")
+        if state.format_version != RESTART_STATE_FORMAT_VERSION:
+            raise ValueError(
+                "Unsupported domino restart-state format: "
+                f"{state.format_version}"
+            )
+        if state.ruleset_version != RULESET_VERSION:
+            raise ValueError(
+                "Domino restart-state ruleset version does not match this engine."
+            )
+        ruleset = resolve_ruleset(state.ruleset_name)
+        if state.game_over:
+            raise ValueError("A restart state must be captured before game termination.")
+        if not 0 <= state.current_player < state.player_count:
+            raise ValueError("Restart state has an invalid current player.")
+
+        engine = cls.__new__(cls)
+        engine.player_count = int(state.player_count)
+        engine.rng = None
+        engine.ruleset = ruleset
+        engine.all_tiles = list(ruleset.all_tiles)
+        engine.game_id = int(state.game_id)
+        engine.current_player = int(state.current_player)
+        engine.hands = [list(map(tuple, hand)) for hand in state.hands]
+        engine.initial_hands = [
+            list(map(tuple, hand)) for hand in state.initial_hands
+        ]
+        engine.drawn_tiles_by_player = [
+            list(map(tuple, tiles)) for tiles in state.drawn_tiles_by_player
+        ]
+        engine.stock = list(map(tuple, state.stock))
+        engine.board_history = [
+            None if action is None else _freeze_action(action)
+            for action in state.board_history
+        ]
+        engine.ends = list(state.ends)
+        engine.turn = int(state.turn)
+        engine.game_over = bool(state.game_over)
+        engine.winner = state.winner
+        engine.win_reason = state.win_reason
+        engine.consecutive_passes = int(state.consecutive_passes)
+        engine.drew_this_turn = {
+            player: bool(value)
+            for player, value in enumerate(state.drew_this_turn)
+        }
+        engine.last_valid_tile_player = state.last_valid_tile_player
+        engine._last_valid_tile_turn_by_player = list(
+            state.last_valid_tile_turn_by_player
+        )
+        engine.required_opening_tile = state.required_opening_tile
+        engine.horizontal_direction = list(state.horizontal_direction)
+        return engine
 
     def valid_actions(self, player=None):
         """Return every legal action for ``player`` without duplicates."""

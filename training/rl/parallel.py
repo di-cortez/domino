@@ -49,7 +49,9 @@ from training.rl.pool import (
     unique_neural_capacity,
 )
 from training.rl.matchmaking import OpponentPerformanceTracker
+from training.rl.restarts import OpponentDecisionRestart
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+from training.utils.seeding import stable_seed
 
 
 DEFAULT_RL_WORKERS = "auto"
@@ -201,7 +203,7 @@ def _worker_collect_rollouts(job):
         "learner_policy": {},
         "opponent_policy": {},
     }
-    for assignment, seed in game_specs:
+    for assignment, seed, capture_restarts in game_specs:
         game_index = assignment.game_index
         profile_game = game_index % DEEP_PROFILE_SAMPLE_INTERVAL == 0
         game_profile = runtime_profile if profile_game else None
@@ -216,7 +218,7 @@ def _worker_collect_rollouts(job):
             if assignment.bank_slot is None
             else _WORKER_POOL_POLICIES[assignment.bank_slot]
         )
-        samples, events, winner, learner_position = collect_steps_for_assignment(
+        collected = collect_steps_for_assignment(
             _WORKER_CURRENT_POLICY,
             assignment.opponent_kind,
             opponent_network,
@@ -224,7 +226,10 @@ def _worker_collect_rollouts(job):
             _WORKER_GAMMA,
             runtime_profile=game_profile,
             ruleset_name=_WORKER_RULESET_NAME,
+            capture_opponent_decision_restarts=capture_restarts,
         )
+        samples, events, winner, learner_position = collected[:4]
+        captured_restarts = collected[4] if capture_restarts else ()
         section_started = time.perf_counter() if profile_game else None
         results.append({
             "game_index": int(game_index),
@@ -237,6 +242,7 @@ def _worker_collect_rollouts(job):
             "opponent_id": assignment.opponent_id,
             "opponent_kind": assignment.opponent_kind,
             "bank_slot": assignment.bank_slot,
+            "captured_restarts": captured_restarts,
         })
         runtime_profile["games"] += 1
         if profile_game:
@@ -264,6 +270,66 @@ def _worker_collect_rollouts(job):
             float(policy_profile.get("total_seconds", 0.0))
             - sum(policy_sections.values()),
         )
+    return {
+        "records": results,
+        "runtime_profile": runtime_profile,
+    }
+
+
+def _worker_collect_restarts(job):
+    """Run one dynamic block of deterministic restart continuations."""
+    from training.rl.rollout import collect_steps_from_restart
+
+    profile_started = time.perf_counter()
+    results = []
+    runtime_profile = {
+        "games": 0,
+        "profiled_games": 0,
+        "profiled_game_cpu_seconds": 0.0,
+        "worker_cpu_seconds": 0.0,
+        "sections_seconds": {},
+        "learner_policy": {},
+        "opponent_policy": {},
+    }
+    for restart, seed in job:
+        random.seed(seed)
+        np.random.seed(seed & 0xFFFFFFFF)
+        opponent_network = (
+            None
+            if restart.bank_slot is None
+            else _WORKER_POOL_POLICIES[restart.bank_slot]
+        )
+        samples, events, winner, learner_position = collect_steps_from_restart(
+            _WORKER_CURRENT_POLICY,
+            restart.opponent_kind,
+            opponent_network,
+            restart,
+            _WORKER_SCHEMA,
+            _WORKER_GAMMA,
+            ruleset_name=_WORKER_RULESET_NAME,
+        )
+        results.append({
+            "restart_index": int(restart.restart_index),
+            "restart_seed": int(seed),
+            "source_game_index": int(restart.source_game_index),
+            "snapshot_ordinal": int(restart.snapshot_ordinal),
+            "source_turn": int(restart.source_turn),
+            "source_legal_tile_action_count": int(
+                restart.source_legal_tile_action_count
+            ),
+            "samples": samples,
+            "event_stats": _event_stats_dict(events),
+            "winner": int(winner),
+            "learner_position": int(learner_position),
+            "bucket_name": restart.bucket_name,
+            "opponent_id": restart.opponent_id,
+            "opponent_kind": restart.opponent_kind,
+            "bank_slot": restart.bank_slot,
+        })
+        runtime_profile["games"] += 1
+    runtime_profile["worker_cpu_seconds"] = float(
+        time.perf_counter() - profile_started
+    )
     return {
         "records": results,
         "runtime_profile": runtime_profile,
@@ -527,11 +593,23 @@ class RLRolloutRunner:
             self._shutdown_executor(terminate=True)
             raise
 
-    def _execute_specs(self, specs, worker_function, job_builder):
+    def _execute_specs(
+        self,
+        specs,
+        worker_function,
+        job_builder,
+        *,
+        index_attribute="game_index",
+        result_index_key="game_index",
+    ):
         """Execute unique ids, retaining completed rollouts across fallbacks."""
-        specs = sorted(specs, key=lambda item: int(item[0].game_index))
-        if len({item[0].game_index for item in specs}) != len(specs):
-            raise ValueError("RL game specs contain duplicate game ids")
+        specs = sorted(
+            specs,
+            key=lambda item: int(getattr(item[0], index_attribute)),
+        )
+        spec_ids = [int(getattr(item[0], index_attribute)) for item in specs]
+        if len(set(spec_ids)) != len(specs):
+            raise ValueError(f"RL specs contain duplicate {index_attribute} values")
         run_info = ParallelRunInfo(
             requested_workers=self.requested_workers,
             initial_workers=self.worker_count,
@@ -549,7 +627,7 @@ class RLRolloutRunner:
 
         results_by_index = {}
         def store(result):
-            index = int(result["game_index"])
+            index = int(result[result_index_key])
             results_by_index.setdefault(index, result)
 
         recoverable = (
@@ -562,7 +640,7 @@ class RLRolloutRunner:
             pending = [
                 spec
                 for spec in specs
-                if spec[0].game_index not in results_by_index
+                if getattr(spec[0], index_attribute) not in results_by_index
             ]
             run_info.attempted_worker_counts.append(self.worker_count)
             jobs = job_builder(_chunk_specs(pending, self.worker_count, self.safety))
@@ -606,11 +684,17 @@ class RLRolloutRunner:
 
         self.last_runtime_profile = dict(run_info.runtime_profile)
         return [
-            results_by_index[assignment.game_index]
-            for assignment, _seed in specs
+            results_by_index[getattr(spec[0], index_attribute)]
+            for spec in specs
         ], run_info
 
-    def collect_games(self, match_plan, base_seed):
+    def collect_games(
+        self,
+        match_plan,
+        base_seed,
+        *,
+        capture_opponent_decision_restarts=False,
+    ):
         """Execute one immutable MatchPlan without discovering opponents."""
         if not match_plan.assignments:
             raise ValueError("RL MatchPlan must contain at least one assignment")
@@ -618,6 +702,7 @@ class RLRolloutRunner:
             (
                 assignment,
                 game_seed(base_seed, assignment.game_index),
+                bool(capture_opponent_decision_restarts),
             )
             for assignment in match_plan.assignments
         ]
@@ -625,6 +710,62 @@ class RLRolloutRunner:
             specs,
             _worker_collect_rollouts,
             lambda chunks: list(chunks),
+        )
+
+    def collect_restarts(self, rollout_results, base_seed, iteration):
+        """Run every captured continuation in deterministic source order."""
+        restarts = []
+        for result in sorted(rollout_results, key=lambda item: item["game_index"]):
+            captures = sorted(
+                result.get("captured_restarts", ()),
+                key=lambda item: item.snapshot_ordinal,
+            )
+            for capture in captures:
+                restarts.append(OpponentDecisionRestart(
+                    restart_index=len(restarts),
+                    source_iteration=int(iteration),
+                    source_game_index=int(result["game_index"]),
+                    snapshot_ordinal=int(capture.snapshot_ordinal),
+                    source_turn=int(capture.source_turn),
+                    original_learner_position=int(
+                        capture.original_learner_position
+                    ),
+                    source_legal_tile_action_count=int(
+                        capture.source_legal_tile_action_count
+                    ),
+                    opponent_kind=result["opponent_kind"],
+                    opponent_id=result["opponent_id"],
+                    bucket_name=result["bucket_name"],
+                    bank_slot=result["bank_slot"],
+                    engine_state=capture.engine_state,
+                ))
+        if not restarts:
+            self.last_runtime_profile = {}
+            return [], ParallelRunInfo(
+                requested_workers=self.requested_workers,
+                initial_workers=self.worker_count,
+                final_workers=self.worker_count,
+                safety_capped=self._safety_capped,
+            )
+        specs = [
+            (
+                restart,
+                stable_seed(
+                    base_seed,
+                    "opponent_decision_restart",
+                    iteration,
+                    restart.source_game_index,
+                    restart.snapshot_ordinal,
+                ),
+            )
+            for restart in restarts
+        ]
+        return self._execute_specs(
+            specs,
+            _worker_collect_restarts,
+            lambda chunks: list(chunks),
+            index_attribute="restart_index",
+            result_index_key="restart_index",
         )
 
     def close(self):

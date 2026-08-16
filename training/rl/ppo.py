@@ -29,15 +29,14 @@ from utils.resource_limits import effective_gpu_available_bytes
 PPO_DISABLED_EPOCHS = 1
 DEFAULT_PPO_MAX_EPOCHS = 4
 MAX_PPO_EPOCHS = 16
-PPO_TRAINING_ALGORITHM = "ppo_v1"
+PPO_TRAINING_ALGORITHM = "ppo_v2_decision_minibatches"
 REINFORCE_TRAINING_ALGORITHM = "reinforce_v1"
 PPO_CLIP_EPSILON = 0.2
 PPO_TARGET_KL = 0.01
 PPO_STOP_KL = 0.015
-PPO_GAMES_PER_MINIBATCH_SCALE = 125
-PPO_MIN_DECISIONS_PER_MINIBATCH = 128
-PPO_MIN_MINIBATCHES = 4
-PPO_MAX_MINIBATCHES = 16
+PPO_TARGET_DECISIONS_PER_MINIBATCH = 512
+PPO_MIN_DECISIONS_PER_MINIBATCH = 256
+PPO_MAX_MINIBATCHES = 256
 PPO_PREFER_GPU_BUFFER = True
 PPO_GPU_BUFFER_SAFETY_FRACTION = 0.70
 POLICY_GRADIENT_CLIP_NORM = 5.0
@@ -74,9 +73,10 @@ def fixed_ppo_policy(max_epochs):
             "clip_epsilon": PPO_CLIP_EPSILON,
             "target_kl": PPO_TARGET_KL,
             "stop_kl": PPO_STOP_KL,
-            "min_minibatches": PPO_MIN_MINIBATCHES,
+            "target_decisions_per_minibatch": (
+                PPO_TARGET_DECISIONS_PER_MINIBATCH
+            ),
             "max_minibatches": PPO_MAX_MINIBATCHES,
-            "games_per_minibatch_scale": PPO_GAMES_PER_MINIBATCH_SCALE,
             "min_decisions_per_minibatch": PPO_MIN_DECISIONS_PER_MINIBATCH,
             "prefer_gpu_buffer": PPO_PREFER_GPU_BUFFER,
             "gpu_buffer_safety_fraction": PPO_GPU_BUFFER_SAFETY_FRACTION,
@@ -265,46 +265,88 @@ class PPOIterationUpdate:
     update_seconds: float
 
 
-def requested_minibatches(
-    actual_games,
-):
-    """Return the requested 4..16 minibatch count based on games collected."""
-    if actual_games < 1:
-        raise ValueError("actual_games must be positive.")
-    raw = math.ceil(int(actual_games) / PPO_GAMES_PER_MINIBATCH_SCALE)
-    return max(PPO_MIN_MINIBATCHES, min(PPO_MAX_MINIBATCHES, raw))
+def requested_minibatches(decision_count):
+    """Return the decision-sized batch request before minimum-tail filtering."""
+    decision_count = int(decision_count)
+    if decision_count < 1:
+        raise ValueError("decision_count must be positive.")
+    raw = math.ceil(decision_count / PPO_TARGET_DECISIONS_PER_MINIBATCH)
+    return min(PPO_MAX_MINIBATCHES, raw)
 
 
-def effective_minibatches(
-    decision_count,
-    requested,
-):
-    """Cap minibatches so every non-final slice remains operationally useful."""
-    if decision_count < 1 or requested < 1:
-        raise ValueError("Decision/minibatch counts must be positive.")
-    maximum_useful = max(
-        1,
-        int(decision_count) // PPO_MIN_DECISIONS_PER_MINIBATCH,
+def effective_minibatches(decision_count):
+    """Return how many optimizer batches the fixed decision policy emits."""
+    decision_count = int(decision_count)
+    if decision_count < 1:
+        raise ValueError("decision_count must be positive.")
+    full = min(
+        PPO_MAX_MINIBATCHES,
+        decision_count // PPO_TARGET_DECISIONS_PER_MINIBATCH,
     )
-    return min(int(requested), maximum_useful, int(decision_count))
+    if full == PPO_MAX_MINIBATCHES:
+        return full
+    remainder = decision_count - full * PPO_TARGET_DECISIONS_PER_MINIBATCH
+    return full + int(remainder >= PPO_MIN_DECISIONS_PER_MINIBATCH)
 
 
-def minibatch_indices(decision_count, minibatch_count, seed):
-    """Return a deterministic no-drop partition with every index exactly once."""
-    if not 1 <= int(minibatch_count) <= int(decision_count):
-        raise ValueError("minibatch_count must be between one and decision_count.")
+def minibatch_indices(decision_count, seed):
+    """Return deterministic 256..512 decision batches and the omitted tail."""
+    decision_count = int(decision_count)
+    if decision_count < 1:
+        raise ValueError("decision_count must be positive.")
     rng = np.random.RandomState(int(seed) & 0xFFFFFFFF)
-    permutation = rng.permutation(int(decision_count))
-    partitions = tuple(
-        np.ascontiguousarray(part, dtype=np.int64)
-        for part in np.array_split(permutation, int(minibatch_count))
+    permutation = rng.permutation(decision_count)
+    partitions = []
+    offset = 0
+    while (
+        len(partitions) < PPO_MAX_MINIBATCHES
+        and decision_count - offset >= PPO_TARGET_DECISIONS_PER_MINIBATCH
+    ):
+        partitions.append(np.ascontiguousarray(
+            permutation[offset:offset + PPO_TARGET_DECISIONS_PER_MINIBATCH],
+            dtype=np.int64,
+        ))
+        offset += PPO_TARGET_DECISIONS_PER_MINIBATCH
+    if (
+        len(partitions) < PPO_MAX_MINIBATCHES
+        and decision_count - offset >= PPO_MIN_DECISIONS_PER_MINIBATCH
+    ):
+        partitions.append(np.ascontiguousarray(
+            permutation[offset:],
+            dtype=np.int64,
+        ))
+        offset = decision_count
+    omitted = np.ascontiguousarray(permutation[offset:], dtype=np.int64)
+    used = (
+        np.concatenate(partitions)
+        if partitions else np.empty(0, dtype=np.int64)
     )
-    if any(part.size == 0 for part in partitions):
-        raise AssertionError("PPO created an empty minibatch.")
-    combined = np.concatenate(partitions)
+    combined = np.concatenate((used, omitted))
     if combined.size != decision_count or np.unique(combined).size != decision_count:
-        raise AssertionError("PPO minibatches lost or duplicated a decision.")
-    return partitions
+        raise AssertionError("PPO partitioning lost or duplicated a decision.")
+    if any(
+        not PPO_MIN_DECISIONS_PER_MINIBATCH
+        <= part.size
+        <= PPO_TARGET_DECISIONS_PER_MINIBATCH
+        for part in partitions
+    ):
+        raise AssertionError("PPO created an invalid decision minibatch.")
+    return tuple(partitions), omitted
+
+
+def full_buffer_indices(decision_count):
+    """Return bounded sequential slices that cover every decision exactly once."""
+    decision_count = int(decision_count)
+    if decision_count < 1:
+        raise ValueError("decision_count must be positive.")
+    return tuple(
+        np.arange(
+            offset,
+            min(decision_count, offset + PPO_TARGET_DECISIONS_PER_MINIBATCH),
+            dtype=np.int64,
+        )
+        for offset in range(0, decision_count, PPO_TARGET_DECISIONS_PER_MINIBATCH)
+    )
 
 
 def clipped_surrogate(ratios, advantages):
@@ -673,7 +715,6 @@ def ppo_update(
     network,
     buffer,
     *,
-    actual_games,
     base_seed,
     iteration,
     entropy_coef,
@@ -710,14 +751,70 @@ def ppo_update(
             "PPO old_values were provided, but the value head is disabled."
         )
 
-    requested = requested_minibatches(actual_games)
-    effective = effective_minibatches(buffer.size, requested)
-    first_partitions = minibatch_indices(
+    requested = requested_minibatches(buffer.size)
+    effective = effective_minibatches(buffer.size)
+    first_partitions, first_omitted = minibatch_indices(
         buffer.size,
-        effective,
         stable_seed(base_seed, "ppo_shuffle", iteration, 0),
     )
     timing["setup_and_first_partition"] = time.perf_counter() - profile_started
+    if not first_partitions:
+        total_seconds = time.perf_counter() - profile_started
+        timing["unaccounted"] = max(0.0, total_seconds - sum(timing.values()))
+        return {
+            "requested_minibatches": int(requested),
+            "effective_minibatches": 0,
+            "minibatch_sizes": [],
+            "epochs_completed": 0,
+            "stopped_by_kl": False,
+            "optimizer_steps": 0,
+            "final_approx_kl": None,
+            "max_approx_kl": None,
+            "final_clip_fraction": None,
+            "final_entropy": None,
+            "final_policy_loss": None,
+            "final_value_loss": None,
+            "final_value_clip_fraction": None,
+            "final_value_mean": None,
+            "final_value_std": None,
+            "final_explained_variance": None,
+            "gradient_norm_mean": 0.0,
+            "gradient_norm_max": 0.0,
+            "buffer_location": "not_prepared",
+            "buffer_bytes": int(buffer.nbytes),
+            "buffer_preflight": {
+                "fallback_reason": "fewer than 256 PPO decisions",
+            },
+            "advantage_std_zero": bool(buffer.advantage_std_zero),
+            "raw_advantage_mean": float(buffer.raw_advantage_mean),
+            "raw_advantage_std": float(buffer.raw_advantage_std),
+            "target_kl": PPO_TARGET_KL,
+            "stop_kl": PPO_STOP_KL,
+            "clip_epsilon": PPO_CLIP_EPSILON,
+            "target_decisions_per_minibatch": (
+                PPO_TARGET_DECISIONS_PER_MINIBATCH
+            ),
+            "min_decisions_per_minibatch": PPO_MIN_DECISIONS_PER_MINIBATCH,
+            "max_minibatches": PPO_MAX_MINIBATCHES,
+            "decisions_used_per_epoch": 0,
+            "decisions_omitted_per_epoch": int(first_omitted.size),
+            "insufficient_decisions": True,
+            "epoch_metrics": [],
+            "entropy": None,
+            "grad_norm": 0.0,
+            "applied_grad_norm": 0.0,
+            "grad_clipped": False,
+            "value_loss": None,
+            "runtime_timing_seconds": {
+                "total": float(total_seconds),
+                **{key: float(value) for key, value in timing.items()},
+            },
+            "runtime_profile_detail": {
+                "optimizer_step": {},
+                "full_buffer_evaluation": {},
+            },
+        }
+    evaluation_partitions = full_buffer_indices(buffer.size)
     storage_started = time.perf_counter()
     storage = prepare_storage(
         network,
@@ -733,11 +830,11 @@ def ppo_update(
         for epoch in range(int(max_epochs)):
             if epoch == 0:
                 partitions = first_partitions
+                omitted = first_omitted
             else:
                 partition_started = time.perf_counter()
-                partitions = minibatch_indices(
+                partitions, omitted = minibatch_indices(
                     buffer.size,
-                    effective,
                     stable_seed(base_seed, "ppo_shuffle", iteration, epoch),
                 )
                 timing["later_epoch_partitioning"] += (
@@ -793,7 +890,7 @@ def ppo_update(
             whole = evaluate_full_buffer(
                 network,
                 storage,
-                partitions,
+                evaluation_partitions,
                 PPO_CLIP_EPSILON,
                 runtime_profile=full_buffer_detail,
             )
@@ -814,6 +911,8 @@ def ppo_update(
                 "decisions": int(buffer.size),
                 "minibatches": int(len(partitions)),
                 "minibatch_sizes": [int(len(indices)) for indices in partitions],
+                "decisions_used": int(sum(len(indices) for indices in partitions)),
+                "decisions_omitted": int(omitted.size),
             }
             epoch_rows.append(row)
             if whole["approx_kl"] > PPO_STOP_KL:
@@ -878,6 +977,14 @@ def ppo_update(
             "target_kl": PPO_TARGET_KL,
             "stop_kl": PPO_STOP_KL,
             "clip_epsilon": PPO_CLIP_EPSILON,
+            "target_decisions_per_minibatch": (
+                PPO_TARGET_DECISIONS_PER_MINIBATCH
+            ),
+            "min_decisions_per_minibatch": PPO_MIN_DECISIONS_PER_MINIBATCH,
+            "max_minibatches": PPO_MAX_MINIBATCHES,
+            "decisions_used_per_epoch": int(final["decisions_used"]),
+            "decisions_omitted_per_epoch": int(final["decisions_omitted"]),
+            "insufficient_decisions": False,
             "epoch_metrics": epoch_rows,
             # Compatibility with the old one-update metric keys.
             "entropy": float(final["entropy"]),
@@ -938,7 +1045,6 @@ def update_from_samples(
     network,
     samples,
     *,
-    actual_games,
     base_seed,
     iteration,
     entropy_coef,
@@ -980,7 +1086,6 @@ def update_from_samples(
     metrics = ppo_update(
         network,
         decision_buffer,
-        actual_games=actual_games,
         base_seed=base_seed,
         iteration=iteration,
         entropy_coef=entropy_coef,

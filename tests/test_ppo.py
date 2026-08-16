@@ -59,6 +59,7 @@ class _FakePPONetwork:
         self.ratio_after_update = ratio_after_update
         self.fail_first_eval = bool(fail_first_eval)
         self.eval_calls = 0
+        self.eval_batch_sizes = []
         self.optimizer_step_count = 0
         self.cache = {}
         self.hidden_sizes = (2, 2)
@@ -86,6 +87,7 @@ class _FakePPONetwork:
         if self.fail_first_eval and self.eval_calls == 1:
             raise MemoryError("simulated CUDA workspace OOM")
         count = int(np.asarray(actions).size)
+        self.eval_batch_sizes.append(count)
         action_size = int(np.asarray(legal_masks).shape[0])
         self.cache = {
             "Z3": np.zeros((action_size, count), dtype=np.float32),
@@ -237,7 +239,10 @@ def test_ppo_value_head_updates_critic_and_reports_value_metrics():
         use_value_head=True,
         device="cpu",
     )
-    samples = [_sample(index, reward=(-1.0 if index % 2 else 1.0)) for index in range(32)]
+    samples = [
+        _sample(index, reward=(-1.0 if index % 2 else 1.0))
+        for index in range(300)
+    ]
     states = np.hstack([sample.x for sample in samples])
     masks = np.hstack([sample.legal_mask for sample in samples])
     actions = [sample.action_index for sample in samples]
@@ -255,7 +260,6 @@ def test_ppo_value_head_updates_critic_and_reports_value_metrics():
     metrics = ppo_update(
         network,
         buffer,
-        actual_games=8,
         base_seed=42,
         iteration=1,
         entropy_coef=0.0,
@@ -285,28 +289,82 @@ def test_ppo_value_head_requires_pre_update_values_in_the_buffer():
         ppo_update(
             network,
             _buffer(8),
-            actual_games=2,
             base_seed=42,
             iteration=1,
             entropy_coef=0.0,
         )
 
 
-def test_requested_minibatches_match_the_required_gpi_table():
-    expected = {100: 4, 200: 4, 400: 4, 600: 5, 800: 7, 1000: 8, 2000: 16}
-    assert {gpi: requested_minibatches(gpi) for gpi in expected} == expected
+def test_requested_minibatches_are_derived_only_from_decision_count():
+    expected = {1: 1, 255: 1, 256: 1, 512: 1, 513: 2, 1024: 2}
+    assert {
+        decisions: requested_minibatches(decisions)
+        for decisions in expected
+    } == expected
 
 
-def test_minibatch_partitions_never_drop_duplicate_or_empty_indices():
-    for decision_count, requested in ((1, 1), (127, 4), (128, 4), (513, 4), (2051, 16)):
-        effective = effective_minibatches(decision_count, requested)
-        parts = minibatch_indices(decision_count, effective, seed=987)
-        combined = np.concatenate(parts)
-        assert all(len(part) > 0 for part in parts)
+def test_decision_minibatches_follow_target_minimum_and_omitted_tail_policy():
+    expected = {
+        255: ([], 255),
+        256: ([256], 0),
+        511: ([511], 0),
+        512: ([512], 0),
+        700: ([512], 188),
+        768: ([512, 256], 0),
+        1025: ([512, 512], 1),
+    }
+    for decision_count, (sizes, omitted_size) in expected.items():
+        parts, omitted = minibatch_indices(decision_count, seed=987)
+        assert [len(part) for part in parts] == sizes
+        assert len(omitted) == omitted_size
+        assert effective_minibatches(decision_count) == len(parts)
+        combined = np.concatenate((*parts, omitted))
         assert len(combined) == decision_count
         assert len(np.unique(combined)) == decision_count
         np.testing.assert_array_equal(np.sort(combined), np.arange(decision_count))
-        assert max(map(len, parts)) - min(map(len, parts)) <= 1
+
+
+def test_omitted_tail_changes_with_the_deterministic_epoch_seed():
+    _parts_a, omitted_a = minibatch_indices(700, seed=11)
+    _parts_b, omitted_b = minibatch_indices(700, seed=12)
+    assert omitted_a.size == omitted_b.size == 188
+    assert not np.array_equal(np.sort(omitted_a), np.sort(omitted_b))
+
+
+def test_full_buffer_kl_still_evaluates_the_optimizer_omitted_tail():
+    network = _FakePPONetwork(ratio_after_update=1.001)
+    metrics = ppo_update(
+        network,
+        _buffer(700),
+        base_seed=42,
+        iteration=7,
+        entropy_coef=0.0,
+        max_epochs=2,
+    )
+    assert metrics["minibatch_sizes"] == [512]
+    assert metrics["decisions_used_per_epoch"] == 512
+    assert metrics["decisions_omitted_per_epoch"] == 188
+    assert metrics["optimizer_steps"] == 2
+    # One workspace probe is followed by a complete 512+188 evaluation after
+    # each epoch. The omitted optimizer tail still participates in KL control.
+    assert network.eval_batch_sizes[-4:] == [512, 188, 512, 188]
+
+
+def test_fewer_than_minimum_decisions_produces_an_explicit_noop():
+    network = _FakePPONetwork(ratio_after_update=1.001)
+    metrics = ppo_update(
+        network,
+        _buffer(255),
+        base_seed=42,
+        iteration=8,
+        entropy_coef=0.0,
+        max_epochs=16,
+    )
+    assert metrics["insufficient_decisions"]
+    assert metrics["optimizer_steps"] == 0
+    assert metrics["epochs_completed"] == 0
+    assert metrics["decisions_omitted_per_epoch"] == 255
+    assert network.optimizer_step_count == 0
 
 
 def test_advantages_are_normalized_once_globally_and_zero_std_is_safe():
@@ -329,7 +387,6 @@ def test_kl_early_stop_occurs_only_after_the_completed_epoch():
     metrics = ppo_update(
         network,
         _buffer(),
-        actual_games=100,
         base_seed=42,
         iteration=1,
         entropy_coef=0.0,
@@ -349,13 +406,12 @@ def test_kl_early_stop_occurs_only_after_the_completed_epoch():
 def test_kl_early_stop_can_end_a_sixteen_epoch_budget_after_several_epochs():
     network = _FakePPONetwork(
         ratio_after_update=lambda optimizer_steps: (
-            1.001 if optimizer_steps < 10 else 1.30
+            1.001 if optimizer_steps < 5 else 1.30
         )
     )
     metrics = ppo_update(
         network,
         _buffer(),
-        actual_games=100,
         base_seed=42,
         iteration=2,
         entropy_coef=0.0,
@@ -374,7 +430,6 @@ def test_small_kl_runs_all_sixteen_epochs_and_counts_every_optimizer_step():
     metrics = ppo_update(
         network,
         _buffer(),
-        actual_games=100,
         base_seed=42,
         iteration=3,
         entropy_coef=0.0,
@@ -393,7 +448,6 @@ def test_fixed_kl_policy_is_reported_and_only_stop_kl_controls_early_stopping():
     metrics = ppo_update(
         network,
         _buffer(),
-        actual_games=100,
         base_seed=42,
         iteration=4,
         entropy_coef=0.0,
@@ -411,7 +465,6 @@ def test_ppo_rejects_more_than_sixteen_epochs():
         ppo_update(
             _FakePPONetwork(),
             _buffer(),
-            actual_games=100,
             base_seed=42,
             iteration=4,
             entropy_coef=0.0,
@@ -448,7 +501,6 @@ def test_simulated_gpu_workspace_oom_falls_back_before_any_optimizer_step():
         metrics = ppo_update(
             network,
             _buffer(),
-            actual_games=100,
             base_seed=9,
             iteration=3,
             entropy_coef=0.0,

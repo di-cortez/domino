@@ -33,12 +33,12 @@ from training.rl.pool import pool_policy_manifest
 from utils.repository import current_git_commit
 
 
-# Version 9 replaced the ``reward_schema`` preset name with the explicit
-# ``alpha``/``event_reward_decay`` tunables and rescaled the reward constants,
-# so a version 8 checkpoint would silently resume against a different reward
-# function.
-RESUME_STATE_VERSION = 10
-SUPPORTED_RESUME_STATE_VERSIONS = (9, RESUME_STATE_VERSION)
+# Version 11 adds the locked opponent-decision-restart semantic and cumulative
+# restart counters. Version 10 remains readable for the REINFORCE path with the
+# missing flag resolved to false. Its ``ppo_v1`` identity is intentionally
+# rejected by the new decision-minibatch ``ppo_v2`` algorithm.
+RESUME_STATE_VERSION = 11
+SUPPORTED_RESUME_STATE_VERSIONS = (10, RESUME_STATE_VERSION)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
 
@@ -55,6 +55,7 @@ class RLTrainingConfiguration:
     moving_average_window: int
     opponent_buckets: tuple[str, ...]
     difficulty_weight: float
+    opponent_decision_restarts: bool
     learning_rate: float
     entropy_coef: float
     use_value_head: bool
@@ -93,6 +94,7 @@ class RLTrainingConfiguration:
         data["ruleset_name"] = resolve_ruleset(data["ruleset_name"]).name
         data.setdefault("run_configuration_sha256", None)
         data.setdefault("git_commit", None)
+        data.setdefault("opponent_decision_restarts", False)
         data["opponent_buckets"] = tuple(data["opponent_buckets"])
         configuration = cls(**{
             field.name: data[field.name]
@@ -133,6 +135,9 @@ class RLTrainingConfiguration:
             "moving_average_window": int(rl["moving_average_window"]),
             "opponent_buckets": tuple(rl["opponent_buckets"]),
             "difficulty_weight": float(rl["difficulty_weight"]),
+            "opponent_decision_restarts": bool(
+                rl.get("opponent_decision_restarts", False)
+            ),
             "learning_rate": float(rl["learning_rate"]),
             "entropy_coef": float(rl["entropy_coef"]),
             "use_value_head": bool(rl["use_value_head"]),
@@ -600,6 +605,10 @@ def _training_state_payload(
     value_loss_window,
     ppo_window,
     total_decision_samples,
+    total_normal_decision_samples,
+    total_restart_decision_samples,
+    total_restart_episodes,
+    total_restart_duration_s,
     policy_updates_completed,
     clipped_iteration_count,
     total_rollout_duration_s,
@@ -612,6 +621,10 @@ def _training_state_payload(
         "ppo_window": list(ppo_window),
         "total_decision_samples": int(total_decision_samples),
         "trainable_decisions_seen": int(total_decision_samples),
+        "total_normal_decision_samples": int(total_normal_decision_samples),
+        "total_restart_decision_samples": int(total_restart_decision_samples),
+        "total_restart_episodes": int(total_restart_episodes),
+        "total_restart_duration_s": float(total_restart_duration_s),
         "policy_updates_completed": int(policy_updates_completed),
         "clipped_iteration_count": int(clipped_iteration_count),
         "total_rollout_duration_s": float(total_rollout_duration_s),

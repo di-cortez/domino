@@ -13,6 +13,7 @@ Owned by `training/rl/`.
 | `matchmaking.py` | Tracks smoothed difficulty evidence and builds immutable exact-GPI match plans. |
 | `checkpoint_archive.py` | Stores a bounded, progressively thinned history independently of exact-resume checkpoints. |
 | `rollout.py` | Finalizes rewards and trajectories and plays one CPU-only self-play or heuristic-opponent training game. |
+| `restarts.py` | Defines immutable same-iteration opponent-decision restart records. |
 | `iteration.py` / `session.py` | Run one update and prepare fresh/resumed training state respectively. |
 | `resume.py` | Loads compatible policies and atomically saves, validates, and restores exact numbered RL resume pairs. |
 | `reporting.py` | Owns iteration summaries, durable metrics JSONL writes, worker metadata aggregation, and cumulative RL runtime profiles. |
@@ -34,6 +35,7 @@ python -m training.rl.cli --fresh-from-sl
 python -m training.rl.cli --fresh-from-sl --opponent-buckets random --difficulty-weight 0
 python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,random,recent
 python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,recent,medium_term
+python -m training.rl.cli --fresh-from-sl --opponent-decision-restarts
 python -m training.rl.cli --dropout 0.1 --weight-decay
 ```
 
@@ -132,11 +134,22 @@ game id. Parent aggregation is ordered, so the same seed produces bit-identical
 checkpoints with one or multiple workers, including after fallback. Useful
 controls are:
 
+With `--opponent-decision-restarts`, the normal GPI games and match plan remain
+unchanged. During them, workers capture every exact pre-action state where the
+source opponent has two or more legal tile placements. After all normal games,
+the same frozen learner continues once from each state in the source opponent's
+seat while the exact source counterpart takes the old learner seat. Normal and
+restart decisions are concatenated and updated once. Restart episodes are
+ephemeral: they never increment GPI progress, win rate, difficulty evidence,
+pool cadence, or checkpoint cadence. Their counts, decisions, and wall time are
+reported separately and persisted cumulatively for exact resume.
+
 | Flag | Meaning | Default |
 |---|---|---:|
 | `--gpi` | Fixed positive number of games per RL iteration | `2000` |
 | `--opponent-buckets` | Named active bucket selection | `heuristic,recent` |
 | `--difficulty-weight` | Uniform/difficulty allocation mixture in `[0, 1]` | `0.5` |
+| `--opponent-decision-restarts` | Add one same-iteration continuation from every genuine opponent tile-choice state | off |
 | `--rl-workers` | CPU-only rollout workers or `auto` | `auto` |
 | `--retune-workers` | Explicitly rerun saved worker tuning on resume | off |
 | `--rl-memory-reserve-mb` | Host RAM that must remain free | `512` |
@@ -183,7 +196,7 @@ requested/effective minibatches, optimizer steps, epochs, KL stops, clipping,
 entropy, gradient norms, buffer location/bytes, rollout time, and update time.
 Every iteration is also appended to `<weights>_training_metrics.jsonl`.
 
-That JSONL uses compact schema version 5. Its first line is a header object with
+That JSONL uses compact schema version 6. Its first line is a header object with
 the ordered metric columns, complete training configuration, canonical
 configuration SHA-256, ordered opponent-bucket names, bucket-result columns,
 and nominal uniform/difficulty budgets. Each later line is an array in metric
@@ -252,17 +265,22 @@ full-buffer policy-gradient update. Exactly one optimizer step is attempted per
 non-empty iteration, and none of `training/rl/ppo.py`'s buffer, ratio, clipped
 surrogate, KL, minibatch, or whole-buffer evaluation paths run. Checkpoint,
 optimizer, RNG, adaptive-tuning, opponent-pool, and canonical resume behavior
-remain unchanged apart from recording `reinforce_v1` instead of `ppo_v1`.
+remain unchanged apart from recording `reinforce_v1` instead of
+`ppo_v2_decision_minibatches`.
 
 The canonical contiguous buffer stays in RAM. If it fits within 70% of reported
 free VRAM and a dry first-minibatch workspace probe succeeds, a complete GPU
 copy is retained across epochs. Otherwise minibatches stream from RAM. No
 fallback restarts a partially applied epoch.
 
-Requested minibatches are fixed by the implementation as
-`clamp(ceil(actual_games / 125), 4, 16)`, further capped to keep roughly 128
-decisions per minibatch. PPO implementation constants live in `ppo.py`; the
-1% worker benchmark fraction and 10% worker acceptance gain live in
+Requested minibatches are based only on the combined decision count and fixed
+as `min(ceil(decisions / 512), 256)`. Every optimizer minibatch targets 512
+decisions. A final remainder of 256–511 decisions is retained; a remainder
+below 256 is omitted from that epoch's optimizer steps. The full buffer,
+including an omitted optimizer tail, is still used by the post-epoch KL
+evaluation. Every epoch uses a fresh deterministic permutation, so omitted
+decisions normally change between epochs. PPO implementation constants live
+in `ppo.py`; the 1% worker benchmark fraction and 10% worker acceptance gain live in
 `constants.py`. None are experiment or CLI parameters. Each epoch visits every
 decision exactly once with a deterministic new permutation. PPO uses clip
 epsilon `0.2`, reports target KL `0.01` as an informational reference, and
@@ -306,6 +324,7 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 | `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
 | `--alpha` | Convex mix of the two reward components per decision: `0` trains on the terminal outcome alone, `1` on local draw/pass shaping alone | `0.5` |
 | `--event-reward-decay` | Per-turn decay crediting a draw/pass event back to the real decisions preceding it (`0` credits only the immediately preceding decision) | `0.90` |
+| `--opponent-decision-restarts` | Continue once from every same-iteration pre-action opponent state with at least two tile plays; the learner swaps seats and all decisions join one update | off |
 | `--ppo-max-epochs` | `1` selects one-update REINFORCE; `2`–`16` select masked PPO | `4` standalone/finite, `16` forever |
 | `--value-head` | Train a linear critic with PPO or REINFORCE | off |
 | `--weight-decay [COEFFICIENT]` | Decoupled L2 shrink on every weight matrix and `Wv` after clipping; shared with supervised training | off (`0.0001`) |

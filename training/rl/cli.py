@@ -149,6 +149,15 @@ def add_optional_rl_arguments(
             "difficulty-based."
         ),
     )
+    group.add_argument(
+        "--opponent-decision-restarts",
+        action="store_true",
+        help=(
+            "Augment each RL iteration with same-iteration continuations from "
+            "every genuine opponent decision state encountered during normal "
+            "GPI games. Restart samples join normal samples before one update."
+        ),
+    )
     group.add_argument("--learning-rate", type=float, default=0.001)
     group.add_argument("--entropy-coef", type=float, default=0.01)
     if include_regularization:
@@ -335,6 +344,7 @@ def training_options_from_args(args):
         gpi=args.gpi,
         opponent_buckets=args.opponent_buckets,
         difficulty_weight=args.difficulty_weight,
+        opponent_decision_restarts=args.opponent_decision_restarts,
         learning_rate=args.learning_rate,
         entropy_coef=args.entropy_coef,
         weight_decay=args.weight_decay,

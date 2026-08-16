@@ -108,8 +108,8 @@ GPI is never autotuned. Canonical pipelines and direct
 `training.rl.cli` runs accept `--gpi` from
 `100, 200, 400, 600, 800, 1000, 2000`, defaulting to 2,000. Before real games begin, an
 isolated benchmark selects the rollout-worker count and discards its games.
-Training uses masked PPO with adaptive
-minibatches. Direct self-play and the finite canonical profiles retain the
+Training uses masked PPO with decision-sized minibatches (512 target, 256
+minimum, 256 batches maximum per epoch). Direct self-play and the finite canonical profiles retain the
 four-epoch default; `forever` now allows up to 16 epochs. After each complete
 epoch, a whole-buffer KL check stops the update before the next epoch when its
 hard `0.015` limit is exceeded. Pass `--ppo-max-epochs 1` to use one
@@ -118,6 +118,14 @@ PPO buffer or calculate ratios, clipping, KL control, minibatches, or the
 post-update full-buffer PPO evaluation. Opponent snapshots refresh once per
 iteration, so `--gpi` also sets the snapshot cadence, and checkpoint saves do
 not run an extra evaluation matchup.
+
+Pass `--opponent-decision-restarts` on a new run to augment each iteration
+with one continuation from every genuine opponent tile-choice state encountered
+in its normal games. The frozen learner swaps into the opponent seat, the
+source counterpart swaps into the learner seat, and both decision sets feed one
+update. These continuations do not count toward GPI, normal win rates,
+matchmaking, pool cadence, or game-budget progress. Resume restores this choice
+from the run configuration.
 
 `big`, `huge`, and `forever` persist weights, optimizer, RNGs, counters, and
 the opponent pool. `--resume` continues that exact saved run;

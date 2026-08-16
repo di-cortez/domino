@@ -753,6 +753,7 @@ def _rl_config(args):
         "games_per_iteration": int(args.gpi),
         "opponent_buckets": list(args.opponent_buckets),
         "difficulty_weight": float(args.difficulty_weight),
+        "opponent_decision_restarts": bool(args.opponent_decision_restarts),
         "learning_rate": float(args.learning_rate),
         "entropy_coef": float(args.entropy_coef),
         "weight_decay": float(args.weight_decay),

@@ -34,12 +34,16 @@ from training.rl.pool import pool_policy_manifest
 from utils.repository import current_git_commit
 
 
-# Version 11 adds the locked opponent-decision-restart semantic and cumulative
-# restart counters. Version 10 remains readable for the REINFORCE path with the
-# missing flag resolved to false. Its ``ppo_v1`` identity is intentionally
-# rejected by the new decision-minibatch ``ppo_v2`` algorithm.
-RESUME_STATE_VERSION = 11
-SUPPORTED_RESUME_STATE_VERSIONS = (10, RESUME_STATE_VERSION)
+# Version 12 makes the neural opponent bands chronologically disjoint:
+# ``medium_term`` became a delayed archive-backed window and
+# ``historical_uniform`` was added. Versions 10 and 11 stored an overlapping
+# ``medium_term`` whose members were also ``recent`` members, which cannot be
+# reinterpreted under the new semantics without silently changing what the
+# saved memberships mean. No converter exists, so they are rejected rather
+# than migrated.
+RESUME_STATE_VERSION = 12
+SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
+OVERLAPPING_MEDIUM_TERM_STATE_VERSIONS = (10, 11)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
 
@@ -438,6 +442,30 @@ def _atomic_resume_state_save(path, metadata, pool_state, pool_weights):
         temporary.unlink(missing_ok=True)
 
 
+def _superseded_opponent_band_hint(metadata):
+    """Explain why a pre-band resume state cannot simply be reinterpreted."""
+    version = metadata.get("version")
+    if version not in OVERLAPPING_MEDIUM_TERM_STATE_VERSIONS:
+        return ""
+    pool_state = metadata.get("opponent_pool_state")
+    selected = (
+        pool_state.get("selected_buckets", ())
+        if isinstance(pool_state, dict)
+        else ()
+    )
+    if "medium_term" in selected:
+        return (
+            " This state stored the superseded overlapping medium_term bucket, "
+            "whose members were also recent members. The delayed band cannot "
+            "be derived from it without changing what those memberships mean, "
+            "so a new run is required."
+        )
+    return (
+        " The opponent-pool policy changed for every bucket selection and no "
+        "migration is implemented, so a new run is required."
+    )
+
+
 def load_resume_state(weights_path, state_path):
     """Validate and load one complete weights/state checkpoint pair."""
     weights_path = Path(weights_path)
@@ -448,6 +476,7 @@ def load_resume_state(weights_path, state_path):
             raise ValueError(
                 f"Unsupported RL resume-state version in {state_path}: "
                 f"{metadata.get('version')!r}."
+                + _superseded_opponent_band_hint(metadata)
             )
         actual_hash = _file_sha256(weights_path)
         if metadata.get("weights_sha256") != actual_hash:

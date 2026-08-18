@@ -604,7 +604,12 @@ class RLTrainingReporter:
             print(f"Iteration {iteration} | {games} games | no real policy decisions")
             return
         bucket_text = ", ".join(
-            f"{name} {value['games']} games/{value['wins'] / value['games']:.1%} wins"
+            f"{name} {value['games']} games/"
+            + (
+                f"{value['wins'] / value['games']:.1%} wins"
+                if value["games"]
+                else "n/a"
+            )
             for name, value in bucket_results.items()
         )
         print(
@@ -621,8 +626,10 @@ class RLTrainingReporter:
             f" | opponents: {opponent_count} ({unique_neural_opponent_count} "
             f"neural) | grad: {_gradient_log_text(gradient_metrics)}"
         )
+        available = opponent_pool_state["available_buckets"]
         print(
             "  Matchmaking: buckets " + ",".join(opponent_buckets)
+            + " | available " + (",".join(available) if available else "none")
             + f" | difficulty weight {difficulty_weight:g} | {bucket_text}"
         )
         if restart_summary["enabled"]:
@@ -637,12 +644,39 @@ class RLTrainingReporter:
             f"{name} {value['membership_count']}/{value['capacity']}"
             for name, value in opponent_pool_state["buckets"].items()
         )
+        overlap_counts = opponent_pool_state["bucket_overlap_counts"]
+        overlap_text = (
+            ", ".join(
+                f"{pair} {count}" for pair, count in overlap_counts.items()
+            )
+            if overlap_counts
+            else "n/a"
+        )
         print(
             f"  Opponent pool: memberships {membership_text} | "
             f"{opponent_pool_state['unique_neural_opponent_count']} unique "
-            "neural policies | recent/medium_term overlap "
-            f"{opponent_pool_state['recent_medium_term_overlap_count']}"
+            f"neural policies | overlaps {overlap_text}"
         )
+        historical = opponent_pool_state["buckets"].get("historical_uniform")
+        diagnostics = (
+            None if historical is None else historical["selection_diagnostics"]
+        )
+        if diagnostics and diagnostics["ideal_gap_games"] is not None:
+            print(
+                "  Historical band: "
+                f"{diagnostics['selected_count']} of "
+                f"{diagnostics['eligible_record_count']} archive candidates | "
+                f"ideal gap {diagnostics['ideal_gap_games']:.0f} games | "
+                f"actual gap {diagnostics['minimum_gap_games']}-"
+                f"{diagnostics['maximum_gap_games']} | target error "
+                f"{diagnostics['mean_absolute_target_error_games']:.0f} mean/"
+                f"{diagnostics['maximum_absolute_target_error_games']:.0f} max"
+                + (
+                    " | archive thinned in region"
+                    if diagnostics["archive_thinned_in_region"]
+                    else ""
+                )
+            )
         value_predictions = (
             None if gradient_metrics is None else
             gradient_metrics.get("value_predictions_before_update")

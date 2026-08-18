@@ -23,10 +23,18 @@ from training.rl.config import (
     RLTrainingOptions,
     resolve_training_options,
 )
-from training.rl.iteration import IterationContext, IterationState
+from training.rl.iteration import (
+    IterationContext,
+    IterationState,
+    refresh_archive_backed_buckets,
+)
 from training.rl.parallel import RLRolloutRunner
 from training.rl.matchmaking import matchmaking_policy_manifest
-from training.rl.pool import pool_policy_manifest, unique_neural_capacity
+from training.rl.pool import (
+    BUCKET_SPECIFICATIONS,
+    pool_policy_manifest,
+    unique_neural_capacity,
+)
 from training.rl.reporting import (
     RLRuntimeProfile,
     RLTrainingReporter,
@@ -466,18 +474,39 @@ def prepare_training_session(training=None, resources=None, execution=None):
             )
     checkpoint_archive = CheckpointArchive(resources.artifact_directory)
     checkpoint_archive.reconcile(inputs.start_iteration)
-    medium_term_checkpoint_ids = (
-        runner.opponent_pool.checkpoint_ids_for_bucket("medium_term")
-    )
+    archive_backed = runner.opponent_pool.archive_backed_bucket_names()
     if inputs.pool_state is None:
+        # The baseline is archived immediately but joins no delayed band until
+        # the age boundary reaches it.
         checkpoint_archive.consider_snapshot(
             network,
             runner.opponent_pool.initial_snapshot_record,
             iteration=0,
             completed_games=0,
-            pinned=bool(medium_term_checkpoint_ids),
+            pinned=bool(archive_backed),
         )
-    checkpoint_archive.set_pinned_checkpoint_ids(medium_term_checkpoint_ids)
+    # Fresh and resumed runs both enter the first match plan with the bands
+    # the archive actually justifies at the restored absolute iteration.
+    refresh_archive_backed_buckets(
+        runner.opponent_pool,
+        checkpoint_archive,
+        completed_iteration=inputs.start_iteration,
+    )
+    if archive_backed:
+        reporter.status(
+            "Archive-backed opponent bands at iteration "
+            f"{inputs.start_iteration}: "
+            + ", ".join(
+                f"{name} {len(runner.opponent_pool.bucket_members(name))}"
+                f"/{BUCKET_SPECIFICATIONS[name].capacity}"
+                for name in archive_backed
+            )
+            + " | pinned archive files "
+            + str(sum(
+                bool(record.pinned)
+                for record in checkpoint_archive.retained_records()
+            ))
+        )
     actual_workers, was_capped, cap_reason = runner.set_workers(selected_workers)
     if was_capped:
         reporter.worker_cap(selected_workers, actual_workers, cap_reason)

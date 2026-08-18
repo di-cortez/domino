@@ -135,8 +135,8 @@ def add_optional_rl_arguments(
         default=DEFAULT_OPPONENT_BUCKETS,
         metavar="NAMES",
         help=(
-            "Comma-separated opponent buckets: heuristic, random, recent, and "
-            "medium_term. Input order is canonicalized."
+            "Comma-separated opponent buckets: heuristic, random, recent, "
+            "medium_term, and historical_uniform. Input order is canonicalized."
         ),
     )
     group.add_argument(

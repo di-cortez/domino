@@ -428,3 +428,82 @@ class CheckpointArchive:
             if record.checkpoint_id == checkpoint_id:
                 return record
         return None
+
+    def retained_records(self):
+        """Return an immutable deterministically ordered manifest view.
+
+        Band selection reads this instead of the mutable list so a later
+        thinning pass cannot change a membership decision already computed.
+        """
+        return tuple(sorted(
+            self.records,
+            key=lambda record: (record.completed_iteration, record.checkpoint_id),
+        ))
+
+    def load_weights(self, checkpoint_id):
+        """Return validated host copies of one retained archived policy.
+
+        The archive is the only path that rehydrates a long-horizon opponent,
+        so every recorded property is re-verified before the weights are
+        allowed to reach the shared bank. Bank slots stay out of this API: a
+        reusable storage address is not part of an archived identity.
+        """
+        record = self.lookup(checkpoint_id)
+        if record is None:
+            raise KeyError(
+                f"Checkpoint {checkpoint_id!r} is not retained in the archive"
+            )
+        path = self.directory / record.filename
+        if not path.is_file():
+            raise ValueError(f"Checkpoint archive file is missing: {path}")
+        if path.stat().st_size != record.file_size:
+            raise ValueError(f"Checkpoint archive file size changed: {path}")
+        if _file_sha256(path) != record.sha256:
+            raise ValueError(f"Checkpoint archive file hash changed: {path}")
+        weights = {}
+        with np.load(path, allow_pickle=False) as stored:
+            if sorted(stored.files) != sorted(record.weight_names):
+                raise ValueError(
+                    "Checkpoint archive weight names do not match the "
+                    f"manifest: {path}"
+                )
+            for name, shape in zip(record.weight_names, record.weight_shapes):
+                # Decompressing one member already yields an independent host
+                # array, so the caller owns it without a second copy.
+                value = stored[name]
+                if value.shape != tuple(shape):
+                    raise ValueError(
+                        f"Checkpoint archive weight {name!r} has shape "
+                        f"{value.shape}, expected {tuple(shape)}: {path}"
+                    )
+                weights[name] = value
+        return weights
+
+    def projected_pin_capacity(self, pinned_checkpoint_count):
+        """Report whether a future pin set can fit inside the byte limit.
+
+        Thinning can never delete an active member, so an oversized pin set
+        must be visible before it becomes an unsatisfiable byte limit.
+        """
+        pinned_checkpoint_count = int(pinned_checkpoint_count)
+        representative_bytes = (
+            max(record.file_size for record in self.records)
+            if self.records
+            else None
+        )
+        projected_bytes = (
+            None
+            if representative_bytes is None
+            else representative_bytes * pinned_checkpoint_count
+        )
+        return {
+            "pinned_checkpoint_count": pinned_checkpoint_count,
+            "representative_file_bytes": representative_bytes,
+            "projected_pinned_bytes": projected_bytes,
+            "maximum_bytes": self.maximum_bytes,
+            "fits_within_limit": (
+                None
+                if projected_bytes is None
+                else projected_bytes <= self.maximum_bytes
+            ),
+        }

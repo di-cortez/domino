@@ -5,7 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from unittest import mock
 
@@ -35,11 +35,57 @@ from training.rl.resume import (
     numbered_checkpoint_path,
     resume_state_path,
 )
+from training.rl.pool import K_RECENT, MEDIUM_TERM_INTERVAL_ITERATIONS
+from training.rl.reporting import read_training_metrics
 from training.rl.rollout import REWARD_SCHEMAS
 from training.rl.cli import parse_args as parse_rl_args
 from training.rl.training_loop import train
 from train_script.run_pipeline import parse_args as parse_pipeline_args
 from utils.resource_limits import MemorySafetyError
+
+
+@dataclass(frozen=True)
+class _ArchivedIdentity:
+    """Archive metadata a test needs for archive-backed band selection."""
+
+    checkpoint_id: str
+    opponent_id: str
+    completed_iteration: int
+    completed_rl_games: int
+
+
+def _fill_delayed_band(pool, network):
+    """Age one pool past the recent band so ``medium_term`` has real members."""
+    archived = []
+    baseline = pool.initial_snapshot_record
+    archived.append((baseline.checkpoint_id, baseline.opponent_id, 0, 0))
+
+    def _load_weights(_checkpoint_id):
+        return {
+            name: np.asarray(getattr(network, name)).copy()
+            for name in network.weight_names
+        }
+
+    last = K_RECENT + MEDIUM_TERM_INTERVAL_ITERATIONS
+    for iteration in range(1, last + 1):
+        record = pool.consider_updated_policy(
+            network,
+            iteration=iteration,
+            completed_games=iteration * 100,
+            has_samples=True,
+        )
+        if record is not None and not iteration % MEDIUM_TERM_INTERVAL_ITERATIONS:
+            archived.append((
+                record.checkpoint_id,
+                record.opponent_id,
+                iteration,
+                iteration * 100,
+            ))
+    pool.reconcile_archive_backed_buckets(
+        [_ArchivedIdentity(*value) for value in archived],
+        completed_iteration=last,
+        load_weights=_load_weights,
+    )
 
 
 def _rollout_fingerprint(results):
@@ -119,6 +165,7 @@ class ParallelRLTests(unittest.TestCase):
         game_count=10,
         seed=1234,
         opponent_buckets=("heuristic", "recent"),
+        prepare=None,
     ):
         network = self._network()
         runner = RLRolloutRunner(
@@ -129,6 +176,8 @@ class ParallelRLTests(unittest.TestCase):
             safety=self.safety,
         )
         try:
+            if prepare is not None:
+                prepare(runner.opponent_pool, network)
             runner.set_workers(workers)
             runner.sync_current(network)
             plan = build_match_plan(
@@ -205,6 +254,29 @@ class ParallelRLTests(unittest.TestCase):
             1,
             game_count=18,
             opponent_buckets=buckets,
+            prepare=_fill_delayed_band,
+        )
+        two_workers, _two_info = self._collect(
+            2,
+            game_count=18,
+            opponent_buckets=buckets,
+            prepare=_fill_delayed_band,
+        )
+        self.assertEqual(
+            _rollout_fingerprint(one_worker),
+            _rollout_fingerprint(two_workers),
+        )
+        self.assertEqual(
+            {row["bucket_name"] for row in one_worker},
+            set(buckets),
+        )
+
+    def test_warm_up_rollouts_are_invariant_with_an_empty_delayed_band(self):
+        buckets = ("heuristic", "recent", "medium_term")
+        one_worker, _one_info = self._collect(
+            1,
+            game_count=18,
+            opponent_buckets=buckets,
         )
         two_workers, _two_info = self._collect(
             2,
@@ -217,7 +289,7 @@ class ParallelRLTests(unittest.TestCase):
         )
         self.assertEqual(
             {row["bucket_name"] for row in one_worker},
-            set(buckets),
+            {"heuristic", "recent"},
         )
 
     def test_random_only_training_reports_one_slotless_opponent(self):
@@ -239,6 +311,38 @@ class ParallelRLTests(unittest.TestCase):
         self.assertEqual(summary["opponent_count"], 1)
         self.assertEqual(summary["unique_neural_opponent_count"], 0)
         self.assertEqual(summary["opponent_bucket_sizes"], {"random": 1})
+
+    def test_warm_up_training_keeps_zero_rows_for_an_empty_bucket(self):
+        buckets = ("heuristic", "recent", "historical_uniform")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            weights_path = Path(temp_dir) / "warm-up.npz"
+            summary = self._train(
+                iterations=2,
+                gpi=6,
+                opponent_buckets=buckets,
+                difficulty_weight=0.5,
+                checkpoint_interval=100,
+                log_interval=1,
+                seed=2026,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                rl_weights_path=str(weights_path),
+                quiet=False,
+                ppo_max_epochs=1,
+            )
+            metrics_path = weights_path.with_name(
+                f"{weights_path.stem}_training_metrics.jsonl"
+            )
+            header, rows = read_training_metrics(metrics_path)
+        self.assertEqual(summary["opponent_bucket_sizes"]["historical_uniform"], 0)
+        self.assertEqual(header["bucket_results"]["bucket_order"], list(buckets))
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            bucket_results = row["bucket_results"]
+            self.assertEqual(len(bucket_results), len(buckets))
+            self.assertEqual(bucket_results[-1], [0, 0, 0])
+            self.assertEqual(sum(result[0] for result in bucket_results), 6)
 
     def test_seeded_training_checkpoints_are_bit_identical(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -387,7 +491,126 @@ class ParallelRLTests(unittest.TestCase):
         self.assertEqual(archived["opponent_id"], admitted["opponent_id"])
         self.assertEqual(archived["checkpoint_id"], admitted["checkpoint_id"])
 
-    def test_medium_term_resume_preserves_cadence_deduplication_and_archive(self):
+    BAND_ITERATIONS = K_RECENT + MEDIUM_TERM_INTERVAL_ITERATIONS
+    BAND_CHECKPOINT_INTERVAL = 105
+
+    def _band_run(self, root, name, **overrides):
+        # Each run owns its artifact directory: the checkpoint archive is
+        # keyed by absolute iteration, so sharing one would let a finished run
+        # collide with a resumed run's descendants.
+        directory = root / name
+        directory.mkdir(exist_ok=True)
+        common = {
+            "iterations": self.BAND_ITERATIONS,
+            "gpi": 1,
+            "opponent_buckets": ("recent", "medium_term"),
+            "difficulty_weight": 0.5,
+            "checkpoint_interval": self.BAND_CHECKPOINT_INTERVAL,
+            "seed": 77,
+            "device": "cpu",
+            "workers": 1,
+            "safety_config": self.safety,
+            "numbered_checkpoints": True,
+            "fresh_from_sl": True,
+            "quiet": True,
+            "ppo_max_epochs": 1,
+        }
+        return self._train(
+            rl_weights_path=str(directory / f"{name}.npz"),
+            **{**common, **overrides},
+        )
+
+    def test_delayed_band_populates_and_pins_during_real_training(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            summary = self._band_run(root, "band")
+            metadata, weights = load_resume_state(
+                summary["rl_weights_path"],
+                summary["resume_state_path"],
+            )
+            archive = json.loads(
+                (root / "band" / "checkpoint_archive" / "manifest.json")
+                .read_text(encoding="utf-8")
+            )
+        pool_state = metadata["opponent_pool_state"]
+        medium_ids = pool_state["buckets"]["medium_term"]["member_ids"]
+        recent_ids = pool_state["buckets"]["recent"]["member_ids"]
+        iterations = {
+            value["opponent_id"]: value["introduced_iteration"]
+            for value in pool_state["opponents"]
+        }
+        completed = int(metadata["completed_iteration"])
+        self.assertTrue(medium_ids)
+        self.assertEqual(set(medium_ids) & set(recent_ids), set())
+        self.assertTrue(all(
+            iterations[value] <= completed - K_RECENT for value in medium_ids
+        ))
+        self.assertLess(
+            max(iterations[value] for value in medium_ids),
+            min(iterations[value] for value in recent_ids),
+        )
+        self.assertEqual(
+            len(weights),
+            len(set(recent_ids) | set(medium_ids)),
+        )
+        # Active band members and every milestone still waiting inside recent
+        # stay pinned, so nothing the band will need can be thinned.
+        pinned = {
+            value["opponent_id"]
+            for value in archive["checkpoints"]
+            if value["pinned"]
+        }
+        self.assertTrue(set(medium_ids) <= pinned)
+        archived_ids = {value["opponent_id"] for value in archive["checkpoints"]}
+        self.assertTrue(archived_ids & set(recent_ids) <= pinned)
+
+    def test_split_resume_across_the_band_boundary_is_bit_identical(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stop = self.BAND_ITERATIONS - self.BAND_CHECKPOINT_INTERVAL
+            full = self._band_run(root, "full")
+            self._band_run(root, "split", stop_after_training_games=stop)
+            partial = numbered_checkpoint_path(root / "split" / "split.npz", stop)
+            resumed = self._band_run(
+                root,
+                "split",
+                fresh_from_sl=False,
+                resume_weights_path=str(partial),
+                resume_state_file=str(resume_state_path(partial)),
+            )
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(
+                    resumed["rl_weights_path"],
+                    allow_pickle=False,
+                ) as right:
+                    self.assertEqual(sorted(left.files), sorted(right.files))
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
+            full_state, _full_weights = load_resume_state(
+                full["rl_weights_path"],
+                full["resume_state_path"],
+            )
+            resumed_state, _resumed_weights = load_resume_state(
+                resumed["rl_weights_path"],
+                resumed["resume_state_path"],
+            )
+        for state in (full_state, resumed_state):
+            self.assertTrue(
+                state["opponent_pool_state"]["buckets"]["medium_term"][
+                    "member_ids"
+                ]
+            )
+        # The refresh straddling the resume is neither skipped nor duplicated.
+        self.assertEqual(
+            full_state["opponent_pool_state"]["buckets"],
+            resumed_state["opponent_pool_state"]["buckets"],
+        )
+        self.assertEqual(
+            full_state["opponent_pool_state"]["lifecycle_counters"],
+            resumed_state["opponent_pool_state"]["lifecycle_counters"],
+        )
+
+    def test_split_resume_preserves_archive_identity_and_an_empty_band(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             full_base = root / "full.npz"
@@ -435,15 +658,16 @@ class ParallelRLTests(unittest.TestCase):
                 resumed["resume_state_path"],
             )
             pool_state = metadata["opponent_pool_state"]
-            medium_ids = pool_state["buckets"]["medium_term"]["member_ids"]
+            # Twelve iterations are far inside the recent band, so the delayed
+            # bucket is genuinely empty while the archive already holds the
+            # milestones that will eventually populate it.
+            self.assertEqual(pool_state["buckets"]["medium_term"]["member_ids"], [])
+            recent_ids = pool_state["buckets"]["recent"]["member_ids"]
+            self.assertEqual(len(weights), len(set(recent_ids)))
             iterations = {
                 value["opponent_id"]: value["introduced_iteration"]
                 for value in pool_state["opponents"]
             }
-            self.assertEqual([iterations[value] for value in medium_ids], [0, 10])
-            recent_ids = pool_state["buckets"]["recent"]["member_ids"]
-            self.assertEqual(set(medium_ids) & set(recent_ids), set(medium_ids))
-            self.assertEqual(len(weights), len(set(recent_ids) | set(medium_ids)))
 
             archive = json.loads(
                 (root / "checkpoint_archive" / "manifest.json").read_text(
@@ -454,7 +678,13 @@ class ParallelRLTests(unittest.TestCase):
                 [value["completed_iteration"] for value in archive["checkpoints"]],
                 [0, 10],
             )
-            self.assertTrue(all(value["pinned"] for value in archive["checkpoints"]))
+            self.assertEqual(
+                {
+                    iterations[value["opponent_id"]]
+                    for value in archive["checkpoints"]
+                },
+                {0, 10},
+            )
             milestone = next(
                 value for value in archive["checkpoints"]
                 if value["completed_iteration"] == 10

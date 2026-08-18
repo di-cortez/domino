@@ -19,7 +19,7 @@ from training.rl.pool import (
 from training.utils.seeding import stable_seed
 
 
-MATCHMAKING_POLICY_VERSION = 2
+MATCHMAKING_POLICY_VERSION = 3
 DIFFICULTY_WIN_RATE_LOWER = 0.375
 DIFFICULTY_WIN_RATE_UPPER = 0.625
 DIFFICULTY_PRIOR_GAMES = 20.0
@@ -45,6 +45,8 @@ def matchmaking_policy_manifest():
         "integer_allocation_tie_breaking": (
             "bucket_registry_order_then_opponent_id"
         ),
+        "component_allocation_scope": "available_buckets_only",
+        "empty_configured_bucket_games": 0,
         "assignment_order": "stable_seeded_shuffle",
     }
 
@@ -214,6 +216,8 @@ class MatchPlan:
     difficulty_weight: float
     uniform_budget: int
     difficulty_budget: int
+    configured_buckets: tuple[str, ...]
+    available_buckets: tuple[str, ...]
     allocations: tuple[MatchAllocation, ...]
     assignments: tuple[GameAssignment, ...]
     plan_sha256: str
@@ -264,6 +268,15 @@ def _largest_remainder(total, keys, weights):
 
 def _component_allocation(opponent_pool, tracker, buckets, budget, difficulty):
     bucket_keys = tuple(buckets)
+    # Only available buckets reach this point, so no weight divides by zero.
+    empty = [
+        bucket for bucket in bucket_keys
+        if not opponent_pool.bucket_members(bucket)
+    ]
+    if empty:
+        raise ValueError(
+            "Component allocation received empty bucket(s): " + ", ".join(empty)
+        )
     if difficulty:
         bucket_weights = {
             bucket: math.fsum(
@@ -278,8 +291,6 @@ def _component_allocation(opponent_pool, tracker, buckets, budget, difficulty):
     result = {}
     for bucket in bucket_keys:
         members = tuple(sorted(opponent_pool.bucket_members(bucket)))
-        if not members:
-            raise ValueError(f"Selected opponent bucket {bucket!r} is empty")
         member_weights = (
             {opponent_id: tracker.difficulty(opponent_id) for opponent_id in members}
             if difficulty
@@ -302,6 +313,8 @@ def _plan_hash_payload(
     difficulty_weight,
     uniform_budget,
     difficulty_budget,
+    configured_buckets,
+    available_buckets,
     allocations,
     assignments,
 ):
@@ -326,6 +339,11 @@ def _plan_hash_payload(
         "difficulty_weight": float(difficulty_weight),
         "uniform_budget": int(uniform_budget),
         "difficulty_budget": int(difficulty_budget),
+        # Availability is part of durable plan identity: a warm-up plan must
+        # never hash identically to the same allocation under a different
+        # availability state.
+        "configured_buckets": list(configured_buckets),
+        "available_buckets": list(available_buckets),
         "allocations": durable_allocations,
         "assignments": durable_assignments,
     }
@@ -362,9 +380,12 @@ def build_match_plan(
     alpha = float(difficulty_weight)
     if not 0.0 <= alpha <= 1.0:
         raise ValueError("difficulty_weight must be between 0 and 1")
-    for bucket in buckets:
-        if not opponent_pool.bucket_members(bucket):
-            raise ValueError(f"Selected opponent bucket {bucket!r} is empty")
+    available = opponent_pool.available_bucket_names()
+    if not available:
+        raise ValueError(
+            "Every configured opponent bucket is empty: "
+            + ", ".join(buckets)
+        )
     performance_tracker.ensure(
         record.opponent_id for record in opponent_pool.active_opponents()
     )
@@ -376,20 +397,20 @@ def build_match_plan(
     uniform = _component_allocation(
         opponent_pool,
         performance_tracker,
-        buckets,
+        available,
         uniform_budget,
         difficulty=False,
     )
     difficult = _component_allocation(
         opponent_pool,
         performance_tracker,
-        buckets,
+        available,
         difficulty_budget,
         difficulty=True,
     )
     allocation_keys = tuple(
         (bucket, opponent_id)
-        for bucket in buckets
+        for bucket in available
         for opponent_id in sorted(opponent_pool.bucket_members(bucket))
     )
     allocations = tuple(
@@ -441,6 +462,8 @@ def build_match_plan(
         difficulty_weight=alpha,
         uniform_budget=uniform_budget,
         difficulty_budget=difficulty_budget,
+        configured_buckets=buckets,
+        available_buckets=available,
         allocations=allocations,
         assignments=assignments,
     )
@@ -451,6 +474,8 @@ def build_match_plan(
         difficulty_weight=alpha,
         uniform_budget=uniform_budget,
         difficulty_budget=difficulty_budget,
+        configured_buckets=buckets,
+        available_buckets=available,
         allocations=allocations,
         assignments=assignments,
         plan_sha256=_sha256(payload),
@@ -467,6 +492,12 @@ def validate_match_plan(plan, opponent_pool):
         raise ValueError("Match plan allocations do not sum to game_count")
     if plan.uniform_budget + plan.difficulty_budget != plan.game_count:
         raise ValueError("Match plan component budgets do not sum to game_count")
+    if plan.configured_buckets != tuple(opponent_pool.selected_buckets):
+        raise ValueError("Match plan configured buckets changed")
+    if plan.available_buckets != opponent_pool.available_bucket_names():
+        raise ValueError("Match plan availability does not match the pool")
+    if not set(plan.available_buckets) <= set(plan.configured_buckets):
+        raise ValueError("Match plan availability is not a configured subset")
     expected_games = set(range(
         plan.first_absolute_game,
         plan.first_absolute_game + plan.game_count,
@@ -474,9 +505,9 @@ def validate_match_plan(plan, opponent_pool):
     actual_games = {value.game_index for value in plan.assignments}
     if actual_games != expected_games or len(actual_games) != len(plan.assignments):
         raise ValueError("Match plan game IDs are not complete and unique")
-    selected = set(opponent_pool.selected_buckets)
+    available = set(plan.available_buckets)
     for assignment in plan.assignments:
-        if assignment.bucket_name not in selected:
+        if assignment.bucket_name not in available:
             raise ValueError("Match plan references an inactive bucket")
         if assignment.opponent_id not in opponent_pool.bucket_members(
             assignment.bucket_name
@@ -511,13 +542,15 @@ def aggregate_match_results(plan, rollout_results):
         }
         for allocation in plan.allocations
     }
+    # Every configured bucket keeps a row, including the ones still empty
+    # during warm-up. The compact metrics header depends on a fixed shape.
     by_bucket = {
-        allocation.bucket_name: {
+        bucket_name: {
             "games": 0,
             "wins": 0,
             "losses": 0,
         }
-        for allocation in plan.allocations
+        for bucket_name in plan.configured_buckets
     }
     seen = set()
     for result in rollout_results:

@@ -17,10 +17,12 @@ from training.rl.ppo import (
     ppo_is_enabled,
     update_from_samples,
 )
+from training.rl.checkpoint_archive import ARCHIVE_INTERVAL_ITERATIONS
 from training.rl.matchmaking import (
     aggregate_match_results,
     build_match_plan,
 )
+from training.rl.pool import select_medium_term_staging_records
 from training.rl.reporting import (
     build_iteration_metrics_row,
     _merge_parallel_summary,
@@ -85,6 +87,67 @@ class IterationState:
     final_weights_path: Path
     completed_this_invocation: int = 0
     completed_iterations_this_invocation: int = 0
+
+
+def long_horizon_pin_checkpoint_ids(
+    opponent_pool,
+    checkpoint_archive,
+    *,
+    completed_iteration,
+):
+    """Return every archive file the delayed bands need now or imminently.
+
+    Staging milestones are included because nothing else keeps them alive
+    between their archive write and their delayed admission. The union is
+    published only after both band memberships are final, so a checkpoint
+    leaving ``medium_term`` for ``historical_uniform`` is never briefly
+    unpinned.
+    """
+    bucket_names = opponent_pool.archive_backed_bucket_names()
+    if not bucket_names:
+        return ()
+    requested = set()
+    for name in bucket_names:
+        requested.update(opponent_pool.checkpoint_ids_for_bucket(name))
+    retained = checkpoint_archive.retained_records()
+    if "medium_term" in bucket_names:
+        requested.update(
+            record.checkpoint_id
+            for record in select_medium_term_staging_records(
+                retained,
+                completed_iteration=completed_iteration,
+                pending_opponent_ids=opponent_pool.bucket_members("recent")
+                if "recent" in opponent_pool.buckets_by_name
+                else (),
+            )
+        )
+    # Exact resume owns active weights on its own, so a restored member whose
+    # archive file is gone must not block the run from pinning the rest.
+    return tuple(sorted(
+        requested & {record.checkpoint_id for record in retained}
+    ))
+
+
+def refresh_archive_backed_buckets(
+    opponent_pool,
+    checkpoint_archive,
+    *,
+    completed_iteration,
+):
+    """Rebuild both delayed bands and publish the final archive pin union."""
+    summary = opponent_pool.reconcile_archive_backed_buckets(
+        checkpoint_archive.retained_records(),
+        completed_iteration=completed_iteration,
+        load_weights=checkpoint_archive.load_weights,
+    )
+    checkpoint_archive.set_pinned_checkpoint_ids(
+        long_horizon_pin_checkpoint_ids(
+            opponent_pool,
+            checkpoint_archive,
+            completed_iteration=completed_iteration,
+        )
+    )
+    return summary
 
 
 def _value_prediction_summary(values):
@@ -512,48 +575,50 @@ def run_iteration(context, state, iteration):
     state.completed_this_invocation += games
     state.completed_iterations_this_invocation += 1
     section_started = time.perf_counter()
-    admitted_record = context.runner.opponent_pool.consider_updated_policy(
+    opponent_pool = context.runner.opponent_pool
+    admitted_record = opponent_pool.consider_updated_policy(
         context.network,
         iteration=iteration,
         completed_games=state.completed_training_games,
         has_samples=gradient_metrics is not None,
     )
-    active_opponent_ids = tuple(
-        record.opponent_id
-        for record in context.runner.opponent_pool.active_opponents()
-    )
-    context.runner.performance_tracker.ensure(active_opponent_ids)
-    context.runner.performance_tracker.retain_only(active_opponent_ids)
     context.runtime_profile.add(
         "opponent_pool_admission_and_retention",
         time.perf_counter() - section_started,
     )
     section_started = time.perf_counter()
     if admitted_record is not None:
-        medium_term_checkpoint_ids = (
-            context.runner.opponent_pool.checkpoint_ids_for_bucket(
-                "medium_term"
-            )
-        )
-        context.checkpoint_archive.set_pinned_checkpoint_ids(
-            checkpoint_id
-            for checkpoint_id in medium_term_checkpoint_ids
-            if context.checkpoint_archive.lookup(checkpoint_id) is not None
-        )
+        # A fresh milestone is always inside the staging window, so it is
+        # pinned on arrival and the refresh below only widens the union.
         context.checkpoint_archive.consider_snapshot(
             context.network,
             admitted_record,
             iteration=iteration,
             completed_games=state.completed_training_games,
-            pinned=(
-                admitted_record.checkpoint_id in medium_term_checkpoint_ids
-            ),
+            pinned=bool(opponent_pool.archive_backed_bucket_names()),
         )
-        context.checkpoint_archive.set_pinned_checkpoint_ids(
-            medium_term_checkpoint_ids
+    # The age boundary advances even when an iteration produced no trainable
+    # decisions, so the bands refresh on cadence rather than on admission.
+    if iteration % ARCHIVE_INTERVAL_ITERATIONS == 0:
+        refresh_archive_backed_buckets(
+            opponent_pool,
+            context.checkpoint_archive,
+            completed_iteration=iteration,
         )
     context.runtime_profile.add(
         "checkpoint_archive_update",
+        time.perf_counter() - section_started,
+    )
+    section_started = time.perf_counter()
+    # Trackers are reconciled only after the membership transaction, so an
+    # identity moving between buckets keeps its accumulated evidence.
+    active_opponent_ids = tuple(
+        record.opponent_id for record in opponent_pool.active_opponents()
+    )
+    context.runner.performance_tracker.ensure(active_opponent_ids)
+    context.runner.performance_tracker.retain_only(active_opponent_ids)
+    context.runtime_profile.add(
+        "opponent_performance_retention",
         time.perf_counter() - section_started,
     )
     if ppo_metrics is not None and not ppo_metrics.get("insufficient_decisions"):

@@ -160,10 +160,24 @@ optimizes a clipped critic loss. The optional `reinforce_v1` update instead appl
 full-buffer policy-gradient step and skips PPO buffer construction, ratios,
 clipping, KL control, minibatches, and post-update full-buffer evaluation.
 There is no replay buffer or cross-iteration reuse in either mode. Decision
-returns are not rescaled by the number of legal choices. Opponent-pool
-snapshots refresh by cumulative training-game thresholds, and a checksummed
+returns are not rescaled by the number of legal choices. A checksummed
 `.resume.npz` preserves the selected algorithm, policy, optimizer, RNG,
 adaptive selections, counters, and pool.
+
+Opponent buckets are ownership boundaries, not just names. `training/rl/pool.py`
+owns durable identity, bucket definitions, membership, and the physical-bank
+mapping; `training/rl/checkpoint_archive.py` owns the disk-backed files,
+hashes, thinning, and pin state; `training/rl/matchmaking.py` owns deterministic
+integer allocation. The neural buckets cover disjoint chronological regions:
+`recent` holds the latest 200 learner snapshots, `medium_term` the newest 200
+archive milestones already behind that band, and `historical_uniform` up to 200
+uniform representatives of everything older. The two delayed bands are derived
+from archive metadata at every cadence boundary rather than admitted at update
+time, so `iteration.py` publishes the archived milestone first, reconciles both
+memberships as one transaction, then republishes the archive pin union and only
+afterwards reconciles performance trackers. `pool.py` never imports the archive
+class: archive records and a weight-loader callback are passed in, keeping the
+dependency pointing one way.
 
 `training.pipeline` owns canonical orchestration. `small` and `default` are
 ephemeral profiles: they choose a random seed by default, build 10,000- and

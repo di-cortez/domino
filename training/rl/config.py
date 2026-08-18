@@ -8,6 +8,7 @@ from agents.nn import DISABLED_DROPOUT_RATE, DISABLED_WEIGHT_DECAY
 from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConfig
 from training.rl.parallel import DEFAULT_RL_WORKERS
 from training.rl.pool import (
+    BOOTSTRAP_CAPABLE_BUCKETS,
     DEFAULT_OPPONENT_BUCKETS,
     canonicalize_bucket_names,
 )
@@ -179,6 +180,13 @@ def resolve_training_options(training, resources, execution):
     if execution.moving_average_window < 1:
         raise ValueError("moving_average_window must be positive")
     opponent_buckets = canonicalize_bucket_names(training.opponent_buckets)
+    if not set(opponent_buckets) & set(BOOTSTRAP_CAPABLE_BUCKETS):
+        raise ValueError(
+            "opponent_buckets must select at least one bucket that is "
+            "available from the first iteration ("
+            + ", ".join(BOOTSTRAP_CAPABLE_BUCKETS)
+            + "); the archive-backed bands cannot bootstrap their own history"
+        )
     difficulty_weight = float(training.difficulty_weight)
     if not 0.0 <= difficulty_weight <= 1.0:
         raise ValueError("difficulty_weight must be between 0 and 1")

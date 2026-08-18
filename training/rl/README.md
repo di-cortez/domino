@@ -96,21 +96,52 @@ logging, and GPU allocations.
 `random` contains only the uniform `RandomAgent`, likewise consumes no
 policy-bank slot, and is available for explicit experiments without joining
 the default bucket selection.
+The three neural buckets cover disjoint chronological regions, so a policy is
+never played from two bands at once.
+
 `recent` begins with a frozen copy of the initial learner, admits every
 non-empty completed update, and retains the latest 200 snapshots with logical
 FIFO eviction. The current mutable learner is never a bucket member.
-`medium_term` references that same initial snapshot and then one successful
-learner milestone at each absolute multiple of 10 completed RL iterations. It
-retains 200 milestones in oldest-to-newest FIFO order. At GPI 2,000 this is a
-nominal four-million-game horizon (3,980,000 games between the oldest and
-newest members when full). A milestone shared by `recent` and `medium_term`
-has one durable identity, one difficulty tracker, and one physical shared-memory
-weight slot; each bucket keeps only its own membership reference.
+
+`medium_term` is a delayed archive-backed window rather than an immediate
+milestone bucket. At every archive cadence boundary it selects the 200 newest
+archive milestones no newer than `N - 200` completed iterations, in
+oldest-to-newest order. A fresh milestone therefore joins no band on the
+iteration it is produced; it waits until the recent band has moved past it. At
+GPI 2,000 the band is a nominal four-million-game horizon (3,980,000 games
+between its oldest and newest members when full), starting roughly 400,000
+games behind the present.
+
+`historical_uniform` represents everything older than both bands: archive
+records no newer than `N - 2200` completed iterations. When more than 200
+qualify it keeps exactly 200 deterministic representatives spaced uniformly in
+completed-game coordinates, not in record rank, so a thinned era widens its own
+gaps instead of borrowing resolution from a denser one. The oldest and newest
+eligible records are always kept, targets are compared with integer arithmetic,
+and ties resolve toward the older checkpoint. Unlike `medium_term`, its span
+grows with the run, so no fixed-cadence nominal horizon applies to it.
+
+Identities in the delayed bands are rehydrated from the checkpoint archive by
+stable checkpoint ID, with the recorded hash, weight names, and shapes verified
+before the policy reaches the shared bank. Both band memberships are reconciled
+as one transaction: incoming weights are fully validated in ordinary host
+memory before any logical state changes, and a slot is released only once no
+bucket still references its identity. A checkpoint that leaves `medium_term`
+for `historical_uniform` in the same refresh keeps its durable identity, its
+bank slot, and its accumulated difficulty evidence.
+
+The delayed bands are genuinely empty during warm-up, and empty buckets are not
+padded with duplicated recent policies. Matchmaking distinguishes *configured*
+buckets from *available* ones and redistributes the complete GPI budget across
+the available buckets, giving an empty bucket zero games and a `[0, 0, 0]`
+metrics row until the archive makes its band real.
 
 `--opponent-buckets` accepts any non-empty combination of `heuristic`, `random`,
-`recent`, and `medium_term` as a comma-separated selection. Input order is
-canonicalized, while duplicates, unknown names, and an empty selection are
-rejected.
+`recent`, `medium_term`, and `historical_uniform` as a comma-separated
+selection. Input order is canonicalized, while duplicates, unknown names, and an
+empty selection are rejected. At least one bucket that is available from the
+first iteration (`heuristic`, `random`, or `recent`) is required, because the
+archive-backed bands cannot bootstrap their own training history.
 `--difficulty-weight` controls the exact
 convex allocation: `0` is entirely uniform, `0.5` is half uniform and half
 difficulty-based, and `1` is entirely difficulty-based. GPI remains the single
@@ -393,12 +424,24 @@ update at an absolute multiple of ten iterations writes the same admitted
 policy identity to `checkpoint_archive/`. This archive is independent of exact
 resume: it has a 1-GiB internal limit and deterministically thins old history in
 exponentially widening tiers while retaining dense recent coverage, its
-baseline, newest, and any pinned entries. Active `medium_term` identities are
-pinned; FIFO eviction unpins them unless another active member still needs the
-identity. Exact resume restores all active weights from its own state and then
-rebuilds archive pins, so it never depends on a thinned archive file. Resume
-also reconciles away archive descendants newer than the selected exact
-checkpoint.
+baseline, newest, and any pinned entries. The pin set is the union of every
+active `medium_term` and `historical_uniform` member plus the staging
+milestones that have not entered `medium_term` yet — the ones inside the recent
+band width, and any archived identity `recent` still holds after iterations
+that produced no trainable decisions. Without those staging pins a tight byte
+limit could thin a milestone during the exact window between its archive write
+and its delayed admission. Pins are published only after both band memberships
+are final, so a checkpoint moving from `medium_term` to `historical_uniform` is
+never briefly unpinned. Exact resume restores all active weights from its own
+state and then rebuilds archive pins, so it never depends on a thinned archive
+file. Resume also reconciles away archive descendants newer than the selected
+exact checkpoint.
+
+Resume states written before the disjoint bands (versions 10 and 11) are
+rejected rather than reinterpreted. A state that selected the superseded
+overlapping `medium_term` cannot be converted without silently changing what
+its saved memberships mean, and no migration is implemented for the other
+selections either; start a new run.
 
 The RL reward now uses a uniform terminal reward plus temporally decayed local
 draw/pass shaping. For each real decision at turn `d_i`, a later event at turn

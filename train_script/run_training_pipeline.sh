@@ -152,7 +152,7 @@ training.rl.cli):
   --rl-sl-weights-path PATH    Input SL weights used to initialize a fresh RL run (default: $RL_SL_WEIGHTS_PATH)
   --rl-total-training-games N  Exact real-game budget (default: $RL_TOTAL_TRAINING_GAMES)
   --rl-iterations N            Legacy fixed iteration budget; uses self-play's fixed default GPI
-  --rl-opponent-buckets NAMES  Comma-separated buckets: heuristic,random,recent,medium_term (default: $RL_OPPONENT_BUCKETS)
+  --rl-opponent-buckets NAMES  Comma-separated buckets: heuristic,random,recent,medium_term,historical_uniform (default: $RL_OPPONENT_BUCKETS)
   --rl-difficulty-weight F     Uniform/difficulty allocation mixture in [0,1] (default: $RL_DIFFICULTY_WEIGHT)
   --rl-learning-rate F         Learning rate (default: $RL_LEARNING_RATE)
   --rl-entropy-coef F          Entropy bonus coefficient (default: $RL_ENTROPY_COEF)

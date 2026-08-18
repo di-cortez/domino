@@ -1093,6 +1093,50 @@ def test_deep_opponent_pool_survives_a_resume_state_round_trip(tmp_path):
         assert np.array_equal(snapshots[opponent_id][name], value)
 
 
+@pytest.mark.parametrize(
+    ("selected_buckets", "expected"),
+    (
+        (["recent", "medium_term"], "superseded overlapping medium_term"),
+        (["heuristic", "recent"], "no migration is implemented"),
+    ),
+)
+def test_pre_band_resume_states_are_rejected_with_a_specific_reason(
+    tmp_path,
+    selected_buckets,
+    expected,
+):
+    """A pre-band state is never silently reinterpreted as a delayed band."""
+    network = PolicyNetwork(random_seed=5, device="cpu")
+    weights_path = tmp_path / "old.npz"
+    network.save(weights_path)
+    state_path = tmp_path / "old.resume.npz"
+    opponent_id = "snapshot:0000000000"
+    pool_state = {
+        "schema_version": 2,
+        "selected_buckets": selected_buckets,
+        "next_snapshot_id": 1,
+        "opponents": [],
+        "buckets": {},
+        "weight_serialization": [],
+    }
+    _atomic_resume_state_save(
+        state_path,
+        {
+            "version": 11,
+            "weights_sha256": file_sha256(weights_path),
+            "opponent_pool_state": pool_state,
+        },
+        pool_state,
+        {},
+    )
+    with pytest.raises(ValueError) as error:
+        load_resume_state(weights_path, state_path)
+    assert "Unsupported RL resume-state version" in str(error.value)
+    assert expected in str(error.value)
+    assert "new run is required" in str(error.value)
+    assert opponent_id not in str(error.value)
+
+
 def test_canonical_reinforce_resume_matches_uninterrupted_training(tmp_path):
     supervised = _write_test_supervised_checkpoint(tmp_path / "sl.npz")
     supervised_hash = file_sha256(supervised)

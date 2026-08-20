@@ -26,6 +26,8 @@ from training.rl.pool import (
     CHAMPION_FINAL_SURVIVORS,
     CHAMPION_VS_HEURISTIC_BUCKET,
     CHAMPION_VS_HEURISTIC_CAPACITY,
+    CHAMPION_VS_LEARNER_BUCKET,
+    CHAMPION_VS_LEARNER_CAPACITY,
     K_RECENT,
     MEDIUM_TERM_INTERVAL_ITERATIONS,
     OpponentPool,
@@ -36,6 +38,7 @@ from training.rl.pool import (
 # targets the fixed-heuristic bucket, so it gets one short local name rather
 # than the constant repeated inside dozens of assertions.
 HEURISTIC_CHAMPION = CHAMPION_VS_HEURISTIC_BUCKET
+LEARNER_CHAMPION = CHAMPION_VS_LEARNER_BUCKET
 
 
 def _network(seed=1):
@@ -164,6 +167,63 @@ def _champion_members(pool):
     return pool.bucket_members("champion_vs_heuristic")
 
 
+def _learner_pool(bucket_names=("heuristic", "recent", "champion_vs_learner")):
+    return _pool(bucket_names)
+
+
+def _learner_members(pool):
+    return pool.bucket_members(LEARNER_CHAMPION)
+
+
+def _learner_race(pool, ids, difficulty=None):
+    """Commit one learner event, defaulting every incumbent to neutral.
+
+    ``difficulty`` may be a mapping or a callable of opponent ID. The caller
+    supplies it because the pool deliberately does not reach into the
+    performance tracker itself.
+    """
+    members = _learner_members(pool)
+    if difficulty is None:
+        values = {opponent_id: 0.5 for opponent_id in members}
+    elif callable(difficulty):
+        values = {
+            opponent_id: float(difficulty(opponent_id))
+            for opponent_id in members
+        }
+    else:
+        values = {
+            opponent_id: float(difficulty[opponent_id])
+            for opponent_id in members
+        }
+    return pool.apply_champion_vs_learner_result(ids, values)
+
+
+def _new_snapshots(pool, network, count):
+    """Return ``count`` fresh successful-update snapshot IDs."""
+    iteration = pool.last_completed_rl_iteration
+    ids = []
+    for _step in range(count):
+        iteration += 1
+        record = pool.consider_updated_policy(
+            network,
+            iteration=iteration,
+            completed_games=iteration * 2000,
+            has_samples=True,
+        )
+        ids.append(record.opponent_id)
+    return ids
+
+
+def _fill_learner_bucket(pool, network, *, events, difficulty=None):
+    """Run ``events`` synthetic learner races admitting five champions each."""
+    admitted = []
+    for _event in range(events):
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        _learner_race(pool, batch, difficulty)
+        admitted.extend(batch)
+    return admitted
+
+
 def test_only_successful_updates_become_champion_candidates():
     network, bank, pool = _champion_pool()
     try:
@@ -274,7 +334,7 @@ def test_champion_bucket_fills_five_at_a_time_without_eviction():
             assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == event
         assert set(pool.heuristic_champion_win_rates()) == set(_champion_members(pool))
         assert pool.observability()["buckets"]["champion_vs_heuristic"][
-            "score_evictions"
+            "strength_evictions"
         ] == 0
     finally:
         bank.close()
@@ -309,7 +369,7 @@ def test_a_full_champion_bucket_evicts_its_weakest_stored_scores():
         assert set(newcomers) <= members
         assert set(pool.heuristic_champion_win_rates()) == members
         assert pool.observability()["buckets"]["champion_vs_heuristic"][
-            "score_evictions"
+            "strength_evictions"
         ] == 5
     finally:
         bank.close()
@@ -427,10 +487,50 @@ def _drive_champion_events(pool, network, *, iterations, ascending=True):
         )
         if not pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION):
             continue
-        batch = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)[:CHAMPION_FINAL_SURVIVORS]
+        batch = pool.champion_pending_candidate_ids(
+            HEURISTIC_CHAMPION
+        )[:CHAMPION_FINAL_SURVIVORS]
         index = len(events)
         base = 0.1 + index * 0.002 if ascending else 0.9 - index * 0.002
         _race(pool, batch, [base + step * 0.0001 for step in range(len(batch))])
+        events.append(batch)
+    return events
+
+
+def _drive_both_champion_events(pool, network, *, iterations):
+    """Advance training and race both buckets whenever their batches complete.
+
+    Both queues are fed by the same successful updates, so in practice they
+    become ready on the same iteration, exactly as production will see them.
+    """
+    first = pool.last_completed_rl_iteration + 1
+    events = []
+    for iteration in range(first, first + iterations):
+        pool.consider_updated_policy(
+            network,
+            iteration=iteration,
+            completed_games=iteration * 2000,
+            has_samples=True,
+        )
+        ready = [
+            name
+            for name in pool.selected_champion_bucket_names()
+            if pool.champion_candidate_batch_is_ready(name)
+        ]
+        if not ready:
+            continue
+        for name in ready:
+            batch = pool.champion_pending_candidate_ids(
+                name
+            )[:CHAMPION_FINAL_SURVIVORS]
+            if name == HEURISTIC_CHAMPION:
+                index = len(events)
+                _race(pool, batch, [
+                    0.1 + index * 0.002 + step * 0.0001
+                    for step in range(len(batch))
+                ])
+            else:
+                _learner_race(pool, batch)
         events.append(batch)
     return events
 
@@ -918,3 +1018,482 @@ def test_one_identity_in_recent_and_champion_receives_games_through_both():
         ) == game_count
     finally:
         bank.close()
+
+
+# ---------------------------------------------------------------------------
+# champion_vs_learner retention. The bucket admits exactly like the heuristic
+# one; what differs is that a full bucket drops the incumbents the learner
+# currently finds easiest rather than the ones with the weakest old score.
+# ---------------------------------------------------------------------------
+
+
+def test_the_learner_bucket_fills_five_at_a_time_without_eviction():
+    network, bank, pool = _learner_pool()
+    try:
+        for event in range(1, 5):
+            _fill_learner_bucket(pool, network, events=1)
+            assert len(_learner_members(pool)) == 5 * event
+            assert pool.champion_completed_event_count(LEARNER_CHAMPION) == event
+        state = pool.observability(games_per_iteration=2000)
+        counters = state["buckets"][LEARNER_CHAMPION]
+        assert counters["strength_evictions"] == 0
+        assert counters["admissions"] == 20
+        # No durable score map for this bucket, unlike the heuristic one.
+        assert "minimum_heuristic_win_rate" not in counters["champion_state"]
+    finally:
+        bank.close()
+
+
+def test_a_full_learner_bucket_evicts_the_currently_easiest_incumbents():
+    """Not the oldest, not the worst-admitted: the easiest right now."""
+    network, bank, pool = _learner_pool()
+    try:
+        incumbents = _fill_learner_bucket(
+            pool,
+            network,
+            events=CHAMPION_VS_LEARNER_CAPACITY // CHAMPION_FINAL_SURVIVORS,
+        )
+        assert len(_learner_members(pool)) == CHAMPION_VS_LEARNER_CAPACITY == 200
+
+        # Deliberately scattered, so a FIFO or prefix rule cannot pass by luck.
+        easiest = [incumbents[index] for index in (3, 47, 101, 150, 198)]
+        difficulty = {
+            opponent_id: 0.05 if opponent_id in easiest else 0.8
+            for opponent_id in incumbents
+        }
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        commit = _learner_race(pool, batch, difficulty)
+
+        assert set(commit["evicted"]) == set(easiest)
+        assert set(commit["admitted"]) == set(batch)
+        assert commit["membership_count"] == CHAMPION_VS_LEARNER_CAPACITY
+        members = set(_learner_members(pool))
+        assert members & set(easiest) == set()
+        assert set(batch) <= members
+        # The oldest incumbents were not touched simply for being oldest.
+        assert incumbents[0] in members
+        assert incumbents[1] in members
+    finally:
+        bank.close()
+
+
+def test_every_new_learner_champion_is_admitted_however_badly_it_raced():
+    """Guaranteed admission: the race result never gates entry."""
+    network, bank, pool = _learner_pool()
+    try:
+        incumbents = _fill_learner_bucket(
+            pool,
+            network,
+            events=CHAMPION_VS_LEARNER_CAPACITY // CHAMPION_FINAL_SURVIVORS,
+        )
+        # Every incumbent is hard; the newcomers would lose any comparison.
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        commit = _learner_race(
+            pool,
+            batch,
+            {opponent_id: 0.99 for opponent_id in incumbents},
+        )
+        assert set(batch) <= set(_learner_members(pool))
+        assert len(commit["evicted"]) == CHAMPION_FINAL_SURVIVORS
+        # A new champion can never be dropped by the event that admitted it.
+        assert set(commit["evicted"]) & set(batch) == set()
+    finally:
+        bank.close()
+
+
+def test_a_learner_champion_loses_its_place_once_it_becomes_easy():
+    """The central rule: retention follows current evidence, not old glory."""
+    network, bank, pool = _learner_pool()
+    try:
+        incumbents = _fill_learner_bucket(
+            pool,
+            network,
+            events=CHAMPION_VS_LEARNER_CAPACITY // CHAMPION_FINAL_SURVIVORS,
+        )
+        veteran = incumbents[7]
+
+        # First event while the veteran is still hard: it survives.
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        commit = _learner_race(pool, batch, lambda item: (
+            0.95 if item == veteran else 0.1 + 0.001 * incumbents.index(item)
+        ))
+        assert veteran not in commit["evicted"]
+        assert veteran in _learner_members(pool)
+
+        # The learner catches up with it. Nothing about its admission changed.
+        members = _learner_members(pool)
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        commit = _learner_race(pool, batch, lambda item: (
+            0.01 if item == veteran else 0.9 - 0.0001 * members.index(item)
+        ))
+        assert veteran in commit["evicted"]
+        assert veteran not in _learner_members(pool)
+    finally:
+        bank.close()
+
+
+def test_equal_learner_difficulties_evict_the_smaller_opponent_id_first():
+    network, bank, pool = _learner_pool()
+    try:
+        incumbents = _fill_learner_bucket(
+            pool,
+            network,
+            events=CHAMPION_VS_LEARNER_CAPACITY // CHAMPION_FINAL_SURVIVORS,
+        )
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        commit = _learner_race(
+            pool,
+            batch,
+            {opponent_id: 0.5 for opponent_id in incumbents},
+        )
+        # A perfectly flat difficulty map has no statistical winner, so the
+        # tie rule alone decides, and it must be reproducible.
+        assert list(commit["evicted"]) == sorted(incumbents)[
+            :CHAMPION_FINAL_SURVIVORS
+        ]
+    finally:
+        bank.close()
+
+
+def test_the_tracker_supplies_a_decaying_retention_signal():
+    """Old strength must fade rather than protect an incumbent forever."""
+    tracker = OpponentPerformanceTracker()
+    hard, fresh = "snapshot:hard", "snapshot:fresh"
+    tracker.ensure((hard, fresh))
+    # The learner used to lose badly to this opponent.
+    tracker.update((hard, fresh), {hard: {"wins": 0, "losses": 400}})
+    strong = tracker.difficulty(hard)
+    assert strong > 0.9
+
+    # Many iterations pass with no new evidence about it at all.
+    for _iteration in range(400):
+        tracker.update((hard, fresh), {})
+    decayed = tracker.difficulty(hard)
+    assert decayed < strong
+    # It converges toward the neutral prior, not toward its old strength.
+    assert abs(decayed - tracker.difficulty(fresh)) < 0.05
+
+
+def test_a_learner_result_is_rejected_before_it_mutates_anything():
+    network, bank, pool = _learner_pool()
+    try:
+        incumbents = _fill_learner_bucket(pool, network, events=2)
+        before = _learner_members(pool)
+        events_before = pool.champion_completed_event_count(LEARNER_CHAMPION)
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        neutral = {opponent_id: 0.5 for opponent_id in incumbents}
+
+        with pytest.raises(ValueError, match="exactly 5 champions"):
+            pool.apply_champion_vs_learner_result(batch[:4], neutral)
+        with pytest.raises(ValueError, match="repeats an opponent identity"):
+            pool.apply_champion_vs_learner_result(
+                batch[:4] + batch[:1],
+                neutral,
+            )
+        with pytest.raises(KeyError):
+            pool.apply_champion_vs_learner_result(
+                batch[:4] + ["snapshot:9999999999"],
+                neutral,
+            )
+        with pytest.raises(ValueError, match="already an incumbent"):
+            pool.apply_champion_vs_learner_result(
+                batch[:4] + incumbents[:1],
+                neutral,
+            )
+        # The difficulty map has to describe the pre-event incumbents exactly:
+        # a stale or partial map would evict on evidence about someone else.
+        with pytest.raises(ValueError, match="exactly the .*pre-event"):
+            pool.apply_champion_vs_learner_result(
+                batch,
+                dict(list(neutral.items())[:-1]),
+            )
+        with pytest.raises(ValueError, match="exactly the .*pre-event"):
+            pool.apply_champion_vs_learner_result(
+                batch,
+                {**neutral, "snapshot:9999999999": 0.5},
+            )
+        with pytest.raises(ValueError, match="invalid difficulty"):
+            pool.apply_champion_vs_learner_result(
+                batch,
+                {**neutral, incumbents[0]: 1.5},
+            )
+        with pytest.raises(ValueError, match="invalid difficulty"):
+            pool.apply_champion_vs_learner_result(
+                batch,
+                {**neutral, incumbents[0]: float("nan")},
+            )
+
+        assert _learner_members(pool) == before
+        assert pool.champion_completed_event_count(LEARNER_CHAMPION) == (
+            events_before
+        )
+        assert set(batch) <= set(
+            pool.champion_pending_candidate_ids(LEARNER_CHAMPION)
+        )
+    finally:
+        bank.close()
+
+
+def test_a_full_learner_bucket_refuses_generic_fifo_eviction():
+    network, bank, pool = _learner_pool()
+    try:
+        _fill_learner_bucket(
+            pool,
+            network,
+            events=CHAMPION_VS_LEARNER_CAPACITY // CHAMPION_FINAL_SURVIVORS,
+        )
+        extra = _new_snapshots(pool, network, 1)[0]
+        with pytest.raises(RuntimeError, match="retains members by strength"):
+            pool.add_membership(LEARNER_CHAMPION, extra)
+        assert len(_learner_members(pool)) == CHAMPION_VS_LEARNER_CAPACITY
+    finally:
+        bank.close()
+
+
+def test_the_two_champion_buckets_commit_independently():
+    """Committing one event must not disturb the other bucket's state."""
+    buckets = (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    network, bank, pool = _pool(buckets)
+    try:
+        # One shared candidate stream feeds both queues.
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        assert pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == (
+            pool.champion_pending_candidate_ids(LEARNER_CHAMPION)
+        ) == tuple(batch)
+
+        _race(pool, batch, [0.9, 0.8, 0.7, 0.6, 0.5])
+        # Only the heuristic queue and event count moved.
+        assert pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == ()
+        assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 1
+        assert pool.champion_pending_candidate_ids(LEARNER_CHAMPION) == tuple(
+            batch
+        )
+        assert pool.champion_completed_event_count(LEARNER_CHAMPION) == 0
+
+        scores = pool.heuristic_champion_win_rates()
+        _learner_race(pool, batch)
+        assert pool.champion_pending_candidate_ids(LEARNER_CHAMPION) == ()
+        assert pool.champion_completed_event_count(LEARNER_CHAMPION) == 1
+        assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 1
+        # The learner commit stores no score of its own and leaves the
+        # heuristic score map exactly as it found it.
+        assert pool.heuristic_champion_win_rates() == scores
+        assert set(_learner_members(pool)) == set(_champion_members(pool))
+    finally:
+        bank.close()
+
+
+def test_an_identity_in_both_champion_buckets_keeps_one_of_everything():
+    """One record, one slot, one weight set, three memberships."""
+    buckets = (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    network, bank, pool = _pool(buckets)
+    try:
+        events = _drive_both_champion_events(
+            pool,
+            network,
+            iterations=CHAMPION_CANDIDATE_BATCH_SIZE,
+        )
+        shared = events[0]
+        # Both buckets raced the same candidate batch, so the same five
+        # identities are champions of both.
+        assert set(shared) <= set(_champion_members(pool))
+        assert set(shared) <= set(_learner_members(pool))
+        assert set(shared) <= set(pool.bucket_members("recent"))
+        slots = {
+            opponent_id: pool.bank_slot(opponent_id)
+            for opponent_id in shared
+        }
+        assert all(slot is not None for slot in slots.values())
+        assert len(pool.export_weights()) == pool.unique_neural_opponent_count
+
+        overlaps = pool.champion_overlap_counts()
+        assert overlaps["champion_vs_heuristic|champion_vs_learner"] == (
+            CHAMPION_FINAL_SURVIVORS
+        )
+        assert overlaps["champion_vs_heuristic|recent"] == (
+            CHAMPION_FINAL_SURVIVORS
+        )
+        assert overlaps["champion_vs_learner|recent"] == (
+            CHAMPION_FINAL_SURVIVORS
+        )
+        # A deliberate champion overlap is not a disjointness violation.
+        assert sum(pool.forbidden_historical_overlap_counts().values()) == 0
+
+        # Ordinary FIFO retention eventually pushes them out of recent. The two
+        # champion memberships alone keep identity, slot, and weights alive.
+        _drive_both_champion_events(pool, network, iterations=K_RECENT + 10)
+        assert not set(shared) & set(pool.bucket_members("recent"))
+        assert set(shared) <= set(_champion_members(pool))
+        assert set(shared) <= set(_learner_members(pool))
+        for opponent_id in shared:
+            assert pool.bank_slot(opponent_id) == slots[opponent_id]
+            assert pool.opponent(opponent_id).kind == "policy_snapshot"
+    finally:
+        bank.close()
+
+
+def test_the_first_of_two_events_commits_while_the_other_batch_is_full():
+    """Both queues complete on the same update; the events commit in sequence.
+
+    Between the two commits the second bucket legitimately still holds a
+    complete batch. Treating "no complete pending batch" as an invariant of
+    every committed state instead of one of durable state made the first event
+    of every double-event iteration fail.
+    """
+    buckets = (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    network, bank, pool = _pool(buckets)
+    try:
+        _new_snapshots(pool, network, CHAMPION_CANDIDATE_BATCH_SIZE)
+        for name in pool.selected_champion_bucket_names():
+            assert pool.champion_candidate_batch_is_ready(name)
+
+        batch = pool.champion_pending_candidate_ids(
+            HEURISTIC_CHAMPION
+        )[:CHAMPION_FINAL_SURVIVORS]
+        # Commits the heuristic event while the learner queue still holds 50.
+        _race(pool, batch, [0.9, 0.8, 0.7, 0.6, 0.5])
+        assert pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == ()
+        assert len(pool.champion_pending_candidate_ids(LEARNER_CHAMPION)) == (
+            CHAMPION_CANDIDATE_BATCH_SIZE
+        )
+
+        learner_batch = pool.champion_pending_candidate_ids(
+            LEARNER_CHAMPION
+        )[:CHAMPION_FINAL_SURVIVORS]
+        _learner_race(pool, learner_batch)
+        for name in pool.selected_champion_bucket_names():
+            assert pool.champion_pending_candidate_ids(name) == ()
+            assert pool.champion_completed_event_count(name) == 1
+
+        # Only now is the state durable, and only now must both batches be
+        # consumed. A checkpoint taken here restores cleanly.
+        state = pool.export_state()
+        weights = pool.export_weights()
+    finally:
+        bank.close()
+
+    restored_bank = SharedPolicyBank(network, unique_neural_capacity(buckets))
+    try:
+        restored = OpponentPool(restored_bank, selected_buckets=buckets)
+        restored.restore_state(state, weights)
+        for name in restored.selected_champion_bucket_names():
+            assert restored.champion_completed_event_count(name) == 1
+    finally:
+        restored_bank.close()
+
+
+def test_a_learner_eviction_does_not_disturb_the_heuristic_bucket():
+    """Each bucket evicts only from its own membership and its own state."""
+    buckets = (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    network, bank, pool = _pool(buckets)
+    try:
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        _race(pool, batch, [0.9, 0.8, 0.7, 0.6, 0.5])
+        _learner_race(pool, batch)
+        scores_before = pool.heuristic_champion_win_rates()
+
+        # Force the learner bucket to full so its next event must evict, while
+        # the heuristic bucket stays far from its own capacity.
+        while len(_learner_members(pool)) < CHAMPION_VS_LEARNER_CAPACITY:
+            extra = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+            _learner_race(pool, extra)
+            if pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION):
+                ready = pool.champion_pending_candidate_ids(
+                    HEURISTIC_CHAMPION
+                )[:CHAMPION_FINAL_SURVIVORS]
+                _race(pool, ready, [0.99, 0.98, 0.97, 0.96, 0.95])
+                scores_before = pool.heuristic_champion_win_rates()
+
+        victims = set(_learner_members(pool)) & set(batch)
+        assert victims, "the shared identities must still be learner champions"
+        newcomers = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        commit = _learner_race(pool, newcomers, lambda item: (
+            0.0 if item in victims else 0.9
+        ))
+
+        evicted = set(commit["evicted"])
+        assert evicted <= victims
+        # Gone from the learner bucket, untouched everywhere else: the
+        # identity, its slot, and its heuristic score all survive.
+        assert not evicted & set(_learner_members(pool))
+        assert evicted <= set(_champion_members(pool))
+        for opponent_id in evicted:
+            assert pool.bank_slot(opponent_id) is not None
+            assert opponent_id in pool.heuristic_champion_win_rates()
+        assert pool.heuristic_champion_win_rates() == scores_before
+        assert commit["evicted_difficulties"] == {
+            opponent_id: 0.0 for opponent_id in commit["evicted"]
+        }
+    finally:
+        bank.close()
+
+
+def test_learner_champion_state_survives_export_and_restore():
+    buckets = (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    network, bank, pool = _pool(buckets)
+    try:
+        batch = _new_snapshots(pool, network, CHAMPION_FINAL_SURVIVORS)
+        _learner_race(pool, batch)
+        # Heuristic queue keeps its partial batch; the learner one was consumed
+        # and has started collecting again.
+        _new_snapshots(pool, network, 3)
+        state = pool.export_state()
+        weights = pool.export_weights()
+        expected_members = _learner_members(pool)
+        expected_heuristic_pending = pool.champion_pending_candidate_ids(
+            HEURISTIC_CHAMPION
+        )
+        expected_learner_pending = pool.champion_pending_candidate_ids(
+            LEARNER_CHAMPION
+        )
+        assert expected_heuristic_pending != expected_learner_pending
+    finally:
+        bank.close()
+
+    restored_bank = SharedPolicyBank(network, unique_neural_capacity(buckets))
+    try:
+        restored = OpponentPool(restored_bank, selected_buckets=buckets)
+        restored.restore_state(state, weights)
+        assert restored.bucket_members(LEARNER_CHAMPION) == expected_members
+        assert restored.champion_completed_event_count(LEARNER_CHAMPION) == 1
+        assert restored.champion_completed_event_count(HEURISTIC_CHAMPION) == 0
+        assert restored.champion_pending_candidate_ids(
+            HEURISTIC_CHAMPION
+        ) == expected_heuristic_pending
+        assert restored.champion_pending_candidate_ids(
+            LEARNER_CHAMPION
+        ) == expected_learner_pending
+        # No durable learner score exists to restore, by design.
+        assert restored.export_state()["champion_state_by_bucket"][
+            LEARNER_CHAMPION
+        ] == {
+            "pending_candidate_ids": list(expected_learner_pending),
+            "completed_event_count": 1,
+        }
+    finally:
+        restored_bank.close()

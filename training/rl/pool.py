@@ -685,7 +685,7 @@ class OpponentPool:
         self._eviction_counts = {name: 0 for name in self.selected_buckets}
         self._band_removal_counts = {name: 0 for name in self.selected_buckets}
         self._band_rebalance_counts = {name: 0 for name in self.selected_buckets}
-        self._score_eviction_counts = {name: 0 for name in self.selected_buckets}
+        self._strength_eviction_counts = {name: 0 for name in self.selected_buckets}
         self._historical_diagnostics = None
         # Champion state is durable and lives here rather than in matchmaking:
         # a heuristic win rate is a selection score, never difficulty evidence.
@@ -1079,6 +1079,24 @@ class OpponentPool:
                 + ", ".join(sorted(missing))
             )
 
+    def _required_champion_evictions(self, bucket_name, incoming):
+        """Return how many incumbents a guaranteed admission must displace.
+
+        Raises rather than truncating when the bucket could not hold the
+        winners even after evicting every incumbent. That is unreachable at the
+        production capacity of 200, but a silent truncation would leave a bucket
+        over capacity, and the failure would surface far from its cause.
+        """
+        bucket = self.buckets_by_name[bucket_name]
+        capacity = int(bucket.capacity)
+        required = max(0, len(bucket.member_ids) + len(incoming) - capacity)
+        if required > len(bucket.member_ids):
+            raise ValueError(
+                f"Bucket {bucket_name!r} has capacity {capacity} and cannot "
+                f"admit {len(incoming)} guaranteed champions"
+            )
+        return required
+
     def apply_champion_vs_heuristic_result(self, champion_ids, final_win_rates):
         """Admit every racing winner and evict only the weakest incumbents.
 
@@ -1100,11 +1118,7 @@ class OpponentPool:
         self._validate_heuristic_champion_scores(incoming, final_win_rates)
 
         bucket = self.buckets_by_name[name]
-        capacity = bucket.capacity
-        required_evictions = max(
-            0,
-            len(bucket.member_ids) + len(incoming) - int(capacity),
-        )
+        required_evictions = self._required_champion_evictions(name, incoming)
         outgoing = tuple(sorted(
             bucket.member_ids,
             key=lambda item: (
@@ -1116,7 +1130,7 @@ class OpponentPool:
         for opponent_id in outgoing:
             bucket.member_ids.remove(opponent_id)
             self._heuristic_win_rate_by_opponent_id.pop(opponent_id, None)
-            self._score_eviction_counts[name] += 1
+            self._strength_eviction_counts[name] += 1
             # An evicted champion that still belongs to any band keeps its
             # record, slot, and difficulty evidence.
             self._remove_if_unreferenced(opponent_id)
@@ -1142,6 +1156,100 @@ class OpponentPool:
             "admitted_win_rates": {
                 opponent_id: final_win_rates[opponent_id]
                 for opponent_id in incoming
+            },
+        }
+
+    def _validate_learner_champion_difficulties(self, difficulties):
+        """Raise unless the caller measured exactly the pre-event incumbents.
+
+        The difficulty values come from the orchestration layer rather than from
+        here: the pool must not import ``matchmaking`` to reach the performance
+        tracker, which would invert ownership. What the pool can still enforce
+        is that the caller measured the right set at the right moment -- a map
+        built after some other bucket already mutated membership would silently
+        evict by stale evidence.
+        """
+        members = self.buckets_by_name[CHAMPION_VS_LEARNER_BUCKET].member_ids
+        if set(difficulties) != set(members):
+            raise ValueError(
+                "Learner champion difficulties must cover exactly the "
+                "pre-event incumbents"
+            )
+        for opponent_id, difficulty in difficulties.items():
+            value = float(difficulty)
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"Learner champion {opponent_id!r} has an invalid "
+                    f"difficulty {difficulty!r}; expected a finite value in "
+                    "[0, 1]"
+                )
+
+    def apply_champion_vs_learner_result(
+        self,
+        champion_ids,
+        incumbent_difficulties,
+    ):
+        """Admit every racing winner and evict the currently easiest incumbents.
+
+        The five winners are admitted unconditionally, exactly as for the
+        heuristic bucket. What differs is which incumbents leave. A candidate's
+        win rate against the learner it raced is not comparable with one
+        measured against a later learner, so it is never stored and never used
+        here. Retention instead reads the current decayed difficulty of each
+        incumbent, supplied by the caller, and drops the ones the learner
+        presently finds easiest.
+
+        A champion admitted with a poor race score is therefore safe until the
+        next event, and an old champion that was admitted brilliantly is not
+        protected once the learner has caught up with it.
+        """
+        incoming = tuple(champion_ids)
+        difficulties = {
+            opponent_id: float(value)
+            for opponent_id, value in dict(incumbent_difficulties).items()
+        }
+        # Validate everything before the first mutation: a partially applied
+        # event would leave the queue consumed without durable champions.
+        name = CHAMPION_VS_LEARNER_BUCKET
+        self._validate_champion_admission(name, incoming)
+        self._validate_learner_champion_difficulties(difficulties)
+
+        bucket = self.buckets_by_name[name]
+        required_evictions = self._required_champion_evictions(name, incoming)
+        # Lowest current difficulty leaves first: difficulty runs opposite to
+        # the learner's estimated win rate, so this drops the incumbents the
+        # learner beats most easily. Ties resolve by ID so a fixed-seed run is
+        # reproducible.
+        outgoing = tuple(sorted(
+            bucket.member_ids,
+            key=lambda item: (difficulties[item], item),
+        )[:required_evictions])
+
+        for opponent_id in outgoing:
+            bucket.member_ids.remove(opponent_id)
+            self._strength_eviction_counts[name] += 1
+            # An evicted champion that still belongs to any other bucket --
+            # including the heuristic champion bucket -- keeps its record,
+            # slot, weights, and accumulated difficulty evidence.
+            self._remove_if_unreferenced(opponent_id)
+        for opponent_id in incoming:
+            bucket.member_ids.append(opponent_id)
+            self._admission_counts[name] += 1
+        # Consuming the batch belongs to the same commit as the admission, and
+        # only this bucket's queue is consumed.
+        self._champion_pending_candidate_ids[name] = []
+        self._champion_completed_event_counts[name] += 1
+        self._validate_champion_invariants()
+        return {
+            "event_index": self._champion_completed_event_counts[name],
+            "admitted": tuple(incoming),
+            "evicted": outgoing,
+            "membership_count": len(bucket.member_ids),
+            # Reported so an operator can see which incumbents were judged
+            # easiest, never stored: the values move with the learner.
+            "evicted_difficulties": {
+                opponent_id: difficulties[opponent_id]
+                for opponent_id in outgoing
             },
         }
 
@@ -1179,11 +1287,6 @@ class OpponentPool:
                     "Champion scores do not describe the current membership"
                 )
             pending = self._champion_pending_candidate_ids[bucket_name]
-            if len(pending) >= CHAMPION_CANDIDATE_BATCH_SIZE:
-                raise ValueError(
-                    f"A committed {bucket_name} state cannot hold a complete "
-                    "pending candidate batch"
-                )
             if len(set(pending)) != len(pending):
                 raise ValueError(
                     f"{bucket_name} pending candidates repeat an identity"
@@ -1195,6 +1298,30 @@ class OpponentPool:
                 raise ValueError(
                     f"{bucket_name} pending candidates are not active: "
                     + ", ".join(sorted(missing))
+                )
+
+    def _validate_champion_batches_consumed(self):
+        """Raise if any champion bucket still holds a complete pending batch.
+
+        Deliberately not part of :meth:`_validate_champion_invariants`. When
+        both champion buckets are selected their queues complete on the same
+        successful update, and the iteration then commits their events one after
+        another; between the two commits the second bucket legitimately still
+        holds a full batch. Asserting this per commit would make the first event
+        of every double-event iteration fail.
+
+        It is a property of *durable* state instead. Every ready event runs
+        before the iteration checkpoints, so a restored state that still carries
+        a complete batch describes an event that was consumed without being
+        committed, and replaying from it would race the same 50 candidates
+        twice.
+        """
+        for bucket_name in self._champion_bucket_names:
+            pending = self._champion_pending_candidate_ids[bucket_name]
+            if len(pending) >= CHAMPION_CANDIDATE_BATCH_SIZE:
+                raise ValueError(
+                    f"A committed {bucket_name} state cannot hold a complete "
+                    "pending candidate batch"
                 )
 
     def archive_backed_bucket_names(self):
@@ -1525,7 +1652,7 @@ class OpponentPool:
                 "fifo_evictions": self._eviction_counts[name],
                 "band_removals": self._band_removal_counts[name],
                 "band_rebalances": self._band_rebalance_counts[name],
-                "score_evictions": self._score_eviction_counts[name],
+                "strength_evictions": self._strength_eviction_counts[name],
                 "band_cutoff_iteration": self._band_cutoff_iteration(name),
                 "oldest_age_iterations": (
                     None
@@ -1628,11 +1755,21 @@ class OpponentPool:
         A champion that is also a recent or archive-backed member is not
         duplicated storage: it is one identity given extra matchmaking weight
         through a second membership.
+
+        The champion-to-champion pair is reported alongside them and is not a
+        violation either. It is the useful statistic of the pair: a snapshot in
+        both buckets is simultaneously strong against the fixed heuristic and
+        hard for the evolving learner.
         """
-        return self._pairwise_overlap_counts(
+        counts = self._pairwise_overlap_counts(
             CHAMPION_BUCKET_NAMES,
             HISTORICAL_BAND_BUCKET_NAMES,
         )
+        counts.update(self._pairwise_overlap_counts(
+            CHAMPION_BUCKET_NAMES,
+            CHAMPION_BUCKET_NAMES,
+        ))
+        return counts
 
     def export_weights(self):
         """Return one copied weight set per unique active neural opponent."""
@@ -1657,7 +1794,7 @@ class OpponentPool:
                 "fifo_evictions": dict(self._eviction_counts),
                 "band_removals": dict(self._band_removal_counts),
                 "band_rebalances": dict(self._band_rebalance_counts),
-                "score_evictions": dict(self._score_eviction_counts),
+                "strength_evictions": dict(self._strength_eviction_counts),
             },
             "champion_state_by_bucket": {
                 name: self._export_champion_bucket_state(name)
@@ -1792,7 +1929,10 @@ class OpponentPool:
                     ).items()
                 }
         # The same invariants a committed event guarantees must hold on the way
-        # back in, so a hand-edited or truncated state fails loudly here.
+        # back in, so a hand-edited or truncated state fails loudly here. A
+        # durable state additionally must not carry an unconsumed batch, which
+        # is checked first because it is the more specific diagnosis.
+        self._validate_champion_batches_consumed()
         self._validate_champion_invariants()
         if self._champion_bucket_names and "recent" in self.buckets_by_name:
             recent = set(self.buckets_by_name["recent"].member_ids)
@@ -1815,7 +1955,7 @@ class OpponentPool:
             "fifo_evictions",
             "band_removals",
             "band_rebalances",
-            "score_evictions",
+            "strength_evictions",
         )
         if any(
             set(counters.get(group, {})) != set(self.selected_buckets)
@@ -1827,7 +1967,7 @@ class OpponentPool:
             self._eviction_counts,
             self._band_removal_counts,
             self._band_rebalance_counts,
-            self._score_eviction_counts,
+            self._strength_eviction_counts,
         ) = (
             {name: int(counters[group][name]) for name in self.selected_buckets}
             for group in groups

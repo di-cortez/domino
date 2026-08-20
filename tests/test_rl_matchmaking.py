@@ -16,12 +16,17 @@ from training.rl.config import (
 )
 from training.rl.matchmaking import (
     OpponentPerformanceTracker,
+    UniformRotationState,
     aggregate_match_results,
     build_match_plan,
+    cyclic_remainder_allocation,
     difficulty_from_win_rate,
+    matchmaking_policy_manifest,
 )
 from training.rl.checkpoint_archive import ArchiveRecord
 from training.rl.pool import (
+    BUCKET_SPECIFICATIONS,
+    CHAMPION_VS_HEURISTIC_CAPACITY,
     HEURISTIC_OPPONENT_ID,
     HISTORICAL_MINIMUM_AGE_ITERATIONS,
     HISTORICAL_UNIFORM_CAPACITY,
@@ -33,6 +38,8 @@ from training.rl.pool import (
     POOL_POLICY_VERSION,
     POOL_SCHEMA_VERSION,
     RANDOM_OPPONENT_ID,
+    ARCHIVE_BACKED_BUCKET_NAMES,
+    BOOTSTRAP_CAPABLE_BUCKETS,
     RECENT_BAND_WIDTH_ITERATIONS,
     SharedPolicyBank,
     canonicalize_bucket_names,
@@ -129,6 +136,147 @@ def test_neural_bucket_bands_are_disjoint_by_construction():
     assert unique_neural_capacity(("heuristic", "random")) == 0
 
 
+def test_champion_bucket_is_registered_after_the_historical_bands():
+    assert canonicalize_bucket_names(
+        "champion_vs_heuristic,recent,heuristic"
+    ) == ("heuristic", "recent", "champion_vs_heuristic")
+    specification = BUCKET_SPECIFICATIONS["champion_vs_heuristic"]
+    assert specification.capacity == CHAMPION_VS_HEURISTIC_CAPACITY == 200
+    assert specification.neural
+    assert specification.admission_rule == "top_5_of_50_racing_vs_heuristic"
+    assert specification.retention_rule == (
+        "guaranteed_new_champions_evict_lowest_heuristic_win_rate"
+    )
+    # Its cadence counts successful snapshots, not absolute iterations.
+    assert specification.admission_interval_iterations is None
+    # It starts empty, so it can neither bootstrap a run nor be archive-derived.
+    assert "champion_vs_heuristic" not in BOOTSTRAP_CAPABLE_BUCKETS
+    assert "champion_vs_heuristic" not in ARCHIVE_BACKED_BUCKET_NAMES
+    assert unique_neural_capacity((
+        "heuristic",
+        "recent",
+        "medium_term",
+        "historical_uniform",
+        "champion_vs_heuristic",
+    )) == 800
+
+
+def test_champion_bucket_requires_recent_in_this_version():
+    with pytest.raises(ValueError, match="requires recent"):
+        resolve_training_options(
+            RLTrainingOptions(
+                opponent_buckets=("heuristic", "champion_vs_heuristic"),
+            ),
+            RLResourceOptions(workers=1),
+            RLExecutionOptions(),
+        )
+    resolved = resolve_training_options(
+        RLTrainingOptions(
+            opponent_buckets=("champion_vs_heuristic", "recent", "heuristic"),
+        ),
+        RLResourceOptions(workers=1),
+        RLExecutionOptions(),
+    )
+    assert resolved.training.opponent_buckets == (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+    )
+
+
+def test_champion_only_selection_is_rejected_before_the_recent_rule():
+    # The bootstrap rule fires first because champion alone can never play its
+    # own first iteration either.
+    with pytest.raises(ValueError, match="available from the first iteration"):
+        resolve_training_options(
+            RLTrainingOptions(opponent_buckets=("champion_vs_heuristic",)),
+            RLResourceOptions(workers=1),
+            RLExecutionOptions(),
+        )
+
+
+def test_overlap_reporting_separates_forbidden_pairs_from_champion_pairs():
+    buckets = (
+        "heuristic",
+        "recent",
+        "medium_term",
+        "historical_uniform",
+        "champion_vs_heuristic",
+    )
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        state = pool.observability()
+        assert set(state["forbidden_historical_overlap_counts"]) == {
+            "recent|medium_term",
+            "recent|historical_uniform",
+            "medium_term|historical_uniform",
+        }
+        assert state["total_forbidden_historical_overlap_count"] == 0
+        assert set(state["champion_overlap_counts"]) == {
+            "champion_vs_heuristic|recent",
+            "champion_vs_heuristic|medium_term",
+            "champion_vs_heuristic|historical_uniform",
+        }
+        assert set(state["champion_overlap_counts"].values()) == {0}
+
+        # Champion memberships over live recent identities are legal and are
+        # counted as intentional overlap, never as an invariant failure.
+        champions = pool.bucket_members("recent")[:5]
+        pool.apply_champion_vs_heuristic_result(
+            champions,
+            {opponent_id: 0.6 for opponent_id in champions},
+        )
+        state = pool.observability()
+        assert state["total_forbidden_historical_overlap_count"] == 0
+        assert state["champion_overlap_counts"][
+            "champion_vs_heuristic|recent"
+        ] == 5
+        # One identity, one slot, one record: overlap is not duplication.
+        assert pool.unique_neural_opponent_count == len(
+            pool.bucket_members("recent")
+        )
+    finally:
+        bank.close()
+
+
+def test_an_empty_champion_bucket_is_configured_but_unavailable():
+    buckets = ("heuristic", "recent", "champion_vs_heuristic")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 5)
+        assert pool.bucket_members("champion_vs_heuristic") == ()
+        assert pool.available_bucket_names() == ("heuristic", "recent")
+        plan = _plan(pool, UniformRotationState(buckets), iteration=1)
+        assert plan.configured_buckets == buckets
+        assert plan.available_buckets == ("heuristic", "recent")
+        assert all(
+            value.bucket_name != "champion_vs_heuristic"
+            for value in plan.allocations
+        )
+        # The compact metrics header keeps a fixed shape, so the empty bucket
+        # still reports a zero row.
+        _by_opponent, by_bucket = aggregate_match_results(plan, [
+            {
+                "game_index": assignment.game_index,
+                "bucket_name": assignment.bucket_name,
+                "opponent_id": assignment.opponent_id,
+                "opponent_kind": assignment.opponent_kind,
+                "bank_slot": assignment.bank_slot,
+                "winner": 0,
+                "learner_position": 0,
+            }
+            for assignment in plan.assignments
+        ])
+        assert by_bucket["champion_vs_heuristic"] == {
+            "games": 0,
+            "wins": 0,
+            "losses": 0,
+        }
+    finally:
+        bank.close()
+
+
 def test_pool_policy_manifest_publishes_versioned_band_boundaries():
     manifest = pool_policy_manifest(("recent", "medium_term", "historical_uniform"))
     assert manifest["schema_version"] == POOL_SCHEMA_VERSION
@@ -139,6 +287,7 @@ def test_pool_policy_manifest_publishes_versioned_band_boundaries():
         "recent",
         "medium_term",
         "historical_uniform",
+        "champion_vs_heuristic",
     ]
     assert manifest["band_policy"] == {
         "recent_band_width_iterations": 200,
@@ -498,6 +647,245 @@ def test_historical_diagnostics_report_a_thinned_archive_region():
     assert diagnostics["maximum_absolute_target_error_games"] > 0
 
 
+def _members(count, *, prefix="snapshot", start=0):
+    return tuple(f"{prefix}:{index:010d}" for index in range(start, start + count))
+
+
+def _rotate_once(state, bucket_name, members, budget):
+    counts, next_anchors = state.plan_uniform_allocation(
+        {bucket_name: budget},
+        {bucket_name: members},
+    )
+    state.commit(next_anchors)
+    return {
+        opponent_id: value
+        for (_bucket, opponent_id), value in counts.items()
+    }
+
+
+def _extra_receivers(counts, base):
+    return tuple(
+        opponent_id
+        for opponent_id, value in sorted(counts.items())
+        if value > base
+    )
+
+
+def test_cyclic_allocation_is_exact_and_never_differs_by_more_than_one():
+    members = _members(7)
+    for total in range(0, 30):
+        counts, _anchor = cyclic_remainder_allocation(
+            total,
+            members,
+            anchor=None,
+        )
+        assert set(counts) == set(members)
+        assert sum(counts.values()) == total
+        assert max(counts.values()) - min(counts.values()) <= 1
+
+
+def test_zero_budget_allocates_nothing_and_leaves_the_anchor_untouched():
+    members = _members(4)
+    state = UniformRotationState(("heuristic", "recent"))
+    counts = _rotate_once(state, "recent", members, 0)
+    assert set(counts.values()) == {0}
+    assert state.anchor("recent") is None
+    # A later non-zero budget must still start from the first canonical member.
+    counts = _rotate_once(state, "recent", members, 1)
+    assert _extra_receivers(counts, 0) == (members[0],)
+
+
+def test_a_single_member_bucket_absorbs_the_complete_bucket_budget():
+    members = _members(1)
+    state = UniformRotationState(("heuristic", "recent"))
+    counts = _rotate_once(state, "recent", members, 13)
+    assert counts == {members[0]: 13}
+    # A one-member bucket never has a remainder, so there is no bias to rotate.
+    assert state.anchor("recent") is None
+
+
+def test_a_budget_below_the_member_count_rotates_through_the_whole_bucket():
+    members = _members(200)
+    state = UniformRotationState(("recent",))
+    windows = []
+    for _iteration in range(4):
+        counts = _rotate_once(state, "recent", members, 66)
+        assert sum(counts.values()) == 66
+        windows.append(_extra_receivers(counts, 0))
+    assert windows[0] == members[0:66]
+    assert windows[1] == members[66:132]
+    assert windows[2] == members[132:198]
+    # The fourth window wraps past the end and resumes at the first identity.
+    assert set(windows[3]) == set(members[198:200]) | set(members[0:64])
+    assert state.anchor("recent") == members[63]
+
+
+def test_a_budget_equal_to_the_member_count_has_no_remainder_to_rotate():
+    members = _members(200)
+    state = UniformRotationState(("recent",))
+    counts = _rotate_once(state, "recent", members, 200)
+    assert set(counts.values()) == {1}
+    assert state.anchor("recent") is None
+
+
+def test_a_budget_above_the_member_count_rotates_only_the_remainder():
+    members = _members(200)
+    state = UniformRotationState(("recent",))
+    counts = _rotate_once(state, "recent", members, 266)
+    assert sum(counts.values()) == 266
+    assert set(counts.values()) == {1, 2}
+    assert _extra_receivers(counts, 1) == members[0:66]
+    counts = _rotate_once(state, "recent", members, 266)
+    assert _extra_receivers(counts, 1) == members[66:132]
+
+
+def test_fixed_membership_coverage_is_balanced_over_a_complete_cycle():
+    members = _members(10)
+    state = UniformRotationState(("recent",))
+    totals = {opponent_id: 0 for opponent_id in members}
+    for _iteration in range(10):
+        counts = _rotate_once(state, "recent", members, 3)
+        for opponent_id, value in counts.items():
+            totals[opponent_id] += value
+    assert sum(totals.values()) == 30
+    assert max(totals.values()) - min(totals.values()) <= 1
+
+
+def test_a_departed_anchor_continues_at_its_insertion_point():
+    members = _members(6)
+    state = UniformRotationState(("recent",))
+    _rotate_once(state, "recent", members, 3)
+    assert state.anchor("recent") == members[2]
+    # The anchored identity leaves the bucket before the next allocation.
+    survivors = tuple(
+        opponent_id for opponent_id in members if opponent_id != members[2]
+    )
+    counts = _rotate_once(state, "recent", survivors, 2)
+    assert _extra_receivers(counts, 0) == (members[3], members[4])
+
+
+def test_repeated_fifo_membership_shifts_never_reset_the_rotation():
+    state = UniformRotationState(("recent",))
+    window = 8
+    receivers = []
+    for step in range(6):
+        members = _members(window, start=step)
+        counts = _rotate_once(state, "recent", members, 2)
+        receivers.extend(_extra_receivers(counts, 0))
+    # Every iteration keeps moving forward: no identity is served twice and the
+    # first canonical member is never re-selected after the opening iteration.
+    assert len(set(receivers)) == len(receivers)
+    assert receivers[2:] and _members(1)[0] not in receivers[2:]
+
+
+def test_a_full_membership_replacement_still_allocates_deterministically():
+    state = UniformRotationState(("historical_uniform",))
+    first = _members(5, prefix="snapshot", start=0)
+    counts = _rotate_once(state, "historical_uniform", first, 2)
+    assert _extra_receivers(counts, 0) == first[0:2]
+    # A rebalance can replace every identity at once; the anchor is gone but
+    # its insertion point is still well defined against the new membership.
+    second = _members(5, prefix="snapshot", start=100)
+    counts = _rotate_once(state, "historical_uniform", second, 2)
+    assert _extra_receivers(counts, 0) == second[0:2]
+    counts = _rotate_once(state, "historical_uniform", second, 2)
+    assert _extra_receivers(counts, 0) == second[2:4]
+
+
+def test_each_bucket_rotates_independently_over_the_same_identity():
+    shared = _members(3)
+    state = UniformRotationState(("recent", "medium_term"))
+    counts, next_anchors = state.plan_uniform_allocation(
+        {"recent": 1, "medium_term": 2},
+        {"recent": shared, "medium_term": shared},
+    )
+    state.commit(next_anchors)
+    assert counts[("recent", shared[0])] == 1
+    assert counts[("medium_term", shared[0])] == 1
+    assert counts[("medium_term", shared[1])] == 1
+    assert state.anchor("recent") == shared[0]
+    assert state.anchor("medium_term") == shared[1]
+
+
+def test_planning_alone_never_advances_a_durable_anchor():
+    members = _members(4)
+    state = UniformRotationState(("recent",))
+    counts, next_anchors = state.plan_uniform_allocation(
+        {"recent": 2},
+        {"recent": members},
+    )
+    assert next_anchors == {"recent": members[1]}
+    assert sum(counts.values()) == 2
+    # A caller that abandons the plan must leave the rotation exactly as it was.
+    assert state.anchor("recent") is None
+    counts = _rotate_once(state, "recent", members, 2)
+    assert _extra_receivers(counts, 0) == members[0:2]
+
+
+def test_an_unavailable_bucket_is_registered_but_never_advanced():
+    state = UniformRotationState(("heuristic", "recent", "historical_uniform"))
+    assert state.configured_buckets == (
+        "heuristic",
+        "recent",
+        "historical_uniform",
+    )
+    assert state.anchors() == {
+        "heuristic": None,
+        "recent": None,
+        "historical_uniform": None,
+    }
+    members = _members(3)
+    _rotate_once(state, "recent", members, 1)
+    assert state.anchor("historical_uniform") is None
+    with pytest.raises(KeyError):
+        state.anchor("champion")
+
+
+def test_rotation_state_rejects_unsorted_members_and_unknown_buckets():
+    state = UniformRotationState(("recent",))
+    with pytest.raises(ValueError):
+        state.plan_uniform_allocation(
+            {"recent": 1},
+            {"recent": ("snapshot:b", "snapshot:a")},
+        )
+    with pytest.raises(KeyError):
+        state.plan_uniform_allocation({"medium_term": 1}, {"medium_term": ()})
+    with pytest.raises(KeyError):
+        state.commit({"medium_term": "snapshot:a"})
+    with pytest.raises(ValueError):
+        cyclic_remainder_allocation(3, (), anchor=None)
+
+
+def test_rotation_state_export_restore_is_exact_and_version_checked():
+    members = _members(5)
+    state = UniformRotationState(("heuristic", "recent"))
+    _rotate_once(state, "recent", members, 3)
+    exported = state.export_state()
+    assert exported["anchors"] == {"heuristic": None, "recent": members[2]}
+
+    restored = UniformRotationState(("heuristic", "recent"))
+    restored.restore_state(exported, ("heuristic", "recent"))
+    assert restored.anchors() == state.anchors()
+    assert _rotate_once(restored, "recent", members, 2) == _rotate_once(
+        state,
+        "recent",
+        members,
+        2,
+    )
+
+    with pytest.raises(ValueError):
+        restored.restore_state(exported, ("heuristic", "recent", "medium_term"))
+    stale = {
+        "policy_manifest": {
+            **matchmaking_policy_manifest(),
+            "policy_version": matchmaking_policy_manifest()["policy_version"] + 1,
+        },
+        "anchors": exported["anchors"],
+    }
+    with pytest.raises(ValueError):
+        restored.restore_state(stale, ("heuristic", "recent"))
+
+
 @pytest.mark.parametrize(
     ("win_rate", "expected"),
     ((0.2, 1.0), (0.375, 1.0), (0.5, 0.5), (0.6, 0.1), (0.625, 0.0), (0.9, 0.0)),
@@ -562,6 +950,7 @@ def test_match_plan_has_exact_component_and_game_budgets(
             opponent_pool=pool,
             performance_tracker=_tracker(pool),
             selected_buckets=("heuristic", "recent"),
+            uniform_rotation=UniformRotationState(("heuristic", "recent")),
             difficulty_weight=alpha,
             iteration=1,
             first_absolute_game=4000,
@@ -601,8 +990,14 @@ def test_match_plan_hash_is_repeatable_and_partial_budget_is_exact():
             "game_count": 37,
             "base_seed": 91,
         }
-        first = build_match_plan(**arguments)
-        second = build_match_plan(**arguments)
+        first = build_match_plan(
+            uniform_rotation=UniformRotationState(("heuristic", "recent")),
+            **arguments,
+        )
+        second = build_match_plan(
+            uniform_rotation=UniformRotationState(("heuristic", "recent")),
+            **arguments,
+        )
     finally:
         bank.close()
     assert first == second
@@ -622,6 +1017,7 @@ def test_empty_configured_bucket_receives_zero_games_and_keeps_its_row():
             opponent_pool=pool,
             performance_tracker=_tracker(pool),
             selected_buckets=buckets,
+            uniform_rotation=UniformRotationState(buckets),
             difficulty_weight=0.5,
             iteration=1,
             first_absolute_game=0,
@@ -672,6 +1068,7 @@ def test_warm_up_redistributes_the_complete_budget_over_available_buckets(
             opponent_pool=pool,
             performance_tracker=_tracker(pool),
             selected_buckets=buckets,
+            uniform_rotation=UniformRotationState(buckets),
             difficulty_weight=difficulty_weight,
             iteration=3,
             first_absolute_game=0,
@@ -706,6 +1103,7 @@ def test_plan_hash_distinguishes_identical_allocations_under_new_availability():
             opponent_pool=narrow,
             performance_tracker=_tracker(narrow),
             selected_buckets=("heuristic", "recent"),
+            uniform_rotation=UniformRotationState(("heuristic", "recent")),
             **arguments,
         )
     finally:
@@ -717,6 +1115,7 @@ def test_plan_hash_distinguishes_identical_allocations_under_new_availability():
             opponent_pool=wide,
             performance_tracker=_tracker(wide),
             selected_buckets=buckets,
+            uniform_rotation=UniformRotationState(buckets),
             **arguments,
         )
     finally:
@@ -740,6 +1139,7 @@ def test_matchmaking_rejects_a_configuration_with_no_available_bucket():
                 opponent_pool=pool,
                 performance_tracker=_tracker(pool),
                 selected_buckets=("historical_uniform",),
+                uniform_rotation=UniformRotationState(("historical_uniform",)),
                 difficulty_weight=0.5,
                 iteration=1,
                 first_absolute_game=0,
@@ -773,6 +1173,279 @@ def test_configuration_requires_a_bucket_available_from_the_first_iteration():
     )
 
 
+def _uniform_by_member(plan, bucket_name):
+    return {
+        value.opponent_id: value.uniform_games
+        for value in plan.allocations
+        if value.bucket_name == bucket_name
+    }
+
+
+def _difficulty_by_member(plan, bucket_name):
+    return {
+        value.opponent_id: value.difficulty_games
+        for value in plan.allocations
+        if value.bucket_name == bucket_name
+    }
+
+
+def _uniform_by_bucket(plan):
+    totals = {name: 0 for name in plan.configured_buckets}
+    for value in plan.allocations:
+        totals[value.bucket_name] += value.uniform_games
+    return totals
+
+
+def _plan(pool, rotation, *, iteration, game_count=64, difficulty_weight=0.5):
+    return build_match_plan(
+        opponent_pool=pool,
+        performance_tracker=_tracker(pool),
+        uniform_rotation=rotation,
+        selected_buckets=tuple(pool.selected_buckets),
+        difficulty_weight=difficulty_weight,
+        iteration=iteration,
+        first_absolute_game=(iteration - 1) * game_count,
+        game_count=game_count,
+        base_seed=7,
+    )
+
+
+def test_uniform_member_remainder_rotates_across_successive_plans():
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        members = tuple(sorted(pool.bucket_members("recent")))
+        assert len(members) == 21
+        rotation = UniformRotationState(buckets)
+        served = []
+        anchors = []
+        for iteration in range(1, 4):
+            plan = _plan(pool, rotation, iteration=iteration)
+            uniform = _uniform_by_member(plan, "recent")
+            # 64 games -> 32 uniform -> 16 per bucket over 21 recent members.
+            assert sum(uniform.values()) == 16
+            assert set(uniform.values()) == {0, 1}
+            served.append({
+                opponent_id
+                for opponent_id, value in uniform.items()
+                if value
+            })
+            anchors.append(dict(plan.uniform_rotation_after)["recent"])
+        # Consecutive windows of 16 walk forward and wrap around the 21 members.
+        assert served[0] == set(members[0:16])
+        assert served[1] == set(members[16:21]) | set(members[0:11])
+        assert served[2] == set(members[11:21]) | set(members[0:6])
+        # The anchor is the last member of each window in rotation order, which
+        # is not the lexicographic maximum once a window has wrapped.
+        assert anchors == [members[15], members[10], members[5]]
+    finally:
+        bank.close()
+
+
+def test_every_member_receives_uniform_games_within_one_full_cycle():
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        members = set(pool.bucket_members("recent"))
+        rotation = UniformRotationState(buckets)
+        served = set()
+        for iteration in range(1, 3):
+            plan = _plan(pool, rotation, iteration=iteration)
+            served |= {
+                opponent_id
+                for opponent_id, value in _uniform_by_member(plan, "recent").items()
+                if value
+            }
+        # 21 members at 16 uniform games per plan need ceil(21/16) == 2 plans.
+        assert served == members
+    finally:
+        bank.close()
+
+
+def test_bucket_level_uniform_allocation_is_unaffected_by_the_rotation():
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        rotation = UniformRotationState(buckets)
+        totals = [
+            _uniform_by_bucket(_plan(pool, rotation, iteration=iteration))
+            for iteration in range(1, 5)
+        ]
+        assert totals == [{"heuristic": 16, "recent": 16}] * 4
+    finally:
+        bank.close()
+
+
+def test_the_rotation_anchor_changes_only_uniform_member_counts():
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        fresh = UniformRotationState(buckets)
+        advanced = UniformRotationState(buckets)
+        # Consume three rotation steps so the two states disagree.
+        for iteration in range(1, 4):
+            _plan(pool, advanced, iteration=iteration)
+        first = _plan(pool, fresh, iteration=9)
+        second = _plan(pool, advanced, iteration=9)
+        assert _uniform_by_member(first, "recent") != _uniform_by_member(
+            second,
+            "recent",
+        )
+        assert _difficulty_by_member(first, "recent") == _difficulty_by_member(
+            second,
+            "recent",
+        )
+        assert first.uniform_budget == second.uniform_budget
+        assert first.difficulty_budget == second.difficulty_budget
+        assert _uniform_by_bucket(first) == _uniform_by_bucket(second)
+    finally:
+        bank.close()
+
+
+def test_component_member_counts_sum_exactly_to_their_bucket_budgets():
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        rotation = UniformRotationState(buckets)
+        for iteration in range(1, 6):
+            plan = _plan(pool, rotation, iteration=iteration, game_count=2000)
+            uniform = sum(value.uniform_games for value in plan.allocations)
+            difficulty = sum(value.difficulty_games for value in plan.allocations)
+            assert uniform == plan.uniform_budget
+            assert difficulty == plan.difficulty_budget
+            assert uniform + difficulty == 2000
+            assert len(plan.assignments) == 2000
+    finally:
+        bank.close()
+
+
+def test_plan_identity_records_the_rotation_transition():
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        fresh = UniformRotationState(buckets)
+        advanced = UniformRotationState(buckets)
+        _plan(pool, advanced, iteration=1)
+        first = _plan(pool, fresh, iteration=5)
+        second = _plan(pool, advanced, iteration=5)
+        assert first.uniform_rotation_before != second.uniform_rotation_before
+        assert first.plan_sha256 != second.plan_sha256
+        assert [name for name, _anchor in first.uniform_rotation_before] == list(
+            buckets
+        )
+        # A bucket with a single member never has a remainder to rotate.
+        assert dict(first.uniform_rotation_after)["heuristic"] is None
+    finally:
+        bank.close()
+
+
+def test_a_rejected_plan_never_consumes_a_rotation_step(monkeypatch):
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        members = tuple(sorted(pool.bucket_members("recent")))
+        rotation = UniformRotationState(buckets)
+
+        def _reject(_plan_value, _pool_value):
+            raise ValueError("injected plan rejection")
+
+        monkeypatch.setattr(
+            "training.rl.matchmaking.validate_match_plan",
+            _reject,
+        )
+        with pytest.raises(ValueError, match="injected plan rejection"):
+            _plan(pool, rotation, iteration=1)
+        assert rotation.anchors() == {"heuristic": None, "recent": None}
+        monkeypatch.undo()
+        # The abandoned plan consumed nothing, so the first window is still the
+        # first canonical members.
+        plan = _plan(pool, rotation, iteration=1)
+        assert tuple(
+            opponent_id
+            for opponent_id, value in sorted(
+                _uniform_by_member(plan, "recent").items()
+            )
+            if value
+        ) == members[0:16]
+    finally:
+        bank.close()
+
+
+def test_an_unavailable_bucket_keeps_its_anchor_until_it_becomes_available():
+    buckets = ("heuristic", "recent", "medium_term")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        rotation = UniformRotationState(buckets)
+        plan = _plan(pool, rotation, iteration=1)
+        assert plan.available_buckets == ("heuristic", "recent")
+        assert dict(plan.uniform_rotation_after)["medium_term"] is None
+        assert rotation.anchor("medium_term") is None
+    finally:
+        bank.close()
+
+
+def test_split_and_uninterrupted_runs_produce_the_same_uniform_allocations():
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        uninterrupted = UniformRotationState(buckets)
+        expected = []
+        for iteration in range(1, 7):
+            plan = _plan(pool, uninterrupted, iteration=iteration)
+            expected.append((plan.plan_sha256, _uniform_by_member(plan, "recent")))
+
+        # Replay the first three plans, checkpoint, then continue from the
+        # restored state exactly as a resumed process would.
+        split = UniformRotationState(buckets)
+        actual = []
+        for iteration in range(1, 4):
+            plan = _plan(pool, split, iteration=iteration)
+            actual.append((plan.plan_sha256, _uniform_by_member(plan, "recent")))
+        exported = split.export_state()
+        resumed = UniformRotationState(buckets)
+        resumed.restore_state(exported, buckets)
+        for iteration in range(4, 7):
+            plan = _plan(pool, resumed, iteration=iteration)
+            actual.append((plan.plan_sha256, _uniform_by_member(plan, "recent")))
+
+        assert actual == expected
+        assert resumed.anchors() == uninterrupted.anchors()
+    finally:
+        bank.close()
+
+
+def test_a_resumed_rotation_does_not_restart_from_the_first_member():
+    buckets = ("heuristic", "recent")
+    network, bank, pool = _pool(buckets)
+    try:
+        _run_iterations(pool, network, 20)
+        members = tuple(sorted(pool.bucket_members("recent")))
+        rotation = UniformRotationState(buckets)
+        _plan(pool, rotation, iteration=1)
+        resumed = UniformRotationState(buckets)
+        resumed.restore_state(rotation.export_state(), buckets)
+        plan = _plan(pool, resumed, iteration=2)
+        served = {
+            opponent_id
+            for opponent_id, value in _uniform_by_member(plan, "recent").items()
+            if value
+        }
+        # A reconstructed-from-membership anchor would replay members[0:16].
+        assert served != set(members[0:16])
+        assert served == set(members[16:21]) | set(members[0:11])
+    finally:
+        bank.close()
+
+
 def test_match_results_have_only_wins_and_losses_and_reject_invalid_winner():
     _network_value, bank, pool = _pool(("random",))
     try:
@@ -780,6 +1453,7 @@ def test_match_results_have_only_wins_and_losses_and_reject_invalid_winner():
             opponent_pool=pool,
             performance_tracker=_tracker(pool),
             selected_buckets=("random",),
+            uniform_rotation=UniformRotationState(("random",)),
             difficulty_weight=0.5,
             iteration=1,
             first_absolute_game=0,
@@ -888,7 +1562,7 @@ def test_medium_term_admits_the_baseline_exactly_when_it_leaves_recent():
         assert rehydrated.introduced_iteration == 0
         assert rehydrated.introduced_at_rl_games == 0
         assert pool.bank_slot(rehydrated.opponent_id) is not None
-        assert pool.observability()["total_bucket_overlap_count"] == 0
+        assert pool.observability()["total_forbidden_historical_overlap_count"] == 0
     finally:
         bank.close()
 
@@ -912,7 +1586,7 @@ def test_medium_term_is_a_full_delayed_band_at_the_expected_boundary():
         assert status["nominal_historical_span_games"] == 4_000_000
         assert status["exact_historical_span_games"] == 3_980_000
         assert status["band_rebalances"] > 0
-        assert pool.observability()["total_bucket_overlap_count"] == 0
+        assert pool.observability()["total_forbidden_historical_overlap_count"] == 0
         assert pool.unique_neural_opponent_count == K_RECENT + MEDIUM_TERM_CAPACITY
         assert bank.allocated_opponent_count == K_RECENT + MEDIUM_TERM_CAPACITY
     finally:
@@ -966,7 +1640,7 @@ def test_a_direct_band_move_preserves_identity_slot_and_performance():
         assert pool.opponent(moving_id) == record_before
         assert tracker.performance(moving_id).lifetime_wins == 3
         assert tracker.performance(moving_id).lifetime_losses == 1
-        assert pool.observability()["total_bucket_overlap_count"] == 0
+        assert pool.observability()["total_forbidden_historical_overlap_count"] == 0
     finally:
         bank.close()
 
@@ -1001,7 +1675,7 @@ def test_iterations_without_samples_cannot_create_a_band_overlap():
                     completed_iteration=iteration,
                     load_weights=archive.load_weights,
                 )
-        assert pool.observability()["total_bucket_overlap_count"] == 0
+        assert pool.observability()["total_forbidden_historical_overlap_count"] == 0
         recent_iterations = set(_member_iterations(pool, "recent"))
         medium_iterations = set(_member_iterations(pool, "medium_term"))
         assert not recent_iterations & medium_iterations
@@ -1065,9 +1739,14 @@ def test_delayed_band_match_plan_is_exact_and_sources_are_disjoint():
             "game_count": 2000,
             "base_seed": 42,
         }
-        plan = build_match_plan(performance_tracker=_tracker(pool), **arguments)
+        plan = build_match_plan(
+            performance_tracker=_tracker(pool),
+            uniform_rotation=UniformRotationState(buckets),
+            **arguments,
+        )
         repeated = build_match_plan(
             performance_tracker=_tracker(pool),
+            uniform_rotation=UniformRotationState(buckets),
             **arguments,
         )
         assert repeated == plan
@@ -1095,6 +1774,7 @@ def test_random_bucket_is_fixed_and_consumes_no_policy_bank_slot():
             opponent_pool=pool,
             performance_tracker=_tracker(pool),
             selected_buckets=("random",),
+            uniform_rotation=UniformRotationState(("random",)),
             difficulty_weight=0.5,
             iteration=1,
             first_absolute_game=0,
@@ -1209,7 +1889,7 @@ def test_delayed_band_resume_restores_order_and_the_next_cadence_refresh():
             load_weights=archive.load_weights,
         )
         assert _member_iterations(restored, "medium_term") == (0, 10, 20)
-        assert restored.observability()["total_bucket_overlap_count"] == 0
+        assert restored.observability()["total_forbidden_historical_overlap_count"] == 0
     finally:
         if bank is not None:
             bank.close()

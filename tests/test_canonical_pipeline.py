@@ -95,7 +95,10 @@ from training.rl.ppo import (
     REINFORCE_TRAINING_ALGORITHM,
 )
 from training.rl.checkpoint_archive import archive_policy_manifest
-from training.rl.matchmaking import matchmaking_policy_manifest
+from training.rl.matchmaking import (
+    UniformRotationState,
+    matchmaking_policy_manifest,
+)
 from training.rl.pool import pool_policy_manifest
 from utils.artifacts import file_sha256
 
@@ -1078,6 +1081,7 @@ def test_deep_opponent_pool_survives_a_resume_state_round_trip(tmp_path):
         "version": RESUME_STATE_VERSION,
         "weights_sha256": file_sha256(weights_path),
         "opponent_pool_state": pool_state,
+        "uniform_rotation_state": UniformRotationState(("recent",)).export_state(),
     }
     _atomic_resume_state_save(
         state_path,

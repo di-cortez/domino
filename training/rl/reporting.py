@@ -13,6 +13,9 @@ import time
 
 import numpy as np
 
+from training.rl.champion_evaluation import (
+    champion_evaluation_policy_manifest,
+)
 from training.rl.rollout import REWARD_ZERO_EPSILON
 from training.rl.constants import (
     RL_WORKER_AUTOTUNE_FRACTION,
@@ -151,6 +154,12 @@ def build_training_metrics_header(
             "ppo_configuration": fixed_ppo_policy(training.ppo_max_epochs),
             "opponent_pool": context.runner.opponent_pool.manifest(),
             "matchmaking_policy": matchmaking_policy_manifest(),
+            # The fixed racing policy is run provenance, like the two manifests
+            # above it, and is absent when the bucket is not selected.
+            "champion_evaluation": (
+                champion_evaluation_policy_manifest()
+                if context.runner.opponent_pool.champion_selected else None
+            ),
             "checkpoint_archive": context.checkpoint_archive.manifest(),
         },
     }
@@ -435,6 +444,21 @@ def build_training_summary(
     }
 
 
+def _overlap_text(counts):
+    """Render one pairwise overlap mapping for a single console line."""
+    if not counts:
+        return "n/a"
+    return ", ".join(f"{pair} {count}" for pair, count in counts.items())
+
+
+def _short_opponent_id(opponent_id):
+    """Return a compact rotation anchor for one console line."""
+    if opponent_id is None:
+        return "start"
+    _prefix, _separator, suffix = str(opponent_id).partition(":")
+    return suffix.lstrip("0") or "0" if suffix else str(opponent_id)
+
+
 class RLTrainingReporter:
     """Keep presentation concerns out of the RL orchestration loop."""
 
@@ -573,6 +597,38 @@ class RLTrainingReporter:
                 f"checkpoint: {format_duration(elapsed)}"
             )
 
+    def champion_event(self, summary):
+        """Report one completed racing event outside the log-interval gate.
+
+        An event costs 100,000 evaluation games and happens roughly once every
+        fifty successful updates, so it is always printed when the reporter is
+        not quiet. Hiding it behind ``log_interval`` would make the most
+        expensive operation in the run the least visible one.
+        """
+        if self.quiet:
+            return
+        funnel = " -> ".join(
+            str(count) for count in summary["stage_candidates"]
+        )
+        print(
+            f"  champion_vs_heuristic event {summary['event_index']} @ "
+            f"iteration {summary['iteration']} | candidates "
+            f"{summary['candidates']} ({funnel} -> "
+            f"{len(summary['survivors'])}) | racing games "
+            f"{summary['racing_games']} in "
+            f"{format_duration(summary['seconds'])} | survivors "
+            f"{len(summary['survivors'])} | admitted "
+            f"{len(summary['admitted'])} | evicted "
+            f"{len(summary['evicted'])} | bucket size "
+            f"{summary['membership_count']}/{summary['capacity']}"
+        )
+        champions = ", ".join(
+            f"{_short_opponent_id(opponent_id)} "
+            f"{summary['win_rates'][opponent_id]:.1%}"
+            for opponent_id in summary["admitted"]
+        )
+        print(f"    New champions vs heuristic: {champions}")
+
     def iteration(
         self,
         *,
@@ -590,6 +646,7 @@ class RLTrainingReporter:
         opponent_count,
         unique_neural_opponent_count,
         opponent_pool_state,
+        uniform_rotation_anchors,
         bucket_results,
         gradient_metrics,
         use_value_head,
@@ -627,10 +684,17 @@ class RLTrainingReporter:
             f"neural) | grad: {_gradient_log_text(gradient_metrics)}"
         )
         available = opponent_pool_state["available_buckets"]
+        # One short identity per bucket is enough to audit the rotation; a
+        # per-member column set would add hundreds of fields per iteration.
+        rotation_text = ", ".join(
+            f"{name} {_short_opponent_id(anchor)}"
+            for name, anchor in uniform_rotation_anchors.items()
+        ) or "n/a"
         print(
             "  Matchmaking: buckets " + ",".join(opponent_buckets)
             + " | available " + (",".join(available) if available else "none")
             + f" | difficulty weight {difficulty_weight:g} | {bucket_text}"
+            + f" | uniform rotation after {rotation_text}"
         )
         if restart_summary["enabled"]:
             print(
@@ -644,18 +708,22 @@ class RLTrainingReporter:
             f"{name} {value['membership_count']}/{value['capacity']}"
             for name, value in opponent_pool_state["buckets"].items()
         )
-        overlap_counts = opponent_pool_state["bucket_overlap_counts"]
-        overlap_text = (
-            ", ".join(
-                f"{pair} {count}" for pair, count in overlap_counts.items()
-            )
-            if overlap_counts
-            else "n/a"
-        )
+        forbidden_counts = opponent_pool_state[
+            "forbidden_historical_overlap_counts"
+        ]
+        forbidden_text = _overlap_text(forbidden_counts)
+        champion_counts = opponent_pool_state["champion_overlap_counts"]
         print(
             f"  Opponent pool: memberships {membership_text} | "
             f"{opponent_pool_state['unique_neural_opponent_count']} unique "
-            f"neural policies | overlaps {overlap_text}"
+            f"neural policies | forbidden overlaps {forbidden_text}"
+            # Champion overlap is a weighting mechanism, so it is reported
+            # separately from the pairs that must stay empty.
+            + (
+                f" | champion overlaps {_overlap_text(champion_counts)}"
+                if champion_counts
+                else ""
+            )
         )
         historical = opponent_pool_state["buckets"].get("historical_uniform")
         diagnostics = (

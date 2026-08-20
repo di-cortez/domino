@@ -22,7 +22,7 @@ from diagnostics.parallel_runner import (
     ParallelSafetyConfig,
 )
 from training.rl.parallel import RLRolloutRunner, worker_count
-from training.rl.matchmaking import build_match_plan
+from training.rl.matchmaking import UniformRotationState, build_match_plan
 from training.rl.config import (
     RLExecutionOptions,
     RLResourceOptions,
@@ -184,6 +184,7 @@ class ParallelRLTests(unittest.TestCase):
                 opponent_pool=runner.opponent_pool,
                 performance_tracker=runner.performance_tracker,
                 selected_buckets=opponent_buckets,
+                uniform_rotation=UniformRotationState(opponent_buckets),
                 difficulty_weight=0.5,
                 iteration=1,
                 first_absolute_game=0,
@@ -193,6 +194,141 @@ class ParallelRLTests(unittest.TestCase):
             return runner.collect_games(plan, seed)
         finally:
             runner.close()
+
+    def _champion_stage(self, workers, *, candidates=3, games=20):
+        """Play one reduced champion stage through the real worker pool."""
+        from training.rl import champion_evaluation as champion
+        from training.rl.champion_evaluation import ChampionGameSpec
+
+        buckets = ("heuristic", "recent", "champion_vs_heuristic")
+        network = self._network()
+        runner = RLRolloutRunner(
+            network,
+            opponent_buckets=buckets,
+            schema=dict(REWARD_SCHEMAS),
+            gamma=1.0,
+            safety=self.safety,
+        )
+        try:
+            pool = runner.opponent_pool
+            for iteration in range(1, candidates + 1):
+                pool.consider_updated_policy(
+                    network,
+                    iteration=iteration,
+                    completed_games=iteration * 10,
+                    has_samples=True,
+                )
+            runner.set_workers(workers)
+            runner.sync_current(network)
+            candidate_ids = pool.champion_pending_candidate_ids[:candidates]
+            specs = []
+            for candidate_id in candidate_ids:
+                for game_index in range(games):
+                    specs.append(ChampionGameSpec(
+                        stage_index=0,
+                        candidate_id=candidate_id,
+                        bank_slot=pool.bank_slot(candidate_id),
+                        game_index=game_index,
+                        seed=champion.champion_stage_seed(
+                            4242,
+                            event_index=0,
+                            stage_index=0,
+                            game_index=game_index,
+                        ),
+                        candidate_position=champion.champion_seat_position(
+                            game_index
+                        ),
+                        sequence=len(specs),
+                    ))
+            results, _run_info = runner.evaluate_champion_games(specs)
+            # The rollout profile must survive a racing stage untouched.
+            assert runner.last_runtime_profile == {}
+            assert runner.last_champion_runtime_profile
+            return tuple(specs), results
+        finally:
+            runner.close()
+
+    def test_champion_evaluation_is_identical_with_one_and_many_workers(self):
+        """Rankings must not depend on how the games were scheduled."""
+        single_specs, single = self._champion_stage(1)
+        multi_specs, multi = self._champion_stage(3)
+        self.assertEqual(single_specs, multi_specs)
+        self.assertEqual(single, multi)
+        self.assertEqual(len(single), len(single_specs))
+
+        # Every returned game is binary and keeps its assigned identity.
+        for spec, result in zip(single_specs, single):
+            self.assertEqual(result["sequence"], spec.sequence)
+            self.assertEqual(result["candidate_id"], spec.candidate_id)
+            self.assertEqual(result["game_index"], spec.game_index)
+            self.assertEqual(
+                result["candidate_position"],
+                spec.candidate_position,
+            )
+            self.assertIn(result["winner"], (0, 1))
+
+    def test_champion_evaluation_shares_one_panel_across_candidates(self):
+        """Common random numbers: identical policies must score identically."""
+        specs, results = self._champion_stage(2)
+        by_candidate = {}
+        for spec, result in zip(specs, results):
+            by_candidate.setdefault(spec.candidate_id, []).append(
+                (spec.game_index, result["winner"], spec.candidate_position)
+            )
+        outcomes = {tuple(value) for value in by_candidate.values()}
+        # The pool snapshots every iteration from the same untrained network,
+        # so every candidate holds identical weights and the shared panel must
+        # produce byte-identical results. Per-candidate seeds could not.
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(len(by_candidate), 3)
+
+    def test_the_policy_bank_uses_one_shared_segment_for_every_slot(self):
+        """A per-slot segment layout exhausts the process descriptor limit.
+
+        A POSIX shared segment costs two descriptors in every process that maps
+        it. At the 800 slots a five-bucket selection reserves, one segment per
+        slot needed about 1,600 descriptors and raised
+        ``OSError: [Errno 24] Too many open files`` from ``shm_open`` on any
+        machine with the common 1024 limit -- in the parent and again in every
+        worker.
+        """
+        from training.rl.pool import SharedPolicyBank
+
+        capacity = 800
+        network = self._network()
+        proc_fds = Path("/proc/self/fd")
+        before = len(os.listdir(proc_fds)) if proc_fds.is_dir() else None
+        bank = SharedPolicyBank(network, capacity)
+        try:
+            if before is not None:
+                self.assertLess(len(os.listdir(proc_fds)) - before, 8)
+            descriptors = (bank.current_descriptor,) + bank.opponent_descriptors
+            self.assertEqual(len(descriptors), capacity + 1)
+            self.assertEqual(len({value.name for value in descriptors}), 1)
+            self.assertEqual(
+                [value.offset for value in descriptors],
+                [index * bank.policy_bytes for index in range(capacity + 1)],
+            )
+            self.assertEqual(
+                bank.allocated_bytes,
+                (capacity + 1) * bank.policy_bytes,
+            )
+
+            # Distinct offsets must address distinct storage.
+            slots = [bank.allocate_slot() for _ in range(capacity)]
+            first, last = slots[0], slots[-1]
+            other = self._network()
+            other.W1 = np.asarray(other.W1) + 1.0
+            bank.write_policy(first, network)
+            bank.write_policy(last, other)
+            np.testing.assert_array_equal(
+                bank.read_policy(first)["W1"], np.asarray(network.W1),
+            )
+            np.testing.assert_array_equal(
+                bank.read_policy(last)["W1"], np.asarray(other.W1),
+            )
+        finally:
+            bank.close()
 
     def test_worker_parser_enforces_hard_limit(self):
         self.assertEqual(worker_count("auto"), "auto")
@@ -343,6 +479,393 @@ class ParallelRLTests(unittest.TestCase):
             self.assertEqual(len(bucket_results), len(buckets))
             self.assertEqual(bucket_results[-1], [0, 0, 0])
             self.assertEqual(sum(result[0] for result in bucket_results), 6)
+
+    def _miniature_racing_policy(self, *, batch=4, survivors=2):
+        """Patch the fixed racing policy down to a size a test can play.
+
+        The real policy costs 100,000 games. Only the constants are shrunk:
+        the stage loop, the seed panels, the seat balance, the tally, the
+        ranking, and the pool commit all run unmodified. Workers re-import the
+        module in fresh processes and never read the stage table, so patching
+        the parent is enough.
+        """
+        from training.rl.champion_evaluation import ChampionStage
+
+        stages = (
+            ChampionStage(games_per_candidate=2, survivors=batch - 1),
+            ChampionStage(games_per_candidate=2, survivors=survivors),
+        )
+        total_games = batch * 2 + (batch - 1) * 2
+        patches = {
+            "training.rl.pool.CHAMPION_CANDIDATE_BATCH_SIZE": batch,
+            "training.rl.pool.CHAMPION_FINAL_SURVIVORS": survivors,
+            "training.rl.champion_evaluation.CHAMPION_CANDIDATE_BATCH_SIZE": (
+                batch
+            ),
+            "training.rl.champion_evaluation.CHAMPION_FINAL_SURVIVORS": (
+                survivors
+            ),
+            "training.rl.champion_evaluation.CHAMPION_FINAL_GAMES": 2,
+            "training.rl.champion_evaluation.CHAMPION_RACING_STAGES": stages,
+            "training.rl.champion_evaluation.CHAMPION_EVALUATION_GAMES": (
+                total_games
+            ),
+        }
+        for target, value in patches.items():
+            patcher = mock.patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return len(stages), total_games
+
+    def test_training_runs_the_champion_event_and_admits_its_winners(self):
+        """The trigger fires from run_iteration and stays out of RL counters."""
+        stage_count, racing_games = self._miniature_racing_policy()
+        buckets = ("heuristic", "recent", "champion_vs_heuristic")
+        iterations = 5
+        gpi = 6
+        with tempfile.TemporaryDirectory() as temp_dir:
+            weights_path = Path(temp_dir) / "champion.npz"
+            summary = self._train(
+                iterations=iterations,
+                gpi=gpi,
+                opponent_buckets=buckets,
+                difficulty_weight=0.5,
+                checkpoint_interval=100,
+                log_interval=1,
+                seed=31337,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                rl_weights_path=str(weights_path),
+                quiet=False,
+                ppo_max_epochs=1,
+            )
+            metrics_path = weights_path.with_name(
+                f"{weights_path.stem}_training_metrics.jsonl"
+            )
+            header, rows = read_training_metrics(metrics_path)
+
+        champion_state = summary["opponent_pool_final_state"]["buckets"][
+            "champion_vs_heuristic"
+        ]["champion_state"]
+        # The fourth successful update completes the batch, so exactly one
+        # event runs and the fifth update starts the next batch.
+        self.assertEqual(champion_state["completed_events"], 1)
+        self.assertEqual(champion_state["pending_candidates"], 1)
+        self.assertEqual(summary["opponent_bucket_sizes"]["champion_vs_heuristic"], 2)
+        self.assertIsNotNone(champion_state["minimum_heuristic_win_rate"])
+        self.assertIsNotNone(champion_state["maximum_heuristic_win_rate"])
+
+        # Evaluation games are invisible to every RL counter.
+        self.assertEqual(summary["completed_training_games"], iterations * gpi)
+        self.assertEqual(header["bucket_results"]["bucket_order"], list(buckets))
+        self.assertEqual(len(rows), iterations)
+        for row in rows:
+            self.assertEqual(
+                sum(result[0] for result in row["bucket_results"]),
+                gpi,
+            )
+        champion_column = header["bucket_results"]["bucket_order"].index(
+            "champion_vs_heuristic"
+        )
+        # The bucket is empty while its own candidates are still racing, so the
+        # racing games cannot have leaked into the event iteration's row.
+        for row in rows[:4]:
+            self.assertEqual(row["bucket_results"][champion_column], [0, 0, 0])
+        self.assertGreater(rows[4]["bucket_results"][champion_column][0], 0)
+
+        # The racing time and worker runs are accounted for separately.
+        sections = summary["runtime_profile_delta"]["sections_seconds"]
+        self.assertGreater(sections["champion_evaluation"], 0.0)
+        self.assertEqual(
+            summary["parallel"]["champion_evaluation_batches"],
+            stage_count,
+        )
+        self.assertEqual(summary["parallel"]["rollout_batches"], iterations)
+        racing_policy = header["metadata"]["training"]["champion_evaluation"]
+        self.assertEqual(racing_policy["total_games"], racing_games)
+        self.assertFalse(racing_policy["counts_toward_gpi"])
+
+    def test_training_with_a_racing_event_is_invariant_to_worker_count(self):
+        """A completed event must not make training depend on scheduling.
+
+        Racing games run on the same pool as rollouts and each stage waits for
+        every one of its games, so a different worker count changes only the
+        order the results arrive in. If any part of the event leaked into the
+        parent RNG stream or into the learner state, the two runs would diverge
+        from iteration 5 on.
+        """
+        self._miniature_racing_policy()
+        buckets = ("heuristic", "recent", "champion_vs_heuristic")
+        digests = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for workers, name in ((1, "one.npz"), (2, "two.npz")):
+                path = Path(temp_dir) / name
+                summary = self._train(
+                    iterations=5,
+                    gpi=6,
+                    opponent_buckets=buckets,
+                    difficulty_weight=0.5,
+                    checkpoint_interval=100,
+                    seed=606,
+                    device="cpu",
+                    workers=workers,
+                    safety_config=self.safety,
+                    rl_weights_path=str(path),
+                    quiet=True,
+                    ppo_max_epochs=1,
+                )
+                self.assertEqual(
+                    summary["opponent_pool_final_state"]["buckets"][
+                        "champion_vs_heuristic"
+                    ]["champion_state"]["completed_events"],
+                    1,
+                )
+                with np.load(path) as weights:
+                    digests.append(tuple(
+                        (key, weights[key].tobytes())
+                        for key in sorted(weights.files)
+                    ))
+        self.assertEqual(digests[0], digests[1])
+
+    def test_split_and_uninterrupted_runs_agree_across_a_racing_event(self):
+        """Specification 28: resume across a partial batch and a whole event.
+
+        The split point sits between two events with a partial candidate batch
+        pending, which is the only state a real checkpoint can ever hold: the
+        batch is completed and consumed inside a single ``run_iteration`` call,
+        so no published checkpoint can carry a full one.
+        """
+        self._miniature_racing_policy()
+        buckets = ("heuristic", "recent", "champion_vs_heuristic")
+        common = {
+            "iterations": 8,
+            "gpi": 6,
+            "opponent_buckets": buckets,
+            "difficulty_weight": 0.5,
+            "checkpoint_interval": 3,
+            "seed": 8080,
+            "device": "cpu",
+            "workers": 1,
+            "safety_config": self.safety,
+            "numbered_checkpoints": True,
+            "fresh_from_sl": True,
+            "quiet": True,
+            "ppo_max_epochs": 1,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            full_base = root / "full.npz"
+            split_base = root / "split.npz"
+            full = self._train(rl_weights_path=str(full_base), **common)
+            # Iteration 6 is a checkpoint boundary two updates past the first
+            # event, so the saved batch is partial.
+            self._train(
+                rl_weights_path=str(split_base),
+                stop_after_training_games=36,
+                **common,
+            )
+            # The numbered checkpoint is keyed by iteration; 36 games at
+            # GPI 6 is iteration 6.
+            partial = numbered_checkpoint_path(split_base, 6)
+            partial_state, _partial_weights = load_resume_state(
+                str(partial),
+                str(resume_state_path(partial)),
+            )
+            resumed = self._train(
+                rl_weights_path=str(split_base),
+                resume_weights_path=str(partial),
+                resume_state_file=str(resume_state_path(partial)),
+                **{**common, "fresh_from_sl": False},
+            )
+
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(
+                    resumed["rl_weights_path"],
+                    allow_pickle=False,
+                ) as right:
+                    self.assertEqual(sorted(left.files), sorted(right.files))
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
+
+            full_state, _full_weights = load_resume_state(
+                full["rl_weights_path"],
+                full["resume_state_path"],
+            )
+            resumed_state, _resumed_weights = load_resume_state(
+                resumed["rl_weights_path"],
+                resumed["resume_state_path"],
+            )
+
+        # The checkpoint the resume started from held a partial batch.
+        partial_champion = partial_state["opponent_pool_state"]["champion_state"]
+        self.assertEqual(partial_champion["completed_event_count"], 1)
+        self.assertEqual(len(partial_champion["pending_candidate_ids"]), 2)
+
+        full_champion = full_state["opponent_pool_state"]["champion_state"]
+        self.assertEqual(full_champion["completed_event_count"], 2)
+
+        # Candidate IDs, event index, survivors, champion IDs, champion scores,
+        # and champion membership all agree. Stage seeds agree by construction
+        # once the effective seed and the event index do, because the panel is
+        # a pure function of the two.
+        self.assertEqual(
+            full_state["opponent_pool_state"]["champion_state"],
+            resumed_state["opponent_pool_state"]["champion_state"],
+        )
+        self.assertEqual(
+            full_state["opponent_pool_state"]["buckets"],
+            resumed_state["opponent_pool_state"]["buckets"],
+        )
+        self.assertEqual(
+            full_state["opponent_pool_state"]["lifecycle_counters"],
+            resumed_state["opponent_pool_state"]["lifecycle_counters"],
+        )
+        # Uniform anchors, and therefore the next normal match plan, agree: the
+        # plan is a pure function of pool, tracker, anchors, seed, and iteration.
+        self.assertEqual(
+            full_state["uniform_rotation_state"],
+            resumed_state["uniform_rotation_state"],
+        )
+        self.assertEqual(
+            full_state["opponent_performance_state"],
+            resumed_state["opponent_performance_state"],
+        )
+        self.assertEqual(full["effective_seed"], resumed["effective_seed"])
+
+    def test_worker_tuning_cannot_advance_champion_or_rotation_state(self):
+        """Specification 29: discarded benchmark work touches neither.
+
+        This drives the real ``benchmark_worker_candidates`` against a real
+        throwaway ``RLRolloutRunner``, not a stub, so the isolation is proved
+        on the code path production uses.
+        """
+        import copy
+
+        from training.rl import adaptive_tuning
+        from training.rl.adaptive_tuning import benchmark_worker_candidates
+
+        self._miniature_racing_policy()
+        buckets = ("heuristic", "recent", "champion_vs_heuristic")
+        network = self._network()
+        source = RLRolloutRunner(
+            network,
+            opponent_buckets=buckets,
+            schema=dict(REWARD_SCHEMAS),
+            gamma=1.0,
+            safety=self.safety,
+        )
+        try:
+            pool = source.opponent_pool
+            # One short of a complete batch: a benchmark that appended even a
+            # single candidate would trigger an event.
+            for iteration in range(1, 4):
+                pool.consider_updated_policy(
+                    network,
+                    iteration=iteration,
+                    completed_games=iteration * 10,
+                    has_samples=True,
+                )
+            source.uniform_rotation.commit({
+                "recent": pool.bucket_members("recent")[0],
+            })
+            # The training loop reconciles the tracker every iteration, so a
+            # realistic export covers every active identity.
+            active = tuple(
+                record.opponent_id for record in pool.active_opponents()
+            )
+            source.performance_tracker.ensure(active)
+            source.performance_tracker.retain_only(active)
+            pool_state = pool.export_state()
+            pool_weights = pool.export_weights()
+            performance_state = source.performance_tracker.export_state()
+            rotation_state = source.uniform_rotation.export_state()
+        finally:
+            source.close()
+
+        before = copy.deepcopy(pool_state)
+        rotation_before = copy.deepcopy(rotation_state)
+        captured = []
+        real_new_runner = adaptive_tuning._new_runner
+
+        def spy(*args, **kwargs):
+            runner = real_new_runner(*args, **kwargs)
+            captured.append(runner)
+            return runner
+
+        def refuse(_self, _specs):
+            raise AssertionError("worker tuning ran a champion evaluation")
+
+        with (
+            mock.patch.object(adaptive_tuning, "_new_runner", side_effect=spy),
+            mock.patch.object(
+                RLRolloutRunner,
+                "evaluate_champion_games",
+                refuse,
+            ),
+            mock.patch.object(
+                adaptive_tuning,
+                "DEFAULT_RL_WORKER_CANDIDATES",
+                (1,),
+            ),
+        ):
+            test_games, rows = benchmark_worker_candidates(
+                self._network(),
+                gpi=4,
+                total_training_games=400,
+                base_seed=99,
+                opponent_buckets=buckets,
+                difficulty_weight=0.5,
+                schema=dict(REWARD_SCHEMAS),
+                gamma=1.0,
+                safety=self.safety,
+                pool_state=pool_state,
+                pool_weights=pool_weights,
+                performance_state=performance_state,
+                rotation_state=rotation_state,
+            )
+
+        self.assertEqual(len(captured), 1)
+        benchmark_pool = captured[0].opponent_pool
+        # The throwaway pool saw only benchmark games: no candidate appended,
+        # no event run.
+        self.assertEqual(len(benchmark_pool.champion_pending_candidate_ids), 3)
+        self.assertEqual(benchmark_pool.champion_completed_event_count, 0)
+        self.assertEqual(benchmark_pool.bucket_members("champion_vs_heuristic"), ())
+
+        # The parent's serialized state is untouched, so the first real plan
+        # after tuning is the plan the run would have built without it.
+        self.assertEqual(pool_state, before)
+        self.assertEqual(rotation_state, rotation_before)
+
+        # Only the planned rollout games are retained as benchmark work.
+        self.assertEqual(rows[0]["actual_games"], test_games)
+        self.assertTrue(rows[0]["success"])
+
+    def test_a_run_without_the_champion_bucket_reports_no_racing_policy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            weights_path = Path(temp_dir) / "plain.npz"
+            summary = self._train(
+                iterations=1,
+                gpi=4,
+                checkpoint_interval=100,
+                seed=11,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                rl_weights_path=str(weights_path),
+                quiet=True,
+                ppo_max_epochs=1,
+            )
+            header, _rows = read_training_metrics(weights_path.with_name(
+                f"{weights_path.stem}_training_metrics.jsonl"
+            ))
+        self.assertIsNone(header["metadata"]["training"]["champion_evaluation"])
+        # The section only exists on iterations that actually raced.
+        self.assertNotIn(
+            "champion_evaluation",
+            summary["runtime_profile_delta"]["sections_seconds"],
+        )
 
     def test_seeded_training_checkpoints_are_bit_identical(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -817,6 +1340,188 @@ class ParallelRLTests(unittest.TestCase):
                 0.01,
             )
 
+    def test_uniform_rotation_survives_a_numbered_checkpoint_resume(self):
+        """A split run must continue the rotation, not restart every bucket."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            full_base = root / "full.npz"
+            resumed_base = root / "resumed.npz"
+            common = {
+                "gpi": 4,
+                "checkpoint_interval": 3,
+                "seed": 4242,
+                "device": "cpu",
+                "workers": 1,
+                "safety_config": self.safety,
+                "quiet": True,
+                "numbered_checkpoints": True,
+                "ppo_max_epochs": 1,
+                "opponent_buckets": ("heuristic", "recent"),
+            }
+
+            full = self._train(iterations=6, rl_weights_path=str(full_base), **common)
+            self._train(
+                iterations=6,
+                stop_after_training_games=12,
+                rl_weights_path=str(resumed_base),
+                **common,
+            )
+            partial_weights = numbered_checkpoint_path(resumed_base, 3)
+            partial_state = resume_state_path(partial_weights)
+            metadata, _pool = load_resume_state(partial_weights, partial_state)
+
+            rotation_state = metadata["uniform_rotation_state"]
+            anchors = rotation_state["anchors"]
+            self.assertEqual(sorted(anchors), ["heuristic", "recent"])
+            # Two uniform games split one per bucket, so the single-member
+            # heuristic bucket never has a remainder while recent always does.
+            self.assertIsNone(anchors["heuristic"])
+            self.assertIsNotNone(anchors["recent"])
+
+            resumed = self._train(
+                iterations=6,
+                rl_weights_path=str(resumed_base),
+                resume_weights_path=str(partial_weights),
+                resume_state_file=str(partial_state),
+                **common,
+            )
+            # Diverging anchors would change which opponents played which games
+            # and therefore the learner update itself.
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
+                    self.assertEqual(left.files, right.files)
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
+
+            final_state = resume_state_path(numbered_checkpoint_path(resumed_base, 6))
+            full_state = resume_state_path(numbered_checkpoint_path(full_base, 6))
+            resumed_metadata, _resumed_pool = load_resume_state(
+                numbered_checkpoint_path(resumed_base, 6),
+                final_state,
+            )
+            full_metadata, _full_pool = load_resume_state(
+                numbered_checkpoint_path(full_base, 6),
+                full_state,
+            )
+            self.assertEqual(
+                resumed_metadata["uniform_rotation_state"],
+                full_metadata["uniform_rotation_state"],
+            )
+
+    def test_champion_state_survives_a_numbered_checkpoint_resume(self):
+        """Pending candidates and the event count are durable exact state."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            full_base = root / "full.npz"
+            resumed_base = root / "resumed.npz"
+            common = {
+                "gpi": 4,
+                "checkpoint_interval": 3,
+                "seed": 606,
+                "device": "cpu",
+                "workers": 1,
+                "safety_config": self.safety,
+                "quiet": True,
+                "numbered_checkpoints": True,
+                "ppo_max_epochs": 1,
+                "opponent_buckets": (
+                    "heuristic",
+                    "recent",
+                    "champion_vs_heuristic",
+                ),
+            }
+            full = self._train(iterations=6, rl_weights_path=str(full_base), **common)
+            self._train(
+                iterations=6,
+                stop_after_training_games=12,
+                rl_weights_path=str(resumed_base),
+                **common,
+            )
+            partial_weights = numbered_checkpoint_path(resumed_base, 3)
+            partial_state = resume_state_path(partial_weights)
+            metadata, _pool = load_resume_state(partial_weights, partial_state)
+
+            champion = metadata["opponent_pool_state"]["champion_state"]
+            pending = champion["pending_candidate_ids"]
+            # Every successful update queues exactly one candidate, and no
+            # racing event can have happened at only three iterations.
+            self.assertEqual(len(pending), 3)
+            self.assertEqual(len(set(pending)), 3)
+            self.assertEqual(champion["completed_event_count"], 0)
+            self.assertEqual(champion["heuristic_win_rate_by_opponent_id"], {})
+            recent = metadata["opponent_pool_state"]["buckets"]["recent"]
+            self.assertTrue(set(pending) <= set(recent["member_ids"]))
+            self.assertEqual(
+                metadata["opponent_pool_state"]["buckets"][
+                    "champion_vs_heuristic"
+                ]["member_ids"],
+                [],
+            )
+
+            resumed = self._train(
+                iterations=6,
+                rl_weights_path=str(resumed_base),
+                resume_weights_path=str(partial_weights),
+                resume_state_file=str(partial_state),
+                **common,
+            )
+            with np.load(full["rl_weights_path"], allow_pickle=False) as left:
+                with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
+                    self.assertEqual(left.files, right.files)
+                    for name in left.files:
+                        np.testing.assert_array_equal(left[name], right[name])
+
+            resumed_metadata, _resumed_pool = load_resume_state(
+                numbered_checkpoint_path(resumed_base, 6),
+                resume_state_path(numbered_checkpoint_path(resumed_base, 6)),
+            )
+            full_metadata, _full_pool = load_resume_state(
+                numbered_checkpoint_path(full_base, 6),
+                resume_state_path(numbered_checkpoint_path(full_base, 6)),
+            )
+            self.assertEqual(
+                resumed_metadata["opponent_pool_state"]["champion_state"],
+                full_metadata["opponent_pool_state"]["champion_state"],
+            )
+            self.assertEqual(
+                len(
+                    resumed_metadata["opponent_pool_state"]["champion_state"][
+                        "pending_candidate_ids"
+                    ]
+                ),
+                6,
+            )
+
+    def test_a_pre_rotation_resume_state_is_rejected_with_a_reason(self):
+        """Version 12 stored no anchor, so it cannot be reinterpreted."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            base = root / "run.npz"
+            self._train(
+                iterations=2,
+                gpi=4,
+                checkpoint_interval=2,
+                seed=11,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                quiet=True,
+                numbered_checkpoints=True,
+                ppo_max_epochs=1,
+                rl_weights_path=str(base),
+            )
+            weights = numbered_checkpoint_path(base, 2)
+            state_path = resume_state_path(weights)
+            with np.load(state_path, allow_pickle=False) as state:
+                payload = {name: state[name] for name in state.files}
+            metadata = json.loads(str(payload["metadata_json"].item()))
+            metadata["version"] = 12
+            metadata.pop("uniform_rotation_state")
+            payload["metadata_json"] = np.asarray(json.dumps(metadata))
+            np.savez(state_path, **payload)
+            with self.assertRaisesRegex(ValueError, "rotation anchor"):
+                load_resume_state(weights, state_path)
+
     def test_four_hidden_layer_run_trains_and_resumes_exactly(self):
         """Carry a deeper architecture through rollouts, PPO, and exact resume."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1118,6 +1823,7 @@ class ParallelRLTests(unittest.TestCase):
                     opponent_pool=runner.opponent_pool,
                     performance_tracker=runner.performance_tracker,
                     selected_buckets=("heuristic", "recent"),
+                    uniform_rotation=UniformRotationState(("heuristic", "recent")),
                     difficulty_weight=0.5,
                     iteration=1,
                     first_absolute_game=0,

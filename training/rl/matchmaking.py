@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import asdict, dataclass
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
@@ -19,7 +20,7 @@ from training.rl.pool import (
 from training.utils.seeding import stable_seed
 
 
-MATCHMAKING_POLICY_VERSION = 3
+MATCHMAKING_POLICY_VERSION = 4
 DIFFICULTY_WIN_RATE_LOWER = 0.375
 DIFFICULTY_WIN_RATE_UPPER = 0.625
 DIFFICULTY_PRIOR_GAMES = 20.0
@@ -45,6 +46,12 @@ def matchmaking_policy_manifest():
         "integer_allocation_tie_breaking": (
             "bucket_registry_order_then_opponent_id"
         ),
+        "bucket_allocation": "largest_remainder_over_available_buckets",
+        "uniform_member_allocation": "cyclic_remainder_by_persisted_anchor",
+        "uniform_rotation_anchor": (
+            "last_extra_game_opponent_id_then_bisect_right_successor"
+        ),
+        "difficulty_member_allocation": "largest_remainder_by_difficulty",
         "component_allocation_scope": "available_buckets_only",
         "empty_configured_bucket_games": 0,
         "assignment_order": "stable_seeded_shuffle",
@@ -180,6 +187,162 @@ class OpponentPerformanceTracker:
         }
 
 
+def _rotation_start_index(members, anchor):
+    """Return the first member index that receives a rotating extra game.
+
+    ``bisect_right`` covers both a live and a departed anchor with one lookup:
+    an anchor that is still a member sits immediately before its own insertion
+    point, so the result is the next identity, and an anchor that has left the
+    bucket resolves to the first surviving identity that sorts after it.
+    """
+    if anchor is None:
+        return 0
+    return bisect.bisect_right(members, anchor) % len(members)
+
+
+def cyclic_remainder_allocation(total, members, *, anchor):
+    """Split one bucket budget equally and rotate the remainder by identity.
+
+    Every member receives ``total // len(members)`` games. The
+    ``total % len(members)`` leftover games go to consecutive members starting
+    after ``anchor``, so the identities carrying the remainder move forward
+    across iterations instead of always being the same stable-order prefix.
+    Returns the per-member counts and the anchor the caller should commit.
+    """
+    total = int(total)
+    if total < 0:
+        raise ValueError("Uniform member allocation total cannot be negative")
+    members = tuple(members)
+    if not members:
+        if total:
+            raise ValueError(
+                "Cannot allocate a non-zero uniform budget to no members"
+            )
+        return {}, anchor
+    count = len(members)
+    base, extra = divmod(total, count)
+    counts = {opponent_id: base for opponent_id in members}
+    # No remainder means no bias to rotate away from, so the anchor keeps its
+    # meaning for the next iteration that actually has one.
+    if extra == 0:
+        return counts, anchor
+    start = _rotation_start_index(members, anchor)
+    for step in range(extra):
+        counts[members[(start + step) % count]] += 1
+    return counts, members[(start + extra - 1) % count]
+
+
+class UniformRotationState:
+    """Own one logical uniform-remainder anchor per configured bucket.
+
+    The anchor is a durable opponent ID and not an integer cursor. Bucket
+    membership changes constantly: ``recent`` evicts and admits on every
+    successful update and the archive-backed bands rebalance, so an index would
+    silently change meaning while an ID stays interpretable through
+    ``bisect_right`` continuation.
+    """
+
+    def __init__(self, bucket_names=()):
+        self._anchors = {}
+        self.ensure(bucket_names)
+
+    @property
+    def configured_buckets(self):
+        """Return the registered bucket names in canonical registry order."""
+        if not self._anchors:
+            return ()
+        return canonicalize_bucket_names(tuple(self._anchors))
+
+    def ensure(self, bucket_names):
+        """Register every configured bucket, including the ones still empty.
+
+        A warm-up bucket keeps an anchor so it starts from the first canonical
+        member the moment it becomes available, rather than inheriting one.
+        """
+        names = tuple(bucket_names)
+        if not names:
+            return
+        for name in canonicalize_bucket_names(names):
+            self._anchors.setdefault(name, None)
+
+    def anchor(self, bucket_name):
+        """Return the last member ID that received a rotating extra game."""
+        try:
+            return self._anchors[bucket_name]
+        except KeyError as exc:
+            raise KeyError(
+                f"Uniform rotation bucket {bucket_name!r} is not configured"
+            ) from exc
+
+    def anchors(self):
+        """Return every current anchor in canonical registry order."""
+        return {name: self._anchors[name] for name in self.configured_buckets}
+
+    def plan_uniform_allocation(self, bucket_budgets, bucket_members):
+        """Return exact member counts plus the anchors a plan would commit.
+
+        This never mutates durable state. The caller commits the returned
+        anchors only after the complete match plan validates, so a rejected
+        plan cannot advance the rotation.
+        """
+        counts = {}
+        next_anchors = {}
+        for bucket_name, budget in bucket_budgets.items():
+            members = tuple(bucket_members.get(bucket_name, ()))
+            if list(members) != sorted(set(members)):
+                raise ValueError(
+                    f"Uniform rotation members for {bucket_name!r} are not "
+                    "sorted and unique"
+                )
+            member_counts, next_anchor = cyclic_remainder_allocation(
+                budget,
+                members,
+                anchor=self.anchor(bucket_name),
+            )
+            counts.update({
+                (bucket_name, opponent_id): value
+                for opponent_id, value in member_counts.items()
+            })
+            next_anchors[bucket_name] = next_anchor
+        return counts, next_anchors
+
+    def commit(self, next_anchors):
+        """Advance the durable anchors after a complete plan has validated."""
+        unknown = sorted(set(next_anchors) - set(self._anchors))
+        if unknown:
+            raise KeyError(
+                "Uniform rotation cannot commit unconfigured bucket(s): "
+                + ", ".join(unknown)
+            )
+        self._anchors.update({
+            name: (None if value is None else str(value))
+            for name, value in next_anchors.items()
+        })
+
+    def export_state(self):
+        """Return JSON-safe rotation state for exact resume."""
+        return {
+            "policy_manifest": matchmaking_policy_manifest(),
+            "anchors": self.anchors(),
+        }
+
+    def restore_state(self, state, bucket_names):
+        """Restore anchors verbatim instead of deriving them from membership."""
+        if state.get("policy_manifest") != matchmaking_policy_manifest():
+            raise ValueError("Resume matchmaking policy manifest changed")
+        names = canonicalize_bucket_names(bucket_names)
+        stored = state.get("anchors", {})
+        if set(stored) != set(names):
+            raise ValueError(
+                "Resume uniform rotation buckets do not match the configured "
+                "selection"
+            )
+        self._anchors = {
+            name: (None if stored[name] is None else str(stored[name]))
+            for name in names
+        }
+
+
 @dataclass(frozen=True)
 class MatchAllocation:
     """Exact component counts for one bucket membership."""
@@ -218,6 +381,11 @@ class MatchPlan:
     difficulty_budget: int
     configured_buckets: tuple[str, ...]
     available_buckets: tuple[str, ...]
+    # Rotation anchors are ordered pairs rather than a mapping so the plan stays
+    # immutable like every other field, and so the transition itself is part of
+    # durable plan identity.
+    uniform_rotation_before: tuple[tuple[str, str | None], ...]
+    uniform_rotation_after: tuple[tuple[str, str | None], ...]
     allocations: tuple[MatchAllocation, ...]
     assignments: tuple[GameAssignment, ...]
     plan_sha256: str
@@ -266,7 +434,27 @@ def _largest_remainder(total, keys, weights):
     return {key: int(value) for key, value in zip(keys, floors)}
 
 
-def _component_allocation(opponent_pool, tracker, buckets, budget, difficulty):
+def _canonical_members(opponent_pool, buckets):
+    """Return the stable logical member order both components allocate over."""
+    return {
+        bucket: tuple(sorted(opponent_pool.bucket_members(bucket)))
+        for bucket in buckets
+    }
+
+
+def _component_bucket_budgets(
+    opponent_pool,
+    tracker,
+    buckets,
+    budget,
+    difficulty,
+):
+    """Split one component budget across available buckets.
+
+    Bucket-level allocation is identical for both components and is deliberately
+    unchanged by the member-level rotation: only the identities that receive a
+    bucket's remainder games rotate, never the size of a bucket's share.
+    """
     bucket_keys = tuple(buckets)
     # Only available buckets reach this point, so no weight divides by zero.
     empty = [
@@ -287,21 +475,28 @@ def _component_allocation(opponent_pool, tracker, buckets, budget, difficulty):
         }
     else:
         bucket_weights = {bucket: 1.0 for bucket in bucket_keys}
-    bucket_counts = _largest_remainder(budget, bucket_keys, bucket_weights)
+    return _largest_remainder(budget, bucket_keys, bucket_weights)
+
+
+def _difficulty_member_allocation(tracker, members_by_bucket, bucket_counts):
+    """Allocate each bucket's difficulty games by individual member difficulty.
+
+    This stays exactly meritocratic. The uniform rotation cursor is never
+    applied here, so a hard opponent keeps concentrating games regardless of
+    where the uniform remainder currently sits.
+    """
     result = {}
-    for bucket in bucket_keys:
-        members = tuple(sorted(opponent_pool.bucket_members(bucket)))
-        member_weights = (
-            {opponent_id: tracker.difficulty(opponent_id) for opponent_id in members}
-            if difficulty
-            else {opponent_id: 1.0 for opponent_id in members}
-        )
+    for bucket, count in bucket_counts.items():
+        members = members_by_bucket[bucket]
         member_counts = _largest_remainder(
-            bucket_counts[bucket],
+            count,
             members,
-            member_weights,
+            {opponent_id: tracker.difficulty(opponent_id) for opponent_id in members},
         )
-        result.update({(bucket, opponent_id): count for opponent_id, count in member_counts.items()})
+        result.update({
+            (bucket, opponent_id): value
+            for opponent_id, value in member_counts.items()
+        })
     return result
 
 
@@ -315,6 +510,8 @@ def _plan_hash_payload(
     difficulty_budget,
     configured_buckets,
     available_buckets,
+    uniform_rotation_before,
+    uniform_rotation_after,
     allocations,
     assignments,
 ):
@@ -344,6 +541,14 @@ def _plan_hash_payload(
         # availability state.
         "configured_buckets": list(configured_buckets),
         "available_buckets": list(available_buckets),
+        # Exact resume now owns the rotation, so the transition is hashed
+        # directly instead of being inferred from the resulting assignments.
+        "uniform_rotation_before": [
+            [name, anchor] for name, anchor in uniform_rotation_before
+        ],
+        "uniform_rotation_after": [
+            [name, anchor] for name, anchor in uniform_rotation_after
+        ],
         "allocations": durable_allocations,
         "assignments": durable_assignments,
     }
@@ -363,6 +568,7 @@ def build_match_plan(
     *,
     opponent_pool,
     performance_tracker,
+    uniform_rotation,
     selected_buckets,
     difficulty_weight,
     iteration,
@@ -370,7 +576,13 @@ def build_match_plan(
     game_count,
     base_seed,
 ):
-    """Build and validate one deterministic plan totaling exactly ``game_count``."""
+    """Build and validate one deterministic plan totaling exactly ``game_count``.
+
+    ``uniform_rotation`` is advanced only after the complete plan validates, so
+    a rejected plan can never consume a rotation step. It is a required
+    argument: defaulting to a throwaway state would silently restore the
+    stable-prefix member bias this rotation exists to remove.
+    """
     buckets = canonicalize_bucket_names(selected_buckets)
     if buckets != tuple(opponent_pool.selected_buckets):
         raise ValueError("Matchmaker buckets do not match the active opponent pool")
@@ -389,29 +601,48 @@ def build_match_plan(
     performance_tracker.ensure(
         record.opponent_id for record in opponent_pool.active_opponents()
     )
+    # Registering a configured bucket only creates a ``None`` anchor; it can
+    # never advance one, so this is safe before the plan validates.
+    uniform_rotation.ensure(buckets)
+    if uniform_rotation.configured_buckets != buckets:
+        raise ValueError(
+            "Uniform rotation buckets do not match the active opponent pool"
+        )
+    rotation_before = uniform_rotation.anchors()
 
     uniform_budget, difficulty_budget = matchmaking_component_budgets(
         game_count,
         alpha,
     )
-    uniform = _component_allocation(
-        opponent_pool,
-        performance_tracker,
-        available,
-        uniform_budget,
-        difficulty=False,
+    members_by_bucket = _canonical_members(opponent_pool, available)
+    uniform, next_anchors = uniform_rotation.plan_uniform_allocation(
+        _component_bucket_budgets(
+            opponent_pool,
+            performance_tracker,
+            available,
+            uniform_budget,
+            difficulty=False,
+        ),
+        members_by_bucket,
     )
-    difficult = _component_allocation(
-        opponent_pool,
+    # An unavailable bucket is absent from the budget mapping, so its anchor
+    # carries over untouched instead of resetting when it becomes available.
+    rotation_after = {**rotation_before, **next_anchors}
+    difficult = _difficulty_member_allocation(
         performance_tracker,
-        available,
-        difficulty_budget,
-        difficulty=True,
+        members_by_bucket,
+        _component_bucket_budgets(
+            opponent_pool,
+            performance_tracker,
+            available,
+            difficulty_budget,
+            difficulty=True,
+        ),
     )
     allocation_keys = tuple(
         (bucket, opponent_id)
         for bucket in available
-        for opponent_id in sorted(opponent_pool.bucket_members(bucket))
+        for opponent_id in members_by_bucket[bucket]
     )
     allocations = tuple(
         MatchAllocation(
@@ -455,6 +686,12 @@ def build_match_plan(
         )
         for local_index, (bucket, opponent_id) in enumerate(ordered_memberships)
     )
+    rotation_pairs_before = tuple(
+        (name, rotation_before[name]) for name in buckets
+    )
+    rotation_pairs_after = tuple(
+        (name, rotation_after[name]) for name in buckets
+    )
     payload = _plan_hash_payload(
         iteration=iteration,
         first_absolute_game=first_absolute_game,
@@ -464,6 +701,8 @@ def build_match_plan(
         difficulty_budget=difficulty_budget,
         configured_buckets=buckets,
         available_buckets=available,
+        uniform_rotation_before=rotation_pairs_before,
+        uniform_rotation_after=rotation_pairs_after,
         allocations=allocations,
         assignments=assignments,
     )
@@ -476,11 +715,16 @@ def build_match_plan(
         difficulty_budget=difficulty_budget,
         configured_buckets=buckets,
         available_buckets=available,
+        uniform_rotation_before=rotation_pairs_before,
+        uniform_rotation_after=rotation_pairs_after,
         allocations=allocations,
         assignments=assignments,
         plan_sha256=_sha256(payload),
     )
     validate_match_plan(plan, opponent_pool)
+    # The rotation is consumed only here, once nothing can still reject the
+    # plan the extra games were allocated for.
+    uniform_rotation.commit(next_anchors)
     return plan
 
 
@@ -498,6 +742,7 @@ def validate_match_plan(plan, opponent_pool):
         raise ValueError("Match plan availability does not match the pool")
     if not set(plan.available_buckets) <= set(plan.configured_buckets):
         raise ValueError("Match plan availability is not a configured subset")
+    _validate_uniform_rotation(plan, opponent_pool)
     expected_games = set(range(
         plan.first_absolute_game,
         plan.first_absolute_game + plan.game_count,
@@ -526,6 +771,42 @@ def validate_match_plan(plan, opponent_pool):
         else:
             raise ValueError(
                 f"Unknown opponent kind: {assignment.opponent_kind!r}"
+            )
+
+
+def _validate_uniform_rotation(plan, opponent_pool):
+    """Raise if the recorded rotation transition is not the one a plan earned."""
+    before = dict(plan.uniform_rotation_before)
+    after = dict(plan.uniform_rotation_after)
+    configured = tuple(plan.configured_buckets)
+    if tuple(name for name, _anchor in plan.uniform_rotation_before) != configured:
+        raise ValueError("Match plan rotation anchors are not in configured order")
+    if tuple(name for name, _anchor in plan.uniform_rotation_after) != configured:
+        raise ValueError("Match plan rotation anchors are not in configured order")
+    available = set(plan.available_buckets)
+    uniform_by_bucket = {name: 0 for name in configured}
+    for allocation in plan.allocations:
+        uniform_by_bucket[allocation.bucket_name] += allocation.uniform_games
+    if sum(uniform_by_bucket.values()) != plan.uniform_budget:
+        raise ValueError("Match plan uniform games do not sum to the uniform budget")
+    for name in configured:
+        member_count = len(opponent_pool.bucket_members(name))
+        # An unavailable bucket receives no games, and a bucket whose uniform
+        # share divides evenly has no remainder to rotate. Both must carry
+        # their anchor forward untouched.
+        rotated = (
+            name in available
+            and member_count
+            and uniform_by_bucket[name] % member_count
+        )
+        if not rotated:
+            if after[name] != before[name]:
+                raise ValueError(
+                    f"Match plan advanced the {name!r} rotation without a remainder"
+                )
+        elif after[name] not in opponent_pool.bucket_members(name):
+            raise ValueError(
+                f"Match plan rotation anchor for {name!r} is not a current member"
             )
 
 

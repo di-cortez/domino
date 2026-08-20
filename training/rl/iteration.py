@@ -17,12 +17,16 @@ from training.rl.ppo import (
     ppo_is_enabled,
     update_from_samples,
 )
+from training.rl.champion_evaluation import evaluate_champion_vs_heuristic
 from training.rl.checkpoint_archive import ARCHIVE_INTERVAL_ITERATIONS
 from training.rl.matchmaking import (
     aggregate_match_results,
     build_match_plan,
 )
-from training.rl.pool import select_medium_term_staging_records
+from training.rl.pool import (
+    CHAMPION_VS_HEURISTIC_CAPACITY,
+    select_medium_term_staging_records,
+)
 from training.rl.reporting import (
     build_iteration_metrics_row,
     _merge_parallel_summary,
@@ -148,6 +152,75 @@ def refresh_archive_backed_buckets(
         )
     )
     return summary
+
+
+def _run_champion_evaluation(context, iteration):
+    """Race one complete candidate batch and commit its five champions.
+
+    Returns ``None`` unless the pending list holds a full non-overlapping
+    batch. The event is deliberately placed after the archive refresh and
+    before performance retention: it changes champion membership, and
+    specification 9.8 requires the tracker to be reconciled only once every
+    final membership for the iteration is known.
+
+    Nothing here touches GPI counters, ``bucket_results``, difficulty
+    evidence, or PPO buffers. The only durable effect is the champion
+    membership transaction committed by the pool.
+    """
+    opponent_pool = context.runner.opponent_pool
+    if not opponent_pool.champion_candidate_batch_is_ready:
+        return None
+    candidate_ids = opponent_pool.champion_pending_candidate_ids
+    bank_slots = {
+        opponent_id: opponent_pool.bank_slot(opponent_id)
+        for opponent_id in candidate_ids
+    }
+
+    def play_stage(specs):
+        """Execute one racing stage and account for its worker-pool run."""
+        results, run_info = context.runner.evaluate_champion_games(specs)
+        _merge_parallel_summary(
+            context.parallel_summary,
+            run_info,
+            phase="champion_evaluation",
+            iteration=iteration,
+        )
+        if run_info.fallback_count:
+            context.reporter.rollout_fallback(iteration, run_info)
+        return results
+
+    result = evaluate_champion_vs_heuristic(
+        candidate_ids=candidate_ids,
+        bank_slots=bank_slots,
+        play_games=play_stage,
+        base_seed=context.effective_seed,
+        # The seed panel is keyed by the number of events already committed,
+        # so a deterministic replay after a crash reuses the same deals.
+        event_index=opponent_pool.champion_completed_event_count,
+    )
+    commit = opponent_pool.apply_champion_vs_heuristic_result(
+        result.champion_ids,
+        result.heuristic_win_rates,
+    )
+    return {
+        "iteration": int(iteration),
+        # ``event_index`` counts committed events, so it is one-based here and
+        # one higher than the zero-based index that seeded the panels.
+        "event_index": int(commit["event_index"]),
+        "racing_event_index": int(result.event_index),
+        "candidates": len(candidate_ids),
+        "racing_games": int(result.total_games),
+        "seconds": float(result.elapsed_seconds),
+        "stage_candidates": tuple(
+            item.candidates for item in result.stage_summaries
+        ),
+        "survivors": tuple(result.champion_ids),
+        "admitted": tuple(commit["admitted"]),
+        "evicted": tuple(commit["evicted"]),
+        "membership_count": int(commit["membership_count"]),
+        "capacity": int(CHAMPION_VS_HEURISTIC_CAPACITY),
+        "win_rates": dict(commit["admitted_win_rates"]),
+    }
 
 
 def _value_prediction_summary(values):
@@ -441,6 +514,7 @@ def run_iteration(context, state, iteration):
     match_plan = build_match_plan(
         opponent_pool=context.runner.opponent_pool,
         performance_tracker=context.runner.performance_tracker,
+        uniform_rotation=context.runner.uniform_rotation,
         selected_buckets=context.training.opponent_buckets,
         difficulty_weight=context.training.difficulty_weight,
         iteration=iteration,
@@ -610,6 +684,19 @@ def run_iteration(context, state, iteration):
         time.perf_counter() - section_started,
     )
     section_started = time.perf_counter()
+    # The racing event runs here, between the archive refresh and performance
+    # retention, so its 100,000 evaluation games stay out of rollout timing and
+    # its admissions are visible to the tracker reconciliation below.
+    champion_event = _run_champion_evaluation(context, iteration)
+    # The section exists only on the iterations that actually raced, so a
+    # profile that reports it is proof the 100,000 games were timed apart from
+    # rollout work rather than folded into it.
+    if champion_event is not None:
+        context.runtime_profile.add(
+            "champion_evaluation",
+            time.perf_counter() - section_started,
+        )
+    section_started = time.perf_counter()
     # Trackers are reconciled only after the membership transaction, so an
     # identity moving between buckets keeps its accumulated evidence.
     active_opponent_ids = tuple(
@@ -671,6 +758,7 @@ def run_iteration(context, state, iteration):
         opponent_pool_state=context.runner.opponent_pool.observability(
             games_per_iteration=context.selected_gpi
         ),
+        uniform_rotation_anchors=context.runner.uniform_rotation.anchors(),
         bucket_results=bucket_results,
         gradient_metrics=gradient_metrics,
         use_value_head=context.training.use_value_head,
@@ -679,6 +767,10 @@ def run_iteration(context, state, iteration):
         ppo_max_epochs=context.training.ppo_max_epochs,
         restart_summary=restart_summary,
     )
+    # Reported after the iteration summary so the event reads as a consequence
+    # of the update that completed its candidate batch.
+    if champion_event is not None:
+        context.reporter.champion_event(champion_event)
     context.runtime_profile.add(
         "console_logging",
         time.perf_counter() - section_started,

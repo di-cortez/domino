@@ -11,6 +11,7 @@ Owned by `training/rl/`.
 | `constants.py` | Fixed worker-autotuning implementation invariants shared by RL modules. |
 | `pool.py` | Separates durable opponent identities and bucket retention from physical shared-memory slots. |
 | `matchmaking.py` | Tracks smoothed difficulty evidence and builds immutable exact-GPI match plans. |
+| `champion_evaluation.py` | Races candidate snapshots against the fixed heuristic on shared seed panels and ranks the survivors. |
 | `checkpoint_archive.py` | Stores a bounded, progressively thinned history independently of exact-resume checkpoints. |
 | `rollout.py` | Finalizes rewards and trajectories and plays one CPU-only self-play or heuristic-opponent training game. |
 | `restarts.py` | Defines immutable same-iteration opponent-decision restart records. |
@@ -35,6 +36,8 @@ python -m training.rl.cli --fresh-from-sl
 python -m training.rl.cli --fresh-from-sl --opponent-buckets random --difficulty-weight 0
 python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,random,recent
 python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,recent,medium_term
+python -m training.rl.cli --fresh-from-sl \
+  --opponent-buckets heuristic,recent,medium_term,historical_uniform,champion_vs_heuristic
 python -m training.rl.cli --fresh-from-sl --opponent-decision-restarts
 python -m training.rl.cli --dropout 0.1 --weight-decay
 ```
@@ -130,6 +133,52 @@ bucket still references its identity. A checkpoint that leaves `medium_term`
 for `historical_uniform` in the same refresh keeps its durable identity, its
 bank slot, and its accumulated difficulty evidence.
 
+`champion_vs_heuristic` is not chronological. It holds up to 200 snapshots
+selected for measured strength against the fixed heuristic, so it is the one
+bucket that may intentionally share identities with `recent`, `medium_term`,
+and `historical_uniform`. An overlapping identity is not duplicated storage: it
+keeps one record, one bank slot, one difficulty tracker, and simply receives
+matchmaking games through each membership it holds. The three historical bands
+remain pairwise disjoint among themselves, so pool observability reports
+`forbidden_historical_overlap_counts` (always zero) separately from
+`champion_overlap_counts` (expected to be non-zero).
+
+Its members are chosen by a racing event, not by a cadence. Every successful
+post-update snapshot that joins `recent` also joins a pending candidate list;
+once that list holds 50 distinct snapshots, the next iteration races them
+against the heuristic in four rounds:
+
+    50 candidates x   500 games -> keep 40
+    40 candidates x   500 games -> keep 30
+    30 candidates x   500 games -> keep 20
+    20 candidates x 2,000 games -> keep  5
+
+which is exactly 100,000 evaluation games per completed event. Every candidate
+in a round faces the identical seeded panel of deals and plays exactly half its
+games in each seat, so the comparison is of play rather than of luck, and each
+round ranks on its own games alone: a lucky screening round is never carried
+forward. The final five are therefore ranked on their final 2,000 games, and
+only that final win rate is stored as the champion score. All five winners are
+admitted unconditionally, even when every one of them is weaker than every
+incumbent; if the bucket is full, the five incumbents with the lowest stored
+heuristic win rate leave first. Eviction chooses only among the incumbents that
+were already there, never from the union of old and new. The candidate list is
+consumed in the same transaction that admits the winners, so consecutive events
+never share a candidate.
+
+The bucket starts empty, so like the delayed bands it is configured but
+unavailable during warm-up and receives no training games until its first event
+completes at the fiftieth successful update.
+
+Racing games are evaluation games. They never enter the GPI budget, the
+`bucket_results` metrics rows, the difficulty evidence, or the PPO buffers, and
+they are timed in their own `champion_evaluation` runtime-profile section
+rather than inside rollout time. A completed event prints its own console
+summary regardless of `--log-interval`. Exact resume restores the champion
+membership, the stored win rates, the pending candidate list, and the completed
+event index, alongside the uniform rotation anchors, so a resumed run races the
+same candidates on the same seed panels a single uninterrupted run would have.
+
 The delayed bands are genuinely empty during warm-up, and empty buckets are not
 padded with duplicated recent policies. Matchmaking distinguishes *configured*
 buckets from *available* ones and redistributes the complete GPI budget across
@@ -137,15 +186,40 @@ the available buckets, giving an empty bucket zero games and a `[0, 0, 0]`
 metrics row until the archive makes its band real.
 
 `--opponent-buckets` accepts any non-empty combination of `heuristic`, `random`,
-`recent`, `medium_term`, and `historical_uniform` as a comma-separated
-selection. Input order is canonicalized, while duplicates, unknown names, and an
-empty selection are rejected. At least one bucket that is available from the
-first iteration (`heuristic`, `random`, or `recent`) is required, because the
-archive-backed bands cannot bootstrap their own training history.
+`recent`, `medium_term`, `historical_uniform`, and `champion_vs_heuristic` as a
+comma-separated selection. Input order is canonicalized, while duplicates,
+unknown names, and an empty selection are rejected. At least one bucket that is
+available from the first iteration (`heuristic`, `random`, or `recent`) is
+required, because the archive-backed bands cannot bootstrap their own training
+history. Selecting `champion_vs_heuristic` additionally requires `recent`,
+because its candidates are the snapshots `recent` is already holding.
 `--difficulty-weight` controls the exact
 convex allocation: `0` is entirely uniform, `0.5` is half uniform and half
 difficulty-based, and `1` is entirely difficulty-based. GPI remains the single
 game budget; matchmaking never adds evaluation games.
+
+Both components split their budget across available buckets by the same
+largest-remainder rule. Inside a bucket they differ. The difficulty component
+weights each member by its own measured difficulty, so hard opponents keep
+concentrating games. The uniform component gives every member
+`floor(bucket_games / members)` games and hands the remainder to consecutive
+members walking forward from a persisted anchor, so the identities receiving
+the extra game rotate across iterations instead of always being the same
+stable-order prefix. Without that rotation a 200-member bucket receiving 66
+uniform games would serve the same 66 identities forever and never reach the
+rest.
+
+The anchor is the last opponent ID that received an extra game, held per
+bucket, and it is exact-resume state. When the anchored identity has left the
+bucket the rotation continues at that ID's insertion point, so FIFO eviction
+and archive rebalancing move the cursor forward instead of resetting it. A
+bucket whose share divides evenly has no remainder and does not advance its
+anchor, and an unavailable bucket never advances at all. Rotation is committed
+only after the complete match plan validates. The per-iteration console line
+reports each bucket's current anchor after `uniform rotation after`.
+
+Allocation fixes counts only. The complete assignment list is still shuffled
+once with a stable seed after every count is final.
 
 GPI is never autotuned. Canonical pipelines and direct RL training accept
 `--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000`, defaulting to

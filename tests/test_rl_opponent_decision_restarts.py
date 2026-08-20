@@ -11,7 +11,7 @@ from agents.network_architecture import default_hidden_sizes
 from agents.rl_nn import PolicyNetwork
 from diagnostics.parallel_runner import ParallelSafetyConfig
 from middleware.domino_engine import DominoEngine
-from training.rl.matchmaking import build_match_plan
+from training.rl.matchmaking import UniformRotationState, build_match_plan
 from training.rl.parallel import RLRolloutRunner
 from training.rl.config import (
     RLExecutionOptions,
@@ -35,14 +35,20 @@ from training.pipeline import parse_args as parse_pipeline_args
 RULESET = "double-three"
 
 
-def test_restart_flag_is_optional_in_standalone_and_canonical_clis():
+def test_restart_flag_is_optional_in_standalone_and_canonical_clis(tmp_path):
     assert parse_rl_args([]).opponent_decision_restarts is False
     assert parse_rl_args([
         "--opponent-decision-restarts"
     ]).opponent_decision_restarts is True
+    # An isolated artifact root keeps this parsing contract independent of any
+    # real canonical run on the machine. Without it the parser finds
+    # models/rl/active_forever_run.json and rejects the flag as conflicting
+    # with that run's saved configuration.
     assert parse_pipeline_args([
         "forever",
         "--opponent-decision-restarts",
+        "--artifact-root",
+        str(tmp_path),
     ]).opponent_decision_restarts is True
 
 
@@ -251,6 +257,7 @@ def test_parallel_restart_results_are_invariant_to_worker_count():
                 opponent_pool=runner.opponent_pool,
                 performance_tracker=runner.performance_tracker,
                 selected_buckets=("random",),
+                uniform_rotation=UniformRotationState(("random",)),
                 difficulty_weight=0.0,
                 iteration=1,
                 first_absolute_game=0,
@@ -310,6 +317,7 @@ def test_neural_restarts_reuse_the_source_opponent_identity_and_bank_slot():
             opponent_pool=runner.opponent_pool,
             performance_tracker=runner.performance_tracker,
             selected_buckets=("recent",),
+            uniform_rotation=UniformRotationState(("recent",)),
             difficulty_weight=0.0,
             iteration=1,
             first_absolute_game=0,

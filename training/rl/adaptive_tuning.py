@@ -68,10 +68,15 @@ def policy_sha256(network):
     return digest.hexdigest()
 
 
-def pool_sha256(pool_state=None, pool_weights=None, performance_state=None):
+def pool_sha256(
+    pool_state=None,
+    pool_weights=None,
+    performance_state=None,
+    rotation_state=None,
+):
     """Hash complete logical pool inputs without relying on bank positions."""
     digest = hashlib.sha256()
-    for value in (pool_state or {}, performance_state or {}):
+    for value in (pool_state or {}, performance_state or {}, rotation_state or {}):
         digest.update(json.dumps(
             value,
             sort_keys=True,
@@ -91,6 +96,7 @@ def capture_isolation_state(
     pool_state=None,
     pool_weights=None,
     performance_state=None,
+    rotation_state=None,
 ):
     """Capture every mutable parent-side state that tuning must not consume."""
     return {
@@ -104,6 +110,7 @@ def capture_isolation_state(
             pool_state,
             pool_weights,
             performance_state,
+            rotation_state,
         ),
         "pool_state": deepcopy(pool_state),
         "pool_weights": {
@@ -114,6 +121,7 @@ def capture_isolation_state(
             for opponent_id, weights in (pool_weights or {}).items()
         },
         "performance_state": deepcopy(performance_state),
+        "rotation_state": deepcopy(rotation_state),
     }
 
 
@@ -123,6 +131,7 @@ def restore_isolation_state(
     pool_state=None,
     pool_weights=None,
     performance_state=None,
+    rotation_state=None,
 ):
     """Restore captured state and fail if any isolation invariant differs."""
     for name, value in snapshot["weights"].items():
@@ -151,15 +160,21 @@ def restore_isolation_state(
     if performance_state is not None:
         performance_state.clear()
         performance_state.update(deepcopy(snapshot["performance_state"]))
+    if rotation_state is not None:
+        rotation_state.clear()
+        rotation_state.update(deepcopy(snapshot["rotation_state"]))
     if policy_sha256(network) != snapshot["weights_sha256"]:
         raise RuntimeError("Adaptive tuning changed RL policy weights.")
     if network.optimizer_state_dict() != snapshot["optimizer"]:
         raise RuntimeError("Adaptive tuning changed the optimizer state.")
     if getattr(network, "rl_training_algorithm", None) != saved_algorithm:
         raise RuntimeError("Adaptive tuning changed RL algorithm metadata.")
-    if pool_sha256(pool_state, pool_weights, performance_state) != snapshot[
-        "pool_sha256"
-    ]:
+    if pool_sha256(
+        pool_state,
+        pool_weights,
+        performance_state,
+        rotation_state,
+    ) != snapshot["pool_sha256"]:
         raise RuntimeError("Adaptive tuning changed the opponent pool.")
 
 
@@ -266,6 +281,7 @@ def _new_runner(
     pool_state,
     pool_weights,
     performance_state,
+    rotation_state=None,
 ):
     runner = RLRolloutRunner(
         network,
@@ -276,10 +292,14 @@ def _new_runner(
         safety=safety,
     )
     if pool_state is not None:
+        # The throwaway runner owns its own rotation object, so benchmark plans
+        # are representative of the real anchors without being able to advance
+        # them.
         runner.restore_opponent_pool(
             pool_state,
             pool_weights,
             performance_state,
+            rotation_state,
         )
     return runner
 
@@ -306,6 +326,7 @@ def benchmark_worker_candidates(
     pool_state=None,
     pool_weights=None,
     performance_state=None,
+    rotation_state=None,
     status_callback=None,
 ):
     """Benchmark workers until marginal throughput gain falls below the limit."""
@@ -329,6 +350,7 @@ def benchmark_worker_candidates(
         pool_state=pool_state,
         pool_weights=pool_weights,
         performance_state=performance_state,
+        rotation_state=rotation_state,
     )
     results = []
     previous_success = None
@@ -362,6 +384,7 @@ def benchmark_worker_candidates(
                     match_plan = build_match_plan(
                         opponent_pool=runner.opponent_pool,
                         performance_tracker=runner.performance_tracker,
+                        uniform_rotation=runner.uniform_rotation,
                         selected_buckets=opponent_buckets,
                         difficulty_weight=difficulty_weight,
                         iteration=block_count + 1,
@@ -552,6 +575,7 @@ def run_worker_tuning(
     pool_state=None,
     pool_weights=None,
     performance_state=None,
+    rotation_state=None,
     output_path=None,
     status_callback=None,
 ):
@@ -562,6 +586,7 @@ def run_worker_tuning(
         pool_state,
         pool_weights,
         performance_state,
+        rotation_state,
     )
     current_hardware = hardware_metadata(network.device)
     try:
@@ -621,6 +646,7 @@ def run_worker_tuning(
                 pool_state=pool_state,
                 pool_weights=pool_weights,
                 performance_state=performance_state,
+                rotation_state=rotation_state,
                 status_callback=emit,
             )
             selected_workers = int(
@@ -663,6 +689,7 @@ def run_worker_tuning(
             pool_state,
             pool_weights,
             performance_state,
+            rotation_state,
         )
 
     if output_path is not None:

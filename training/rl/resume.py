@@ -41,9 +41,14 @@ from utils.repository import current_git_commit
 # reinterpreted under the new semantics without silently changing what the
 # saved memberships mean. No converter exists, so they are rejected rather
 # than migrated.
-RESUME_STATE_VERSION = 12
+RESUME_STATE_VERSION = 14
 SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
 OVERLAPPING_MEDIUM_TERM_STATE_VERSIONS = (10, 11)
+# States written before the uniform member remainder rotated. They carry no
+# rotation anchor, so their next match plan cannot be reproduced.
+PRE_UNIFORM_ROTATION_STATE_VERSIONS = (12,)
+# States written before the pool carried durable champion state.
+PRE_CHAMPION_STATE_VERSIONS = (13,)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
 
@@ -443,8 +448,23 @@ def _atomic_resume_state_save(path, metadata, pool_state, pool_weights):
 
 
 def _superseded_opponent_band_hint(metadata):
-    """Explain why a pre-band resume state cannot simply be reinterpreted."""
+    """Explain why a superseded resume state cannot simply be reinterpreted."""
     version = metadata.get("version")
+    if version in PRE_CHAMPION_STATE_VERSIONS:
+        return (
+            " This state predates durable champion_vs_heuristic state and "
+            "stores no pending candidate batch, event count, or champion "
+            "scores. The opponent-pool schema changed for every bucket "
+            "selection, so a new run is required."
+        )
+    if version in PRE_UNIFORM_ROTATION_STATE_VERSIONS:
+        return (
+            " This state predates the rotating uniform member allocation and "
+            "stores no rotation anchor. Reinterpreting it would silently "
+            "restart every bucket from its first ordered member, which is a "
+            "policy change and not a bit-identical continuation, so a new run "
+            "is required."
+        )
     if version not in OVERLAPPING_MEDIUM_TERM_STATE_VERSIONS:
         return ""
     pool_state = metadata.get("opponent_pool_state")
@@ -487,6 +507,8 @@ def load_resume_state(weights_path, state_path):
         pool_state = metadata.get("opponent_pool_state")
         if not isinstance(pool_state, dict):
             raise ValueError("RL resume state is missing opponent-pool state")
+        if not isinstance(metadata.get("uniform_rotation_state"), dict):
+            raise ValueError("RL resume state is missing uniform rotation state")
         serialization = pool_state.get("weight_serialization", ())
         pool_count = int(state["pool_weight_count"])
         if pool_count != len(serialization):
@@ -627,6 +649,7 @@ def _save_numbered_resume_checkpoint(
         "opponent_performance_state": (
             runner.performance_tracker.export_state()
         ),
+        "uniform_rotation_state": runner.uniform_rotation.export_state(),
         "checkpoint_archive": {
             "path": "checkpoint_archive/manifest.json",
             "policy": archive_policy_manifest(),

@@ -17,12 +17,18 @@ from multiprocessing import shared_memory
 import numpy as np
 
 
-POOL_SCHEMA_VERSION = 3
-POOL_POLICY_VERSION = 4
+POOL_SCHEMA_VERSION = 4
+POOL_POLICY_VERSION = 5
 K_RECENT = 200
 MEDIUM_TERM_CAPACITY = 200
 MEDIUM_TERM_INTERVAL_ITERATIONS = 10
 HISTORICAL_UNIFORM_CAPACITY = 200
+CHAMPION_VS_HEURISTIC_CAPACITY = 200
+# One racing event consumes exactly this many successive learner snapshots and
+# admits exactly this many winners. Both live here rather than in the evaluation
+# module because the pool owns the pending queue and the admission invariants.
+CHAMPION_CANDIDATE_BATCH_SIZE = 50
+CHAMPION_FINAL_SURVIVORS = 5
 # The neural buckets cover disjoint chronological regions. ``recent`` owns the
 # newest ``K_RECENT`` snapshots, ``medium_term`` the archive milestones behind
 # that band, and ``historical_uniform`` everything older than both.
@@ -35,6 +41,10 @@ HISTORICAL_MINIMUM_AGE_ITERATIONS = (
 )
 MEDIUM_TERM_RETENTION_RULE = "delayed_fifo_archive_window"
 HISTORICAL_UNIFORM_RETENTION_RULE = "deterministic_uniform_historical_rebalance"
+CHAMPION_VS_HEURISTIC_ADMISSION_RULE = "top_5_of_50_racing_vs_heuristic"
+CHAMPION_VS_HEURISTIC_RETENTION_RULE = (
+    "guaranteed_new_champions_evict_lowest_heuristic_win_rate"
+)
 HEURISTIC_OPPONENT_ID = "heuristic:strategic_v1"
 HEURISTIC_KIND = "heuristic"
 RANDOM_OPPONENT_ID = "random:uniform_v1"
@@ -92,6 +102,15 @@ BUCKET_REGISTRY = (
         neural=True,
         admission_interval_iterations=MEDIUM_TERM_INTERVAL_ITERATIONS,
     ),
+    # Not chronological, so it carries no admission interval: its cadence is
+    # counted in successful snapshots, not in absolute iterations.
+    BucketSpecification(
+        name="champion_vs_heuristic",
+        capacity=CHAMPION_VS_HEURISTIC_CAPACITY,
+        admission_rule=CHAMPION_VS_HEURISTIC_ADMISSION_RULE,
+        retention_rule=CHAMPION_VS_HEURISTIC_RETENTION_RULE,
+        neural=True,
+    ),
 )
 BUCKET_SPECIFICATIONS = {item.name: item for item in BUCKET_REGISTRY}
 DEFAULT_OPPONENT_BUCKETS = ("heuristic", "recent")
@@ -102,6 +121,13 @@ NEURAL_BUCKET_NAMES = tuple(
     item.name for item in BUCKET_REGISTRY if item.neural
 )
 ARCHIVE_BACKED_BUCKET_NAMES = ("medium_term", "historical_uniform")
+# Exactly the buckets whose memberships must stay pairwise disjoint. A champion
+# is selected by strength rather than by age, so it deliberately overlaps them.
+HISTORICAL_BAND_BUCKET_NAMES = ("recent", "medium_term", "historical_uniform")
+CHAMPION_BUCKET_NAMES = ("champion_vs_heuristic",)
+# ``champion_vs_heuristic`` reuses the identities ``recent`` already holds, so
+# it cannot supply its own candidates and must not bootstrap a run.
+CHAMPION_REQUIRED_BUCKETS = ("recent",)
 
 
 def canonicalize_bucket_names(value):
@@ -158,6 +184,15 @@ def pool_policy_manifest(bucket_names=DEFAULT_OPPONENT_BUCKETS):
             "historical_selection_tie_breaking": (
                 "absolute_target_error_then_older_iteration_then_checkpoint_id"
             ),
+        },
+        "champion_policy": {
+            "candidate_batch_size": CHAMPION_CANDIDATE_BATCH_SIZE,
+            "final_survivors": CHAMPION_FINAL_SURVIVORS,
+            "candidate_source": "successful_post_update_recent_snapshots",
+            "admission": "guaranteed_all_final_survivors",
+            "eviction": "weakest_stored_heuristic_win_rate_then_opponent_id",
+            "score_semantics": "final_stage_win_rate_versus_fixed_heuristic",
+            "overlaps_historical_bands": True,
         },
         "bucket_definitions": {
             name: {
@@ -380,13 +415,18 @@ def historical_uniform_selection_diagnostics(selected_records, *, eligible_recor
 
 @dataclass(frozen=True)
 class SharedPolicyDescriptor:
-    """Pickle-friendly description of one policy stored in shared memory."""
+    """Pickle-friendly description of one policy stored in shared memory.
+
+    Every descriptor of one bank names the *same* segment and differs only by
+    ``offset``. Workers therefore attach once and take a view per slot.
+    """
 
     name: str
     weight_names: tuple[str, ...]
     shapes: tuple[tuple[int, ...], ...]
     element_count: int
     dtype: str
+    offset: int
 
 
 class _SnapshotPolicy:
@@ -415,29 +455,35 @@ class SharedPolicyBank:
         self.dtype = np.asarray(first_weight).dtype
         self.element_count = sum(math.prod(shape) for shape in self.shapes)
         self.opponent_capacity = opponent_capacity
-        self._segments = []
-        self._descriptors = []
+        self.policy_bytes = self.element_count * self.dtype.itemsize
+        self.slot_count = 1 + opponent_capacity
         self._free_slots = list(range(opponent_capacity))
         self._allocated_slots = set()
         self._closed = False
+        # One segment for the whole bank, not one per slot. A POSIX shared
+        # segment costs two file descriptors in every process that maps it, so
+        # a per-slot layout needed about 1,600 descriptors at 800 slots and
+        # exceeded the common 1024 limit in the parent and in every worker.
+        self._segment = shared_memory.SharedMemory(
+            create=True,
+            size=self.slot_count * self.policy_bytes,
+        )
+        self._descriptors = tuple(
+            SharedPolicyDescriptor(
+                name=self._segment.name,
+                weight_names=self.weight_names,
+                shapes=self.shapes,
+                element_count=self.element_count,
+                dtype=self.dtype.str,
+                offset=index * self.policy_bytes,
+            )
+            for index in range(self.slot_count)
+        )
         try:
-            for _slot in range(1 + opponent_capacity):
-                segment = shared_memory.SharedMemory(
-                    create=True,
-                    size=self.element_count * self.dtype.itemsize,
-                )
-                self._segments.append(segment)
-                self._descriptors.append(SharedPolicyDescriptor(
-                    name=segment.name,
-                    weight_names=self.weight_names,
-                    shapes=self.shapes,
-                    element_count=self.element_count,
-                    dtype=self.dtype.str,
-                ))
+            self.write_current(network)
         except BaseException:
             self.close()
             raise
-        self.write_current(network)
 
     @property
     def current_descriptor(self):
@@ -449,7 +495,7 @@ class SharedPolicyBank:
 
     @property
     def allocated_bytes(self):
-        return len(self._segments) * self.element_count * self.dtype.itemsize
+        return self.slot_count * self.policy_bytes
 
     @property
     def allocated_opponent_count(self):
@@ -482,12 +528,17 @@ class SharedPolicyBank:
         if not 0 <= slot < self.opponent_capacity:
             raise ValueError(f"Invalid shared policy slot: {slot}")
 
-    def _write_segment(self, segment_index, network):
-        flat = np.ndarray(
+    def _slot_view(self, segment_index):
+        """Return the flat array view of one slot inside the shared segment."""
+        return np.ndarray(
             (self.element_count,),
             dtype=self.dtype,
-            buffer=self._segments[segment_index].buf,
+            buffer=self._segment.buf,
+            offset=int(segment_index) * self.policy_bytes,
         )
+
+    def _write_segment(self, segment_index, network):
+        flat = self._slot_view(segment_index)
         offset = 0
         for name, shape in zip(self.weight_names, self.shapes):
             value = getattr(network, name)
@@ -519,11 +570,7 @@ class SharedPolicyBank:
         self._validate_opponent_slot(slot)
         if int(slot) not in self._allocated_slots:
             raise ValueError(f"Shared policy slot {slot} is not allocated")
-        flat = np.ndarray(
-            (self.element_count,),
-            dtype=self.dtype,
-            buffer=self._segments[int(slot) + 1].buf,
-        )
+        flat = self._slot_view(int(slot) + 1)
         weights = {}
         offset = 0
         for name, shape in zip(self.weight_names, self.shapes):
@@ -533,18 +580,17 @@ class SharedPolicyBank:
         return weights
 
     def close(self):
-        """Release every shared segment, even after a failed training run."""
+        """Release the shared segment, even after a failed training run."""
         if self._closed:
             return
         self._closed = True
-        for segment in self._segments:
+        try:
+            self._segment.close()
+        finally:
             try:
-                segment.close()
-            finally:
-                try:
-                    segment.unlink()
-                except FileNotFoundError:
-                    pass
+                self._segment.unlink()
+            except FileNotFoundError:
+                pass
 
 
 @dataclass(frozen=True)
@@ -588,7 +634,13 @@ class OpponentPool:
         self._eviction_counts = {name: 0 for name in self.selected_buckets}
         self._band_removal_counts = {name: 0 for name in self.selected_buckets}
         self._band_rebalance_counts = {name: 0 for name in self.selected_buckets}
+        self._score_eviction_counts = {name: 0 for name in self.selected_buckets}
         self._historical_diagnostics = None
+        # Champion state is durable and lives here rather than in matchmaking:
+        # a heuristic win rate is a selection score, never difficulty evidence.
+        self._champion_pending_candidate_ids = []
+        self._champion_completed_event_count = 0
+        self._champion_win_rate_by_opponent_id = {}
         for name in self.selected_buckets:
             specification = BUCKET_SPECIFICATIONS[name]
             self.buckets_by_name[name] = OpponentBucket(
@@ -698,12 +750,23 @@ class OpponentPool:
             origin=origin,
         )
 
+    @staticmethod
+    def _reject_fifo_eviction(bucket_name):
+        """Refuse to drop the oldest member of a score-retained bucket."""
+        if bucket_name in CHAMPION_BUCKET_NAMES:
+            raise RuntimeError(
+                f"Bucket {bucket_name!r} retains members by stored score; FIFO "
+                "eviction would drop its oldest champion instead of its "
+                "weakest. Use apply_champion_vs_heuristic_result()."
+            )
+
     def _make_room_for_memberships(self, bucket_names):
         for bucket_name in bucket_names:
             bucket = self.buckets_by_name[bucket_name]
             if bucket.capacity is None:
                 continue
             while len(bucket.member_ids) >= bucket.capacity:
+                self._reject_fifo_eviction(bucket_name)
                 removed_id = bucket.member_ids.pop(0)
                 self._eviction_counts[bucket_name] += 1
                 self._remove_if_unreferenced(removed_id)
@@ -787,7 +850,7 @@ class OpponentPool:
         archive_milestone = iteration % MEDIUM_TERM_INTERVAL_ITERATIONS == 0
         if not bucket_names and not archive_milestone:
             return None
-        return self._add_snapshot(
+        record = self._add_snapshot(
             network,
             iteration=iteration,
             completed_games=completed_games,
@@ -798,6 +861,200 @@ class OpponentPool:
             ),
             bucket_names=bucket_names,
         )
+        # Only a snapshot that is actually active can be raced later, which is
+        # why v1 requires ``recent`` alongside the champion bucket.
+        if self.champion_selected and "recent" in bucket_names:
+            self._append_champion_candidate(record.opponent_id)
+        return record
+
+    @property
+    def champion_selected(self):
+        """Return whether the champion bucket is part of this run."""
+        return CHAMPION_BUCKET_NAMES[0] in self.buckets_by_name
+
+    @property
+    def champion_pending_candidate_ids(self):
+        """Return the ordered snapshots waiting for the next racing event."""
+        return tuple(self._champion_pending_candidate_ids)
+
+    @property
+    def champion_completed_event_count(self):
+        """Return how many racing events have been durably committed."""
+        return int(self._champion_completed_event_count)
+
+    @property
+    def champion_candidate_batch_is_ready(self):
+        """Return whether a complete non-overlapping candidate batch exists."""
+        return (
+            len(self._champion_pending_candidate_ids)
+            == CHAMPION_CANDIDATE_BATCH_SIZE
+        )
+
+    def champion_win_rates(self):
+        """Return the stored final-stage win rate of every current champion."""
+        return dict(sorted(self._champion_win_rate_by_opponent_id.items()))
+
+    def _append_champion_candidate(self, opponent_id):
+        if len(self._champion_pending_candidate_ids) >= (
+            CHAMPION_CANDIDATE_BATCH_SIZE
+        ):
+            raise RuntimeError(
+                "Champion candidate batch is already complete; the racing "
+                "event must consume it before another snapshot is admitted"
+            )
+        if opponent_id in self._champion_pending_candidate_ids:
+            raise RuntimeError(
+                f"Champion candidate {opponent_id!r} is already pending"
+            )
+        self._champion_pending_candidate_ids.append(opponent_id)
+
+    def _validate_champion_result(self, incoming, final_win_rates):
+        """Raise unless the racing result can be committed in full."""
+        if not self.champion_selected:
+            raise ValueError(
+                "champion_vs_heuristic is not part of this opponent pool"
+            )
+        if len(incoming) != CHAMPION_FINAL_SURVIVORS:
+            raise ValueError(
+                "A racing event must admit exactly "
+                f"{CHAMPION_FINAL_SURVIVORS} champions, got {len(incoming)}"
+            )
+        if len(set(incoming)) != len(incoming):
+            raise ValueError("Champion result repeats an opponent identity")
+        members = self.buckets_by_name[CHAMPION_BUCKET_NAMES[0]].member_ids
+        for opponent_id in incoming:
+            if opponent_id not in self.opponents_by_id:
+                raise KeyError(f"Unknown champion opponent: {opponent_id}")
+            if self.bank_slot_by_opponent_id.get(opponent_id) is None:
+                raise ValueError(
+                    f"Champion {opponent_id!r} has no active policy weights"
+                )
+            if opponent_id in members:
+                raise ValueError(
+                    f"Champion {opponent_id!r} is already an incumbent; "
+                    "candidate batches never overlap"
+                )
+        if set(final_win_rates) != set(incoming):
+            raise ValueError(
+                "Champion win rates must cover exactly the admitted identities"
+            )
+        for opponent_id, win_rate in final_win_rates.items():
+            value = float(win_rate)
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(
+                    f"Champion {opponent_id!r} has an invalid win rate "
+                    f"{win_rate!r}; expected a finite value in [0, 1]"
+                )
+        missing = [item for item in members if item not in (
+            self._champion_win_rate_by_opponent_id
+        )]
+        if missing:
+            raise ValueError(
+                "Champion incumbents are missing stored scores: "
+                + ", ".join(sorted(missing))
+            )
+
+    def apply_champion_vs_heuristic_result(self, champion_ids, final_win_rates):
+        """Admit every racing winner and evict only the weakest incumbents.
+
+        The five winners are admitted unconditionally: this is deliberately not
+        a best-200-of-205 selection, so a weak generation still displaces older
+        champions and the bucket keeps tracking the run. Eviction chooses from
+        the pre-event membership only, so a new champion can never be dropped by
+        the same event that admitted it.
+        """
+        incoming = tuple(champion_ids)
+        final_win_rates = {
+            opponent_id: float(value)
+            for opponent_id, value in dict(final_win_rates).items()
+        }
+        # Validate everything before the first mutation: a partially applied
+        # event would leave the score map and the membership disagreeing.
+        self._validate_champion_result(incoming, final_win_rates)
+
+        name = CHAMPION_BUCKET_NAMES[0]
+        bucket = self.buckets_by_name[name]
+        capacity = bucket.capacity
+        required_evictions = max(
+            0,
+            len(bucket.member_ids) + len(incoming) - int(capacity),
+        )
+        outgoing = tuple(sorted(
+            bucket.member_ids,
+            key=lambda item: (
+                self._champion_win_rate_by_opponent_id[item],
+                item,
+            ),
+        )[:required_evictions])
+
+        for opponent_id in outgoing:
+            bucket.member_ids.remove(opponent_id)
+            self._champion_win_rate_by_opponent_id.pop(opponent_id, None)
+            self._score_eviction_counts[name] += 1
+            # An evicted champion that still belongs to any band keeps its
+            # record, slot, and difficulty evidence.
+            self._remove_if_unreferenced(opponent_id)
+        for opponent_id in incoming:
+            bucket.member_ids.append(opponent_id)
+            self._champion_win_rate_by_opponent_id[opponent_id] = (
+                final_win_rates[opponent_id]
+            )
+            self._admission_counts[name] += 1
+        # Consuming the batch belongs to the same commit as the admission. If
+        # they were separate steps a checkpoint could claim the batch was used
+        # without the champions being durable, or race the same 50 twice.
+        self._champion_pending_candidate_ids = []
+        self._champion_completed_event_count += 1
+        self._validate_champion_invariants()
+        return {
+            "event_index": self._champion_completed_event_count,
+            "admitted": tuple(incoming),
+            "evicted": outgoing,
+            "membership_count": len(bucket.member_ids),
+            "admitted_win_rates": {
+                opponent_id: final_win_rates[opponent_id]
+                for opponent_id in incoming
+            },
+        }
+
+    def _validate_champion_invariants(self):
+        """Raise unless membership and stored scores describe the same set."""
+        if not self.champion_selected:
+            if self._champion_win_rate_by_opponent_id:
+                raise ValueError(
+                    "Champion scores exist without a champion bucket"
+                )
+            return
+        bucket = self.buckets_by_name[CHAMPION_BUCKET_NAMES[0]]
+        members = set(bucket.member_ids)
+        if len(members) != len(bucket.member_ids):
+            raise ValueError("Champion bucket repeats an opponent identity")
+        if bucket.capacity is not None and len(members) > bucket.capacity:
+            raise ValueError("Champion bucket exceeds its capacity")
+        if members != set(self._champion_win_rate_by_opponent_id):
+            raise ValueError(
+                "Champion scores do not describe the current membership"
+            )
+        unknown = members - set(self.opponents_by_id)
+        if unknown:
+            raise ValueError(
+                "Champion bucket references unknown opponent(s): "
+                + ", ".join(sorted(unknown))
+            )
+        pending = self._champion_pending_candidate_ids
+        if len(pending) >= CHAMPION_CANDIDATE_BATCH_SIZE:
+            raise ValueError(
+                "A committed champion state cannot hold a complete pending "
+                "candidate batch"
+            )
+        if len(set(pending)) != len(pending):
+            raise ValueError("Champion pending candidates repeat an identity")
+        missing = [item for item in pending if item not in self.opponents_by_id]
+        if missing:
+            raise ValueError(
+                "Champion pending candidates are not active: "
+                + ", ".join(sorted(missing))
+            )
 
     def archive_backed_bucket_names(self):
         """Return the selected buckets whose membership comes from the archive."""
@@ -1031,6 +1288,7 @@ class OpponentPool:
         if bucket.capacity is None:
             return
         while len(bucket.member_ids) > bucket.capacity:
+            self._reject_fifo_eviction(bucket_name)
             removed_id = bucket.member_ids.pop(0)
             self._eviction_counts[bucket_name] += 1
             self._remove_if_unreferenced(removed_id)
@@ -1050,6 +1308,7 @@ class OpponentPool:
 
     def add_membership(self, bucket_name, opponent_id):
         """Add a deduplicated logical reference for future bucket policies."""
+        self._reject_fifo_eviction(bucket_name)
         bucket = self.buckets_by_name[bucket_name]
         if opponent_id not in self.opponents_by_id:
             raise KeyError(f"Unknown opponent: {opponent_id}")
@@ -1125,6 +1384,7 @@ class OpponentPool:
                 "fifo_evictions": self._eviction_counts[name],
                 "band_removals": self._band_removal_counts[name],
                 "band_rebalances": self._band_rebalance_counts[name],
+                "score_evictions": self._score_eviction_counts[name],
                 "band_cutoff_iteration": self._band_cutoff_iteration(name),
                 "oldest_age_iterations": (
                     None
@@ -1143,7 +1403,22 @@ class OpponentPool:
                 bucket_state[name]["selection_diagnostics"] = (
                     self._historical_diagnostics
                 )
-        overlaps = self.bucket_overlap_counts()
+            if name in CHAMPION_BUCKET_NAMES:
+                scores = tuple(self._champion_win_rate_by_opponent_id.values())
+                bucket_state[name]["champion_state"] = {
+                    "pending_candidates": len(
+                        self._champion_pending_candidate_ids
+                    ),
+                    "candidate_batch_size": CHAMPION_CANDIDATE_BATCH_SIZE,
+                    "completed_events": self._champion_completed_event_count,
+                    "minimum_heuristic_win_rate": (
+                        min(scores) if scores else None
+                    ),
+                    "maximum_heuristic_win_rate": (
+                        max(scores) if scores else None
+                    ),
+                }
+        forbidden = self.forbidden_historical_overlap_counts()
         return {
             "last_completed_rl_iteration": self.last_completed_rl_iteration,
             "membership_count": sum(
@@ -1153,8 +1428,11 @@ class OpponentPool:
             "unique_neural_opponent_count": self.unique_neural_opponent_count,
             "configured_buckets": list(self.selected_buckets),
             "available_buckets": list(self.available_bucket_names()),
-            "bucket_overlap_counts": overlaps,
-            "total_bucket_overlap_count": sum(overlaps.values()),
+            # Deliberately not one merged field: a name implying that all
+            # neural overlap is an error would be wrong once a champion exists.
+            "forbidden_historical_overlap_counts": forbidden,
+            "total_forbidden_historical_overlap_count": sum(forbidden.values()),
+            "champion_overlap_counts": self.champion_overlap_counts(),
             "buckets": bucket_state,
         }
 
@@ -1168,23 +1446,46 @@ class OpponentPool:
             )
         return None
 
-    def bucket_overlap_counts(self):
-        """Return every neural membership intersection, named by its pair.
+    def _pairwise_overlap_counts(self, first_names, second_names):
+        """Return one entry per selected bucket pair, named by that pair."""
+        counts = {}
+        for first in first_names:
+            if first not in self.buckets_by_name:
+                continue
+            members = set(self.buckets_by_name[first].member_ids)
+            for second in second_names:
+                if second == first or second not in self.buckets_by_name:
+                    continue
+                key = f"{first}|{second}"
+                if f"{second}|{first}" in counts:
+                    continue
+                counts[key] = len(
+                    members & set(self.buckets_by_name[second].member_ids)
+                )
+        return counts
+
+    def forbidden_historical_overlap_counts(self):
+        """Return the pairs that must always be empty, named by their pair.
 
         Reporting one aggregate count would hide which disjointness invariant
         failed, so each selected pair keeps its own entry.
         """
-        selected = [
-            name for name in NEURAL_BUCKET_NAMES if name in self.buckets_by_name
-        ]
-        return {
-            f"{first}|{second}": len(
-                set(self.buckets_by_name[first].member_ids)
-                & set(self.buckets_by_name[second].member_ids)
-            )
-            for index, first in enumerate(selected)
-            for second in selected[index + 1:]
-        }
+        return self._pairwise_overlap_counts(
+            HISTORICAL_BAND_BUCKET_NAMES,
+            HISTORICAL_BAND_BUCKET_NAMES,
+        )
+
+    def champion_overlap_counts(self):
+        """Return champion intersections, which are intentional and may be > 0.
+
+        A champion that is also a recent or archive-backed member is not
+        duplicated storage: it is one identity given extra matchmaking weight
+        through a second membership.
+        """
+        return self._pairwise_overlap_counts(
+            CHAMPION_BUCKET_NAMES,
+            HISTORICAL_BAND_BUCKET_NAMES,
+        )
 
     def export_weights(self):
         """Return one copied weight set per unique active neural opponent."""
@@ -1209,6 +1510,21 @@ class OpponentPool:
                 "fifo_evictions": dict(self._eviction_counts),
                 "band_removals": dict(self._band_removal_counts),
                 "band_rebalances": dict(self._band_rebalance_counts),
+                "score_evictions": dict(self._score_eviction_counts),
+            },
+            "champion_state": {
+                "pending_candidate_ids": list(
+                    self._champion_pending_candidate_ids
+                ),
+                "completed_event_count": int(
+                    self._champion_completed_event_count
+                ),
+                "heuristic_win_rate_by_opponent_id": {
+                    opponent_id: float(value)
+                    for opponent_id, value in sorted(
+                        self._champion_win_rate_by_opponent_id.items()
+                    )
+                },
             },
             "opponents": [
                 asdict(self.opponents_by_id[opponent_id])
@@ -1309,12 +1625,44 @@ class OpponentPool:
             raise ValueError(
                 "Resume opponent-pool state is missing the completed iteration"
             )
+        champion = state.get("champion_state")
+        if not isinstance(champion, dict):
+            raise ValueError("Resume opponent-pool state is missing champion state")
+        self._champion_pending_candidate_ids = [
+            str(item) for item in champion.get("pending_candidate_ids", ())
+        ]
+        self._champion_completed_event_count = int(
+            champion.get("completed_event_count", 0)
+        )
+        self._champion_win_rate_by_opponent_id = {
+            str(opponent_id): float(value)
+            for opponent_id, value in champion.get(
+                "heuristic_win_rate_by_opponent_id",
+                {},
+            ).items()
+        }
+        # The same invariants a committed event guarantees must hold on the way
+        # back in, so a hand-edited or truncated state fails loudly here.
+        self._validate_champion_invariants()
+        if self.champion_selected and "recent" in self.buckets_by_name:
+            recent = set(self.buckets_by_name["recent"].member_ids)
+            stranded = [
+                opponent_id
+                for opponent_id in self._champion_pending_candidate_ids
+                if opponent_id not in recent
+            ]
+            if stranded:
+                raise ValueError(
+                    "Champion pending candidates must still belong to recent: "
+                    + ", ".join(sorted(stranded))
+                )
         counters = state.get("lifecycle_counters", {})
         groups = (
             "admissions",
             "fifo_evictions",
             "band_removals",
             "band_rebalances",
+            "score_evictions",
         )
         if any(
             set(counters.get(group, {})) != set(self.selected_buckets)
@@ -1326,6 +1674,7 @@ class OpponentPool:
             self._eviction_counts,
             self._band_removal_counts,
             self._band_rebalance_counts,
+            self._score_eviction_counts,
         ) = (
             {name: int(counters[group][name]) for name in self.selected_buckets}
             for group in groups

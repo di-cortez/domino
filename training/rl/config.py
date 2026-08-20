@@ -9,6 +9,8 @@ from diagnostics.parallel_runner import MAX_PARALLEL_WORKERS, ParallelSafetyConf
 from training.rl.parallel import DEFAULT_RL_WORKERS
 from training.rl.pool import (
     BOOTSTRAP_CAPABLE_BUCKETS,
+    CHAMPION_BUCKET_NAMES,
+    CHAMPION_REQUIRED_BUCKETS,
     DEFAULT_OPPONENT_BUCKETS,
     canonicalize_bucket_names,
 )
@@ -186,6 +188,22 @@ def resolve_training_options(training, resources, execution):
             "available from the first iteration ("
             + ", ".join(BOOTSTRAP_CAPABLE_BUCKETS)
             + "); the archive-backed bands cannot bootstrap their own history"
+        )
+    # A separate and stronger rule than the bootstrap check above: champion
+    # candidates are the identities recent already holds, so without recent the
+    # 50 pending snapshots would have no active weights left to race.
+    missing_champion_requirements = [
+        name
+        for name in CHAMPION_REQUIRED_BUCKETS
+        if name not in opponent_buckets
+    ]
+    if set(opponent_buckets) & set(CHAMPION_BUCKET_NAMES) and (
+        missing_champion_requirements
+    ):
+        raise ValueError(
+            "champion_vs_heuristic currently requires "
+            + ", ".join(missing_champion_requirements)
+            + " so its candidate snapshots remain available for racing"
         )
     difficulty_weight = float(training.difficulty_weight)
     if not 0.0 <= difficulty_weight <= 1.0:

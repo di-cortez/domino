@@ -168,10 +168,20 @@ Opponent buckets are ownership boundaries, not just names. `training/rl/pool.py`
 owns durable identity, bucket definitions, membership, and the physical-bank
 mapping; `training/rl/checkpoint_archive.py` owns the disk-backed files,
 hashes, thinning, and pin state; `training/rl/matchmaking.py` owns deterministic
-integer allocation. The neural buckets cover disjoint chronological regions:
+integer allocation, including the persisted per-bucket anchor that rotates
+which members receive the uniform component's remainder games. The three historical neural buckets cover disjoint chronological regions:
 `recent` holds the latest 200 learner snapshots, `medium_term` the newest 200
 archive milestones already behind that band, and `historical_uniform` up to 200
-uniform representatives of everything older. The two delayed bands are derived
+uniform representatives of everything older. `champion_vs_heuristic` is
+selected by strength rather than by age and may therefore overlap all three on
+purpose, giving one identity extra matchmaking weight without a second weight
+copy. `training/rl/champion_evaluation.py` owns only the racing mechanics that
+choose those champions -- the fixed stage table, the shared seed panels, seat
+balance, and deterministic ranking -- and never touches membership, which
+remains the pool's; `iteration.py` runs the event between the archive refresh
+and performance-tracker reconciliation, so its 100,000 evaluation games are
+timed separately and stay out of GPI counters, metrics rows, and PPO buffers.
+The two delayed bands are derived
 from archive metadata at every cadence boundary rather than admitted at update
 time, so `iteration.py` publishes the archived milestone first, reconciles both
 memberships as one transaction, then republishes the archive pin union and only

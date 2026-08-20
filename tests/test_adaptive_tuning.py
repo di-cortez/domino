@@ -24,7 +24,10 @@ from training.rl.adaptive_tuning import (
     selected_worker_candidate,
 )
 from training.rl.rollout import REWARD_SCHEMAS
-from training.rl.matchmaking import matchmaking_policy_manifest
+from training.rl.matchmaking import (
+    UniformRotationState,
+    matchmaking_policy_manifest,
+)
 from training.rl.pool import pool_policy_manifest
 
 
@@ -52,6 +55,9 @@ class _Runner:
         self.worker_count = 1
         self.opponent_pool = None
         self.performance_tracker = None
+        # The real runner owns rotation state, and tuning must read its own
+        # throwaway copy rather than the live one.
+        self.uniform_rotation = UniformRotationState(("heuristic", "recent"))
         self.calls = []
         self.closed = False
 
@@ -228,6 +234,50 @@ def test_capture_restore_recovers_weights_optimizer_rng_and_pool():
         pool["snapshot:0000000000"]["W1"],
         snapshot["pool_weights"]["snapshot:0000000000"]["W1"],
     )
+
+
+def test_tuning_cannot_consume_the_real_uniform_rotation():
+    """Discarded benchmark plans must leave the parent anchors untouched."""
+    network = _policy(seed=12)
+    buckets = ("heuristic", "recent")
+    live = UniformRotationState(buckets)
+    live.commit({"recent": "snapshot:0000000007"})
+    rotation_state = live.export_state()
+    before = json.dumps(rotation_state, sort_keys=True)
+
+    def fake_workers(_policy_value, **kwargs):
+        # A benchmark runner sees the real anchors but owns its own object.
+        borrowed = UniformRotationState(buckets)
+        borrowed.restore_state(kwargs["rotation_state"], buckets)
+        assert borrowed.anchor("recent") == "snapshot:0000000007"
+        borrowed.commit({"recent": "snapshot:0000000099"})
+        return 100, [{
+            "success": True,
+            "accepted": True,
+            "requested_workers": 1,
+            "games_per_second": 5.0,
+            "actual_games": 100,
+        }]
+
+    with mock.patch(
+        "training.rl.adaptive_tuning.benchmark_worker_candidates",
+        side_effect=fake_workers,
+    ):
+        metadata = _tuning_kwargs(network, rotation_state=rotation_state)
+
+    assert metadata["isolation_verified"]
+    assert json.dumps(rotation_state, sort_keys=True) == before
+    assert live.anchor("recent") == "snapshot:0000000007"
+
+
+def test_tuning_isolation_detects_a_mutated_rotation_anchor():
+    """The pool isolation hash must cover rotation state, not just membership."""
+    network = _policy(seed=13)
+    rotation_state = UniformRotationState(("heuristic", "recent")).export_state()
+    snapshot = capture_isolation_state(network, rotation_state=rotation_state)
+    rotation_state["anchors"]["recent"] = "snapshot:0000000123"
+    restore_isolation_state(network, snapshot, rotation_state=rotation_state)
+    assert rotation_state["anchors"]["recent"] is None
 
 
 def test_worker_tuning_restores_state_and_writes_fixed_gpi_metadata():

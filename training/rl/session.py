@@ -85,6 +85,7 @@ class _ResumeInputs:
     pool_state: dict | None
     pool_weights: dict
     performance_state: dict | None
+    rotation_state: dict | None
     saved_configuration: RLTrainingConfiguration | None
     completed_training_games: int
     start_iteration: int
@@ -109,6 +110,7 @@ def _resume_inputs(training, resources, execution, reporter):
             pool_state=None,
             pool_weights={},
             performance_state=None,
+            rotation_state=None,
             saved_configuration=None,
             completed_training_games=0,
             start_iteration=0,
@@ -170,6 +172,7 @@ def _resume_inputs(training, resources, execution, reporter):
         pool_state=metadata["opponent_pool_state"],
         pool_weights=pool_weights,
         performance_state=metadata["opponent_performance_state"],
+        rotation_state=metadata["uniform_rotation_state"],
         saved_configuration=saved,
         completed_training_games=int(metadata["completed_training_games"]),
         start_iteration=int(metadata["completed_iteration"]),
@@ -403,6 +406,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         pool_state=inputs.pool_state,
         pool_weights=inputs.pool_weights,
         performance_state=inputs.performance_state,
+        rotation_state=inputs.rotation_state,
         output_path=resources.adaptive_tuning_path,
         status_callback=reporter.status,
     )
@@ -463,6 +467,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
             inputs.pool_state,
             inputs.pool_weights,
             inputs.performance_state,
+            inputs.rotation_state,
         )
         if (
             runner.opponent_pool.last_completed_rl_iteration

@@ -48,7 +48,10 @@ from training.rl.pool import (
     SharedPolicyDescriptor,
     unique_neural_capacity,
 )
-from training.rl.matchmaking import OpponentPerformanceTracker
+from training.rl.matchmaking import (
+    OpponentPerformanceTracker,
+    UniformRotationState,
+)
 from training.rl.restarts import OpponentDecisionRestart
 from training.utils.seeding import stable_seed
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
@@ -110,13 +113,18 @@ _WORKER_GAMMA = None
 _WORKER_RULESET_NAME = DEFAULT_RULESET_NAME
 
 
-def _attach_policy(descriptor):
-    """Attach one worker-side inference policy to a shared-memory segment."""
-    segment = shared_memory.SharedMemory(name=descriptor.name)
+def _attach_policy(descriptor, segment):
+    """Return one worker-side inference policy viewing its slot of the bank.
+
+    The segment is attached once by the caller. Descriptors of one bank share
+    a segment and differ only by ``offset``, so a per-descriptor attach would
+    cost two file descriptors per slot for no benefit.
+    """
     flat = np.ndarray(
         (descriptor.element_count,),
         dtype=np.dtype(descriptor.dtype),
         buffer=segment.buf,
+        offset=int(descriptor.offset),
     )
     weights = {}
     offset = 0
@@ -124,7 +132,7 @@ def _attach_policy(descriptor):
         size = math.prod(shape)
         weights[name] = flat[offset:offset + size].reshape(shape)
         offset += size
-    return _CPUInferencePolicy(weights), segment
+    return _CPUInferencePolicy(weights)
 
 
 def _worker_initializer(
@@ -145,15 +153,17 @@ def _worker_initializer(
     # direct initializer use and documents the invariant at the worker boundary.
     os.environ["DOMINO_FORCE_CPU"] = "1"
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    current, current_handle = _attach_policy(current_descriptor)
-    pool_policies = []
-    handles = [current_handle]
-    for descriptor in pool_descriptors:
-        policy, handle = _attach_policy(descriptor)
-        pool_policies.append(policy)
-        handles.append(handle)
+    names = {descriptor.name for descriptor in pool_descriptors}
+    names.add(current_descriptor.name)
+    if len(names) != 1:
+        raise ValueError("Policy bank descriptors must share one segment")
+    segment = shared_memory.SharedMemory(name=current_descriptor.name)
+    current = _attach_policy(current_descriptor, segment)
+    pool_policies = [
+        _attach_policy(descriptor, segment) for descriptor in pool_descriptors
+    ]
 
-    _WORKER_SHARED_HANDLES = handles
+    _WORKER_SHARED_HANDLES = [segment]
     _WORKER_CURRENT_POLICY = current
     _WORKER_POOL_POLICIES = tuple(pool_policies)
     _WORKER_SCHEMA = dict(schema)
@@ -276,6 +286,35 @@ def _worker_collect_rollouts(job):
     }
 
 
+def _worker_evaluate_champion_games(job):
+    """Play one block of frozen champion-evaluation games on a CPU worker."""
+    profile_started = time.perf_counter()
+    from training.rl.champion_evaluation import play_champion_game
+
+    records = []
+    for (spec,) in job:
+        random.seed(spec.seed)
+        np.random.seed(spec.seed & 0xFFFFFFFF)
+        records.append({
+            "sequence": int(spec.sequence),
+            "candidate_id": spec.candidate_id,
+            "game_index": int(spec.game_index),
+            "candidate_position": int(spec.candidate_position),
+            "winner": int(play_champion_game(
+                _WORKER_POOL_POLICIES[spec.bank_slot],
+                spec.candidate_position,
+                ruleset_name=_WORKER_RULESET_NAME,
+            )),
+        })
+    return {
+        "records": records,
+        "runtime_profile": {
+            "games": len(records),
+            "worker_cpu_seconds": float(time.perf_counter() - profile_started),
+        },
+    }
+
+
 def _worker_collect_restarts(job):
     """Run one dynamic block of deterministic restart continuations."""
     from training.rl.rollout import collect_steps_from_restart
@@ -387,6 +426,10 @@ class RLRolloutRunner:
             record.opponent_id
             for record in self.opponent_pool.active_opponents()
         )
+        # Rotation lives beside the performance tracker so a throwaway runner
+        # built for worker autotuning gets its own copy and cannot advance the
+        # real anchors with discarded plans.
+        self.uniform_rotation = UniformRotationState(opponent_buckets)
         self.executor = None
         self.requested_workers = 1
         self.worker_count = 1
@@ -394,6 +437,9 @@ class RLRolloutRunner:
         self._safety_capped = False
         self._closed = False
         self.last_runtime_profile = {}
+        # Champion evaluation keeps its own worker profile so rollout
+        # accounting never absorbs the racing games.
+        self.last_champion_runtime_profile = {}
 
     @property
     def allocated_shared_bytes(self):
@@ -403,8 +449,19 @@ class RLRolloutRunner:
         """Publish weights only while no worker task is in flight."""
         self.bank.write_current(network)
 
-    def restore_opponent_pool(self, state, weights, performance_state):
-        """Restore the exact opponent pool before starting resumed rollouts."""
+    def restore_opponent_pool(
+        self,
+        state,
+        weights,
+        performance_state,
+        rotation_state=None,
+    ):
+        """Restore the exact opponent pool before starting resumed rollouts.
+
+        ``rotation_state`` is restored verbatim rather than derived from the
+        current membership: an anchor describes where the previous plan stopped
+        handing out remainder games, which bucket order alone cannot recover.
+        """
         self._shutdown_executor()
         self.opponent_pool.restore_state(state, weights)
         self.performance_tracker.restore_state(
@@ -414,6 +471,11 @@ class RLRolloutRunner:
                 for record in self.opponent_pool.active_opponents()
             ),
         )
+        if rotation_state is not None:
+            self.uniform_rotation.restore_state(
+                rotation_state,
+                self.opponent_pool.selected_buckets,
+            )
 
     def _shutdown_executor(self, terminate=False):
         if self.executor is None:
@@ -767,6 +829,35 @@ class RLRolloutRunner:
             index_attribute="restart_index",
             result_index_key="restart_index",
         )
+
+    def evaluate_champion_games(self, specs):
+        """Play one champion stage and return ``(results, run_info)``.
+
+        Evaluation games never enter the match plan, GPI counters, difficulty
+        evidence, or PPO buffers: this method only reads frozen bank policies
+        and returns winners.
+
+        ``last_runtime_profile`` describes the most recent *rollout*, so the
+        champion worker timings are parked in a separate attribute and the
+        rollout value is restored. Without this the next
+        ``merge_rollout_worker`` call would add 100,000 evaluation games to the
+        rollout worker counters.
+        """
+        if not specs:
+            raise ValueError("A champion stage must contain at least one game")
+        rollout_runtime_profile = self.last_runtime_profile
+        try:
+            results, run_info = self._execute_specs(
+                [(spec,) for spec in specs],
+                _worker_evaluate_champion_games,
+                list,
+                index_attribute="sequence",
+                result_index_key="sequence",
+            )
+        finally:
+            self.last_champion_runtime_profile = self.last_runtime_profile
+            self.last_runtime_profile = rollout_runtime_profile
+        return results, run_info
 
     def close(self):
         """Stop workers before unlinking the policy bank they are viewing."""

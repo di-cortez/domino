@@ -39,6 +39,8 @@ from training.rl.pool import (
     CHAMPION_VS_HEURISTIC_BUCKET,
     K_RECENT,
     MEDIUM_TERM_INTERVAL_ITERATIONS,
+    NEURAL_BUCKET_NAMES,
+    unique_neural_capacity,
 )
 # The pool now keys champion state by bucket. Every existing champion test
 # targets the fixed-heuristic bucket, so it gets one short local name rather
@@ -301,15 +303,18 @@ class ParallelRLTests(unittest.TestCase):
         """A per-slot segment layout exhausts the process descriptor limit.
 
         A POSIX shared segment costs two descriptors in every process that maps
-        it. At the 800 slots a five-bucket selection reserves, one segment per
-        slot needed about 1,600 descriptors and raised
+        it. At the 1000 slots a selection of all five neural buckets reserves,
+        one segment per slot needed about 2,000 descriptors and raised
         ``OSError: [Errno 24] Too many open files`` from ``shm_open`` on any
         machine with the common 1024 limit -- in the parent and again in every
         worker.
         """
         from training.rl.pool import SharedPolicyBank
 
-        capacity = 800
+        # The conservative capacity of every neural bucket at once, which is
+        # the largest bank a supported selection can ask for.
+        capacity = unique_neural_capacity(NEURAL_BUCKET_NAMES)
+        self.assertEqual(capacity, 1000)
         network = self._network()
         proc_fds = Path("/proc/self/fd")
         before = len(os.listdir(proc_fds)) if proc_fds.is_dir() else None

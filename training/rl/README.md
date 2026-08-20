@@ -38,6 +38,8 @@ python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,random,re
 python -m training.rl.cli --fresh-from-sl --opponent-buckets heuristic,recent,medium_term
 python -m training.rl.cli --fresh-from-sl \
   --opponent-buckets heuristic,recent,medium_term,historical_uniform,champion_vs_heuristic
+python -m training.rl.cli --fresh-from-sl \
+  --opponent-buckets heuristic,recent,medium_term,historical_uniform,champion_vs_heuristic,champion_vs_learner
 python -m training.rl.cli --fresh-from-sl --opponent-decision-restarts
 python -m training.rl.cli --dropout 0.1 --weight-decay
 ```
@@ -133,15 +135,17 @@ bucket still references its identity. A checkpoint that leaves `medium_term`
 for `historical_uniform` in the same refresh keeps its durable identity, its
 bank slot, and its accumulated difficulty evidence.
 
-`champion_vs_heuristic` is not chronological. It holds up to 200 snapshots
-selected for measured strength against the fixed heuristic, so it is the one
-bucket that may intentionally share identities with `recent`, `medium_term`,
-and `historical_uniform`. An overlapping identity is not duplicated storage: it
-keeps one record, one bank slot, one difficulty tracker, and simply receives
-matchmaking games through each membership it holds. The three historical bands
-remain pairwise disjoint among themselves, so pool observability reports
+The two champion buckets are not chronological. Each holds up to 200 snapshots
+selected for measured strength, so they are the buckets that may intentionally
+share identities with `recent`, `medium_term`, `historical_uniform`, and with
+each other. An overlapping identity is not duplicated storage: it keeps one
+record, one bank slot, one difficulty tracker, and simply receives matchmaking
+games through each membership it holds. The three historical bands remain
+pairwise disjoint among themselves, so pool observability reports
 `forbidden_historical_overlap_counts` (always zero) separately from
 `champion_overlap_counts` (expected to be non-zero).
+
+`champion_vs_heuristic` selects for strength against the fixed heuristic.
 
 Its members are chosen by a racing event, not by a cadence. Every successful
 post-update snapshot that joins `recent` also joins a pending candidate list;
@@ -166,9 +170,29 @@ were already there, never from the union of old and new. The candidate list is
 consumed in the same transaction that admits the winners, so consecutive events
 never share a candidate.
 
-The bucket starts empty, so like the delayed bands it is configured but
-unavailable during warm-up and receives no training games until its first event
-completes at the fiftieth successful update.
+`champion_vs_learner` uses the same candidate stream, the same funnel, and the
+same 100,000-game cost, but races each candidate against the **current
+post-update learner**, frozen for the whole event. Because its target moves
+between events, an old admission win rate says nothing about present strength:
+65% against the learner of iteration 500 is not comparable with 55% against the
+learner of iteration 5,000. It therefore stores no durable admission score. When
+its bucket is full, the incumbents that leave are the ones the learner currently
+finds easiest, read from the existing decayed `OpponentPerformanceTracker`
+difficulty, ties broken by opponent ID. That is the one place the two champion
+buckets genuinely differ: a fixed target admits a comparable stored score, a
+moving target does not.
+
+> **Not implemented yet.** `champion_vs_learner` is registered, selectable, and
+> reserves its 200 bank slots, but no racing event runs against the learner
+> target yet, so the bucket stays permanently empty and receives no games.
+> Selecting it today only costs memory. This note goes away when the evaluator
+> lands.
+
+Both champion buckets start empty, so like the delayed bands they are configured
+but unavailable during warm-up and receive no training games until their first
+event completes at the fiftieth successful update. Each owns its own pending
+candidate list and its own event index; a snapshot joins every selected champion
+queue, and committing one bucket's event clears only that bucket's queue.
 
 Racing games are evaluation games. They never enter the GPI budget, the
 `bucket_results` metrics rows, the difficulty evidence, or the PPO buffers, and
@@ -186,13 +210,16 @@ the available buckets, giving an empty bucket zero games and a `[0, 0, 0]`
 metrics row until the archive makes its band real.
 
 `--opponent-buckets` accepts any non-empty combination of `heuristic`, `random`,
-`recent`, `medium_term`, `historical_uniform`, and `champion_vs_heuristic` as a
-comma-separated selection. Input order is canonicalized, while duplicates,
+`recent`, `medium_term`, `historical_uniform`, `champion_vs_heuristic`, and
+`champion_vs_learner` as a comma-separated selection. Input order is canonicalized, while duplicates,
 unknown names, and an empty selection are rejected. At least one bucket that is
 available from the first iteration (`heuristic`, `random`, or `recent`) is
 required, because the archive-backed bands cannot bootstrap their own training
-history. Selecting `champion_vs_heuristic` additionally requires `recent`,
-because its candidates are the snapshots `recent` is already holding.
+history. Selecting either champion bucket additionally requires `recent`,
+because their candidates are the snapshots `recent` is already holding.
+Selecting all five neural buckets reserves 1,000 opponent slots conservatively,
+without compressing the overlap the champion buckets are allowed to have; at the
+default architecture that is one shared segment of about 318 MB.
 `--difficulty-weight` controls the exact
 convex allocation: `0` is entirely uniform, `0.5` is half uniform and half
 difficulty-based, and `1` is entirely difficulty-based. GPI remains the single

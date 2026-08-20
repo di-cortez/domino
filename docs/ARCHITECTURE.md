@@ -172,10 +172,14 @@ integer allocation, including the persisted per-bucket anchor that rotates
 which members receive the uniform component's remainder games. The three historical neural buckets cover disjoint chronological regions:
 `recent` holds the latest 200 learner snapshots, `medium_term` the newest 200
 archive milestones already behind that band, and `historical_uniform` up to 200
-uniform representatives of everything older. `champion_vs_heuristic` is
-selected by strength rather than by age and may therefore overlap all three on
+uniform representatives of everything older. The two champion buckets,
+`champion_vs_heuristic` and `champion_vs_learner`, are selected by strength
+rather than by age and may therefore overlap all three -- and each other -- on
 purpose, giving one identity extra matchmaking weight without a second weight
-copy. `training/rl/champion_evaluation.py` owns only the racing mechanics that
+copy. They share the racing mechanics and the candidate stream but not the
+retention evidence: the fixed heuristic target admits a stored score that stays
+comparable across events, while the moving learner target does not, so a full
+learner bucket evicts by current decayed difficulty instead. `training/rl/champion_evaluation.py` owns only the racing mechanics that
 choose those champions -- the fixed stage table, the shared seed panels, seat
 balance, and deterministic ranking -- and never touches membership, which
 remains the pool's; `iteration.py` runs the event between the archive refresh

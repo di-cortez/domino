@@ -191,19 +191,24 @@ def resolve_training_options(training, resources, execution):
         )
     # A separate and stronger rule than the bootstrap check above: champion
     # candidates are the identities recent already holds, so without recent the
-    # 50 pending snapshots would have no active weights left to race.
+    # 50 pending snapshots would have no active weights left to race. The rule
+    # is the same for every champion bucket, so the error names the ones this
+    # selection actually asked for rather than one hard-coded bucket.
     missing_champion_requirements = [
         name
         for name in CHAMPION_REQUIRED_BUCKETS
         if name not in opponent_buckets
     ]
-    if set(opponent_buckets) & set(CHAMPION_BUCKET_NAMES) and (
-        missing_champion_requirements
-    ):
+    selected_champions = [
+        name for name in CHAMPION_BUCKET_NAMES if name in opponent_buckets
+    ]
+    if selected_champions and missing_champion_requirements:
         raise ValueError(
-            "champion_vs_heuristic currently requires "
+            ", ".join(selected_champions)
+            + (" currently requires " if len(selected_champions) == 1
+               else " currently require ")
             + ", ".join(missing_champion_requirements)
-            + " so its candidate snapshots remain available for racing"
+            + " so the candidate snapshots remain available for racing"
         )
     difficulty_weight = float(training.difficulty_weight)
     if not 0.0 <= difficulty_weight <= 1.0:

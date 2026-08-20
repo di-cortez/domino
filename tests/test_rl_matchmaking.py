@@ -26,8 +26,11 @@ from training.rl.matchmaking import (
 from training.rl.checkpoint_archive import ArchiveRecord
 from training.rl.pool import (
     BUCKET_SPECIFICATIONS,
+    CHAMPION_BUCKET_NAMES,
     CHAMPION_VS_HEURISTIC_CAPACITY,
+    CHAMPION_VS_LEARNER_CAPACITY,
     HEURISTIC_OPPONENT_ID,
+    HISTORICAL_BAND_BUCKET_NAMES,
     HISTORICAL_MINIMUM_AGE_ITERATIONS,
     HISTORICAL_UNIFORM_CAPACITY,
     K_RECENT,
@@ -159,6 +162,71 @@ def test_champion_bucket_is_registered_after_the_historical_bands():
         "historical_uniform",
         "champion_vs_heuristic",
     )) == 800
+    # Every neural bucket at once, which is the largest bank a supported
+    # selection can reserve. The conservative policy sums capacities without
+    # compressing the overlap the champion buckets are allowed to have.
+    assert unique_neural_capacity((
+        "heuristic",
+        "recent",
+        "medium_term",
+        "historical_uniform",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )) == 1000
+
+
+def test_learner_champion_bucket_is_registered_after_the_heuristic_one():
+    """Registry order fixes the deterministic order champion events run in."""
+    assert canonicalize_bucket_names(
+        "champion_vs_learner,champion_vs_heuristic,recent,heuristic"
+    ) == (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    assert CHAMPION_BUCKET_NAMES == (
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    specification = BUCKET_SPECIFICATIONS["champion_vs_learner"]
+    assert specification.capacity == CHAMPION_VS_LEARNER_CAPACITY == 200
+    assert specification.neural
+    assert specification.admission_rule == (
+        "top_5_of_50_racing_vs_current_learner"
+    )
+    # Not the heuristic rule: a score against a target that moves between
+    # events cannot decide which incumbent leaves a full bucket.
+    assert specification.retention_rule == (
+        "guaranteed_new_champions_evict_lowest_current_difficulty"
+    )
+    assert specification.admission_interval_iterations is None
+    assert "champion_vs_learner" not in BOOTSTRAP_CAPABLE_BUCKETS
+    assert "champion_vs_learner" not in ARCHIVE_BACKED_BUCKET_NAMES
+    # Overlapping the chronological bands is allowed, so it is not one of the
+    # buckets whose memberships must stay pairwise disjoint.
+    assert "champion_vs_learner" not in HISTORICAL_BAND_BUCKET_NAMES
+
+
+def test_the_champion_policy_manifest_separates_the_two_targets():
+    manifest = pool_policy_manifest(("heuristic", "recent"))["champion_policy"]
+    # What the buckets share is stated once; what makes them different is
+    # stated per target, so no reader can take one bucket's retention rule as
+    # the policy of champion buckets in general.
+    assert manifest["common"]["candidate_batch_size"] == 50
+    assert manifest["common"]["final_survivors"] == 5
+    assert manifest["common"]["overlaps_other_champion_bucket"] is True
+    heuristic = manifest["targets"]["champion_vs_heuristic"]
+    learner = manifest["targets"]["champion_vs_learner"]
+    assert heuristic["target"] == "fixed_heuristic"
+    assert heuristic["durable_admission_score"] == (
+        "final_stage_win_rate_versus_fixed_heuristic"
+    )
+    assert learner["target"] == "frozen_post_update_current_learner"
+    assert learner["durable_admission_score"] is None
+    assert learner["retention_signal"] == "opponent_performance_difficulty"
+    assert learner["retention_signal_is_decayed"] is True
+    assert learner["eviction"] == "lowest_current_difficulty_then_opponent_id"
 
 
 def test_champion_bucket_requires_recent_in_this_version():
@@ -181,6 +249,48 @@ def test_champion_bucket_requires_recent_in_this_version():
         "heuristic",
         "recent",
         "champion_vs_heuristic",
+    )
+
+
+def test_both_champion_buckets_require_recent_and_name_themselves():
+    """One rule, one error style, whichever champion target asked for it."""
+    with pytest.raises(ValueError, match="champion_vs_learner currently requires recent"):
+        resolve_training_options(
+            RLTrainingOptions(
+                opponent_buckets=("heuristic", "champion_vs_learner"),
+            ),
+            RLResourceOptions(workers=1),
+            RLExecutionOptions(),
+        )
+    # Both selected: the message names both rather than one hard-coded bucket.
+    with pytest.raises(
+        ValueError,
+        match="champion_vs_heuristic, champion_vs_learner currently require ",
+    ):
+        resolve_training_options(
+            RLTrainingOptions(opponent_buckets=(
+                "heuristic",
+                "champion_vs_heuristic",
+                "champion_vs_learner",
+            )),
+            RLResourceOptions(workers=1),
+            RLExecutionOptions(),
+        )
+    resolved = resolve_training_options(
+        RLTrainingOptions(opponent_buckets=(
+            "champion_vs_learner",
+            "champion_vs_heuristic",
+            "recent",
+            "heuristic",
+        )),
+        RLResourceOptions(workers=1),
+        RLExecutionOptions(),
+    )
+    assert resolved.training.opponent_buckets == (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
     )
 
 
@@ -281,6 +391,8 @@ def test_pool_policy_manifest_publishes_versioned_band_boundaries():
     manifest = pool_policy_manifest(("recent", "medium_term", "historical_uniform"))
     assert manifest["schema_version"] == POOL_SCHEMA_VERSION
     assert manifest["policy_version"] == POOL_POLICY_VERSION
+    # Registry order is also the deterministic order champion events run in,
+    # so the two champion buckets are pinned to the end and to each other.
     assert manifest["bucket_registry_order"] == [
         "heuristic",
         "random",
@@ -288,6 +400,7 @@ def test_pool_policy_manifest_publishes_versioned_band_boundaries():
         "medium_term",
         "historical_uniform",
         "champion_vs_heuristic",
+        "champion_vs_learner",
     ]
     assert manifest["band_policy"] == {
         "recent_band_width_iterations": 200,

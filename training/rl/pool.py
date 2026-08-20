@@ -24,6 +24,7 @@ MEDIUM_TERM_CAPACITY = 200
 MEDIUM_TERM_INTERVAL_ITERATIONS = 10
 HISTORICAL_UNIFORM_CAPACITY = 200
 CHAMPION_VS_HEURISTIC_CAPACITY = 200
+CHAMPION_VS_LEARNER_CAPACITY = 200
 # One racing event consumes exactly this many successive learner snapshots and
 # admits exactly this many winners. Both live here rather than in the evaluation
 # module because the pool owns the pending queue and the admission invariants.
@@ -45,7 +46,15 @@ CHAMPION_VS_HEURISTIC_ADMISSION_RULE = "top_5_of_50_racing_vs_heuristic"
 CHAMPION_VS_HEURISTIC_RETENTION_RULE = (
     "guaranteed_new_champions_evict_lowest_heuristic_win_rate"
 )
+CHAMPION_VS_LEARNER_ADMISSION_RULE = "top_5_of_50_racing_vs_current_learner"
+# The learner target moves between events, so an old admission score says
+# nothing about present strength. Retention reads current decayed difficulty
+# instead, supplied by the orchestration layer that owns the tracker.
+CHAMPION_VS_LEARNER_RETENTION_RULE = (
+    "guaranteed_new_champions_evict_lowest_current_difficulty"
+)
 CHAMPION_VS_HEURISTIC_BUCKET = "champion_vs_heuristic"
+CHAMPION_VS_LEARNER_BUCKET = "champion_vs_learner"
 HEURISTIC_OPPONENT_ID = "heuristic:strategic_v1"
 HEURISTIC_KIND = "heuristic"
 RANDOM_OPPONENT_ID = "random:uniform_v1"
@@ -112,6 +121,15 @@ BUCKET_REGISTRY = (
         retention_rule=CHAMPION_VS_HEURISTIC_RETENTION_RULE,
         neural=True,
     ),
+    # Same racing mechanics and same candidate stream as the bucket above, but
+    # a different target, which is why its retention evidence differs too.
+    BucketSpecification(
+        name=CHAMPION_VS_LEARNER_BUCKET,
+        capacity=CHAMPION_VS_LEARNER_CAPACITY,
+        admission_rule=CHAMPION_VS_LEARNER_ADMISSION_RULE,
+        retention_rule=CHAMPION_VS_LEARNER_RETENTION_RULE,
+        neural=True,
+    ),
 )
 BUCKET_SPECIFICATIONS = {item.name: item for item in BUCKET_REGISTRY}
 DEFAULT_OPPONENT_BUCKETS = ("heuristic", "recent")
@@ -127,9 +145,12 @@ ARCHIVE_BACKED_BUCKET_NAMES = ("medium_term", "historical_uniform")
 HISTORICAL_BAND_BUCKET_NAMES = ("recent", "medium_term", "historical_uniform")
 # Registry order, which is also the deterministic order champion events run
 # in when more than one champion bucket completes a batch in the same iteration.
-CHAMPION_BUCKET_NAMES = (CHAMPION_VS_HEURISTIC_BUCKET,)
-# ``champion_vs_heuristic`` reuses the identities ``recent`` already holds, so
-# it cannot supply its own candidates and must not bootstrap a run.
+CHAMPION_BUCKET_NAMES = (
+    CHAMPION_VS_HEURISTIC_BUCKET,
+    CHAMPION_VS_LEARNER_BUCKET,
+)
+# Both champion buckets reuse the identities ``recent`` already holds, so
+# neither can supply its own candidates or bootstrap a run.
 CHAMPION_REQUIRED_BUCKETS = ("recent",)
 
 
@@ -188,14 +209,41 @@ def pool_policy_manifest(bucket_names=DEFAULT_OPPONENT_BUCKETS):
                 "absolute_target_error_then_older_iteration_then_checkpoint_id"
             ),
         },
+        # Split into what the champion buckets share and what distinguishes
+        # them. A single flat block would have to describe one bucket's
+        # retention as if it were the policy of both, which is exactly the
+        # confusion the two different targets make dangerous.
         "champion_policy": {
-            "candidate_batch_size": CHAMPION_CANDIDATE_BATCH_SIZE,
-            "final_survivors": CHAMPION_FINAL_SURVIVORS,
-            "candidate_source": "successful_post_update_recent_snapshots",
-            "admission": "guaranteed_all_final_survivors",
-            "eviction": "weakest_stored_heuristic_win_rate_then_opponent_id",
-            "score_semantics": "final_stage_win_rate_versus_fixed_heuristic",
-            "overlaps_historical_bands": True,
+            "common": {
+                "candidate_batch_size": CHAMPION_CANDIDATE_BATCH_SIZE,
+                "final_survivors": CHAMPION_FINAL_SURVIVORS,
+                "candidate_source": "successful_post_update_recent_snapshots",
+                "admission": "guaranteed_all_final_survivors",
+                "overlaps_historical_bands": True,
+                "overlaps_other_champion_bucket": True,
+            },
+            "targets": {
+                CHAMPION_VS_HEURISTIC_BUCKET: {
+                    "capacity": CHAMPION_VS_HEURISTIC_CAPACITY,
+                    "target": "fixed_heuristic",
+                    "durable_admission_score": (
+                        "final_stage_win_rate_versus_fixed_heuristic"
+                    ),
+                    "eviction": (
+                        "weakest_stored_heuristic_win_rate_then_opponent_id"
+                    ),
+                },
+                CHAMPION_VS_LEARNER_BUCKET: {
+                    "capacity": CHAMPION_VS_LEARNER_CAPACITY,
+                    "target": "frozen_post_update_current_learner",
+                    # No durable score: the target differs between events, so
+                    # an admission win rate is not comparable across them.
+                    "durable_admission_score": None,
+                    "retention_signal": "opponent_performance_difficulty",
+                    "retention_signal_is_decayed": True,
+                    "eviction": "lowest_current_difficulty_then_opponent_id",
+                },
+            },
         },
         "bucket_definitions": {
             name: {

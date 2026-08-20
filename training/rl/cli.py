@@ -136,8 +136,9 @@ def add_optional_rl_arguments(
         metavar="NAMES",
         help=(
             "Comma-separated opponent buckets: heuristic, random, recent, "
-            "medium_term, historical_uniform, and champion_vs_heuristic "
-            "(which requires recent). Input order is canonicalized."
+            "medium_term, historical_uniform, champion_vs_heuristic, and "
+            "champion_vs_learner (both champion buckets require recent). "
+            "Input order is canonicalized."
         ),
     )
     group.add_argument(

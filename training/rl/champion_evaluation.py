@@ -1,14 +1,21 @@
-"""Deterministic champion-vs-heuristic racing for the champion opponent bucket.
+"""Deterministic champion racing for both champion opponent buckets.
 
 This module owns racing mechanics only: the stage table, the common seed panels,
 seat balancing, outcome validation, and deterministic ranking. It never touches
 bucket membership, GPI counters, PPO buffers, or learner-difficulty evidence.
-Admission of the surviving five belongs to
-``OpponentPool.apply_champion_vs_heuristic_result``.
+Admission of the surviving five belongs to the pool's per-bucket commit methods.
 
-Execution is injected. ``evaluate_champion_vs_heuristic`` receives a
-``play_games`` callable so the racing algorithm can be tested without a worker
-pool, and so the CPU-only pool plumbing stays in ``training/rl/parallel.py``.
+One funnel serves both targets. ``champion_vs_heuristic`` races candidates
+against the fixed ``StrategicAgent``; ``champion_vs_learner`` races them against
+the frozen post-update learner. The mechanics are identical and deliberately
+share an implementation; what differs is the target, the seed namespace, and
+what the caller may do with the returned win rates. A heuristic score stays
+comparable across events because its target never moves, so the pool stores it.
+A learner score does not, so it is an event result and nothing more.
+
+Execution is injected. The evaluators receive a ``play_games`` callable so the
+racing algorithm can be tested without a worker pool, and so the CPU-only pool
+plumbing stays in ``training/rl/parallel.py``.
 """
 
 from __future__ import annotations
@@ -19,12 +26,14 @@ import time
 from training.rl.pool import (
     CHAMPION_CANDIDATE_BATCH_SIZE,
     CHAMPION_FINAL_SURVIVORS,
+    CHAMPION_VS_HEURISTIC_BUCKET,
+    CHAMPION_VS_LEARNER_BUCKET,
 )
 from training.utils.seeding import stable_seed
 from middleware.rulesets import DEFAULT_RULESET_NAME
 
 
-CHAMPION_EVALUATION_POLICY_VERSION = 1
+CHAMPION_EVALUATION_POLICY_VERSION = 2
 CHAMPION_STAGE_1_GAMES = 500
 CHAMPION_STAGE_1_SURVIVORS = 40
 CHAMPION_STAGE_2_GAMES = 500
@@ -34,7 +43,29 @@ CHAMPION_STAGE_3_SURVIVORS = 20
 CHAMPION_FINAL_GAMES = 2000
 # Champion selection is an evaluation, not an on-policy rollout, so the frozen
 # candidate plays its highest-probability legal action rather than sampling.
+# Both seats use this mode when the target is itself a policy: the race is a
+# ranking diagnostic and must not add action-sampling noise to it.
 CHAMPION_EVALUATION_MODE = "evaluation"
+# What a candidate plays against. The execution layer reads this off the spec;
+# it is never inferred from the bank slot, which addresses the candidate alone.
+CHAMPION_TARGET_HEURISTIC = "heuristic"
+CHAMPION_TARGET_CURRENT_LEARNER = "current_learner"
+CHAMPION_TARGET_KINDS = (
+    CHAMPION_TARGET_HEURISTIC,
+    CHAMPION_TARGET_CURRENT_LEARNER,
+)
+# The seed namespace of each bucket is its own name, so two events with the same
+# integer coordinates never share a panel. Kept as an explicit mapping rather
+# than a fallback default: a namespace that silently defaults to the heuristic
+# one would couple two different evaluation targets to the same deals.
+CHAMPION_SEED_NAMESPACE_BY_BUCKET = {
+    CHAMPION_VS_HEURISTIC_BUCKET: CHAMPION_VS_HEURISTIC_BUCKET,
+    CHAMPION_VS_LEARNER_BUCKET: CHAMPION_VS_LEARNER_BUCKET,
+}
+CHAMPION_TARGET_KIND_BY_BUCKET = {
+    CHAMPION_VS_HEURISTIC_BUCKET: CHAMPION_TARGET_HEURISTIC,
+    CHAMPION_VS_LEARNER_BUCKET: CHAMPION_TARGET_CURRENT_LEARNER,
+}
 
 
 @dataclass(frozen=True)
@@ -114,13 +145,36 @@ def champion_evaluation_policy_manifest():
             )
         ],
         "total_games": CHAMPION_EVALUATION_GAMES,
-        "seed_namespace": "champion_vs_heuristic",
         "seed_excludes_candidate_identity": True,
         "seat_assignment": "game_index_modulo_two",
         "stage_scoring": "current_stage_games_only",
         "ranking_tie_breaking": "more_wins_then_smaller_opponent_id",
         "candidate_action_mode": CHAMPION_EVALUATION_MODE,
         "counts_toward_gpi": False,
+        # Everything above is shared by both buckets. Everything below is what
+        # makes an event against one target incomparable with the other.
+        "targets": {
+            CHAMPION_VS_HEURISTIC_BUCKET: {
+                "opponent_kind": "strategic_agent",
+                "seed_namespace": CHAMPION_SEED_NAMESPACE_BY_BUCKET[
+                    CHAMPION_VS_HEURISTIC_BUCKET
+                ],
+                "target_kind": CHAMPION_TARGET_HEURISTIC,
+                "target_action_mode": None,
+                "win_rates_are_durable": True,
+            },
+            CHAMPION_VS_LEARNER_BUCKET: {
+                "opponent_kind": "frozen_post_update_current_learner",
+                "seed_namespace": CHAMPION_SEED_NAMESPACE_BY_BUCKET[
+                    CHAMPION_VS_LEARNER_BUCKET
+                ],
+                "target_kind": CHAMPION_TARGET_CURRENT_LEARNER,
+                "target_action_mode": CHAMPION_EVALUATION_MODE,
+                # The target of an old event is a historical policy, so the
+                # rate it produced describes nothing about the present.
+                "win_rates_are_durable": False,
+            },
+        },
     }
 
 
@@ -130,7 +184,11 @@ class ChampionGameSpec:
 
     stage_index: int
     candidate_id: str
+    # The candidate's opponent bank slot, always. The current learner is not
+    # addressed by slot: it lives in the bank's separate current-policy region,
+    # and opponent slot 0 is the first opponent, not that region.
     bank_slot: int
+    target_kind: str
     game_index: int
     seed: int
     candidate_position: int
@@ -153,28 +211,52 @@ class ChampionStageSummary:
 
 
 @dataclass(frozen=True)
-class ChampionHeuristicEvaluationResult:
-    """Final five champions plus the evidence needed to report the event."""
+class ChampionEvaluationResult:
+    """Final five champions plus the evidence needed to report the event.
 
+    ``final_win_rates`` is deliberately not named for either target. It is the
+    candidate's win rate over the final stage against whatever this bucket
+    races, and whether it may become durable state is the caller's decision,
+    not a property of the number.
+    """
+
+    bucket_name: str
     event_index: int
     champion_ids: tuple[str, ...]
-    heuristic_win_rates: dict[str, float]
+    final_win_rates: dict[str, float]
     total_games: int
     elapsed_seconds: float
     stage_summaries: tuple[ChampionStageSummary, ...]
 
 
-def champion_stage_seed(base_seed, *, event_index, stage_index, game_index):
+def champion_stage_seed(
+    base_seed,
+    *,
+    seed_namespace,
+    event_index,
+    stage_index,
+    game_index,
+):
     """Return the common panel seed shared by every candidate in one stage.
 
     The candidate identity is deliberately absent. All candidates in a stage
     face the identical sequence of deals, so the race compares play rather than
     luck. Every stage and every event gets a fresh panel, so screening luck is
     never replayed by the stage that follows it.
+
+    ``seed_namespace`` has no default on purpose. The two champion buckets run
+    their events on the same integer coordinates, so a namespace that could be
+    omitted would eventually let one bucket's event silently inherit the other's
+    deals -- coupling two different evaluation targets to one random panel and
+    quietly destroying the independence the common-panel design is for.
     """
+    if seed_namespace not in CHAMPION_SEED_NAMESPACE_BY_BUCKET.values():
+        raise ValueError(
+            f"Unknown champion seed namespace: {seed_namespace!r}"
+        )
     return stable_seed(
         base_seed,
-        "champion_vs_heuristic",
+        str(seed_namespace),
         int(event_index),
         int(stage_index),
         int(game_index),
@@ -196,10 +278,14 @@ def build_stage_specs(
     bank_slots,
     *,
     base_seed,
+    seed_namespace,
+    target_kind,
     event_index,
     stage_index,
 ):
     """Return every game of one stage in deterministic candidate/game order."""
+    if target_kind not in CHAMPION_TARGET_KINDS:
+        raise ValueError(f"Unknown champion target kind: {target_kind!r}")
     stage = CHAMPION_RACING_STAGES[stage_index]
     specs = []
     for candidate_id in candidate_ids:
@@ -218,9 +304,11 @@ def build_stage_specs(
                 stage_index=int(stage_index),
                 candidate_id=candidate_id,
                 bank_slot=int(bank_slot),
+                target_kind=str(target_kind),
                 game_index=game_index,
                 seed=champion_stage_seed(
                     base_seed,
+                    seed_namespace=seed_namespace,
                     event_index=event_index,
                     stage_index=stage_index,
                     game_index=game_index,
@@ -300,8 +388,9 @@ def rank_stage_candidates(wins):
     return tuple(sorted(wins, key=lambda item: (-wins[item], item)))
 
 
-def evaluate_champion_vs_heuristic(
+def _evaluate_champion_race(
     *,
+    bucket_name,
     candidate_ids,
     bank_slots,
     play_games,
@@ -310,11 +399,23 @@ def evaluate_champion_vs_heuristic(
 ):
     """Race one complete candidate batch and return the surviving champions.
 
-    Each stage ranks using only the games it just played: earlier stage scores
-    are discarded, so a candidate that screened through on a lucky panel has to
-    prove itself again on the next one. Only the final stage's win rate becomes
-    durable champion state.
+    The single funnel behind both champion buckets. Each stage ranks using only
+    the games it just played: earlier stage scores are discarded, so a candidate
+    that screened through on a lucky panel has to prove itself again on the next
+    one. Only the final stage's win rate reaches the result.
+
+    The bucket name selects the seed namespace and the target, which is why the
+    two buckets cannot accidentally share a panel or a target: neither has a
+    default a caller could fall through.
     """
+    try:
+        seed_namespace = CHAMPION_SEED_NAMESPACE_BY_BUCKET[bucket_name]
+        target_kind = CHAMPION_TARGET_KIND_BY_BUCKET[bucket_name]
+    except KeyError as exc:
+        raise ValueError(
+            f"{bucket_name!r} is not a champion bucket"
+        ) from exc
+
     candidates = tuple(candidate_ids)
     if len(candidates) != CHAMPION_CANDIDATE_BATCH_SIZE:
         raise ValueError(
@@ -334,6 +435,8 @@ def evaluate_champion_vs_heuristic(
             survivors,
             bank_slots,
             base_seed=base_seed,
+            seed_namespace=seed_namespace,
+            target_kind=target_kind,
             event_index=event_index,
             stage_index=stage_index,
         )
@@ -354,17 +457,70 @@ def evaluate_champion_vs_heuristic(
             f"Champion evaluation played {total_games} games, expected "
             f"{CHAMPION_EVALUATION_GAMES}"
         )
-    return ChampionHeuristicEvaluationResult(
+    return ChampionEvaluationResult(
+        bucket_name=str(bucket_name),
         event_index=int(event_index),
         champion_ids=survivors,
-        # Only the final stage's rate is durable; every earlier score is gone.
-        heuristic_win_rates={
+        # Only the final stage's rate survives; every earlier score is gone.
+        final_win_rates={
             candidate_id: wins[candidate_id] / CHAMPION_FINAL_GAMES
             for candidate_id in survivors
         },
         total_games=total_games,
         elapsed_seconds=time.perf_counter() - started,
         stage_summaries=tuple(summaries),
+    )
+
+
+def evaluate_champion_vs_heuristic(
+    *,
+    candidate_ids,
+    bank_slots,
+    play_games,
+    base_seed,
+    event_index,
+):
+    """Race one batch against the fixed heuristic.
+
+    The returned win rates are comparable across events because the target
+    never changes, which is why the pool stores them as champion scores.
+    """
+    return _evaluate_champion_race(
+        bucket_name=CHAMPION_VS_HEURISTIC_BUCKET,
+        candidate_ids=candidate_ids,
+        bank_slots=bank_slots,
+        play_games=play_games,
+        base_seed=base_seed,
+        event_index=event_index,
+    )
+
+
+def evaluate_champion_vs_learner(
+    *,
+    candidate_ids,
+    bank_slots,
+    play_games,
+    base_seed,
+    event_index,
+):
+    """Race one batch against the frozen post-update current learner.
+
+    The caller must publish the post-update learner into the shared bank's
+    current-policy region before the first stage, and must not write to it again
+    until the event is over: every stage of one event has to face exactly the
+    same target weights.
+
+    The returned win rates are an event result only. They are measured against a
+    policy that will have moved on by the next event, so they must never become
+    the score that decides which incumbent leaves a full bucket.
+    """
+    return _evaluate_champion_race(
+        bucket_name=CHAMPION_VS_LEARNER_BUCKET,
+        candidate_ids=candidate_ids,
+        bank_slots=bank_slots,
+        play_games=play_games,
+        base_seed=base_seed,
+        event_index=event_index,
     )
 
 

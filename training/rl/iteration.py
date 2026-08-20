@@ -209,7 +209,7 @@ def _run_champion_evaluation(context, iteration):
     )
     commit = opponent_pool.apply_champion_vs_heuristic_result(
         result.champion_ids,
-        result.heuristic_win_rates,
+        result.final_win_rates,
     )
     return {
         "iteration": int(iteration),

@@ -237,7 +237,9 @@ class ParallelRLTests(unittest.TestCase):
                 )
             runner.set_workers(workers)
             runner.sync_current(network)
-            candidate_ids = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)[:candidates]
+            candidate_ids = pool.champion_pending_candidate_ids(
+                HEURISTIC_CHAMPION
+            )[:candidates]
             specs = []
             for candidate_id in candidate_ids:
                 for game_index in range(games):
@@ -245,9 +247,11 @@ class ParallelRLTests(unittest.TestCase):
                         stage_index=0,
                         candidate_id=candidate_id,
                         bank_slot=pool.bank_slot(candidate_id),
+                        target_kind=champion.CHAMPION_TARGET_HEURISTIC,
                         game_index=game_index,
                         seed=champion.champion_stage_seed(
                             4242,
+                            seed_namespace=HEURISTIC_CHAMPION,
                             event_index=0,
                             stage_index=0,
                             game_index=game_index,

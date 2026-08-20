@@ -24,6 +24,7 @@ from training.rl.matchmaking import (
     build_match_plan,
 )
 from training.rl.pool import (
+    CHAMPION_VS_HEURISTIC_BUCKET,
     CHAMPION_VS_HEURISTIC_CAPACITY,
     select_medium_term_staging_records,
 )
@@ -168,9 +169,15 @@ def _run_champion_evaluation(context, iteration):
     membership transaction committed by the pool.
     """
     opponent_pool = context.runner.opponent_pool
-    if not opponent_pool.champion_candidate_batch_is_ready:
+    if not opponent_pool.champion_selected(CHAMPION_VS_HEURISTIC_BUCKET):
         return None
-    candidate_ids = opponent_pool.champion_pending_candidate_ids
+    if not opponent_pool.champion_candidate_batch_is_ready(
+        CHAMPION_VS_HEURISTIC_BUCKET
+    ):
+        return None
+    candidate_ids = opponent_pool.champion_pending_candidate_ids(
+        CHAMPION_VS_HEURISTIC_BUCKET
+    )
     bank_slots = {
         opponent_id: opponent_pool.bank_slot(opponent_id)
         for opponent_id in candidate_ids
@@ -196,7 +203,9 @@ def _run_champion_evaluation(context, iteration):
         base_seed=context.effective_seed,
         # The seed panel is keyed by the number of events already committed,
         # so a deterministic replay after a crash reuses the same deals.
-        event_index=opponent_pool.champion_completed_event_count,
+        event_index=opponent_pool.champion_completed_event_count(
+            CHAMPION_VS_HEURISTIC_BUCKET
+        ),
     )
     commit = opponent_pool.apply_champion_vs_heuristic_result(
         result.champion_ids,

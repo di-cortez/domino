@@ -158,7 +158,8 @@ def build_training_metrics_header(
             # above it, and is absent when the bucket is not selected.
             "champion_evaluation": (
                 champion_evaluation_policy_manifest()
-                if context.runner.opponent_pool.champion_selected else None
+                if context.runner.opponent_pool.selected_champion_bucket_names()
+                else None
             ),
             "checkpoint_archive": context.checkpoint_archive.manifest(),
         },

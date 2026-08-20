@@ -17,8 +17,8 @@ from multiprocessing import shared_memory
 import numpy as np
 
 
-POOL_SCHEMA_VERSION = 4
-POOL_POLICY_VERSION = 5
+POOL_SCHEMA_VERSION = 5
+POOL_POLICY_VERSION = 6
 K_RECENT = 200
 MEDIUM_TERM_CAPACITY = 200
 MEDIUM_TERM_INTERVAL_ITERATIONS = 10
@@ -45,6 +45,7 @@ CHAMPION_VS_HEURISTIC_ADMISSION_RULE = "top_5_of_50_racing_vs_heuristic"
 CHAMPION_VS_HEURISTIC_RETENTION_RULE = (
     "guaranteed_new_champions_evict_lowest_heuristic_win_rate"
 )
+CHAMPION_VS_HEURISTIC_BUCKET = "champion_vs_heuristic"
 HEURISTIC_OPPONENT_ID = "heuristic:strategic_v1"
 HEURISTIC_KIND = "heuristic"
 RANDOM_OPPONENT_ID = "random:uniform_v1"
@@ -105,7 +106,7 @@ BUCKET_REGISTRY = (
     # Not chronological, so it carries no admission interval: its cadence is
     # counted in successful snapshots, not in absolute iterations.
     BucketSpecification(
-        name="champion_vs_heuristic",
+        name=CHAMPION_VS_HEURISTIC_BUCKET,
         capacity=CHAMPION_VS_HEURISTIC_CAPACITY,
         admission_rule=CHAMPION_VS_HEURISTIC_ADMISSION_RULE,
         retention_rule=CHAMPION_VS_HEURISTIC_RETENTION_RULE,
@@ -124,7 +125,9 @@ ARCHIVE_BACKED_BUCKET_NAMES = ("medium_term", "historical_uniform")
 # Exactly the buckets whose memberships must stay pairwise disjoint. A champion
 # is selected by strength rather than by age, so it deliberately overlaps them.
 HISTORICAL_BAND_BUCKET_NAMES = ("recent", "medium_term", "historical_uniform")
-CHAMPION_BUCKET_NAMES = ("champion_vs_heuristic",)
+# Registry order, which is also the deterministic order champion events run
+# in when more than one champion bucket completes a batch in the same iteration.
+CHAMPION_BUCKET_NAMES = (CHAMPION_VS_HEURISTIC_BUCKET,)
 # ``champion_vs_heuristic`` reuses the identities ``recent`` already holds, so
 # it cannot supply its own candidates and must not bootstrap a run.
 CHAMPION_REQUIRED_BUCKETS = ("recent",)
@@ -638,9 +641,23 @@ class OpponentPool:
         self._historical_diagnostics = None
         # Champion state is durable and lives here rather than in matchmaking:
         # a heuristic win rate is a selection score, never difficulty evidence.
-        self._champion_pending_candidate_ids = []
-        self._champion_completed_event_count = 0
-        self._champion_win_rate_by_opponent_id = {}
+        # Every champion bucket owns its own queue and event count because the
+        # batches are consumed independently, one racing target each.
+        self._champion_bucket_names = tuple(
+            name
+            for name in CHAMPION_BUCKET_NAMES
+            if name in self.selected_buckets
+        )
+        self._champion_pending_candidate_ids = {
+            name: [] for name in self._champion_bucket_names
+        }
+        self._champion_completed_event_counts = {
+            name: 0 for name in self._champion_bucket_names
+        }
+        # Only the heuristic champion keeps a durable admission score. Its
+        # target never changes, so scores from different events stay
+        # comparable; a score against the moving learner would not be.
+        self._heuristic_win_rate_by_opponent_id = {}
         for name in self.selected_buckets:
             specification = BUCKET_SPECIFICATIONS[name]
             self.buckets_by_name[name] = OpponentBucket(
@@ -752,12 +769,12 @@ class OpponentPool:
 
     @staticmethod
     def _reject_fifo_eviction(bucket_name):
-        """Refuse to drop the oldest member of a score-retained bucket."""
+        """Refuse to drop the oldest member of a champion bucket."""
         if bucket_name in CHAMPION_BUCKET_NAMES:
             raise RuntimeError(
-                f"Bucket {bucket_name!r} retains members by stored score; FIFO "
+                f"Bucket {bucket_name!r} retains members by strength; FIFO "
                 "eviction would drop its oldest champion instead of its "
-                "weakest. Use apply_champion_vs_heuristic_result()."
+                f"weakest. Use apply_{bucket_name}_result()."
             )
 
     def _make_room_for_memberships(self, bucket_names):
@@ -862,57 +879,113 @@ class OpponentPool:
             bucket_names=bucket_names,
         )
         # Only a snapshot that is actually active can be raced later, which is
-        # why v1 requires ``recent`` alongside the champion bucket.
-        if self.champion_selected and "recent" in bucket_names:
-            self._append_champion_candidate(record.opponent_id)
+        # why v1 requires ``recent`` alongside every champion bucket. The same
+        # identity joins every selected champion queue: the buckets race the
+        # same candidate stream against different targets.
+        if "recent" in bucket_names:
+            for bucket_name in self._champion_bucket_names:
+                self._append_champion_candidate(bucket_name, record.opponent_id)
         return record
 
-    @property
-    def champion_selected(self):
-        """Return whether the champion bucket is part of this run."""
-        return CHAMPION_BUCKET_NAMES[0] in self.buckets_by_name
+    def selected_champion_bucket_names(self):
+        """Return this run's champion buckets in deterministic registry order."""
+        return self._champion_bucket_names
 
-    @property
-    def champion_pending_candidate_ids(self):
-        """Return the ordered snapshots waiting for the next racing event."""
-        return tuple(self._champion_pending_candidate_ids)
+    def champion_selected(self, bucket_name):
+        """Return whether one named champion bucket is part of this run."""
+        return bucket_name in self._champion_bucket_names
 
-    @property
-    def champion_completed_event_count(self):
-        """Return how many racing events have been durably committed."""
-        return int(self._champion_completed_event_count)
+    def _require_champion_bucket(self, bucket_name):
+        """Return the name, or explain that this run does not race that target."""
+        if bucket_name not in self._champion_pending_candidate_ids:
+            raise KeyError(
+                f"Champion bucket {bucket_name!r} is not part of this pool"
+            )
+        return bucket_name
 
-    @property
-    def champion_candidate_batch_is_ready(self):
-        """Return whether a complete non-overlapping candidate batch exists."""
-        return (
-            len(self._champion_pending_candidate_ids)
-            == CHAMPION_CANDIDATE_BATCH_SIZE
+    def champion_pending_candidate_ids(self, bucket_name):
+        """Return one bucket's snapshots waiting for its next racing event."""
+        return tuple(
+            self._champion_pending_candidate_ids[
+                self._require_champion_bucket(bucket_name)
+            ]
         )
 
-    def champion_win_rates(self):
-        """Return the stored final-stage win rate of every current champion."""
-        return dict(sorted(self._champion_win_rate_by_opponent_id.items()))
+    def champion_completed_event_count(self, bucket_name):
+        """Return how many of one bucket's events have been durably committed."""
+        return int(
+            self._champion_completed_event_counts[
+                self._require_champion_bucket(bucket_name)
+            ]
+        )
 
-    def _append_champion_candidate(self, opponent_id):
-        if len(self._champion_pending_candidate_ids) >= (
-            CHAMPION_CANDIDATE_BATCH_SIZE
-        ):
-            raise RuntimeError(
-                "Champion candidate batch is already complete; the racing "
-                "event must consume it before another snapshot is admitted"
-            )
-        if opponent_id in self._champion_pending_candidate_ids:
-            raise RuntimeError(
-                f"Champion candidate {opponent_id!r} is already pending"
-            )
-        self._champion_pending_candidate_ids.append(opponent_id)
+    def champion_candidate_batch_is_ready(self, bucket_name):
+        """Return whether one bucket holds a complete non-overlapping batch."""
+        return len(
+            self._champion_pending_candidate_ids[
+                self._require_champion_bucket(bucket_name)
+            ]
+        ) == CHAMPION_CANDIDATE_BATCH_SIZE
 
-    def _validate_champion_result(self, incoming, final_win_rates):
-        """Raise unless the racing result can be committed in full."""
-        if not self.champion_selected:
+    def _export_champion_bucket_state(self, bucket_name):
+        """Return one champion bucket's durable state as JSON-safe values.
+
+        The heuristic score map is nested inside its own bucket rather than
+        shared, so no reader can mistake a fixed-target score for evidence
+        about a bucket raced against a moving target.
+        """
+        state = {
+            "pending_candidate_ids": list(
+                self._champion_pending_candidate_ids[bucket_name]
+            ),
+            "completed_event_count": int(
+                self._champion_completed_event_counts[bucket_name]
+            ),
+        }
+        if bucket_name == CHAMPION_VS_HEURISTIC_BUCKET:
+            state["heuristic_win_rate_by_opponent_id"] = {
+                opponent_id: float(value)
+                for opponent_id, value in sorted(
+                    self._heuristic_win_rate_by_opponent_id.items()
+                )
+            }
+        return state
+
+    def heuristic_champion_win_rates(self):
+        """Return the stored final-stage heuristic score of every champion.
+
+        Deliberately not named for champions in general: this map exists only
+        because the heuristic target is fixed, so its values stay comparable
+        across events. No equivalent durable score is meaningful for a target
+        that changes between events.
+        """
+        return dict(sorted(self._heuristic_win_rate_by_opponent_id.items()))
+
+    def _append_champion_candidate(self, bucket_name, opponent_id):
+        pending = self._champion_pending_candidate_ids[bucket_name]
+        if len(pending) >= CHAMPION_CANDIDATE_BATCH_SIZE:
+            raise RuntimeError(
+                f"Champion candidate batch for {bucket_name!r} is already "
+                "complete; the racing event must consume it before another "
+                "snapshot is admitted"
+            )
+        if opponent_id in pending:
+            raise RuntimeError(
+                f"Champion candidate {opponent_id!r} is already pending for "
+                f"{bucket_name!r}"
+            )
+        pending.append(opponent_id)
+
+    def _validate_champion_admission(self, bucket_name, incoming):
+        """Raise unless one racing event's winners can be admitted in full.
+
+        Target-independent: every champion bucket admits exactly five active,
+        bank-backed identities that are not already incumbents. What differs
+        between the buckets is the retention evidence, validated separately.
+        """
+        if not self.champion_selected(bucket_name):
             raise ValueError(
-                "champion_vs_heuristic is not part of this opponent pool"
+                f"{bucket_name} is not part of this opponent pool"
             )
         if len(incoming) != CHAMPION_FINAL_SURVIVORS:
             raise ValueError(
@@ -921,7 +994,7 @@ class OpponentPool:
             )
         if len(set(incoming)) != len(incoming):
             raise ValueError("Champion result repeats an opponent identity")
-        members = self.buckets_by_name[CHAMPION_BUCKET_NAMES[0]].member_ids
+        members = self.buckets_by_name[bucket_name].member_ids
         for opponent_id in incoming:
             if opponent_id not in self.opponents_by_id:
                 raise KeyError(f"Unknown champion opponent: {opponent_id}")
@@ -931,9 +1004,12 @@ class OpponentPool:
                 )
             if opponent_id in members:
                 raise ValueError(
-                    f"Champion {opponent_id!r} is already an incumbent; "
-                    "candidate batches never overlap"
+                    f"Champion {opponent_id!r} is already an incumbent of "
+                    f"{bucket_name}; candidate batches never overlap"
                 )
+
+    def _validate_heuristic_champion_scores(self, incoming, final_win_rates):
+        """Raise unless the fixed-target scores can retain the full bucket."""
         if set(final_win_rates) != set(incoming):
             raise ValueError(
                 "Champion win rates must cover exactly the admitted identities"
@@ -945,8 +1021,9 @@ class OpponentPool:
                     f"Champion {opponent_id!r} has an invalid win rate "
                     f"{win_rate!r}; expected a finite value in [0, 1]"
                 )
+        members = self.buckets_by_name[CHAMPION_VS_HEURISTIC_BUCKET].member_ids
         missing = [item for item in members if item not in (
-            self._champion_win_rate_by_opponent_id
+            self._heuristic_win_rate_by_opponent_id
         )]
         if missing:
             raise ValueError(
@@ -970,9 +1047,10 @@ class OpponentPool:
         }
         # Validate everything before the first mutation: a partially applied
         # event would leave the score map and the membership disagreeing.
-        self._validate_champion_result(incoming, final_win_rates)
+        name = CHAMPION_VS_HEURISTIC_BUCKET
+        self._validate_champion_admission(name, incoming)
+        self._validate_heuristic_champion_scores(incoming, final_win_rates)
 
-        name = CHAMPION_BUCKET_NAMES[0]
         bucket = self.buckets_by_name[name]
         capacity = bucket.capacity
         required_evictions = max(
@@ -982,32 +1060,34 @@ class OpponentPool:
         outgoing = tuple(sorted(
             bucket.member_ids,
             key=lambda item: (
-                self._champion_win_rate_by_opponent_id[item],
+                self._heuristic_win_rate_by_opponent_id[item],
                 item,
             ),
         )[:required_evictions])
 
         for opponent_id in outgoing:
             bucket.member_ids.remove(opponent_id)
-            self._champion_win_rate_by_opponent_id.pop(opponent_id, None)
+            self._heuristic_win_rate_by_opponent_id.pop(opponent_id, None)
             self._score_eviction_counts[name] += 1
             # An evicted champion that still belongs to any band keeps its
             # record, slot, and difficulty evidence.
             self._remove_if_unreferenced(opponent_id)
         for opponent_id in incoming:
             bucket.member_ids.append(opponent_id)
-            self._champion_win_rate_by_opponent_id[opponent_id] = (
+            self._heuristic_win_rate_by_opponent_id[opponent_id] = (
                 final_win_rates[opponent_id]
             )
             self._admission_counts[name] += 1
         # Consuming the batch belongs to the same commit as the admission. If
         # they were separate steps a checkpoint could claim the batch was used
-        # without the champions being durable, or race the same 50 twice.
-        self._champion_pending_candidate_ids = []
-        self._champion_completed_event_count += 1
+        # without the champions being durable, or race the same 50 twice. Only
+        # this bucket's queue is consumed: the other champion target is still
+        # collecting its own independent batch.
+        self._champion_pending_candidate_ids[name] = []
+        self._champion_completed_event_counts[name] += 1
         self._validate_champion_invariants()
         return {
-            "event_index": self._champion_completed_event_count,
+            "event_index": self._champion_completed_event_counts[name],
             "admitted": tuple(incoming),
             "evicted": outgoing,
             "membership_count": len(bucket.member_ids),
@@ -1018,43 +1098,56 @@ class OpponentPool:
         }
 
     def _validate_champion_invariants(self):
-        """Raise unless membership and stored scores describe the same set."""
-        if not self.champion_selected:
-            if self._champion_win_rate_by_opponent_id:
+        """Raise unless every champion bucket's membership and state agree."""
+        if not self.champion_selected(CHAMPION_VS_HEURISTIC_BUCKET):
+            if self._heuristic_win_rate_by_opponent_id:
                 raise ValueError(
                     "Champion scores exist without a champion bucket"
                 )
-            return
-        bucket = self.buckets_by_name[CHAMPION_BUCKET_NAMES[0]]
-        members = set(bucket.member_ids)
-        if len(members) != len(bucket.member_ids):
-            raise ValueError("Champion bucket repeats an opponent identity")
-        if bucket.capacity is not None and len(members) > bucket.capacity:
-            raise ValueError("Champion bucket exceeds its capacity")
-        if members != set(self._champion_win_rate_by_opponent_id):
-            raise ValueError(
-                "Champion scores do not describe the current membership"
-            )
-        unknown = members - set(self.opponents_by_id)
-        if unknown:
-            raise ValueError(
-                "Champion bucket references unknown opponent(s): "
-                + ", ".join(sorted(unknown))
-            )
-        pending = self._champion_pending_candidate_ids
-        if len(pending) >= CHAMPION_CANDIDATE_BATCH_SIZE:
-            raise ValueError(
-                "A committed champion state cannot hold a complete pending "
-                "candidate batch"
-            )
-        if len(set(pending)) != len(pending):
-            raise ValueError("Champion pending candidates repeat an identity")
-        missing = [item for item in pending if item not in self.opponents_by_id]
-        if missing:
-            raise ValueError(
-                "Champion pending candidates are not active: "
-                + ", ".join(sorted(missing))
-            )
+        for bucket_name in self._champion_bucket_names:
+            bucket = self.buckets_by_name[bucket_name]
+            members = set(bucket.member_ids)
+            if len(members) != len(bucket.member_ids):
+                raise ValueError(
+                    f"Champion bucket {bucket_name!r} repeats an identity"
+                )
+            if bucket.capacity is not None and len(members) > bucket.capacity:
+                raise ValueError(
+                    f"Champion bucket {bucket_name!r} exceeds its capacity"
+                )
+            unknown = members - set(self.opponents_by_id)
+            if unknown:
+                raise ValueError(
+                    f"Champion bucket {bucket_name!r} references unknown "
+                    "opponent(s): " + ", ".join(sorted(unknown))
+                )
+            # The stored score map belongs to the fixed-target bucket alone. A
+            # bucket whose target moves between events has no comparable score
+            # to store, so requiring one here would be wrong for it.
+            if bucket_name == CHAMPION_VS_HEURISTIC_BUCKET and members != set(
+                self._heuristic_win_rate_by_opponent_id
+            ):
+                raise ValueError(
+                    "Champion scores do not describe the current membership"
+                )
+            pending = self._champion_pending_candidate_ids[bucket_name]
+            if len(pending) >= CHAMPION_CANDIDATE_BATCH_SIZE:
+                raise ValueError(
+                    f"A committed {bucket_name} state cannot hold a complete "
+                    "pending candidate batch"
+                )
+            if len(set(pending)) != len(pending):
+                raise ValueError(
+                    f"{bucket_name} pending candidates repeat an identity"
+                )
+            missing = [
+                item for item in pending if item not in self.opponents_by_id
+            ]
+            if missing:
+                raise ValueError(
+                    f"{bucket_name} pending candidates are not active: "
+                    + ", ".join(sorted(missing))
+                )
 
     def archive_backed_bucket_names(self):
         """Return the selected buckets whose membership comes from the archive."""
@@ -1403,21 +1496,27 @@ class OpponentPool:
                 bucket_state[name]["selection_diagnostics"] = (
                     self._historical_diagnostics
                 )
-            if name in CHAMPION_BUCKET_NAMES:
-                scores = tuple(self._champion_win_rate_by_opponent_id.values())
-                bucket_state[name]["champion_state"] = {
+            if name in self._champion_bucket_names:
+                champion_state = {
                     "pending_candidates": len(
-                        self._champion_pending_candidate_ids
+                        self._champion_pending_candidate_ids[name]
                     ),
                     "candidate_batch_size": CHAMPION_CANDIDATE_BATCH_SIZE,
-                    "completed_events": self._champion_completed_event_count,
-                    "minimum_heuristic_win_rate": (
-                        min(scores) if scores else None
-                    ),
-                    "maximum_heuristic_win_rate": (
-                        max(scores) if scores else None
+                    "completed_events": (
+                        self._champion_completed_event_counts[name]
                     ),
                 }
+                if name == CHAMPION_VS_HEURISTIC_BUCKET:
+                    scores = tuple(
+                        self._heuristic_win_rate_by_opponent_id.values()
+                    )
+                    champion_state["minimum_heuristic_win_rate"] = (
+                        min(scores) if scores else None
+                    )
+                    champion_state["maximum_heuristic_win_rate"] = (
+                        max(scores) if scores else None
+                    )
+                bucket_state[name]["champion_state"] = champion_state
         forbidden = self.forbidden_historical_overlap_counts()
         return {
             "last_completed_rl_iteration": self.last_completed_rl_iteration,
@@ -1512,19 +1611,9 @@ class OpponentPool:
                 "band_rebalances": dict(self._band_rebalance_counts),
                 "score_evictions": dict(self._score_eviction_counts),
             },
-            "champion_state": {
-                "pending_candidate_ids": list(
-                    self._champion_pending_candidate_ids
-                ),
-                "completed_event_count": int(
-                    self._champion_completed_event_count
-                ),
-                "heuristic_win_rate_by_opponent_id": {
-                    opponent_id: float(value)
-                    for opponent_id, value in sorted(
-                        self._champion_win_rate_by_opponent_id.items()
-                    )
-                },
+            "champion_state_by_bucket": {
+                name: self._export_champion_bucket_state(name)
+                for name in self._champion_bucket_names
             },
             "opponents": [
                 asdict(self.opponents_by_id[opponent_id])
@@ -1625,37 +1714,53 @@ class OpponentPool:
             raise ValueError(
                 "Resume opponent-pool state is missing the completed iteration"
             )
-        champion = state.get("champion_state")
-        if not isinstance(champion, dict):
+        champion_state = state.get("champion_state_by_bucket")
+        if not isinstance(champion_state, dict):
             raise ValueError("Resume opponent-pool state is missing champion state")
-        self._champion_pending_candidate_ids = [
-            str(item) for item in champion.get("pending_candidate_ids", ())
-        ]
-        self._champion_completed_event_count = int(
-            champion.get("completed_event_count", 0)
-        )
-        self._champion_win_rate_by_opponent_id = {
-            str(opponent_id): float(value)
-            for opponent_id, value in champion.get(
-                "heuristic_win_rate_by_opponent_id",
-                {},
-            ).items()
-        }
+        if set(champion_state) != set(self._champion_bucket_names):
+            raise ValueError(
+                "Resume champion state does not cover exactly the selected "
+                "champion buckets"
+            )
+        self._heuristic_win_rate_by_opponent_id = {}
+        for bucket_name in self._champion_bucket_names:
+            saved = champion_state[bucket_name]
+            if not isinstance(saved, dict):
+                raise ValueError(
+                    f"Resume champion state for {bucket_name!r} is malformed"
+                )
+            self._champion_pending_candidate_ids[bucket_name] = [
+                str(item) for item in saved.get("pending_candidate_ids", ())
+            ]
+            self._champion_completed_event_counts[bucket_name] = int(
+                saved.get("completed_event_count", 0)
+            )
+            if bucket_name == CHAMPION_VS_HEURISTIC_BUCKET:
+                self._heuristic_win_rate_by_opponent_id = {
+                    str(opponent_id): float(value)
+                    for opponent_id, value in saved.get(
+                        "heuristic_win_rate_by_opponent_id",
+                        {},
+                    ).items()
+                }
         # The same invariants a committed event guarantees must hold on the way
         # back in, so a hand-edited or truncated state fails loudly here.
         self._validate_champion_invariants()
-        if self.champion_selected and "recent" in self.buckets_by_name:
+        if self._champion_bucket_names and "recent" in self.buckets_by_name:
             recent = set(self.buckets_by_name["recent"].member_ids)
-            stranded = [
-                opponent_id
-                for opponent_id in self._champion_pending_candidate_ids
-                if opponent_id not in recent
-            ]
-            if stranded:
-                raise ValueError(
-                    "Champion pending candidates must still belong to recent: "
-                    + ", ".join(sorted(stranded))
-                )
+            for bucket_name in self._champion_bucket_names:
+                stranded = [
+                    opponent_id
+                    for opponent_id in self._champion_pending_candidate_ids[
+                        bucket_name
+                    ]
+                    if opponent_id not in recent
+                ]
+                if stranded:
+                    raise ValueError(
+                        f"{bucket_name} pending candidates must still belong "
+                        "to recent: " + ", ".join(sorted(stranded))
+                    )
         counters = state.get("lifecycle_counters", {})
         groups = (
             "admissions",

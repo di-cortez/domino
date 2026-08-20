@@ -41,7 +41,7 @@ from utils.repository import current_git_commit
 # reinterpreted under the new semantics without silently changing what the
 # saved memberships mean. No converter exists, so they are rejected rather
 # than migrated.
-RESUME_STATE_VERSION = 14
+RESUME_STATE_VERSION = 15
 SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
 OVERLAPPING_MEDIUM_TERM_STATE_VERSIONS = (10, 11)
 # States written before the uniform member remainder rotated. They carry no
@@ -49,6 +49,10 @@ OVERLAPPING_MEDIUM_TERM_STATE_VERSIONS = (10, 11)
 PRE_UNIFORM_ROTATION_STATE_VERSIONS = (12,)
 # States written before the pool carried durable champion state.
 PRE_CHAMPION_STATE_VERSIONS = (13,)
+# States written while a single champion bucket existed, so the pool stored one
+# unqualified champion queue, event count, and score map instead of one set per
+# champion bucket.
+PRE_PER_BUCKET_CHAMPION_STATE_VERSIONS = (14,)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
 
@@ -450,6 +454,15 @@ def _atomic_resume_state_save(path, metadata, pool_state, pool_weights):
 def _superseded_opponent_band_hint(metadata):
     """Explain why a superseded resume state cannot simply be reinterpreted."""
     version = metadata.get("version")
+    if version in PRE_PER_BUCKET_CHAMPION_STATE_VERSIONS:
+        return (
+            " This state stores one unqualified champion queue, event count, "
+            "and score map from when champion_vs_heuristic was the only "
+            "champion bucket. Champion state is now recorded per bucket, and "
+            "reading the old singular state as one particular bucket's state "
+            "would be a guess rather than a continuation, so a new run is "
+            "required."
+        )
     if version in PRE_CHAMPION_STATE_VERSIONS:
         return (
             " This state predates durable champion_vs_heuristic state and "

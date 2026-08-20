@@ -35,7 +35,22 @@ from training.rl.resume import (
     numbered_checkpoint_path,
     resume_state_path,
 )
-from training.rl.pool import K_RECENT, MEDIUM_TERM_INTERVAL_ITERATIONS
+from training.rl.pool import (
+    CHAMPION_VS_HEURISTIC_BUCKET,
+    K_RECENT,
+    MEDIUM_TERM_INTERVAL_ITERATIONS,
+)
+# The pool now keys champion state by bucket. Every existing champion test
+# targets the fixed-heuristic bucket, so it gets one short local name rather
+# than the constant repeated inside dozens of assertions.
+HEURISTIC_CHAMPION = CHAMPION_VS_HEURISTIC_BUCKET
+
+
+def _champion_state(metadata):
+    """Return the heuristic champion's durable block of exported pool state."""
+    return metadata["opponent_pool_state"]["champion_state_by_bucket"][
+        HEURISTIC_CHAMPION
+    ]
 from training.rl.reporting import read_training_metrics
 from training.rl.rollout import REWARD_SCHEMAS
 from training.rl.cli import parse_args as parse_rl_args
@@ -220,7 +235,7 @@ class ParallelRLTests(unittest.TestCase):
                 )
             runner.set_workers(workers)
             runner.sync_current(network)
-            candidate_ids = pool.champion_pending_candidate_ids[:candidates]
+            candidate_ids = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)[:candidates]
             specs = []
             for candidate_id in candidate_ids:
                 for game_index in range(games):
@@ -698,11 +713,11 @@ class ParallelRLTests(unittest.TestCase):
             )
 
         # The checkpoint the resume started from held a partial batch.
-        partial_champion = partial_state["opponent_pool_state"]["champion_state"]
+        partial_champion = _champion_state(partial_state)
         self.assertEqual(partial_champion["completed_event_count"], 1)
         self.assertEqual(len(partial_champion["pending_candidate_ids"]), 2)
 
-        full_champion = full_state["opponent_pool_state"]["champion_state"]
+        full_champion = _champion_state(full_state)
         self.assertEqual(full_champion["completed_event_count"], 2)
 
         # Candidate IDs, event index, survivors, champion IDs, champion scores,
@@ -710,8 +725,8 @@ class ParallelRLTests(unittest.TestCase):
         # once the effective seed and the event index do, because the panel is
         # a pure function of the two.
         self.assertEqual(
-            full_state["opponent_pool_state"]["champion_state"],
-            resumed_state["opponent_pool_state"]["champion_state"],
+            _champion_state(full_state),
+            _champion_state(resumed_state),
         )
         self.assertEqual(
             full_state["opponent_pool_state"]["buckets"],
@@ -829,8 +844,8 @@ class ParallelRLTests(unittest.TestCase):
         benchmark_pool = captured[0].opponent_pool
         # The throwaway pool saw only benchmark games: no candidate appended,
         # no event run.
-        self.assertEqual(len(benchmark_pool.champion_pending_candidate_ids), 3)
-        self.assertEqual(benchmark_pool.champion_completed_event_count, 0)
+        self.assertEqual(len(benchmark_pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)), 3)
+        self.assertEqual(benchmark_pool.champion_completed_event_count(HEURISTIC_CHAMPION), 0)
         self.assertEqual(benchmark_pool.bucket_members("champion_vs_heuristic"), ())
 
         # The parent's serialized state is untouched, so the first real plan
@@ -1441,7 +1456,7 @@ class ParallelRLTests(unittest.TestCase):
             partial_state = resume_state_path(partial_weights)
             metadata, _pool = load_resume_state(partial_weights, partial_state)
 
-            champion = metadata["opponent_pool_state"]["champion_state"]
+            champion = _champion_state(metadata)
             pending = champion["pending_candidate_ids"]
             # Every successful update queues exactly one candidate, and no
             # racing event can have happened at only three iterations.
@@ -1480,12 +1495,12 @@ class ParallelRLTests(unittest.TestCase):
                 resume_state_path(numbered_checkpoint_path(full_base, 6)),
             )
             self.assertEqual(
-                resumed_metadata["opponent_pool_state"]["champion_state"],
-                full_metadata["opponent_pool_state"]["champion_state"],
+                _champion_state(resumed_metadata),
+                _champion_state(full_metadata),
             )
             self.assertEqual(
                 len(
-                    resumed_metadata["opponent_pool_state"]["champion_state"][
+                    _champion_state(resumed_metadata)[
                         "pending_candidate_ids"
                     ]
                 ),

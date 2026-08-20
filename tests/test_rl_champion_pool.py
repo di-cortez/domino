@@ -24,6 +24,7 @@ from training.rl.matchmaking import (
 from training.rl.pool import (
     CHAMPION_CANDIDATE_BATCH_SIZE,
     CHAMPION_FINAL_SURVIVORS,
+    CHAMPION_VS_HEURISTIC_BUCKET,
     CHAMPION_VS_HEURISTIC_CAPACITY,
     K_RECENT,
     MEDIUM_TERM_INTERVAL_ITERATIONS,
@@ -31,6 +32,10 @@ from training.rl.pool import (
     SharedPolicyBank,
     unique_neural_capacity,
 )
+# The pool now keys champion state by bucket. Every existing champion test
+# targets the fixed-heuristic bucket, so it gets one short local name rather
+# than the constant repeated inside dozens of assertions.
+HEURISTIC_CHAMPION = CHAMPION_VS_HEURISTIC_BUCKET
 
 
 def _network(seed=1):
@@ -163,8 +168,8 @@ def test_only_successful_updates_become_champion_candidates():
     network, bank, pool = _champion_pool()
     try:
         # The warm-start policy is not a candidate.
-        assert pool.champion_pending_candidate_ids == ()
-        assert pool.champion_completed_event_count == 0
+        assert pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == ()
+        assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 0
 
         pool.consider_updated_policy(
             network,
@@ -172,7 +177,7 @@ def test_only_successful_updates_become_champion_candidates():
             completed_games=2000,
             has_samples=True,
         )
-        assert len(pool.champion_pending_candidate_ids) == 1
+        assert len(pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)) == 1
         # An iteration with no trainable decisions produces no snapshot.
         pool.consider_updated_policy(
             network,
@@ -180,7 +185,7 @@ def test_only_successful_updates_become_champion_candidates():
             completed_games=4000,
             has_samples=False,
         )
-        assert len(pool.champion_pending_candidate_ids) == 1
+        assert len(pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)) == 1
 
         for iteration in range(3, CHAMPION_CANDIDATE_BATCH_SIZE + 2):
             pool.consider_updated_policy(
@@ -189,9 +194,9 @@ def test_only_successful_updates_become_champion_candidates():
                 completed_games=iteration * 2000,
                 has_samples=True,
             )
-        pending = pool.champion_pending_candidate_ids
+        pending = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
         assert len(pending) == CHAMPION_CANDIDATE_BATCH_SIZE == 50
-        assert pool.champion_candidate_batch_is_ready
+        assert pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION)
         assert len(set(pending)) == len(pending)
         assert set(pending) <= set(pool.bucket_members("recent"))
         # A 51st snapshot before the event would make the batch overlap.
@@ -216,10 +221,10 @@ def test_candidate_batches_never_overlap_across_events():
                 completed_games=iteration * 2000,
                 has_samples=True,
             )
-        first_batch = pool.champion_pending_candidate_ids
+        first_batch = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
         _race(pool, first_batch[:5], [0.9, 0.8, 0.7, 0.6, 0.5])
-        assert pool.champion_pending_candidate_ids == ()
-        assert pool.champion_completed_event_count == 1
+        assert pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == ()
+        assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 1
 
         for iteration in range(
             CHAMPION_CANDIDATE_BATCH_SIZE + 1,
@@ -231,7 +236,7 @@ def test_candidate_batches_never_overlap_across_events():
                 completed_games=iteration * 2000,
                 has_samples=True,
             )
-        second_batch = pool.champion_pending_candidate_ids
+        second_batch = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
         assert len(second_batch) == CHAMPION_CANDIDATE_BATCH_SIZE
         assert not set(second_batch) & set(first_batch)
     finally:
@@ -266,8 +271,8 @@ def test_champion_bucket_fills_five_at_a_time_without_eviction():
         for event in range(1, 6):
             _fill_champion_bucket(pool, network, events=1)
             assert len(_champion_members(pool)) == 5 * event
-            assert pool.champion_completed_event_count == event
-        assert set(pool.champion_win_rates()) == set(_champion_members(pool))
+            assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == event
+        assert set(pool.heuristic_champion_win_rates()) == set(_champion_members(pool))
         assert pool.observability()["buckets"]["champion_vs_heuristic"][
             "score_evictions"
         ] == 0
@@ -282,7 +287,7 @@ def test_a_full_champion_bucket_evicts_its_weakest_stored_scores():
         _fill_champion_bucket(pool, network, events=events)
         assert len(_champion_members(pool)) == CHAMPION_VS_HEURISTIC_CAPACITY
 
-        before = pool.champion_win_rates()
+        before = pool.heuristic_champion_win_rates()
         weakest = sorted(before.items(), key=lambda item: (item[1], item[0]))
         expected_evicted = {opponent_id for opponent_id, _score in weakest[:5]}
 
@@ -302,7 +307,7 @@ def test_a_full_champion_bucket_evicts_its_weakest_stored_scores():
         assert set(summary["evicted"]) == expected_evicted
         assert not expected_evicted & members
         assert set(newcomers) <= members
-        assert set(pool.champion_win_rates()) == members
+        assert set(pool.heuristic_champion_win_rates()) == members
         assert pool.observability()["buckets"]["champion_vs_heuristic"][
             "score_evictions"
         ] == 5
@@ -316,7 +321,7 @@ def test_new_champions_are_admitted_even_when_weaker_than_every_incumbent():
         events = CHAMPION_VS_HEURISTIC_CAPACITY // CHAMPION_FINAL_SURVIVORS
         _fill_champion_bucket(pool, network, events=events)
         incumbents = set(_champion_members(pool))
-        assert min(pool.champion_win_rates().values()) > 0.1
+        assert min(pool.heuristic_champion_win_rates().values()) > 0.1
 
         newcomers = []
         for step in range(CHAMPION_FINAL_SURVIVORS):
@@ -333,7 +338,7 @@ def test_new_champions_are_admitted_even_when_weaker_than_every_incumbent():
         assert set(newcomers) <= members
         assert len(incumbents - members) == CHAMPION_FINAL_SURVIVORS
         assert all(
-            pool.champion_win_rates()[opponent_id] == 0.0
+            pool.heuristic_champion_win_rates()[opponent_id] == 0.0
             for opponent_id in newcomers
         )
     finally:
@@ -347,7 +352,7 @@ def test_equal_champion_scores_evict_the_smaller_opponent_id_first():
         _fill_champion_bucket(pool, network, events=events)
         # Flatten every stored score so only the documented ID rule can decide.
         members = sorted(_champion_members(pool))
-        pool._champion_win_rate_by_opponent_id = {
+        pool._heuristic_win_rate_by_opponent_id = {
             opponent_id: 0.5 for opponent_id in members
         }
         newcomers = []
@@ -370,7 +375,7 @@ def test_a_champion_result_is_rejected_before_it_mutates_anything():
     try:
         _fill_champion_bucket(pool, network, events=2)
         members = _champion_members(pool)
-        scores = pool.champion_win_rates()
+        scores = pool.heuristic_champion_win_rates()
 
         fresh = [
             pool.consider_updated_policy(
@@ -398,8 +403,8 @@ def test_a_champion_result_is_rejected_before_it_mutates_anything():
             )
 
         assert _champion_members(pool) == members
-        assert pool.champion_win_rates() == scores
-        assert pool.champion_completed_event_count == 2
+        assert pool.heuristic_champion_win_rates() == scores
+        assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 2
     finally:
         bank.close()
 
@@ -420,9 +425,9 @@ def _drive_champion_events(pool, network, *, iterations, ascending=True):
             completed_games=iteration * 2000,
             has_samples=True,
         )
-        if not pool.champion_candidate_batch_is_ready:
+        if not pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION):
             continue
-        batch = pool.champion_pending_candidate_ids[:CHAMPION_FINAL_SURVIVORS]
+        batch = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)[:CHAMPION_FINAL_SURVIVORS]
         index = len(events)
         base = 0.1 + index * 0.002 if ascending else 0.9 - index * 0.002
         _race(pool, batch, [base + step * 0.0001 for step in range(len(batch))])
@@ -456,7 +461,7 @@ def test_a_champion_keeps_its_identity_after_leaving_every_other_bucket():
         for opponent_id in champions:
             assert pool.opponent(opponent_id).kind == "policy_snapshot"
             assert pool.bank_slot(opponent_id) == slots[opponent_id]
-        assert set(pool.champion_win_rates()) == set(_champion_members(pool))
+        assert set(pool.heuristic_champion_win_rates()) == set(_champion_members(pool))
     finally:
         bank.close()
 
@@ -473,7 +478,7 @@ def test_an_evicted_champion_with_no_other_membership_releases_its_slot():
         assert len(_champion_members(pool)) == CHAMPION_VS_HEURISTIC_CAPACITY
 
         weakest = sorted(
-            pool.champion_win_rates().items(),
+            pool.heuristic_champion_win_rates().items(),
             key=lambda item: (item[1], item[0]),
         )[:CHAMPION_FINAL_SURVIVORS]
         doomed = [opponent_id for opponent_id, _score in weakest]
@@ -497,7 +502,7 @@ def test_an_evicted_champion_with_no_other_membership_releases_its_slot():
 
         for opponent_id in doomed:
             assert pool.bank_slot(opponent_id) is None
-            assert opponent_id not in pool.champion_win_rates()
+            assert opponent_id not in pool.heuristic_champion_win_rates()
         assert pool.unique_neural_opponent_count == (
             before - CHAMPION_FINAL_SURVIVORS
         )
@@ -517,7 +522,7 @@ def test_a_full_champion_bucket_refuses_generic_fifo_eviction():
             completed_games=120_000_000,
             has_samples=True,
         )
-        with pytest.raises(RuntimeError, match="retains members by stored score"):
+        with pytest.raises(RuntimeError, match="retains members by strength"):
             pool.add_membership("champion_vs_heuristic", extra.opponent_id)
         assert len(_champion_members(pool)) == CHAMPION_VS_HEURISTIC_CAPACITY
     finally:
@@ -539,8 +544,8 @@ def test_champion_state_survives_export_and_restore():
         state = pool.export_state()
         weights = pool.export_weights()
         expected_members = _champion_members(pool)
-        expected_scores = pool.champion_win_rates()
-        expected_pending = pool.champion_pending_candidate_ids
+        expected_scores = pool.heuristic_champion_win_rates()
+        expected_pending = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
     finally:
         bank.close()
 
@@ -549,12 +554,12 @@ def test_champion_state_survives_export_and_restore():
         restored = OpponentPool(restored_bank, selected_buckets=buckets)
         restored.restore_state(state, weights)
         assert restored.bucket_members("champion_vs_heuristic") == expected_members
-        assert restored.champion_win_rates() == expected_scores
-        assert restored.champion_pending_candidate_ids == expected_pending
-        assert restored.champion_completed_event_count == 3
+        assert restored.heuristic_champion_win_rates() == expected_scores
+        assert restored.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == expected_pending
+        assert restored.champion_completed_event_count(HEURISTIC_CHAMPION) == 3
         # Exact float equality: a champion score is a stored measurement.
         assert all(
-            restored.champion_win_rates()[opponent_id] == value
+            restored.heuristic_champion_win_rates()[opponent_id] == value
             for opponent_id, value in expected_scores.items()
         )
     finally:
@@ -581,14 +586,23 @@ def test_restoring_inconsistent_champion_state_is_rejected():
         finally:
             restored_bank.close()
 
+    def _heuristic_state(value):
+        return value["champion_state_by_bucket"][HEURISTIC_CHAMPION]
+
     with pytest.raises(ValueError, match="do not describe the current membership"):
-        _restore(lambda value: value["champion_state"][
+        _restore(lambda value: _heuristic_state(value)[
             "heuristic_win_rate_by_opponent_id"
         ].popitem())
     with pytest.raises(ValueError, match="missing champion state"):
-        _restore(lambda value: value.pop("champion_state"))
+        _restore(lambda value: value.pop("champion_state_by_bucket"))
+    # A state whose champion block covers the wrong set of buckets cannot be
+    # read as this run's state, whichever bucket the saved block described.
+    with pytest.raises(ValueError, match="selected champion buckets"):
+        _restore(lambda value: value["champion_state_by_bucket"].pop(
+            HEURISTIC_CHAMPION
+        ))
     with pytest.raises(ValueError, match="complete pending candidate batch"):
-        _restore(lambda value: value["champion_state"].__setitem__(
+        _restore(lambda value: _heuristic_state(value).__setitem__(
             "pending_candidate_ids",
             list(value["buckets"]["recent"]["member_ids"][:1])
             * 1 + [f"snapshot:{index:010d}" for index in range(900, 949)],
@@ -666,7 +680,7 @@ def test_an_evicted_rotation_anchor_continues_at_its_insertion_point():
         members = tuple(sorted(_champion_members(pool)))
         assert len(members) == CHAMPION_VS_HEURISTIC_CAPACITY
 
-        scores = pool.champion_win_rates()
+        scores = pool.heuristic_champion_win_rates()
         doomed = tuple(sorted(
             sorted(scores, key=lambda item: (scores[item], item))[
                 :CHAMPION_FINAL_SURVIVORS
@@ -737,10 +751,10 @@ def _drive_champion_and_archive(pool, network, last_iteration):
             iteration=iteration,
             completed_games=completed_games,
         )
-        if pool.champion_candidate_batch_is_ready:
+        if pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION):
             milestones = [
                 opponent_id
-                for opponent_id in pool.champion_pending_candidate_ids
+                for opponent_id in pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
                 if pool.opponent(opponent_id).introduced_iteration
                 % MEDIUM_TERM_INTERVAL_ITERATIONS == 0
             ]
@@ -776,7 +790,7 @@ def test_a_band_rebalance_keeps_an_identity_that_is_also_a_champion():
             for opponent_id in champions
         }
         scores = {
-            opponent_id: pool.champion_win_rates()[opponent_id]
+            opponent_id: pool.heuristic_champion_win_rates()[opponent_id]
             for opponent_id in champions
         }
         tracker = _tracker(pool)
@@ -797,7 +811,7 @@ def test_a_band_rebalance_keeps_an_identity_that_is_also_a_champion():
             assert pool.bank_slot(opponent_id) == slots[opponent_id]
             assert pool.opponent(opponent_id).kind == "policy_snapshot"
             # Exact float equality: a champion score is a stored measurement.
-            assert pool.champion_win_rates()[opponent_id] == scores[opponent_id]
+            assert pool.heuristic_champion_win_rates()[opponent_id] == scores[opponent_id]
         assert tracker.estimated_win_rate(champions[0]) == difficulty_before
 
         state = pool.observability()

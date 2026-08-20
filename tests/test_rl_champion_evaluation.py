@@ -33,7 +33,12 @@ from training.rl.champion_evaluation import (
 from training.rl.pool import (
     CHAMPION_CANDIDATE_BATCH_SIZE,
     CHAMPION_FINAL_SURVIVORS,
+    CHAMPION_VS_HEURISTIC_BUCKET,
 )
+# The pool now keys champion state by bucket. Every existing champion test
+# targets the fixed-heuristic bucket, so it gets one short local name rather
+# than the constant repeated inside dozens of assertions.
+HEURISTIC_CHAMPION = CHAMPION_VS_HEURISTIC_BUCKET
 
 
 def _candidates(count=CHAMPION_CANDIDATE_BATCH_SIZE):
@@ -421,8 +426,8 @@ def _champion_pool_fixture():
 
 def test_the_racing_result_feeds_pool_admission_directly(champion_pool):
     pool = champion_pool
-    candidates = pool.champion_pending_candidate_ids
-    assert pool.champion_candidate_batch_is_ready
+    candidates = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
+    assert pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION)
     result = evaluate_champion_vs_heuristic(
         candidate_ids=candidates,
         bank_slots={
@@ -431,7 +436,7 @@ def test_the_racing_result_feeds_pool_admission_directly(champion_pool):
         },
         play_games=_ScriptedEvaluator(_descending_strength(candidates)),
         base_seed=99,
-        event_index=pool.champion_completed_event_count,
+        event_index=pool.champion_completed_event_count(HEURISTIC_CHAMPION),
     )
     summary = pool.apply_champion_vs_heuristic_result(
         result.champion_ids,
@@ -439,9 +444,9 @@ def test_the_racing_result_feeds_pool_admission_directly(champion_pool):
     )
     assert summary["admitted"] == result.champion_ids
     assert pool.bucket_members("champion_vs_heuristic") == result.champion_ids
-    assert pool.champion_win_rates() == dict(result.heuristic_win_rates)
-    assert pool.champion_pending_candidate_ids == ()
-    assert pool.champion_completed_event_count == 1
+    assert pool.heuristic_champion_win_rates() == dict(result.heuristic_win_rates)
+    assert pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == ()
+    assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -533,12 +538,12 @@ def test_no_event_runs_until_the_candidate_batch_is_complete():
     )
     try:
         context = _stub_context(fixture.pool, _ScriptedEvaluator({}))
-        assert not fixture.pool.champion_candidate_batch_is_ready
+        assert not fixture.pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION)
         assert _run_champion_evaluation(context, 49) is None
         # The worker pool must not be touched at all on a non-event iteration.
         assert context.runner.stage_sizes == []
         assert context.parallel_summary["attempted_worker_counts"] == []
-        assert fixture.pool.champion_completed_event_count == 0
+        assert fixture.pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 0
     finally:
         fixture.close()
 
@@ -547,7 +552,7 @@ def test_a_ready_batch_races_commits_and_reports_one_event(champion_pool):
     from training.rl.iteration import _run_champion_evaluation
     from training.rl.pool import CHAMPION_VS_HEURISTIC_CAPACITY
 
-    candidates = champion_pool.champion_pending_candidate_ids
+    candidates = champion_pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
     expected_slots = {
         candidate_id: champion_pool.bank_slot(candidate_id)
         for candidate_id in candidates
@@ -585,9 +590,9 @@ def test_a_ready_batch_races_commits_and_reports_one_event(champion_pool):
     assert champion_pool.bucket_members("champion_vs_heuristic") == (
         summary["admitted"]
     )
-    assert champion_pool.champion_win_rates() == summary["win_rates"]
-    assert champion_pool.champion_pending_candidate_ids == ()
-    assert champion_pool.champion_completed_event_count == 1
+    assert champion_pool.heuristic_champion_win_rates() == summary["win_rates"]
+    assert champion_pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == ()
+    assert champion_pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 1
 
     # Every champion is active when the event returns, so the performance
     # retention that runs next in the iteration cannot drop one of them.
@@ -608,7 +613,7 @@ def test_the_event_seeds_from_the_run_seed_and_the_committed_event_count(
     """A replayed event must reuse the panels the crashed attempt used."""
     from training.rl.iteration import _run_champion_evaluation
 
-    candidates = champion_pool.champion_pending_candidate_ids
+    candidates = champion_pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
     evaluator = _ScriptedEvaluator(_descending_strength(candidates))
     context = _stub_context(champion_pool, evaluator, effective_seed=777)
     _run_champion_evaluation(context, 50)
@@ -631,7 +636,7 @@ def test_racing_stages_are_accounted_for_in_the_parallel_summary(champion_pool):
     """Racing worker runs are visible, and never counted as rollout batches."""
     from training.rl.iteration import _run_champion_evaluation
 
-    candidates = champion_pool.champion_pending_candidate_ids
+    candidates = champion_pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
     context = _stub_context(
         champion_pool,
         _ScriptedEvaluator(_descending_strength(candidates)),

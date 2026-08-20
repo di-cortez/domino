@@ -126,6 +126,34 @@ class OpponentPerformanceTracker:
     def difficulty(self, opponent_id):
         return self.performance(opponent_id).difficulty
 
+    def difficulty_snapshot(self, opponent_ids):
+        """Return current difficulty per opponent **without** creating rows.
+
+        ``difficulty`` goes through ``performance``, which calls ``ensure`` and
+        inserts a neutral row for anything it has not seen. That is right for
+        the matchmaking path, which asks about opponents as it meets them, and
+        wrong for a caller that only wants to read: champion retention must be
+        able to prove it did not perturb the tracker it read from.
+
+        An unknown identity is an error rather than a neutral default. Every
+        champion incumbent is an active opponent that the previous iteration's
+        ``ensure`` already covered, so a missing row means the caller measured
+        the wrong set.
+        """
+        opponent_ids = tuple(opponent_ids)
+        missing = sorted(
+            set(opponent_ids) - set(self._values)
+        )
+        if missing:
+            raise KeyError(
+                "No performance evidence for opponent(s): "
+                + ", ".join(missing)
+            )
+        return {
+            opponent_id: self._values[opponent_id].difficulty
+            for opponent_id in opponent_ids
+        }
+
     def update(self, active_opponent_ids, outcomes):
         """Decay every active opponent once, then add this iteration's evidence."""
         active = tuple(sorted(set(active_opponent_ids)))

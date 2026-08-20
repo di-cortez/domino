@@ -17,7 +17,10 @@ from training.rl.ppo import (
     ppo_is_enabled,
     update_from_samples,
 )
-from training.rl.champion_evaluation import evaluate_champion_vs_heuristic
+from training.rl.champion_evaluation import (
+    evaluate_champion_vs_heuristic,
+    evaluate_champion_vs_learner,
+)
 from training.rl.checkpoint_archive import ARCHIVE_INTERVAL_ITERATIONS
 from training.rl.matchmaking import (
     aggregate_match_results,
@@ -25,7 +28,7 @@ from training.rl.matchmaking import (
 )
 from training.rl.pool import (
     CHAMPION_VS_HEURISTIC_BUCKET,
-    CHAMPION_VS_HEURISTIC_CAPACITY,
+    CHAMPION_VS_LEARNER_BUCKET,
     select_medium_term_staging_records,
 )
 from training.rl.reporting import (
@@ -155,13 +158,69 @@ def refresh_archive_backed_buckets(
     return summary
 
 
-def _run_champion_evaluation(context, iteration):
+def champion_evaluation_phase(bucket_name):
+    """Return the runtime/parallel accounting phase name for one champion target.
+
+    Kept distinct per bucket so an iteration that runs both events reports two
+    separate 100,000-game costs rather than one indistinguishable 200,000.
+    """
+    return f"{bucket_name}_evaluation"
+
+
+def _publish_champion_target(context, bucket_name):
+    """Make the worker-visible current policy the one this event must race.
+
+    ``run_iteration`` publishes the learner once, at the top, before the
+    rollouts. By the time a champion event runs, PPO has already replaced the
+    parent network, so the bank's current-policy region still holds the policy
+    the update *replaced*. Racing against it would rank 50 candidates against a
+    learner that no longer exists, and every funnel, seed, seat, and ranking
+    check would still pass.
+
+    Published once, immediately before the first stage. Nothing may write to
+    that region again until the event finishes: workers view it live, so a
+    second write mid-event would change the target between candidates and
+    destroy the comparison the common seed panels exist to protect.
+    """
+    if bucket_name != CHAMPION_VS_LEARNER_BUCKET:
+        return
+    context.runner.sync_current(context.network)
+
+
+def _commit_champion_event(context, bucket_name, result):
+    """Commit one racing result through the bucket's own retention rule.
+
+    The two buckets share the race and nothing else here. The heuristic bucket
+    stores the win rates it just measured, because its target is fixed and the
+    numbers stay comparable. The learner bucket discards them and retains on
+    current decayed difficulty instead, which the pool cannot read for itself:
+    the tracker belongs to matchmaking, and ``pool.py`` importing it would
+    invert ownership.
+    """
+    opponent_pool = context.runner.opponent_pool
+    if bucket_name == CHAMPION_VS_HEURISTIC_BUCKET:
+        return opponent_pool.apply_champion_vs_heuristic_result(
+            result.champion_ids,
+            result.final_win_rates,
+        )
+    incumbent_difficulties = (
+        context.runner.performance_tracker.difficulty_snapshot(
+            opponent_pool.bucket_members(bucket_name)
+        )
+    )
+    return opponent_pool.apply_champion_vs_learner_result(
+        result.champion_ids,
+        incumbent_difficulties,
+    )
+
+
+def _run_champion_evaluation(context, iteration, bucket_name):
     """Race one complete candidate batch and commit its five champions.
 
-    Returns ``None`` unless the pending list holds a full non-overlapping
-    batch. The event is deliberately placed after the archive refresh and
-    before performance retention: it changes champion membership, and
-    specification 9.8 requires the tracker to be reconciled only once every
+    Returns ``None`` unless the named bucket's pending list holds a full
+    non-overlapping batch. The event is deliberately placed after the archive
+    refresh and before performance retention: it changes champion membership,
+    and specification 9.8 requires the tracker to be reconciled only once every
     final membership for the iteration is known.
 
     Nothing here touches GPI counters, ``bucket_results``, difficulty
@@ -169,49 +228,52 @@ def _run_champion_evaluation(context, iteration):
     membership transaction committed by the pool.
     """
     opponent_pool = context.runner.opponent_pool
-    if not opponent_pool.champion_selected(CHAMPION_VS_HEURISTIC_BUCKET):
+    if not opponent_pool.champion_selected(bucket_name):
         return None
-    if not opponent_pool.champion_candidate_batch_is_ready(
-        CHAMPION_VS_HEURISTIC_BUCKET
-    ):
+    if not opponent_pool.champion_candidate_batch_is_ready(bucket_name):
         return None
-    candidate_ids = opponent_pool.champion_pending_candidate_ids(
-        CHAMPION_VS_HEURISTIC_BUCKET
-    )
+    candidate_ids = opponent_pool.champion_pending_candidate_ids(bucket_name)
     bank_slots = {
         opponent_id: opponent_pool.bank_slot(opponent_id)
         for opponent_id in candidate_ids
     }
+    # Only reached on an iteration that actually races, so a run that never
+    # completes a batch pays nothing for this.
+    _publish_champion_target(context, bucket_name)
 
     def play_stage(specs):
         """Execute one racing stage and account for its worker-pool run."""
-        results, run_info = context.runner.evaluate_champion_games(specs)
+        results, run_info = context.runner.evaluate_champion_games(
+            specs,
+            bucket_name=bucket_name,
+        )
         _merge_parallel_summary(
             context.parallel_summary,
             run_info,
-            phase="champion_evaluation",
+            phase=champion_evaluation_phase(bucket_name),
             iteration=iteration,
         )
         if run_info.fallback_count:
             context.reporter.rollout_fallback(iteration, run_info)
         return results
 
-    result = evaluate_champion_vs_heuristic(
+    evaluate = (
+        evaluate_champion_vs_heuristic
+        if bucket_name == CHAMPION_VS_HEURISTIC_BUCKET
+        else evaluate_champion_vs_learner
+    )
+    result = evaluate(
         candidate_ids=candidate_ids,
         bank_slots=bank_slots,
         play_games=play_stage,
         base_seed=context.effective_seed,
         # The seed panel is keyed by the number of events already committed,
         # so a deterministic replay after a crash reuses the same deals.
-        event_index=opponent_pool.champion_completed_event_count(
-            CHAMPION_VS_HEURISTIC_BUCKET
-        ),
+        event_index=opponent_pool.champion_completed_event_count(bucket_name),
     )
-    commit = opponent_pool.apply_champion_vs_heuristic_result(
-        result.champion_ids,
-        result.final_win_rates,
-    )
+    commit = _commit_champion_event(context, bucket_name, result)
     return {
+        "bucket_name": bucket_name,
         "iteration": int(iteration),
         # ``event_index`` counts committed events, so it is one-based here and
         # one higher than the zero-based index that seeded the panels.
@@ -227,9 +289,38 @@ def _run_champion_evaluation(context, iteration):
         "admitted": tuple(commit["admitted"]),
         "evicted": tuple(commit["evicted"]),
         "membership_count": int(commit["membership_count"]),
-        "capacity": int(CHAMPION_VS_HEURISTIC_CAPACITY),
-        "win_rates": dict(commit["admitted_win_rates"]),
+        "capacity": int(opponent_pool.buckets_by_name[bucket_name].capacity),
+        # The candidate's win rate against whatever this bucket raced. Durable
+        # only for the heuristic bucket; reported either way.
+        "win_rates": dict(result.final_win_rates),
+        "evicted_difficulties": dict(commit.get("evicted_difficulties", {})),
     }
+
+
+def _run_champion_evaluations(context, iteration):
+    """Run every ready champion event in deterministic registry order.
+
+    Both buckets are fed by the same successful updates, so their batches
+    normally complete on the same iteration and both events run here, one after
+    the other. Registry order fixes which goes first; nothing may derive the
+    order from dictionary insertion.
+    """
+    events = []
+    opponent_pool = context.runner.opponent_pool
+    for bucket_name in opponent_pool.selected_champion_bucket_names():
+        section_started = time.perf_counter()
+        event = _run_champion_evaluation(context, iteration, bucket_name)
+        # The section exists only on the iterations that actually raced, so a
+        # profile that reports it is proof the 100,000 games were timed apart
+        # from rollout work rather than folded into it.
+        if event is None:
+            continue
+        context.runtime_profile.add(
+            champion_evaluation_phase(bucket_name),
+            time.perf_counter() - section_started,
+        )
+        events.append(event)
+    return tuple(events)
 
 
 def _value_prediction_summary(values):
@@ -692,19 +783,11 @@ def run_iteration(context, state, iteration):
         "checkpoint_archive_update",
         time.perf_counter() - section_started,
     )
-    section_started = time.perf_counter()
-    # The racing event runs here, between the archive refresh and performance
-    # retention, so its 100,000 evaluation games stay out of rollout timing and
-    # its admissions are visible to the tracker reconciliation below.
-    champion_event = _run_champion_evaluation(context, iteration)
-    # The section exists only on the iterations that actually raced, so a
-    # profile that reports it is proof the 100,000 games were timed apart from
-    # rollout work rather than folded into it.
-    if champion_event is not None:
-        context.runtime_profile.add(
-            "champion_evaluation",
-            time.perf_counter() - section_started,
-        )
+    # Racing events run here, between the archive refresh and performance
+    # retention, so their evaluation games stay out of rollout timing and their
+    # admissions are visible to the tracker reconciliation below. Each event
+    # times itself, so a double-event iteration reports two costs.
+    champion_events = _run_champion_evaluations(context, iteration)
     section_started = time.perf_counter()
     # Trackers are reconciled only after the membership transaction, so an
     # identity moving between buckets keeps its accumulated evidence.
@@ -776,9 +859,9 @@ def run_iteration(context, state, iteration):
         ppo_max_epochs=context.training.ppo_max_epochs,
         restart_summary=restart_summary,
     )
-    # Reported after the iteration summary so the event reads as a consequence
+    # Reported after the iteration summary so each event reads as a consequence
     # of the update that completed its candidate batch.
-    if champion_event is not None:
+    for champion_event in champion_events:
         context.reporter.champion_event(champion_event)
     context.runtime_profile.add(
         "console_logging",

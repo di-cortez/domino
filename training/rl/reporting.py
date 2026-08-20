@@ -13,6 +13,7 @@ import time
 
 import numpy as np
 
+from training.rl.pool import CHAMPION_VS_HEURISTIC_BUCKET
 from training.rl.champion_evaluation import (
     champion_evaluation_policy_manifest,
 )
@@ -612,7 +613,7 @@ class RLTrainingReporter:
             str(count) for count in summary["stage_candidates"]
         )
         print(
-            f"  champion_vs_heuristic event {summary['event_index']} @ "
+            f"  {summary['bucket_name']} event {summary['event_index']} @ "
             f"iteration {summary['iteration']} | candidates "
             f"{summary['candidates']} ({funnel} -> "
             f"{len(summary['survivors'])}) | racing games "
@@ -628,7 +629,27 @@ class RLTrainingReporter:
             f"{summary['win_rates'][opponent_id]:.1%}"
             for opponent_id in summary["admitted"]
         )
-        print(f"    New champions vs heuristic: {champions}")
+        # Spelled out in full because the opposite direction is also reported
+        # elsewhere: OpponentPerformanceTracker.estimated_win_rate is the
+        # *learner's* win rate against the opponent, and confusing the two
+        # would invert the meaning of every number on this line.
+        target = (
+            "heuristic"
+            if summary["bucket_name"] == CHAMPION_VS_HEURISTIC_BUCKET
+            else "current learner"
+        )
+        print(
+            f"    New champions, candidate win rate vs {target}: {champions}"
+        )
+        if summary["evicted_difficulties"]:
+            evicted = ", ".join(
+                f"{_short_opponent_id(opponent_id)} "
+                f"{value:.2f}"
+                for opponent_id, value in sorted(
+                    summary["evicted_difficulties"].items()
+                )
+            )
+            print(f"    Evicted, current difficulty: {evicted}")
 
     def iteration(
         self,

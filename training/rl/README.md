@@ -182,11 +182,10 @@ difficulty, ties broken by opponent ID. That is the one place the two champion
 buckets genuinely differ: a fixed target admits a comparable stored score, a
 moving target does not.
 
-> **Not implemented yet.** `champion_vs_learner` is registered, selectable, and
-> reserves its 200 bank slots, but no racing event runs against the learner
-> target yet, so the bucket stays permanently empty and receives no games.
-> Selecting it today only costs memory. This note goes away when the evaluator
-> lands.
+The learner target is published into the shared bank's current-policy region
+immediately before the event and left alone until it finishes, so all 100,000
+games of one event face exactly the same weights. Both seats play in
+deterministic evaluation mode.
 
 Both champion buckets start empty, so like the delayed bands they are configured
 but unavailable during warm-up and receive no training games until their first

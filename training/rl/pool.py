@@ -616,12 +616,24 @@ class SharedPolicyBank:
             raise ValueError(f"Shared policy slot {slot} is not allocated")
         self._write_segment(int(slot) + 1, network)
 
+    def read_current(self):
+        """Copy the published current learner policy out of shared memory.
+
+        Lets a caller prove what the workers are actually seeing. The worker
+        views this region live, so the only thing that keeps an evaluation
+        target frozen is that nobody writes here while the event runs.
+        """
+        return self._read_segment(0)
+
     def read_policy(self, slot):
         """Copy one opponent policy from shared memory to ordinary arrays."""
         self._validate_opponent_slot(slot)
         if int(slot) not in self._allocated_slots:
             raise ValueError(f"Shared policy slot {slot} is not allocated")
-        flat = self._slot_view(int(slot) + 1)
+        return self._read_segment(int(slot) + 1)
+
+    def _read_segment(self, segment_index):
+        flat = self._slot_view(segment_index)
         weights = {}
         offset = 0
         for name, shape in zip(self.weight_names, self.shapes):

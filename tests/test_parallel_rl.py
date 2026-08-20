@@ -711,17 +711,86 @@ class ParallelRLTests(unittest.TestCase):
             self.assertEqual(row["bucket_results"][champion_column], [0, 0, 0])
         self.assertGreater(rows[4]["bucket_results"][champion_column][0], 0)
 
-        # The racing time and worker runs are accounted for separately.
+        # The racing time and worker runs are accounted for separately, and
+        # named for the target so a run with both champion buckets reports two
+        # costs rather than one indistinguishable total.
         sections = summary["runtime_profile_delta"]["sections_seconds"]
-        self.assertGreater(sections["champion_evaluation"], 0.0)
+        self.assertGreater(sections["champion_vs_heuristic_evaluation"], 0.0)
+        self.assertNotIn("champion_evaluation", sections)
         self.assertEqual(
-            summary["parallel"]["champion_evaluation_batches"],
+            summary["parallel"]["champion_vs_heuristic_evaluation_batches"],
             stage_count,
         )
         self.assertEqual(summary["parallel"]["rollout_batches"], iterations)
         racing_policy = header["metadata"]["training"]["champion_evaluation"]
         self.assertEqual(racing_policy["total_games"], racing_games)
         self.assertFalse(racing_policy["counts_toward_gpi"])
+
+    def test_training_runs_both_champion_events_in_one_iteration(self):
+        """Both queues fill on the same update, so both events run together."""
+        stage_count, racing_games = self._miniature_racing_policy()
+        buckets = (
+            "heuristic",
+            "recent",
+            "champion_vs_heuristic",
+            "champion_vs_learner",
+        )
+        iterations = 5
+        gpi = 6
+        with tempfile.TemporaryDirectory() as temp_dir:
+            weights_path = Path(temp_dir) / "both.npz"
+            summary = self._train(
+                iterations=iterations,
+                gpi=gpi,
+                opponent_buckets=buckets,
+                difficulty_weight=0.5,
+                checkpoint_interval=100,
+                log_interval=1,
+                seed=31337,
+                device="cpu",
+                workers=1,
+                safety_config=self.safety,
+                rl_weights_path=str(weights_path),
+                quiet=True,
+                ppo_max_epochs=1,
+            )
+
+        final = summary["opponent_pool_final_state"]["buckets"]
+        for bucket_name in ("champion_vs_heuristic", "champion_vs_learner"):
+            state = final[bucket_name]["champion_state"]
+            self.assertEqual(state["completed_events"], 1)
+            self.assertEqual(state["pending_candidates"], 1)
+            self.assertEqual(
+                summary["opponent_bucket_sizes"][bucket_name],
+                2,
+            )
+        # The learner bucket keeps no durable admission score.
+        self.assertIn(
+            "minimum_heuristic_win_rate",
+            final["champion_vs_heuristic"]["champion_state"],
+        )
+        self.assertNotIn(
+            "minimum_heuristic_win_rate",
+            final["champion_vs_learner"]["champion_state"],
+        )
+
+        # Two separately accounted events, not one merged 2x cost.
+        sections = summary["runtime_profile_delta"]["sections_seconds"]
+        parallel = summary["parallel"]
+        for bucket_name in ("champion_vs_heuristic", "champion_vs_learner"):
+            self.assertGreater(sections[f"{bucket_name}_evaluation"], 0.0)
+            self.assertEqual(
+                parallel[f"{bucket_name}_evaluation_batches"],
+                stage_count,
+            )
+        self.assertEqual(parallel["rollout_batches"], iterations)
+
+        # Neither event's games reached the training counters.
+        self.assertEqual(
+            summary["completed_training_games"],
+            iterations * gpi,
+        )
+        self.assertGreater(racing_games, 0)
 
     def test_training_with_a_racing_event_is_invariant_to_worker_count(self):
         """A completed event must not make training depend on scheduling.

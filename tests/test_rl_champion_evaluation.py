@@ -670,10 +670,12 @@ class _StubRunner:
         self._fallbacks = list(fallbacks)
         self._run_info_type = ParallelRunInfo
         self.stage_sizes = []
+        self.stage_buckets = []
         self.last_runtime_profile = {"sentinel": 1}
 
-    def evaluate_champion_games(self, specs):
+    def evaluate_champion_games(self, specs, *, bucket_name=None):
         self.stage_sizes.append(len(specs))
+        self.stage_buckets.append(bucket_name)
         fallback_count = (
             self._fallbacks.pop(0) if self._fallbacks else 0
         )
@@ -698,6 +700,8 @@ def _stub_context(pool, evaluator, *, effective_seed=4242, fallbacks=()):
         reporter=_StubReporter(),
         parallel_summary=_new_parallel_summary(4),
         effective_seed=effective_seed,
+        runtime_profile=_RecordingProfile(),
+        network=None,
     )
 
 
@@ -711,7 +715,7 @@ def test_no_event_runs_until_the_candidate_batch_is_complete():
     try:
         context = _stub_context(fixture.pool, _ScriptedEvaluator({}))
         assert not fixture.pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION)
-        assert _run_champion_evaluation(context, 49) is None
+        assert _run_champion_evaluation(context, 49, HEURISTIC_CHAMPION) is None
         # The worker pool must not be touched at all on a non-event iteration.
         assert context.runner.stage_sizes == []
         assert context.parallel_summary["attempted_worker_counts"] == []
@@ -733,7 +737,7 @@ def test_a_ready_batch_races_commits_and_reports_one_event(champion_pool):
         champion_pool,
         _ScriptedEvaluator(_descending_strength(candidates)),
     )
-    summary = _run_champion_evaluation(context, 50)
+    summary = _run_champion_evaluation(context, 50, HEURISTIC_CHAMPION)
 
     assert summary is not None
     # One worker-pool run per racing stage, sized by the fixed stage table.
@@ -788,7 +792,7 @@ def test_the_event_seeds_from_the_run_seed_and_the_committed_event_count(
     candidates = champion_pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
     evaluator = _ScriptedEvaluator(_descending_strength(candidates))
     context = _stub_context(champion_pool, evaluator, effective_seed=777)
-    _run_champion_evaluation(context, 50)
+    _run_champion_evaluation(context, 50, HEURISTIC_CHAMPION)
     first_panel = tuple(
         spec.seed for spec in evaluator.stages[0][:CHAMPION_STAGE_1_GAMES]
     )
@@ -804,6 +808,186 @@ def test_the_event_seeds_from_the_run_seed_and_the_committed_event_count(
     )
 
 
+class _BankReadingRunner(_StubRunner):
+    """A stub runner that reports what the workers would actually see.
+
+    Champion games are still scripted, but every stage first copies the bank's
+    current-policy region. A worker views that region live, so this is the same
+    thing the real ``_WORKER_CURRENT_POLICY`` resolves to.
+    """
+
+    def __init__(self, pool, evaluator, bank, **kwargs):
+        super().__init__(pool, evaluator, **kwargs)
+        self.bank = bank
+        self.published_current = []
+        self.sync_calls = 0
+
+    def sync_current(self, network):
+        self.sync_calls += 1
+        self.bank.write_current(network)
+
+    def evaluate_champion_games(self, specs, *, bucket_name=None):
+        self.published_current.append(self.bank.read_current())
+        return super().evaluate_champion_games(specs, bucket_name=bucket_name)
+
+
+class _TrackingTracker:
+    """A real tracker that records whether anything mutated it."""
+
+    def __init__(self, opponent_ids):
+        from training.rl.matchmaking import OpponentPerformanceTracker
+
+        self.tracker = OpponentPerformanceTracker()
+        self.tracker.ensure(opponent_ids)
+
+    def snapshot(self):
+        import json
+
+        return json.dumps(self.tracker.export_state(), sort_keys=True)
+
+    def difficulty_snapshot(self, opponent_ids):
+        return self.tracker.difficulty_snapshot(opponent_ids)
+
+
+def _learner_context(fixture, evaluator, *, effective_seed=4242):
+    from types import SimpleNamespace
+
+    from training.rl.reporting import _new_parallel_summary
+
+    runner = _BankReadingRunner(fixture.pool, evaluator, fixture.bank)
+    runner.performance_tracker = _TrackingTracker(
+        record.opponent_id for record in fixture.pool.active_opponents()
+    )
+    return SimpleNamespace(
+        runner=runner,
+        reporter=_StubReporter(),
+        parallel_summary=_new_parallel_summary(4),
+        effective_seed=effective_seed,
+        runtime_profile=_RecordingProfile(),
+        network=None,
+    )
+
+
+class _RecordingProfile:
+    def __init__(self):
+        self.sections = {}
+
+    def add(self, section, seconds):
+        self.sections[section] = self.sections.get(section, 0.0) + seconds
+
+
+def _distinct_network(seed):
+    from agents.rl_nn import PolicyNetwork
+
+    return PolicyNetwork(
+        input_size=8,
+        hidden1_size=6,
+        hidden2_size=4,
+        output_size=5,
+        random_seed=seed,
+        device="cpu",
+    )
+
+
+def test_the_learner_race_targets_the_post_update_learner():
+    """The event must face the policy the update produced, not the one it replaced.
+
+    ``run_iteration`` publishes the current learner once, at the top, before the
+    rollouts. The champion event runs after PPO has already changed the parent
+    network, so without an explicit re-publish the bank still holds the
+    pre-update weights and 100,000 games would rank candidates against a policy
+    that no longer exists. Every funnel, seed, seat and ranking test would still
+    pass, which is why this one asserts the actual shared-bank weights.
+    """
+    import numpy as np
+
+    from training.rl.iteration import _run_champion_evaluation
+    from training.rl.pool import CHAMPION_VS_LEARNER_BUCKET
+
+    fixture = _ChampionPoolFixture(
+        ("heuristic", "recent", "champion_vs_learner"),
+        CHAMPION_CANDIDATE_BATCH_SIZE,
+    )
+    try:
+        pre_update = _distinct_network(11)
+        post_update = _distinct_network(22)
+        assert not np.array_equal(
+            np.asarray(pre_update.W1), np.asarray(post_update.W1)
+        )
+
+        # What run_iteration published at the top of the iteration, before the
+        # rollouts and before the update.
+        fixture.bank.write_current(pre_update)
+
+        candidates = fixture.pool.champion_pending_candidate_ids(
+            CHAMPION_VS_LEARNER_BUCKET
+        )
+        context = _learner_context(
+            fixture,
+            _ScriptedEvaluator(_descending_strength(candidates)),
+        )
+        # The update has happened: the parent network is the post-update one.
+        context.network = post_update
+
+        summary = _run_champion_evaluation(
+            context,
+            50,
+            CHAMPION_VS_LEARNER_BUCKET,
+        )
+        assert summary is not None
+
+        # Every stage of the event faced the post-update weights, and the same
+        # ones throughout: the target may not move between stages either.
+        assert len(context.runner.published_current) == len(
+            CHAMPION_RACING_STAGES
+        )
+        for seen in context.runner.published_current:
+            np.testing.assert_array_equal(
+                seen["W1"], np.asarray(post_update.W1)
+            )
+        assert not np.array_equal(
+            context.runner.published_current[0]["W1"],
+            np.asarray(pre_update.W1),
+        )
+        # And the region still holds them when the event ends, so nothing
+        # rewrote the target mid-event.
+        np.testing.assert_array_equal(
+            fixture.bank.read_current()["W1"], np.asarray(post_update.W1)
+        )
+    finally:
+        fixture.close()
+
+
+def test_a_learner_event_reads_difficulty_without_disturbing_the_tracker():
+    """Retention reads the tracker; the race must leave no trace in it."""
+    from training.rl.iteration import _run_champion_evaluation
+    from training.rl.pool import CHAMPION_VS_LEARNER_BUCKET
+
+    fixture = _ChampionPoolFixture(
+        ("heuristic", "recent", "champion_vs_learner"),
+        CHAMPION_CANDIDATE_BATCH_SIZE,
+    )
+    try:
+        fixture.bank.write_current(fixture.network)
+        candidates = fixture.pool.champion_pending_candidate_ids(
+            CHAMPION_VS_LEARNER_BUCKET
+        )
+        context = _learner_context(
+            fixture,
+            _ScriptedEvaluator(_descending_strength(candidates)),
+        )
+        context.network = fixture.network
+        before = context.runner.performance_tracker.snapshot()
+
+        _run_champion_evaluation(context, 50, CHAMPION_VS_LEARNER_BUCKET)
+
+        # Byte-identical: neither the 100,000 racing games nor the retention
+        # read may add evidence or create a row.
+        assert context.runner.performance_tracker.snapshot() == before
+    finally:
+        fixture.close()
+
+
 def test_racing_stages_are_accounted_for_in_the_parallel_summary(champion_pool):
     """Racing worker runs are visible, and never counted as rollout batches."""
     from training.rl.iteration import _run_champion_evaluation
@@ -814,14 +998,19 @@ def test_racing_stages_are_accounted_for_in_the_parallel_summary(champion_pool):
         _ScriptedEvaluator(_descending_strength(candidates)),
         fallbacks=(0, 1, 0, 0),
     )
-    _run_champion_evaluation(context, 50)
+    _run_champion_evaluation(context, 50, HEURISTIC_CHAMPION)
 
     summary = context.parallel_summary
-    assert summary["champion_evaluation_batches"] == len(CHAMPION_RACING_STAGES)
+    # The phase is named for the target, so an iteration that runs both events
+    # reports two separate 100,000-game costs instead of one opaque 200,000.
+    assert summary["champion_vs_heuristic_evaluation_batches"] == len(
+        CHAMPION_RACING_STAGES
+    )
+    assert "champion_evaluation_batches" not in summary
     assert summary["rollout_batches"] == 0
     assert summary["fallback_count"] == 1
     assert [item["rl_phase"] for item in summary["fallback_history"]] == [
-        "champion_evaluation"
+        "champion_vs_heuristic_evaluation"
     ]
     assert [item["iteration"] for item in summary["fallback_history"]] == [50]
     assert len(context.reporter.fallbacks) == 1

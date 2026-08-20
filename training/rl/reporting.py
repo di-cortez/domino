@@ -156,9 +156,12 @@ def build_training_metrics_header(
             "opponent_pool": context.runner.opponent_pool.manifest(),
             "matchmaking_policy": matchmaking_policy_manifest(),
             # The fixed racing policy is run provenance, like the two manifests
-            # above it, and is absent when the bucket is not selected.
+            # above it, and is absent when no champion bucket is selected.
             "champion_evaluation": (
-                champion_evaluation_policy_manifest()
+                champion_evaluation_policy_manifest(
+                    context.runner.opponent_pool
+                    .selected_champion_bucket_names()
+                )
                 if context.runner.opponent_pool.selected_champion_bucket_names()
                 else None
             ),

@@ -351,6 +351,16 @@ def test_the_evaluation_manifest_separates_common_racing_from_the_targets():
     # No top-level seed namespace any more: it is not a property the two
     # targets share.
     assert "seed_namespace" not in manifest
+    # The fixed policy of both targets is always published; which ones a run
+    # actually races is recorded separately, in registry order regardless of
+    # the order the caller passed them.
+    assert manifest["selected_targets"] == []
+    assert champion_evaluation_policy_manifest(
+        (CHAMPION_VS_LEARNER_BUCKET, HEURISTIC_CHAMPION)
+    )["selected_targets"] == [HEURISTIC_CHAMPION, CHAMPION_VS_LEARNER_BUCKET]
+    assert champion_evaluation_policy_manifest(
+        (CHAMPION_VS_LEARNER_BUCKET,)
+    )["selected_targets"] == [CHAMPION_VS_LEARNER_BUCKET]
     heuristic = manifest["targets"][HEURISTIC_CHAMPION]
     learner = manifest["targets"][CHAMPION_VS_LEARNER_BUCKET]
     assert heuristic["seed_namespace"] != learner["seed_namespace"]

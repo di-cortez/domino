@@ -725,6 +725,17 @@ class ParallelRLTests(unittest.TestCase):
         racing_policy = header["metadata"]["training"]["champion_evaluation"]
         self.assertEqual(racing_policy["total_games"], racing_games)
         self.assertFalse(racing_policy["counts_toward_gpi"])
+        # The fixed policy of both targets is always published, so a stored
+        # header stays comparable across runs; selected_targets records which
+        # of them this run actually raced.
+        self.assertEqual(
+            sorted(racing_policy["targets"]),
+            ["champion_vs_heuristic", "champion_vs_learner"],
+        )
+        self.assertEqual(
+            racing_policy["selected_targets"],
+            ["champion_vs_heuristic"],
+        )
 
     def test_training_runs_both_champion_events_in_one_iteration(self):
         """Both queues fill on the same update, so both events run together."""

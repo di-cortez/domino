@@ -24,6 +24,7 @@ from dataclasses import dataclass
 import time
 
 from training.rl.pool import (
+    CHAMPION_BUCKET_NAMES,
     CHAMPION_CANDIDATE_BATCH_SIZE,
     CHAMPION_FINAL_SURVIVORS,
     CHAMPION_VS_HEURISTIC_BUCKET,
@@ -128,10 +129,21 @@ _validate_stage_table()
 CHAMPION_EVALUATION_GAMES = champion_evaluation_game_count()
 
 
-def champion_evaluation_policy_manifest():
-    """Return the fixed internal racing policy for provenance and reporting."""
+def champion_evaluation_policy_manifest(selected_buckets=()):
+    """Return the fixed internal racing policy for provenance and reporting.
+
+    Both target blocks are always published, because the policy is fixed
+    whether or not a given run uses it and a stored manifest should stay
+    comparable across runs. ``selected_targets`` records which of them this run
+    actually raced, so a reader of one metrics header alone can tell the two
+    apart without cross-referencing the pool manifest.
+    """
+    selected = set(selected_buckets)
     return {
         "policy_version": CHAMPION_EVALUATION_POLICY_VERSION,
+        "selected_targets": [
+            name for name in CHAMPION_BUCKET_NAMES if name in selected
+        ],
         "candidate_batch_size": CHAMPION_CANDIDATE_BATCH_SIZE,
         "stages": [
             {

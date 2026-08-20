@@ -212,12 +212,26 @@ class ParallelRLTests(unittest.TestCase):
         finally:
             runner.close()
 
-    def _champion_stage(self, workers, *, candidates=3, games=20):
-        """Play one reduced champion stage through the real worker pool."""
+    def _champion_stage(
+        self,
+        workers,
+        *,
+        candidates=3,
+        games=20,
+        bucket_name=None,
+        learner_network=None,
+    ):
+        """Play one reduced champion stage through the real worker pool.
+
+        ``learner_network``, when given, is published into the bank's
+        current-policy region instead of the parent network, which is how a
+        test makes the learner target observably different from the candidates.
+        """
         from training.rl import champion_evaluation as champion
         from training.rl.champion_evaluation import ChampionGameSpec
 
-        buckets = ("heuristic", "recent", "champion_vs_heuristic")
+        bucket_name = bucket_name or HEURISTIC_CHAMPION
+        buckets = ("heuristic", "recent", bucket_name)
         network = self._network()
         runner = RLRolloutRunner(
             network,
@@ -236,10 +250,13 @@ class ParallelRLTests(unittest.TestCase):
                     has_samples=True,
                 )
             runner.set_workers(workers)
-            runner.sync_current(network)
+            runner.sync_current(
+                network if learner_network is None else learner_network
+            )
             candidate_ids = pool.champion_pending_candidate_ids(
-                HEURISTIC_CHAMPION
+                bucket_name
             )[:candidates]
+            target_kind = champion.CHAMPION_TARGET_KIND_BY_BUCKET[bucket_name]
             specs = []
             for candidate_id in candidate_ids:
                 for game_index in range(games):
@@ -247,11 +264,11 @@ class ParallelRLTests(unittest.TestCase):
                         stage_index=0,
                         candidate_id=candidate_id,
                         bank_slot=pool.bank_slot(candidate_id),
-                        target_kind=champion.CHAMPION_TARGET_HEURISTIC,
+                        target_kind=target_kind,
                         game_index=game_index,
                         seed=champion.champion_stage_seed(
                             4242,
-                            seed_namespace=HEURISTIC_CHAMPION,
+                            seed_namespace=bucket_name,
                             event_index=0,
                             stage_index=0,
                             game_index=game_index,
@@ -261,10 +278,16 @@ class ParallelRLTests(unittest.TestCase):
                         ),
                         sequence=len(specs),
                     ))
-            results, _run_info = runner.evaluate_champion_games(specs)
+            results, _run_info = runner.evaluate_champion_games(
+                specs,
+                bucket_name=bucket_name,
+            )
             # The rollout profile must survive a racing stage untouched.
             assert runner.last_runtime_profile == {}
             assert runner.last_champion_runtime_profile
+            assert set(runner.champion_runtime_profile_by_bucket) == {
+                bucket_name
+            }
             return tuple(specs), results
         finally:
             runner.close()
@@ -302,6 +325,96 @@ class ParallelRLTests(unittest.TestCase):
         # produce byte-identical results. Per-candidate seeds could not.
         self.assertEqual(len(outcomes), 1)
         self.assertEqual(len(by_candidate), 3)
+
+    def test_a_learner_race_runs_neural_vs_neural_through_the_worker_pool(self):
+        """The learner target is played, not stubbed, and stays deterministic."""
+        single_specs, single = self._champion_stage(
+            1,
+            bucket_name="champion_vs_learner",
+        )
+        multi_specs, multi = self._champion_stage(
+            3,
+            bucket_name="champion_vs_learner",
+        )
+        # Worker count must not reach the outcome of a single game.
+        self.assertEqual(single_specs, multi_specs)
+        self.assertEqual(single, multi)
+        for spec, result in zip(single_specs, single):
+            self.assertEqual(spec.target_kind, "current_learner")
+            self.assertEqual(result["candidate_id"], spec.candidate_id)
+            self.assertIn(result["winner"], (0, 1))
+
+    def test_a_learner_race_reads_the_published_current_policy(self):
+        """Not the candidate's slot, and not opponent slot 0.
+
+        The candidates are all snapshots of the same untrained network, so the
+        only thing that can change the outcomes is the weights published into
+        the current-policy region. If the worker raced against a bank slot
+        instead, publishing a different learner would change nothing.
+        """
+        _specs, baseline = self._champion_stage(
+            1,
+            bucket_name="champion_vs_learner",
+        )
+        other = self._network()
+        other.W1 = np.asarray(other.W1) * -1.0 - 3.0
+        _specs, shifted = self._champion_stage(
+            1,
+            bucket_name="champion_vs_learner",
+            learner_network=other,
+        )
+        baseline_winners = [item["winner"] for item in baseline]
+        shifted_winners = [item["winner"] for item in shifted]
+        self.assertEqual(len(baseline_winners), len(shifted_winners))
+        self.assertNotEqual(baseline_winners, shifted_winners)
+
+    def test_a_learner_game_needs_the_current_policy_to_be_supplied(self):
+        """A missing target must fail loudly rather than silently substitute."""
+        from training.rl.champion_evaluation import play_champion_game
+
+        network = self._network()
+        with self.assertRaises(ValueError) as caught:
+            play_champion_game(
+                network,
+                0,
+                target_kind="current_learner",
+                current_learner_policy=None,
+            )
+        self.assertIn("current-policy view", str(caught.exception))
+        with self.assertRaises(ValueError):
+            play_champion_game(network, 0, target_kind="recent")
+
+    def test_a_learner_game_gives_each_seat_its_own_agent(self):
+        """Identical weights must still mean two independent players."""
+        import training.rl.champion_evaluation as champion
+        from agents.rl_agent import RLAgent as _RLAgent
+
+        # ``play_champion_game`` imports RLAgent inside the function, so
+        # patching the defining module is what the worker will actually see.
+        network = self._network()
+        built = []
+
+        class _Counting(_RLAgent):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                built.append(id(self))
+
+        import agents.rl_agent as rl_agent_module
+
+        original = rl_agent_module.RLAgent
+        rl_agent_module.RLAgent = _Counting
+        try:
+            champion.play_champion_game(
+                network,
+                0,
+                target_kind="current_learner",
+                # Deliberately the same policy object in both seats.
+                current_learner_policy=network,
+            )
+        finally:
+            rl_agent_module.RLAgent = original
+        self.assertEqual(len(built), 2)
+        self.assertEqual(len(set(built)), 2)
 
     def test_the_policy_bank_uses_one_shared_segment_for_every_slot(self):
         """A per-slot segment layout exhausts the process descriptor limit.

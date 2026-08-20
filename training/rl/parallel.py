@@ -287,7 +287,14 @@ def _worker_collect_rollouts(job):
 
 
 def _worker_evaluate_champion_games(job):
-    """Play one block of frozen champion-evaluation games on a CPU worker."""
+    """Play one block of frozen champion-evaluation games on a CPU worker.
+
+    ``_WORKER_CURRENT_POLICY`` views the bank's current-policy region directly,
+    so a learner-target game reads whatever the parent last published there.
+    The parent is responsible for publishing the post-update learner before the
+    event and for leaving that region alone until the event finishes; the whole
+    event must face one set of target weights.
+    """
     profile_started = time.perf_counter()
     from training.rl.champion_evaluation import play_champion_game
 
@@ -301,8 +308,12 @@ def _worker_evaluate_champion_games(job):
             "game_index": int(spec.game_index),
             "candidate_position": int(spec.candidate_position),
             "winner": int(play_champion_game(
+                # Always the candidate's own slot. The learner is not addressed
+                # by slot at all, so no target can be confused for an opponent.
                 _WORKER_POOL_POLICIES[spec.bank_slot],
                 spec.candidate_position,
+                target_kind=spec.target_kind,
+                current_learner_policy=_WORKER_CURRENT_POLICY,
                 ruleset_name=_WORKER_RULESET_NAME,
             )),
         })
@@ -438,8 +449,11 @@ class RLRolloutRunner:
         self._closed = False
         self.last_runtime_profile = {}
         # Champion evaluation keeps its own worker profile so rollout
-        # accounting never absorbs the racing games.
+        # accounting never absorbs the racing games. Keyed by bucket: two
+        # champion events can complete in one iteration, and a single slot
+        # would silently report only whichever ran last.
         self.last_champion_runtime_profile = {}
+        self.champion_runtime_profile_by_bucket = {}
 
     @property
     def allocated_shared_bytes(self):
@@ -830,7 +844,7 @@ class RLRolloutRunner:
             result_index_key="restart_index",
         )
 
-    def evaluate_champion_games(self, specs):
+    def evaluate_champion_games(self, specs, *, bucket_name=None):
         """Play one champion stage and return ``(results, run_info)``.
 
         Evaluation games never enter the match plan, GPI counters, difficulty
@@ -841,7 +855,8 @@ class RLRolloutRunner:
         champion worker timings are parked in a separate attribute and the
         rollout value is restored. Without this the next
         ``merge_rollout_worker`` call would add 100,000 evaluation games to the
-        rollout worker counters.
+        rollout worker counters. When the caller names its bucket the timings
+        are also kept per bucket, so two events in one iteration stay legible.
         """
         if not specs:
             raise ValueError("A champion stage must contain at least one game")
@@ -856,6 +871,14 @@ class RLRolloutRunner:
             )
         finally:
             self.last_champion_runtime_profile = self.last_runtime_profile
+            if bucket_name is not None:
+                _add_numeric_tree(
+                    self.champion_runtime_profile_by_bucket.setdefault(
+                        bucket_name,
+                        {},
+                    ),
+                    self.last_runtime_profile,
+                )
             self.last_runtime_profile = rollout_runtime_profile
         return results, run_info
 

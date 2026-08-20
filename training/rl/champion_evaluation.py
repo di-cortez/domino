@@ -524,14 +524,27 @@ def evaluate_champion_vs_learner(
     )
 
 
-def play_champion_game(policy, candidate_position, *, ruleset_name=DEFAULT_RULESET_NAME):
-    """Play one frozen candidate against the fixed heuristic and return a winner.
+def play_champion_game(
+    policy,
+    candidate_position,
+    *,
+    target_kind=CHAMPION_TARGET_HEURISTIC,
+    current_learner_policy=None,
+    ruleset_name=DEFAULT_RULESET_NAME,
+):
+    """Play one frozen candidate against this bucket's target, return a winner.
 
     The game loop is ``diagnostics.gameplay.play_game``, the same deterministic
     evaluation path the pairwise diagnostics use. Only the worker plumbing is
     new: that module's parallel runner loads agents from weight files, which
     cannot serve 140 in-memory candidates without one temporary file or one pool
     restart per candidate.
+
+    Against the current learner both seats are neural and both play in
+    evaluation mode. The two agents are always separate objects, even when the
+    candidate happens to hold the same weights as the learner: an ``RLAgent`` is
+    mutable per-game state, and sharing one between the seats would let each
+    player observe the other's bookkeeping.
     """
     from agents.heuristic_agent import StrategicAgent
     from agents.rl_agent import RLAgent
@@ -542,9 +555,25 @@ def play_champion_game(policy, candidate_position, *, ruleset_name=DEFAULT_RULES
         mode=CHAMPION_EVALUATION_MODE,
         ruleset=ruleset_name,
     )
+    if target_kind == CHAMPION_TARGET_HEURISTIC:
+        target = StrategicAgent(ruleset=ruleset_name)
+    elif target_kind == CHAMPION_TARGET_CURRENT_LEARNER:
+        if current_learner_policy is None:
+            raise ValueError(
+                "A champion game against the current learner needs the "
+                "current-policy view; the candidate's bank slot addresses the "
+                "candidate alone and never the learner"
+            )
+        target = RLAgent(
+            current_learner_policy,
+            mode=CHAMPION_EVALUATION_MODE,
+            ruleset=ruleset_name,
+        )
+    else:
+        raise ValueError(f"Unknown champion target kind: {target_kind!r}")
     record = play_game(
         candidate,
-        StrategicAgent(ruleset=ruleset_name),
+        target,
         agent_position=int(candidate_position),
         suppress_agent_output=True,
         ruleset=ruleset_name,

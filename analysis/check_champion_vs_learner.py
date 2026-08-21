@@ -7,7 +7,13 @@ training counters, both champion buckets filling and evicting independently,
 and the two racing targets producing the distinct win-rate signatures they
 should.
 
+The pool half of the audit needs the run's resume state. Three different
+weights/state naming conventions exist in this repository, so pass the run
+directory and let ``training_state.json`` name the pair; a weights file still
+works and is resolved by convention.
+
 Usage:
+    python -m analysis.check_champion_vs_learner <metrics.jsonl> [run_dir]
     python -m analysis.check_champion_vs_learner <metrics.jsonl> [rl_weights.npz]
 """
 
@@ -15,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 from training.rl.reporting import read_training_metrics
 from training.rl.resume import load_resume_state, resume_state_path
@@ -37,6 +44,86 @@ def _read(path):
 
 def _check(results, name, condition, detail=""):
     results.append((bool(condition), name, detail))
+
+
+# Number of checks ``audit_pool`` contributes. Named so a skipped pool half can
+# report an honest denominator instead of shrinking it silently.
+# ``tests/test_check_champion_vs_learner.py`` pins this to the real count.
+POOL_CHECK_COUNT = 9
+
+
+def _state_beside(weights_path):
+    """Return the resume state paired with a weights file, or ``None``.
+
+    Three conventions coexist and only the first follows ``resume_state_path``:
+
+    ``training_iter008427.npz``           + ``.resume.npz``   (numbered)
+    ``games_..._latest_..._weights.npz``  + ``..._state.npz`` (canonical)
+    ``latest_weights.npz``                + ``latest.resume.npz`` (alias)
+
+    A canonical ``forever`` run publishes the last two and neither the second
+    nor the third can be derived by appending ``.resume``, which is why asking
+    only ``resume_state_path`` used to skip the pool half of a real run.
+    """
+    weights_path = Path(weights_path)
+    candidates = [resume_state_path(weights_path)]
+    name = weights_path.name
+    if name.endswith("_weights.npz"):
+        candidates.append(
+            weights_path.with_name(name[: -len("_weights.npz")] + "_state.npz")
+        )
+    if name == "latest_weights.npz":
+        candidates.append(weights_path.with_name("latest.resume.npz"))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def resolve_checkpoint_pair(argument):
+    """Return ``(weights, state)`` for a run directory or a weights file.
+
+    For a directory the pair comes from ``training_state.json``, the same
+    source ``training.canonical_run`` resumes from, so the audit reads the
+    generation the run itself considers current rather than guessing a name.
+
+    Raises ``FileNotFoundError`` with the paths that were tried. The caller
+    must not turn that into a silent skip: the pool half is where every
+    champion-state invariant lives.
+    """
+    argument = Path(argument)
+    if argument.is_dir():
+        state_file = argument / "training_state.json"
+        if not state_file.is_file():
+            raise FileNotFoundError(
+                f"{argument} is not a run directory: no training_state.json"
+            )
+        published = json.loads(state_file.read_text(encoding="utf-8"))
+        try:
+            weights = argument / published["latest_weights_path"]
+            state = argument / published["latest_resume_state_path"]
+        except KeyError as error:
+            raise FileNotFoundError(
+                f"{state_file} names no current checkpoint ({error})"
+            ) from error
+        missing = [path for path in (weights, state) if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(
+                "training_state.json points at files that are gone: "
+                + ", ".join(str(path) for path in missing)
+            )
+        return weights, state
+    if not argument.is_file():
+        raise FileNotFoundError(f"No such run directory or weights file: {argument}")
+    state = _state_beside(argument)
+    if state is None:
+        raise FileNotFoundError(
+            f"No resume state pairs with {argument}. Tried "
+            f"{resume_state_path(argument).name}, the canonical _state.npz, and "
+            "the latest.resume.npz alias. Passing the run directory instead "
+            "reads the pair from training_state.json."
+        )
+    return argument, state
 
 
 def audit(metrics_path):
@@ -186,18 +273,24 @@ def main(argv):
         print(__doc__)
         return 2
     header, rows, results = audit(argv[1])
+    skipped = 0
+    skip_reason = ""
     if len(argv) == 3:
-        # The repository's own reader owns the resume payload format.
-        state_path = resume_state_path(argv[2])
-        if not state_path.exists():
-            print(
-                f"No resume state beside {argv[2]}; skipping the pool checks. "
-                "A pipeline run or --numbered-checkpoints writes one.",
-                file=sys.stderr,
-            )
+        try:
+            weights_path, state_path = resolve_checkpoint_pair(argv[2])
+        except FileNotFoundError as error:
+            skipped = POOL_CHECK_COUNT
+            skip_reason = str(error)
         else:
-            state, _weights = load_resume_state(argv[2], str(state_path))
+            # The repository's own reader owns the resume payload format.
+            state, _weights = load_resume_state(weights_path, str(state_path))
             results.extend(audit_pool(state))
+    else:
+        skipped = POOL_CHECK_COUNT
+        skip_reason = (
+            "No run directory or weights file given, so the champion-state "
+            "invariants were not read."
+        )
 
     width = max(len(name) for _passed, name, _detail in results)
     for passed, name, detail in results:
@@ -206,11 +299,17 @@ def main(argv):
         print(f"{mark}  {name:<{width}}{suffix}")
     failed = [name for passed, name, _detail in results if not passed]
     print()
-    print(
-        f"{len(results) - len(failed)}/{len(results)} checks passed "
-        f"over {len(rows)} iterations"
-    )
-    return 1 if failed else 0
+    # A skipped pool half must never read like a clean audit: it drops exactly
+    # the champion-state checks this script exists for, so it is reported on
+    # stdout, kept in the denominator, and made a non-zero exit.
+    total = len(results) + skipped
+    summary = f"{len(results) - len(failed)}/{total} checks passed"
+    if skipped:
+        summary += f", {skipped} SKIPPED"
+    print(f"{summary} over {len(rows)} iterations")
+    if skipped:
+        print(f"SKIPPED the pool checks: {skip_reason}")
+    return 1 if failed or skipped else 0
 
 
 if __name__ == "__main__":

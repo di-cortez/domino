@@ -193,14 +193,28 @@ event completes at the fiftieth successful update. Each owns its own pending
 candidate list and its own event index; a snapshot joins every selected champion
 queue, and committing one bucket's event clears only that bucket's queue.
 
+All five winners of a learner event are admitted unconditionally too, exactly
+as for the heuristic bucket, so a weak generation still displaces older
+champions and the bucket keeps tracking the run. Eviction chooses only among the
+incumbents that were already there.
+
 Racing games are evaluation games. They never enter the GPI budget, the
 `bucket_results` metrics rows, the difficulty evidence, or the PPO buffers, and
-they are timed in their own `champion_evaluation` runtime-profile section
-rather than inside rollout time. A completed event prints its own console
-summary regardless of `--log-interval`. Exact resume restores the champion
-membership, the stored win rates, the pending candidate list, and the completed
-event index, alongside the uniform rotation anchors, so a resumed run races the
-same candidates on the same seed panels a single uninterrupted run would have.
+each event is timed in its own `champion_vs_heuristic_evaluation` or
+`champion_vs_learner_evaluation` runtime-profile section rather than inside
+rollout time. The parallel summary counts the two separately as well, so an
+iteration that runs both reports two 100,000-game costs rather than one opaque
+200,000. A completed event prints its own console summary regardless of
+`--log-interval`, labelled with the direction of the number it reports:
+`candidate win rate vs current learner` is the candidate's, which is the
+opposite direction from the tracker's `estimated_win_rate`.
+
+Exact resume restores both pending candidate lists and both completed event
+indices independently, both champion memberships, the heuristic score map, the
+opponent performance evidence, and the uniform rotation anchors. The learner
+bucket has no durable admission score to restore. A resumed run therefore races
+the same candidates on the same seed panels a single uninterrupted run would
+have, and evicts the same incumbents.
 
 The delayed bands are genuinely empty during warm-up, and empty buckets are not
 padded with duplicated recent policies. Matchmaking distinguishes *configured*
@@ -210,7 +224,8 @@ metrics row until the archive makes its band real.
 
 `--opponent-buckets` accepts any non-empty combination of `heuristic`, `random`,
 `recent`, `medium_term`, `historical_uniform`, `champion_vs_heuristic`, and
-`champion_vs_learner` as a comma-separated selection. Input order is canonicalized, while duplicates,
+`champion_vs_learner` as a comma-separated selection, and defaults to
+`heuristic,recent`. Input order is canonicalized, while duplicates,
 unknown names, and an empty selection are rejected. At least one bucket that is
 available from the first iteration (`heuristic`, `random`, or `recent`) is
 required, because the archive-backed bands cannot bootstrap their own training
@@ -218,7 +233,20 @@ history. Selecting either champion bucket additionally requires `recent`,
 because their candidates are the snapshots `recent` is already holding.
 Selecting all five neural buckets reserves 1,000 opponent slots conservatively,
 without compressing the overlap the champion buckets are allowed to have; at the
-default architecture that is one shared segment of about 318 MB.
+default architecture that is about 318 MB. The whole bank is **one** shared
+memory segment whatever the capacity, not one per slot: a POSIX segment costs
+two file descriptors in every process that maps it, so a per-slot layout would
+need roughly 2,000 descriptors at full capacity and exceed the common 1,024
+limit in the parent and again in every worker.
+A canonical run selecting every bucket looks like:
+
+```bash
+python -m training.pipeline forever \
+  --opponent-buckets \
+  heuristic,recent,medium_term,historical_uniform,champion_vs_heuristic,champion_vs_learner \
+  --difficulty-weight 0.5
+```
+
 `--difficulty-weight` controls the exact
 convex allocation: `0` is entirely uniform, `0.5` is half uniform and half
 difficulty-based, and `1` is entirely difficulty-based. GPI remains the single

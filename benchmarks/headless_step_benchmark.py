@@ -6,7 +6,7 @@ computed state and legal actions. The optimized path passes the fresh legal
 collection and suppresses the discarded post-action state. Both modes use the
 same per-game seeds and must produce identical result fingerprints.
 """
-
+ 
 from __future__ import annotations
 
 import argparse

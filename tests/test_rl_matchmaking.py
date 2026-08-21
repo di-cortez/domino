@@ -312,6 +312,7 @@ def test_overlap_reporting_separates_forbidden_pairs_from_champion_pairs():
         "medium_term",
         "historical_uniform",
         "champion_vs_heuristic",
+        "champion_vs_learner",
     )
     network, bank, pool = _pool(buckets)
     try:
@@ -323,29 +324,42 @@ def test_overlap_reporting_separates_forbidden_pairs_from_champion_pairs():
             "medium_term|historical_uniform",
         }
         assert state["total_forbidden_historical_overlap_count"] == 0
+        # Every champion pair is reported, including champion-to-champion.
         assert set(state["champion_overlap_counts"]) == {
             "champion_vs_heuristic|recent",
             "champion_vs_heuristic|medium_term",
             "champion_vs_heuristic|historical_uniform",
+            "champion_vs_learner|recent",
+            "champion_vs_learner|medium_term",
+            "champion_vs_learner|historical_uniform",
+            "champion_vs_heuristic|champion_vs_learner",
         }
         assert set(state["champion_overlap_counts"].values()) == {0}
 
         # Champion memberships over live recent identities are legal and are
-        # counted as intentional overlap, never as an invariant failure.
+        # counted as intentional overlap, never as an invariant failure. Both
+        # buckets race the same batch, so all three pairs become non-zero.
         champions = pool.bucket_members("recent")[:5]
         pool.apply_champion_vs_heuristic_result(
             champions,
             {opponent_id: 0.6 for opponent_id in champions},
         )
+        pool.apply_champion_vs_learner_result(champions, {})
         state = pool.observability()
         assert state["total_forbidden_historical_overlap_count"] == 0
-        assert state["champion_overlap_counts"][
-            "champion_vs_heuristic|recent"
-        ] == 5
+        counts = state["champion_overlap_counts"]
+        assert counts["champion_vs_heuristic|recent"] == 5
+        assert counts["champion_vs_learner|recent"] == 5
+        assert counts["champion_vs_heuristic|champion_vs_learner"] == 5
         # One identity, one slot, one record: overlap is not duplication.
         assert pool.unique_neural_opponent_count == len(
             pool.bucket_members("recent")
         )
+
+        # Non-zero champion-to-band overlap needs a champion that has aged out
+        # of recent, which only the archive reconcile produces. That path is
+        # exercised in tests/test_rl_champion_pool.py, where the band
+        # membership is real rather than manufactured.
     finally:
         bank.close()
 

@@ -765,6 +765,10 @@ class ParallelRLTests(unittest.TestCase):
                 quiet=True,
                 ppo_max_epochs=1,
             )
+            metrics_path = weights_path.with_name(
+                f"{weights_path.stem}_training_metrics.jsonl"
+            )
+            header, rows = read_training_metrics(metrics_path)
 
         final = summary["opponent_pool_final_state"]["buckets"]
         for bucket_name in ("champion_vs_heuristic", "champion_vs_learner"):
@@ -802,6 +806,26 @@ class ParallelRLTests(unittest.TestCase):
             iterations * gpi,
         )
         self.assertGreater(racing_games, 0)
+
+        # Every normal metrics row still accounts for exactly GPI games, so no
+        # racing game leaked into a bucket-result matrix.
+        self.assertEqual(len(rows), iterations)
+        for row in rows:
+            self.assertEqual(
+                sum(value[0] for value in row["bucket_results"]),
+                gpi,
+            )
+        self.assertEqual(
+            header["bucket_results"]["bucket_order"],
+            list(buckets),
+        )
+        # Both targets are recorded as having run.
+        self.assertEqual(
+            header["metadata"]["training"]["champion_evaluation"][
+                "selected_targets"
+            ],
+            ["champion_vs_heuristic", "champion_vs_learner"],
+        )
 
     def test_training_with_a_racing_event_is_invariant_to_worker_count(self):
         """A completed event must not make training depend on scheduling.

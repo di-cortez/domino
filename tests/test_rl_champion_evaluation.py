@@ -371,10 +371,16 @@ def test_the_evaluation_manifest_separates_common_racing_from_the_targets():
     assert learner["win_rates_are_durable"] is False
 
 
-def test_racing_narrows_fifty_candidates_to_five_and_scores_only_the_final():
+# The funnel, the ranking, the tally, and the result shape belong to the one
+# shared racing core, so each contract is checked through both wrappers.
+RACE_EVALUATORS = [evaluate_champion_vs_heuristic, evaluate_champion_vs_learner]
+
+
+@pytest.mark.parametrize("race", RACE_EVALUATORS)
+def test_racing_narrows_fifty_candidates_to_five_and_scores_only_the_final(race):
     candidates = _candidates()
     evaluator = _ScriptedEvaluator(_descending_strength(candidates))
-    result = evaluate_champion_vs_heuristic(
+    result = race(
         candidate_ids=candidates,
         bank_slots=_slots(candidates),
         play_games=evaluator,
@@ -398,9 +404,17 @@ def test_racing_narrows_fifty_candidates_to_five_and_scores_only_the_final():
         ) / CHAMPION_FINAL_GAMES
     assert len(result.stage_summaries) == 4
     assert result.stage_summaries[-1].survivors == result.champion_ids
+    # Exactly five identities and exactly five final win rates, and every one
+    # of them measured over the final stage alone.
+    assert len(result.champion_ids) == len(result.final_win_rates) == 5
+    # Higher candidate win rate is better: the strongest scripted candidate
+    # leads, so the direction of the ranked quantity is the candidate's.
+    rates = [result.final_win_rates[item] for item in result.champion_ids]
+    assert rates == sorted(rates, reverse=True)
 
 
-def test_each_stage_ranks_only_its_own_games():
+@pytest.mark.parametrize("race", RACE_EVALUATORS)
+def test_each_stage_ranks_only_its_own_games(race):
     candidates = _candidates()
     # Screen through on stage one, then collapse: an implementation that
     # accumulated earlier scores would still carry these candidates.
@@ -423,7 +437,7 @@ def test_each_stage_ranks_only_its_own_games():
                 }
             return super().__call__(specs)
 
-    result = evaluate_champion_vs_heuristic(
+    result = race(
         candidate_ids=candidates,
         bank_slots=_slots(candidates),
         play_games=_CollapsingEvaluator(strength),
@@ -456,17 +470,30 @@ def test_exact_ranking_ties_resolve_by_smaller_opponent_id():
     )
 
 
-def test_stage_results_are_independent_of_arrival_order():
+# The tally and its rejections are target-independent by construction; the
+# parametrization records that rather than leaving it implied.
+RACE_BUCKETS = [HEURISTIC_CHAMPION, CHAMPION_VS_LEARNER_BUCKET]
+
+
+def _final_stage_specs(bucket_name, *, base_seed=5):
+    from training.rl.champion_evaluation import CHAMPION_TARGET_KIND_BY_BUCKET
+
     candidates = _candidates(CHAMPION_STAGE_3_SURVIVORS)
-    specs = build_stage_specs(
+    return build_stage_specs(
         candidates,
         _slots(candidates),
-        base_seed=5,
-        seed_namespace=HEURISTIC_CHAMPION,
-        target_kind=CHAMPION_TARGET_HEURISTIC,
+        base_seed=base_seed,
+        seed_namespace=bucket_name,
+        target_kind=CHAMPION_TARGET_KIND_BY_BUCKET[bucket_name],
         event_index=0,
         stage_index=3,
     )
+
+
+@pytest.mark.parametrize("bucket_name", RACE_BUCKETS)
+def test_stage_results_are_independent_of_arrival_order(bucket_name):
+    candidates = _candidates(CHAMPION_STAGE_3_SURVIVORS)
+    specs = _final_stage_specs(bucket_name)
     evaluator = _ScriptedEvaluator(_descending_strength(candidates))
     results = evaluator(specs)
     ordered = tally_stage_results(specs, results)
@@ -476,17 +503,10 @@ def test_stage_results_are_independent_of_arrival_order():
     assert sum(ordered.values()) > 0
 
 
-def test_a_stage_rejects_missing_duplicate_and_non_binary_results():
+@pytest.mark.parametrize("bucket_name", RACE_BUCKETS)
+def test_a_stage_rejects_missing_duplicate_and_non_binary_results(bucket_name):
     candidates = _candidates(CHAMPION_STAGE_3_SURVIVORS)
-    specs = build_stage_specs(
-        candidates,
-        _slots(candidates),
-        base_seed=5,
-        seed_namespace=HEURISTIC_CHAMPION,
-        target_kind=CHAMPION_TARGET_HEURISTIC,
-        event_index=0,
-        stage_index=3,
-    )
+    specs = _final_stage_specs(bucket_name)
     evaluator = _ScriptedEvaluator(_descending_strength(candidates))
     results = evaluator(specs)
 

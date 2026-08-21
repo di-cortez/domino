@@ -224,12 +224,17 @@ def _fill_learner_bucket(pool, network, *, events, difficulty=None):
     return admitted
 
 
-def test_only_successful_updates_become_champion_candidates():
-    network, bank, pool = _champion_pool()
+# Both champion buckets consume the same candidate stream under the same
+# rules, so the queue contract is exercised once per bucket rather than
+# written twice.
+@pytest.mark.parametrize("bucket_name", [HEURISTIC_CHAMPION, LEARNER_CHAMPION])
+def test_only_successful_updates_become_champion_candidates(bucket_name):
+    network, bank, pool = _champion_pool(("heuristic", "recent", bucket_name))
     try:
         # The warm-start policy is not a candidate.
-        assert pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == ()
-        assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 0
+        assert pool.champion_pending_candidate_ids(bucket_name) == ()
+        assert pool.champion_completed_event_count(bucket_name) == 0
+        assert pool.initial_snapshot_record is not None
 
         pool.consider_updated_policy(
             network,
@@ -237,7 +242,7 @@ def test_only_successful_updates_become_champion_candidates():
             completed_games=2000,
             has_samples=True,
         )
-        assert len(pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)) == 1
+        assert len(pool.champion_pending_candidate_ids(bucket_name)) == 1
         # An iteration with no trainable decisions produces no snapshot.
         pool.consider_updated_policy(
             network,
@@ -245,18 +250,30 @@ def test_only_successful_updates_become_champion_candidates():
             completed_games=4000,
             has_samples=False,
         )
-        assert len(pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)) == 1
+        assert len(pool.champion_pending_candidate_ids(bucket_name)) == 1
 
-        for iteration in range(3, CHAMPION_CANDIDATE_BATCH_SIZE + 2):
+        for iteration in range(3, CHAMPION_CANDIDATE_BATCH_SIZE + 1):
             pool.consider_updated_policy(
                 network,
                 iteration=iteration,
                 completed_games=iteration * 2000,
                 has_samples=True,
             )
-        pending = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
+        # One short of a full batch: no event is ready yet.
+        assert len(pool.champion_pending_candidate_ids(bucket_name)) == (
+            CHAMPION_CANDIDATE_BATCH_SIZE - 1
+        )
+        assert not pool.champion_candidate_batch_is_ready(bucket_name)
+
+        pool.consider_updated_policy(
+            network,
+            iteration=CHAMPION_CANDIDATE_BATCH_SIZE + 1,
+            completed_games=(CHAMPION_CANDIDATE_BATCH_SIZE + 1) * 2000,
+            has_samples=True,
+        )
+        pending = pool.champion_pending_candidate_ids(bucket_name)
         assert len(pending) == CHAMPION_CANDIDATE_BATCH_SIZE == 50
-        assert pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION)
+        assert pool.champion_candidate_batch_is_ready(bucket_name)
         assert len(set(pending)) == len(pending)
         assert set(pending) <= set(pool.bucket_members("recent"))
         # A 51st snapshot before the event would make the batch overlap.
@@ -271,8 +288,14 @@ def test_only_successful_updates_become_champion_candidates():
         bank.close()
 
 
-def test_candidate_batches_never_overlap_across_events():
-    network, bank, pool = _champion_pool()
+@pytest.mark.parametrize("bucket_name", [HEURISTIC_CHAMPION, LEARNER_CHAMPION])
+def test_candidate_batches_never_overlap_across_events(bucket_name):
+    network, bank, pool = _champion_pool(("heuristic", "recent", bucket_name))
+    commit = (
+        (lambda ids: _race(pool, ids, [0.9, 0.8, 0.7, 0.6, 0.5]))
+        if bucket_name == HEURISTIC_CHAMPION
+        else (lambda ids: _learner_race(pool, ids))
+    )
     try:
         for iteration in range(1, CHAMPION_CANDIDATE_BATCH_SIZE + 1):
             pool.consider_updated_policy(
@@ -281,10 +304,10 @@ def test_candidate_batches_never_overlap_across_events():
                 completed_games=iteration * 2000,
                 has_samples=True,
             )
-        first_batch = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
-        _race(pool, first_batch[:5], [0.9, 0.8, 0.7, 0.6, 0.5])
-        assert pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION) == ()
-        assert pool.champion_completed_event_count(HEURISTIC_CHAMPION) == 1
+        first_batch = pool.champion_pending_candidate_ids(bucket_name)
+        commit(first_batch[:5])
+        assert pool.champion_pending_candidate_ids(bucket_name) == ()
+        assert pool.champion_completed_event_count(bucket_name) == 1
 
         for iteration in range(
             CHAMPION_CANDIDATE_BATCH_SIZE + 1,
@@ -296,7 +319,7 @@ def test_candidate_batches_never_overlap_across_events():
                 completed_games=iteration * 2000,
                 has_samples=True,
             )
-        second_batch = pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
+        second_batch = pool.champion_pending_candidate_ids(bucket_name)
         assert len(second_batch) == CHAMPION_CANDIDATE_BATCH_SIZE
         assert not set(second_batch) & set(first_batch)
     finally:
@@ -854,7 +877,9 @@ def _drive_champion_and_archive(pool, network, last_iteration):
         if pool.champion_candidate_batch_is_ready(HEURISTIC_CHAMPION):
             milestones = [
                 opponent_id
-                for opponent_id in pool.champion_pending_candidate_ids(HEURISTIC_CHAMPION)
+                for opponent_id in pool.champion_pending_candidate_ids(
+                    HEURISTIC_CHAMPION
+                )
                 if pool.opponent(opponent_id).introduced_iteration
                 % MEDIUM_TERM_INTERVAL_ITERATIONS == 0
             ]
@@ -863,6 +888,8 @@ def _drive_champion_and_archive(pool, network, last_iteration):
             _race(pool, batch, [
                 0.7 + step * 0.0001 for step in range(len(batch))
             ])
+            if pool.champion_selected(LEARNER_CHAMPION):
+                _learner_race(pool, batch)
             events.append(tuple(batch))
         if iteration % MEDIUM_TERM_INTERVAL_ITERATIONS == 0:
             pool.reconcile_archive_backed_buckets(
@@ -871,6 +898,47 @@ def _drive_champion_and_archive(pool, network, last_iteration):
                 load_weights=archive.load_weights,
             )
     return events
+
+
+def test_a_learner_champion_that_ages_into_a_band_overlaps_it_legally():
+    """Specification 45: champion-to-band overlap is a statistic, not a fault.
+
+    The band membership here is real: the identities are archive milestones
+    that both champion buckets raced, and the reconcile later claims them for
+    ``medium_term`` after ordinary FIFO retention has removed them from
+    ``recent``. Manufacturing the membership instead would create a genuine
+    ``recent | medium_term`` violation and prove nothing.
+    """
+    buckets = (
+        "heuristic",
+        "recent",
+        "medium_term",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    network, bank, pool = _champion_pool(buckets)
+    try:
+        events = _drive_champion_and_archive(pool, network, 250)
+        champions = events[0]
+        assert not set(champions) & set(pool.bucket_members("recent"))
+        assert set(champions) <= set(pool.bucket_members("medium_term"))
+        assert set(champions) <= set(_champion_members(pool))
+        assert set(champions) <= set(_learner_members(pool))
+
+        state = pool.observability()
+        counts = state["champion_overlap_counts"]
+        assert counts["champion_vs_learner|medium_term"] == len(champions)
+        assert counts["champion_vs_heuristic|medium_term"] == len(champions)
+        assert counts["champion_vs_heuristic|champion_vs_learner"] >= len(
+            champions
+        )
+        # Four memberships for one identity, and still no band violation.
+        assert state["total_forbidden_historical_overlap_count"] == 0
+        for opponent_id in champions:
+            assert pool.bank_slot(opponent_id) is not None
+        assert len(pool.export_weights()) == pool.unique_neural_opponent_count
+    finally:
+        bank.close()
 
 
 def test_a_band_rebalance_keeps_an_identity_that_is_also_a_champion():
@@ -926,6 +994,149 @@ def test_a_band_rebalance_keeps_an_identity_that_is_also_a_champion():
         )
         assert pool.unique_neural_opponent_count == len(
             recent | medium | set(_champion_members(pool))
+        )
+    finally:
+        bank.close()
+
+
+def test_the_learner_champion_bucket_participates_in_matchmaking():
+    """Specification 46: no new formula, but the bucket must behave like one.
+
+    It is registered from the start, empty during warm-up, available after its
+    first event, and from then on allocated by ordinary uniform rotation and
+    ordinary tracker difficulty.
+    """
+    buckets = (
+        "heuristic",
+        "recent",
+        "champion_vs_heuristic",
+        "champion_vs_learner",
+    )
+    network, bank, pool = _champion_pool(buckets)
+    rotation = UniformRotationState(buckets)
+    try:
+        _run_iterations(pool, network, 40)
+        game_count = 600
+
+        # Empty but configured: zero games, a row of its own, and an anchor
+        # that does not advance.
+        assert LEARNER_CHAMPION not in pool.available_bucket_names()
+        plan = _plan(pool, rotation, iteration=1, game_count=game_count)
+        learner_allocations = [
+            value for value in plan.allocations
+            if value.bucket_name == LEARNER_CHAMPION
+        ]
+        assert not learner_allocations
+        assert sum(
+            value.game_count for value in plan.allocations
+        ) == game_count
+        anchor_before = rotation.anchors()[LEARNER_CHAMPION]
+        rotation.commit(dict(plan.uniform_rotation_after))
+        assert rotation.anchors()[LEARNER_CHAMPION] == anchor_before
+
+        # After the first event it becomes available and is allocated.
+        batch = pool.bucket_members("recent")[:CHAMPION_FINAL_SURVIVORS]
+        _learner_race(pool, batch)
+        assert LEARNER_CHAMPION in pool.available_bucket_names()
+
+        plan = _plan(pool, rotation, iteration=2, game_count=game_count)
+        learner_allocations = [
+            value for value in plan.allocations
+            if value.bucket_name == LEARNER_CHAMPION
+        ]
+        assert len(learner_allocations) == CHAMPION_FINAL_SURVIVORS
+        assert sum(value.game_count for value in learner_allocations) > 0
+        # Both components reach it: no special-cased allocation path.
+        assert any(value.uniform_games > 0 for value in learner_allocations)
+        assert any(value.difficulty_games > 0 for value in learner_allocations)
+
+        # GPI stays exact and every game keeps a unique ID.
+        assert sum(
+            value.game_count for value in plan.allocations
+        ) == game_count
+        assert len(plan.assignments) == game_count
+        assert len({
+            assignment.game_index for assignment in plan.assignments
+        }) == game_count
+
+        rotation.commit(dict(plan.uniform_rotation_after))
+        # 600 games divide evenly across five members, so there is no
+        # remainder to rotate and the anchor correctly stays put. A budget that
+        # does leave one advances this bucket's anchor and no other bucket's.
+        remainder_rotation = UniformRotationState(buckets)
+        remainder_plan = _plan(
+            pool,
+            remainder_rotation,
+            iteration=2,
+            game_count=607,
+        )
+        learner_uniform = [
+            value.uniform_games for value in remainder_plan.allocations
+            if value.bucket_name == LEARNER_CHAMPION
+        ]
+        assert len(set(learner_uniform)) == 2
+        remainder_rotation.commit(dict(remainder_plan.uniform_rotation_after))
+        anchors = remainder_rotation.anchors()
+        assert anchors[LEARNER_CHAMPION] is not None
+        # Its anchor names one of its own members, never another bucket's:
+        # the rotation is per bucket, not shared.
+        assert anchors[LEARNER_CHAMPION] in _learner_members(pool)
+
+        # The plan is a pure function of its inputs.
+        assert _plan(
+            pool,
+            UniformRotationState(buckets),
+            iteration=2,
+            game_count=game_count,
+        ).plan_sha256 == _plan(
+            pool,
+            UniformRotationState(buckets),
+            iteration=2,
+            game_count=game_count,
+        ).plan_sha256
+    finally:
+        bank.close()
+
+
+def test_a_learner_champion_uses_ordinary_tracker_difficulty():
+    """No second difficulty signal: matchmaking reads the shared tracker."""
+    buckets = ("heuristic", "recent", "champion_vs_learner")
+    network, bank, pool = _champion_pool(buckets)
+    try:
+        _run_iterations(pool, network, 40)
+        batch = pool.bucket_members("recent")[:CHAMPION_FINAL_SURVIVORS]
+        _learner_race(pool, batch)
+        tracker = _tracker(pool)
+        hard, easy = batch[0], batch[1]
+        # The learner loses badly to one champion and beats another.
+        tracker.update(
+            (record.opponent_id for record in pool.active_opponents()),
+            {
+                hard: {"games": 200, "wins": 10, "losses": 190},
+                easy: {"games": 200, "wins": 190, "losses": 10},
+            },
+        )
+        assert tracker.difficulty(hard) > tracker.difficulty(easy)
+
+        plan = build_match_plan(
+            opponent_pool=pool,
+            performance_tracker=tracker,
+            uniform_rotation=UniformRotationState(buckets),
+            selected_buckets=buckets,
+            # Difficulty only, so the component is unambiguous.
+            difficulty_weight=1.0,
+            iteration=3,
+            first_absolute_game=0,
+            game_count=600,
+            base_seed=7,
+        )
+        by_opponent = {
+            value.opponent_id: value
+            for value in plan.allocations
+            if value.bucket_name == LEARNER_CHAMPION
+        }
+        assert by_opponent[hard].difficulty_games > (
+            by_opponent[easy].difficulty_games
         )
     finally:
         bank.close()

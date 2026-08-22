@@ -31,6 +31,10 @@ from training.rl.parallel import (
     DEFAULT_RL_WORKERS,
     worker_count as parse_rl_worker_count,
 )
+from training.rl.reward_distance import (
+    DEFAULT_REWARD_DISTANCE_MODE,
+    REWARD_DISTANCE_MODES,
+)
 from training.rl.rollout import REWARD_ETA, DEFAULT_GAMMA_F, GAMMA_I
 from training.rl.resume import load_resume_state
 from training.utils.cli_args import add_regularization_arguments, positive_int
@@ -261,6 +265,16 @@ def add_optional_rl_arguments(
         ),
     )
     group.add_argument(
+        "--reward-distance-mode",
+        choices=REWARD_DISTANCE_MODES,
+        default=DEFAULT_REWARD_DISTANCE_MODE,
+        help=(
+            "Distance metrics for local and terminal discounting, in that "
+            "order. 'turn-turn' is the new default; 'turn-decision' exactly "
+            "reproduces the historical metric choice."
+        ),
+    )
+    group.add_argument(
         "--normalize-advantages",
         dest="normalize_advantages",
         action="store_true",
@@ -370,6 +384,7 @@ def training_options_from_args(args):
         gamma_f=args.gamma_f,
         reward_eta=args.reward_eta,
         gamma_i=args.gamma_i,
+        reward_distance_mode=args.reward_distance_mode,
         normalize_advantages=args.normalize_advantages,
         seed=args.seed,
         ppo_max_epochs=args.ppo_max_epochs,

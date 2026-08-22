@@ -477,16 +477,17 @@ same supervised checkpoint and use separately archived RL outputs.
 
 ## Optional RL controls
 
-The default command uses PPO, the original reward constants, no terminal-reward
-discount, gradient clipping at norm `5.0`, and whole-buffer advantage
-normalization. Rollouts remain parallel while all updates stay in the parent:
+The default command uses PPO, turn-based local and terminal reward discounting,
+gradient clipping at norm `5.0`, and whole-buffer advantage normalization.
+Rollouts remain parallel while all updates stay in the parent:
 
 | Flag | Meaning | Default |
 |---|---|---:|
 | `--fresh-from-sl` / `--continue-existing-rl` | Force initialization from SL or allow a compatible existing RL checkpoint | continue existing RL (standalone); canonical continuation uses `--resume` |
-| `--gamma` | Terminal-reward discount per remaining real decision (`1.0` = no discount) | `1.0` |
-| `--alpha` | Convex mix of the two reward components per decision: `0` trains on the terminal outcome alone, `1` on local draw/pass shaping alone | `0.5` |
-| `--event-reward-decay` | Per-turn decay crediting a draw/pass event back to the real decisions preceding it (`0` credits only the immediately preceding decision) | `0.90` |
+| `--gamma-f` | Terminal/final-reward discount using the mode's second distance metric | `0.95` |
+| `--reward-eta` | Convex mix of the two reward components per decision: `0` trains on terminal outcome alone, `1` on local draw/pass shaping alone | `0.5` |
+| `--gamma-i` | Local/immediate-event discount using the mode's first distance metric | `0.90` |
+| `--reward-distance-mode` | Distance units in `gamma_i`/`gamma_f` order: `turn-turn`, `decision-decision`, `turn-decision`, or `decision-turn` | `turn-turn` |
 | `--opponent-decision-restarts` | Continue once from every same-iteration pre-action opponent state with at least two tile plays; the learner swaps seats and all decisions join one update | off |
 | `--ppo-max-epochs` | `1` selects one-update REINFORCE; `2`–`16` select masked PPO | `4` standalone/finite, `16` forever |
 | `--value-head` | Train a linear critic with PPO or REINFORCE | off |
@@ -501,7 +502,7 @@ normalization. Rollouts remain parallel while all updates stay in the parent:
 | `--device` | Array backend: `auto` matches `GPU_ENABLED` exactly (CuPy when installed, else NumPy); `cpu`/`gpu` force one backend regardless of what's installed/enabled globally | `auto` |
 
 ```bash
-python -m training.rl.cli --gamma 0.97 --alpha 0.3 --event-reward-decay 0.8 --seed 42
+python -m training.rl.cli --gamma-f 0.97 --reward-eta 0.3 --gamma-i 0.8 --reward-distance-mode decision-turn --seed 42
 ```
 
 A point-in-time value loss or win rate is dominated by batch noise; the
@@ -571,31 +572,46 @@ overlapping `medium_term` cannot be converted without silently changing what
 its saved memberships mean, and no migration is implemented for the other
 selections either; start a new run.
 
-The RL reward now uses a uniform terminal reward plus temporally decayed local
-draw/pass shaping. For each real decision at turn `d_i`, a later event at turn
-`t_e` contributes:
+The RL reward combines a discounted terminal reward with temporally discounted
+local draw/pass shaping. A "decision" is exactly one compressed PPO trajectory
+step: a learner tile choice with at least two legal tile actions. Forced tile
+plays, draws, passes, and opponent actions are not decisions. For decision `j`:
 
 ```text
-c_e * EVENT_REWARD_DECAY ** (t_e - d_i - 1)
+R(j) = (1 - eta) * R_f * gamma_f ** d_f(j)
+     + eta * sum(event_reward * gamma_i ** d_i(j, event))
 ```
 
-with `EVENT_REWARD_DECAY = 0.90` by default, tunable through
-`--event-reward-decay`. An immediately following event therefore has exponent
-`0` and receives the full event reward.
+The single `--reward-distance-mode` flag selects both distances. Its first word
+always controls `gamma_i`; its second always controls `gamma_f`:
 
-The two components are then combined into the total reward of each decision:
+| Mode | Local `gamma_i` distance | Terminal `gamma_f` distance |
+|---|---|---|
+| `turn-turn` | engine turns between the decision and event | engine turns between the decision and terminal state |
+| `decision-decision` | later real learner decisions before the event | later real learner decisions before termination |
+| `turn-decision` | engine turns | later real learner decisions |
+| `decision-turn` | later real learner decisions | engine turns |
+
+For turn distance, an event or terminal state immediately after a decision has
+distance zero: `event_turn - decision_turn - 1` or
+`terminal_turn - decision_turn - 1`. Decision distance counts only later
+compressed learner decisions. Multiple local events are summed.
+
+The new-run defaults are:
 
 ```text
-R_T = (1 - ALPHA) * DEFAULT_GAMMA ** k * R_f + ALPHA * R_l
+gamma_i = 0.90
+gamma_f = 0.95
+eta = 0.50
+reward_distance_mode = turn-turn
 ```
 
-where `R_f` is the terminal reward, `k` the number of real decisions still
-remaining after this one, and `R_l` the summed decayed local event reward.
-By default (`--gamma 1.0`) the terminal result is not discounted and is
-applied uniformly to every real decision in the game; passing `--gamma` below
-`1.0` discounts it per remaining real decision instead. `--alpha` trades the
-two components off against each other: `0` trains on the terminal outcome
-alone and `1` on local shaping alone (see "Optional RL controls" above).
+Thus both components use actual engine time by default. `reward_eta` trades the
+components off: `0` trains on terminal outcome alone and `1` on local shaping
+alone. Runs/checkpoints created before `reward_distance_mode` existed are
+unambiguously restored as `turn-decision`, with the historical defaults
+`gamma_i=0.90`, `gamma_f=1.0`, and `reward_eta=0.50`; resume never silently
+changes their objective.
 
 Reward constants:
 
@@ -609,11 +625,10 @@ Reward constants:
 | learner pass | `-0.10` |
 | final remaining pips | `-0.05 * remaining_pips` |
 
-Multiple local events are summed. A learner draw/pass penalty is applied to all
-earlier real decisions with the same decay rule, not just to the most recent
-decision. The final pip penalty is applied to the learner's own final hand. The
-number of legal choices does not rescale a decision's return. The final
-training weight for every decision is:
+A learner draw/pass penalty is applied to all earlier real decisions with the
+selected decay rule, not just to the most recent decision. The final pip
+penalty is applied to the learner's own final hand. The number of legal choices
+does not rescale a decision's return. The final training weight is:
 
 ```text
 policy_reward = terminal_reward + local_reward

@@ -242,11 +242,13 @@ def test_parallel_restart_results_are_invariant_to_worker_count():
 
     def collect(workers):
         network = _network()
+        schema = dict(REWARD_SCHEMAS)
+        schema["reward_distance_mode"] = "decision-turn"
         runner = RLRolloutRunner(
             network,
             opponent_buckets=("random",),
-            schema=dict(REWARD_SCHEMAS),
-            gamma_f=1.0,
+            schema=schema,
+            gamma_f=0.95,
             ruleset_name=RULESET,
             safety=safety,
         )

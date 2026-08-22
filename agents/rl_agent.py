@@ -47,6 +47,10 @@ class RLAgent(Agent):
     apply temporally decayed local rewards outside the agent. Training steps
     also retain the masked-policy log-probability from collection time so PPO
     never has to reconstruct ``pi_old`` after the policy has changed.
+
+    ``use_opponent_suit_features=False`` selects the ablated encoder layout and
+    skips exact opponent inference entirely, so the policy it wraps must have
+    been trained with the shortened input. The shape check below enforces that.
     """
 
     VALID_MODES = {"training", "stochastic_evaluation", "evaluation"}
@@ -58,6 +62,7 @@ class RLAgent(Agent):
         runtime_profile=None,
         *,
         ruleset=DEFAULT_RULESET_NAME,
+        use_opponent_suit_features=True,
     ):
         if mode not in self.VALID_MODES:
             raise ValueError(
@@ -67,7 +72,11 @@ class RLAgent(Agent):
         self.ruleset = resolve_ruleset(ruleset)
         self.network = network
         self.mode = mode
-        self.encoder = DominoEncoder(self.ruleset)
+        self.use_opponent_suit_features = bool(use_opponent_suit_features)
+        self.encoder = DominoEncoder(
+            self.ruleset,
+            use_opponent_suit_features=self.use_opponent_suit_features,
+        )
         first_weight = getattr(network, "W1", None)
         layer_count = getattr(network, "layer_count", None)
         output_weight = (
@@ -88,9 +97,12 @@ class RLAgent(Agent):
                     f"input={self.encoder.vector_size}, "
                     f"output={self.encoder.action_size}."
                 )
-        self.opponent_model = ExactOpponentModel(
-            ruleset=self.ruleset,
-            record_traces=False,
+        # The model exists only to fill the encoder's trailing block. With that
+        # block ablated nothing would read its output, so it is never built.
+        self.opponent_model = (
+            ExactOpponentModel(ruleset=self.ruleset, record_traces=False)
+            if self.use_opponent_suit_features
+            else None
         )
         self.trajectory = []
         # Optional low-overhead accumulator used by rollout/diagnostic workers.
@@ -112,6 +124,7 @@ class RLAgent(Agent):
         mode="evaluation",
         use_value_head=False,
         ruleset=DEFAULT_RULESET_NAME,
+        use_opponent_suit_features=True,
     ):
         """Load an RL policy and optionally restore its persisted value head."""
         weights_path = weights_path or default_rl_weights_path(ruleset)
@@ -119,7 +132,12 @@ class RLAgent(Agent):
             weights_path,
             use_value_head=use_value_head,
         )
-        return cls(network, mode=mode, ruleset=ruleset)
+        return cls(
+            network,
+            mode=mode,
+            ruleset=ruleset,
+            use_opponent_suit_features=use_opponent_suit_features,
+        )
 
     def choose_move(self, state, legal_actions):
         if self.runtime_profile is None:
@@ -139,7 +157,8 @@ class RLAgent(Agent):
         if len(policy_actions) == 1:
             return policy_actions[0]
 
-        state["opponent_suit_probabilities"] = self.opponent_model.update(state)
+        if self.opponent_model is not None:
+            state["opponent_suit_probabilities"] = self.opponent_model.update(state)
         x = self.encoder.encode_state(state)
         x = self.network.xp.asarray(x)
         probabilities = self.network.forward(x)
@@ -243,7 +262,10 @@ class RLAgent(Agent):
             )
 
             section_started = time.perf_counter() if profiling else None
-            state["opponent_suit_probabilities"] = self.opponent_model.update(state)
+            if self.opponent_model is not None:
+                state["opponent_suit_probabilities"] = (
+                    self.opponent_model.update(state)
+                )
             self._profile_add(
                 "exact_opponent_model_update",
                 section_started,

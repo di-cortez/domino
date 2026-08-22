@@ -543,6 +543,7 @@ def play_champion_game(
     target_kind=CHAMPION_TARGET_HEURISTIC,
     current_learner_policy=None,
     ruleset_name=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Play one frozen candidate against this bucket's target, return a winner.
 
@@ -566,6 +567,7 @@ def play_champion_game(
         policy,
         mode=CHAMPION_EVALUATION_MODE,
         ruleset=ruleset_name,
+        use_opponent_suit_features=use_opponent_suit_features,
     )
     if target_kind == CHAMPION_TARGET_HEURISTIC:
         target = StrategicAgent(ruleset=ruleset_name)
@@ -580,6 +582,7 @@ def play_champion_game(
             current_learner_policy,
             mode=CHAMPION_EVALUATION_MODE,
             ruleset=ruleset_name,
+            use_opponent_suit_features=use_opponent_suit_features,
         )
     else:
         raise ValueError(f"Unknown champion target kind: {target_kind!r}")

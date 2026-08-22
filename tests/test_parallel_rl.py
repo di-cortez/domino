@@ -189,7 +189,7 @@ class ParallelRLTests(unittest.TestCase):
             network,
             opponent_buckets=opponent_buckets,
             schema=dict(REWARD_SCHEMAS),
-            gamma=1.0,
+            gamma_f=1.0,
             safety=self.safety,
         )
         try:
@@ -237,7 +237,7 @@ class ParallelRLTests(unittest.TestCase):
             network,
             opponent_buckets=buckets,
             schema=dict(REWARD_SCHEMAS),
-            gamma=1.0,
+            gamma_f=1.0,
             safety=self.safety,
         )
         try:
@@ -1285,7 +1285,7 @@ class ParallelRLTests(unittest.TestCase):
             network,
             opponent_buckets=buckets,
             schema=dict(REWARD_SCHEMAS),
-            gamma=1.0,
+            gamma_f=1.0,
             safety=self.safety,
         )
         try:
@@ -1350,7 +1350,7 @@ class ParallelRLTests(unittest.TestCase):
                 opponent_buckets=buckets,
                 difficulty_weight=0.5,
                 schema=dict(REWARD_SCHEMAS),
-                gamma=1.0,
+                gamma_f=1.0,
                 safety=self.safety,
                 pool_state=pool_state,
                 pool_weights=pool_weights,
@@ -1859,10 +1859,10 @@ class ParallelRLTests(unittest.TestCase):
                 rl_weights_path=str(resumed_base),
                 resume_weights_path=str(partial_weights),
                 resume_state_file=str(partial_state),
-                gamma=0.97,
+                gamma_f=0.97,
                 **common,
             )
-            self.assertEqual(resumed["gamma"], common.get("gamma", 1.0))
+            self.assertEqual(resumed["gamma_f"], common.get("gamma_f", 1.0))
             self.assertEqual(resumed["rl_training_algorithm"], "reinforce_v1")
             with np.load(full["rl_weights_path"], allow_pickle=False) as left:
                 with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
@@ -2320,7 +2320,7 @@ class ParallelRLTests(unittest.TestCase):
             network,
             opponent_buckets=("heuristic", "recent"),
             schema=dict(REWARD_SCHEMAS),
-            gamma=1.0,
+            gamma_f=1.0,
             safety=safety,
         )
         try:

@@ -254,6 +254,7 @@ def run_all_pairs(
     status_callback=None,
     run_metadata=None,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Evaluate canonical agents and write aggregate artifacts.
 
@@ -312,6 +313,7 @@ def run_all_pairs(
                 ruleset,
             ),
             ruleset_name=ruleset.name,
+            use_opponent_suit_features=use_opponent_suit_features,
         ))
     matchup_specs = tuple(matchup_specs)
     network_metadata = _network_metadata(agents, matchup_specs)
@@ -425,6 +427,9 @@ def run_all_pairs(
                     final_output_dir / "pairs" / f"{agent}_vs_{opponent}"
                 ),
                 ruleset=ruleset,
+                use_opponent_suit_features=(
+                    matchup.use_opponent_suit_features
+                ),
             )
         except BaseException:
             shutil.rmtree(output_dir, ignore_errors=True)

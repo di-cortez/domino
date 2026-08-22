@@ -64,7 +64,7 @@ from middleware.opponent_model import (
 )
 from training.rl.config import DEFAULT_GPI, RLResourceOptions
 from training.rl.rollout import (
-    EVENT_REWARD_DECAY,
+    GAMMA_I,
     LEARNER_DRAW_PENALTY,
     LEARNER_PASS_PENALTY,
     OPPONENT_DRAW_REWARD,
@@ -1538,7 +1538,7 @@ def test_decayed_event_reward_exponents():
             TrajectoryStep(None, 0, None, decision_turn=10),
         ]
 
-        agent.add_decayed_event_reward(event_turn, 0.10, EVENT_REWARD_DECAY)
+        agent.add_decayed_event_reward(event_turn, 0.10, GAMMA_I)
 
         assert abs(agent.trajectory[0].local_reward - expected) < 1e-12
 
@@ -1564,8 +1564,8 @@ def test_multiple_events_and_all_previous_decisions_receive_rewards():
         TrajectoryStep(None, 0, None, decision_turn=12),
     ]
 
-    agent.add_decayed_event_reward(13, 0.10, EVENT_REWARD_DECAY)
-    agent.add_decayed_event_reward(14, -0.02, EVENT_REWARD_DECAY)
+    agent.add_decayed_event_reward(13, 0.10, GAMMA_I)
+    agent.add_decayed_event_reward(14, -0.02, GAMMA_I)
 
     assert abs(agent.trajectory[0].local_reward - (0.081 - 0.01458)) < 1e-12
     assert abs(agent.trajectory[1].local_reward - (0.10 - 0.018)) < 1e-12
@@ -1574,7 +1574,7 @@ def test_multiple_events_and_all_previous_decisions_receive_rewards():
 def test_event_reward_without_decisions_is_noop():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
 
-    agent.add_decayed_event_reward(3, 0.10, EVENT_REWARD_DECAY)
+    agent.add_decayed_event_reward(3, 0.10, GAMMA_I)
 
     assert agent.trajectory == []
 
@@ -1603,14 +1603,14 @@ def test_choice_count_does_not_weight_terminal_or_local_rewards():
 
     samples = _finish_episode_with_rewards(agent, 0.50)
 
-    # (1 - ALPHA) * 0.50 + ALPHA * 0.10 at the default ALPHA of 0.5.
+    # (1 - REWARD_ETA) * 0.50 + REWARD_ETA * 0.10 at the default REWARD_ETA of 0.5.
     assert [sample.policy_reward for sample in samples] == [0.30, 0.30]
     assert all(not hasattr(sample, "multiplier") for sample in samples)
     assert all(not hasattr(sample, "option_count") for sample in samples)
 
 
 def test_alpha_mixes_terminal_and_local_reward_components():
-    """R_T scales the terminal half by (1 - alpha) and the local half by alpha."""
+    """R_T scales the terminal half by (1 - reward_eta) and the local half by reward_eta."""
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
         TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
@@ -1627,13 +1627,13 @@ def test_alpha_mixes_terminal_and_local_reward_components():
 
 
 def test_alpha_extremes_select_a_single_reward_component():
-    """alpha=0 keeps the terminal outcome only; alpha=1 keeps local shaping only."""
-    def one_sample(alpha):
+    """reward_eta=0 keeps the terminal outcome only; reward_eta=1 keeps local shaping only."""
+    def one_sample(reward_eta):
         agent = RLAgent(UniformPolicyNetwork(), mode="training")
         agent.trajectory = [
             TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
         ]
-        return _finish_episode_with_rewards(agent, 0.50, 1.0, alpha)[0]
+        return _finish_episode_with_rewards(agent, 0.50, 1.0, reward_eta)[0]
 
     terminal_only = one_sample(0.0)
     assert terminal_only.policy_reward == 0.50

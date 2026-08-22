@@ -170,9 +170,9 @@ def _rl_config_from_summary(summary):
         "moving_average_window": summary["moving_average_window"],
         "use_value_head": summary["use_value_head"],
         "value_coef": summary["value_coef"] or 0.5,
-        "gamma": summary["gamma"],
-        "alpha": summary["alpha"],
-        "event_reward_decay": summary["event_reward_decay"],
+        "gamma_f": summary["gamma_f"],
+        "reward_eta": summary["reward_eta"],
+        "gamma_i": summary["gamma_i"],
         "clip_grad_norm": summary["clip_grad_norm"],
         "normalize_advantages": summary["normalize_advantages"],
         "worker_memory_reserve_mb": 0,
@@ -196,9 +196,9 @@ def _test_resume_configuration(**overrides):
         "entropy_coef": 0.01,
         "use_value_head": False,
         "value_coef": 0.5,
-        "gamma": 1.0,
-        "alpha": 0.5,
-        "event_reward_decay": 0.90,
+        "gamma_f": 1.0,
+        "reward_eta": 0.5,
+        "gamma_i": 0.90,
         "clip_grad_norm": 5.0,
         "normalize_advantages": True,
         "weight_decay": 0.0,
@@ -815,7 +815,7 @@ def test_run_config_is_stable_and_target_extension_must_be_explicit(tmp_path):
         "supervised_weights_path": "models/sl.npz",
         "supervised_weights_sha256": "abc",
         "ppo_config": {"clip_epsilon": 0.2, "target_kl": 0.01},
-        "rl_config": {"gamma": 1.0},
+        "rl_config": {"gamma_f": 1.0},
     }
     first = create_run_config(run_dir, **values)
     second = create_run_config(run_dir, **values)
@@ -864,7 +864,7 @@ def test_legacy_run_root_analysis_files_are_copied_to_compact_bundle(tmp_path):
         "supervised_weights_path": "models/sl.npz",
         "supervised_weights_sha256": "abc",
         "ppo_config": {"clip_epsilon": 0.2},
-        "rl_config": {"gamma": 1.0},
+        "rl_config": {"gamma_f": 1.0},
     }
     create_run_config(run_dir, **values)
 
@@ -884,7 +884,7 @@ def test_legacy_run_root_analysis_files_are_copied_to_compact_bundle(tmp_path):
 
 def test_run_config_requires_exact_rl_fields_without_legacy_defaults(tmp_path):
     run_dir = canonical_run_dir(tmp_path, "big", 42)
-    legacy_rl_config = {"gamma": 1.0, "learning_rate": 0.001}
+    legacy_rl_config = {"gamma_f": 1.0, "learning_rate": 0.001}
     values = {
         "root": ROOT,
         "pipeline_level": "big",
@@ -956,7 +956,7 @@ def test_commit_change_warns_but_never_blocks_exact_resume(monkeypatch):
 def test_retired_pool_refresh_field_is_not_accepted(tmp_path):
     run_dir = canonical_run_dir(tmp_path, "big", 42)
     legacy_rl_config = {
-        "gamma": 1.0,
+        "gamma_f": 1.0,
         "learning_rate": 0.001,
         "pool_refresh_games": 400,
     }
@@ -974,13 +974,13 @@ def test_retired_pool_refresh_field_is_not_accepted(tmp_path):
     assert published["rl_config"]["pool_refresh_games"] == 400
 
     current = dict(values)
-    current["rl_config"] = {"gamma": 1.0, "learning_rate": 0.001}
+    current["rl_config"] = {"gamma_f": 1.0, "learning_rate": 0.001}
     with pytest.raises(ValueError, match="rl_config"):
         create_run_config(run_dir, **current)
 
     # A field that still affects computation must keep rejecting the resume.
     conflicting = dict(values)
-    conflicting["rl_config"] = {"gamma": 0.97, "learning_rate": 0.001}
+    conflicting["rl_config"] = {"gamma_f": 0.97, "learning_rate": 0.001}
     with pytest.raises(ValueError, match="rl_config"):
         create_run_config(run_dir, **conflicting)
 

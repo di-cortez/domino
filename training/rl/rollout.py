@@ -22,15 +22,15 @@ LEARNER_PASS_PENALTY = -OPPONENT_PASS_REWARD
 
 # Per-turn decay applied to a local event reward as it is credited backwards to
 # the real decisions that preceded the event.
-EVENT_REWARD_DECAY = 0.90
+GAMMA_I = 0.90
 
 # Terminal-reward discount applied per remaining real decision (1.0 keeps the
 # historical undiscounted terminal outcome).
-DEFAULT_GAMMA = 1.0
+DEFAULT_GAMMA_F = 1.0
 
 # Convex mixture weight between the two reward components of one decision:
 # 0.0 trains on the terminal outcome alone, 1.0 on local event shaping alone.
-ALPHA = 0.5
+REWARD_ETA = 0.5
 
 REWARD_ZERO_EPSILON = 1e-8
 
@@ -46,8 +46,8 @@ REWARD_SCHEMAS = {
     "learner_draw": LEARNER_DRAW_PENALTY,
     "opponent_pass": OPPONENT_PASS_REWARD,
     "learner_pass": LEARNER_PASS_PENALTY,
-    "event_decay": EVENT_REWARD_DECAY,
-    "alpha": ALPHA,
+    "gamma_i": GAMMA_I,
+    "reward_eta": REWARD_ETA,
 }
 
 
@@ -132,21 +132,21 @@ def _terminal_reward(engine, learner_position, schema):
 
 
 def _finish_episode_with_rewards(
-    learner_agent, terminal_reward, gamma=DEFAULT_GAMMA, alpha=ALPHA
+    learner_agent, terminal_reward, gamma_f=DEFAULT_GAMMA_F, reward_eta=REWARD_ETA
 ):
     """Finalize one learner trajectory into policy-gradient training samples.
 
     Each decision's total reward is the convex combination
 
-        R_T = (1 - alpha) * gamma ** k * R_f + alpha * R_l
+        R_T = (1 - reward_eta) * gamma_f ** k * R_f + reward_eta * R_l
 
     where ``R_f`` is the episode's terminal reward, ``k`` the number of real
     decisions still remaining after this one, and ``R_l`` the decayed local
-    event reward already accumulated on the step. ``gamma`` therefore discounts
+    event reward already accumulated on the step. ``gamma_f`` therefore discounts
     the terminal component per remaining decision, so earlier decisions receive
     a more heavily discounted share of the final outcome than the last one,
-    while ``alpha`` trades the two components off against each other:
-    ``alpha=0`` trains on the terminal outcome alone and ``alpha=1`` on local
+    while ``reward_eta`` trades the two components off against each other:
+    ``reward_eta=0`` trains on the terminal outcome alone and ``reward_eta=1`` on local
     event shaping alone.
 
     The stored ``terminal_reward`` and ``local_reward`` components are the
@@ -158,10 +158,10 @@ def _finish_episode_with_rewards(
     samples = []
     for index, step in enumerate(finished_steps):
         remaining_after = step_count - 1 - index
-        discounted_terminal = (1.0 - alpha) * step.terminal_reward * (
-            gamma ** remaining_after
+        discounted_terminal = (1.0 - reward_eta) * step.terminal_reward * (
+            gamma_f ** remaining_after
         )
-        scaled_local = alpha * step.local_reward
+        scaled_local = reward_eta * step.local_reward
         raw_reward = discounted_terminal + scaled_local
         samples.append(
             TrainingSample(
@@ -257,7 +257,7 @@ def _play_training_game_unprofiled(
             learner_agent.add_decayed_event_reward(
                 event_turn=state["turn"],
                 base_reward=event_reward,
-                decay_lambda=schema["event_decay"],
+                decay_lambda=schema["gamma_i"],
             )
         engine.step(
             action,
@@ -354,7 +354,7 @@ def _play_training_game(
             learner_agent.add_decayed_event_reward(
                 event_turn=state["turn"],
                 base_reward=event_reward,
-                decay_lambda=schema["event_decay"],
+                decay_lambda=schema["gamma_i"],
             )
         _profile_worker_section(
             runtime_profile,
@@ -381,10 +381,11 @@ def _collect_steps_vs_snapshot(
     network,
     opponent_network,
     schema,
-    gamma,
+    gamma_f,
     runtime_profile=None,
     ruleset_name=DEFAULT_RULESET_NAME,
     capture_opponent_decision_restarts=False,
+    use_opponent_suit_features=True,
 ):
     """Play against one already-selected frozen neural opponent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -405,12 +406,14 @@ def _collect_steps_vs_snapshot(
         mode="training",
         runtime_profile=learner_policy_profile,
         ruleset=ruleset_name,
+        use_opponent_suit_features=use_opponent_suit_features,
     )
     opponent = RLAgent(
         opponent_network,
         mode="stochastic_evaluation",
         runtime_profile=opponent_policy_profile,
         ruleset=ruleset_name,
+        use_opponent_suit_features=use_opponent_suit_features,
     )
     agents = [None, None]
     agents[learner_position] = learner
@@ -429,7 +432,7 @@ def _collect_steps_vs_snapshot(
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
     samples = _finish_episode_with_rewards(
-        learner, reward, gamma, schema["alpha"]
+        learner, reward, gamma_f, schema["reward_eta"]
     )
     _profile_worker_section(
         runtime_profile,
@@ -447,10 +450,11 @@ def collect_steps_for_assignment(
     opponent_kind,
     opponent_network,
     schema,
-    gamma,
+    gamma_f,
     runtime_profile=None,
     ruleset_name=DEFAULT_RULESET_NAME,
     capture_opponent_decision_restarts=False,
+    use_opponent_suit_features=True,
 ):
     """Dispatch one preselected assignment without knowing pool policy."""
     if opponent_kind == "policy_snapshot":
@@ -460,12 +464,13 @@ def collect_steps_for_assignment(
             learner_network,
             opponent_network,
             schema,
-            gamma,
+            gamma_f,
             runtime_profile=runtime_profile,
             ruleset_name=ruleset_name,
             capture_opponent_decision_restarts=(
                 capture_opponent_decision_restarts
             ),
+            use_opponent_suit_features=use_opponent_suit_features,
         )
     if opponent_kind == "heuristic":
         if opponent_network is not None:
@@ -473,12 +478,13 @@ def collect_steps_for_assignment(
         return _collect_steps_vs_heuristic(
             learner_network,
             schema,
-            gamma,
+            gamma_f,
             runtime_profile=runtime_profile,
             ruleset_name=ruleset_name,
             capture_opponent_decision_restarts=(
                 capture_opponent_decision_restarts
             ),
+            use_opponent_suit_features=use_opponent_suit_features,
         )
     if opponent_kind == "random":
         if opponent_network is not None:
@@ -486,12 +492,13 @@ def collect_steps_for_assignment(
         return _collect_steps_vs_random(
             learner_network,
             schema,
-            gamma,
+            gamma_f,
             runtime_profile=runtime_profile,
             ruleset_name=ruleset_name,
             capture_opponent_decision_restarts=(
                 capture_opponent_decision_restarts
             ),
+            use_opponent_suit_features=use_opponent_suit_features,
         )
     raise ValueError(f"Unknown RL opponent kind: {opponent_kind!r}")
 
@@ -499,10 +506,11 @@ def collect_steps_for_assignment(
 def _collect_steps_vs_heuristic(
     network,
     schema,
-    gamma,
+    gamma_f,
     runtime_profile=None,
     ruleset_name=DEFAULT_RULESET_NAME,
     capture_opponent_decision_restarts=False,
+    use_opponent_suit_features=True,
 ):
     """Play one training game against the fixed heuristic agent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -517,6 +525,7 @@ def _collect_steps_vs_heuristic(
         mode="training",
         runtime_profile=learner_policy_profile,
         ruleset=ruleset_name,
+        use_opponent_suit_features=use_opponent_suit_features,
     )
     agents = [None, None]
     agents[learner_position] = learner
@@ -535,7 +544,7 @@ def _collect_steps_vs_heuristic(
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
     samples = _finish_episode_with_rewards(
-        learner, reward, gamma, schema["alpha"]
+        learner, reward, gamma_f, schema["reward_eta"]
     )
     _profile_worker_section(
         runtime_profile,
@@ -551,10 +560,11 @@ def _collect_steps_vs_heuristic(
 def _collect_steps_vs_random(
     network,
     schema,
-    gamma,
+    gamma_f,
     runtime_profile=None,
     ruleset_name=DEFAULT_RULESET_NAME,
     capture_opponent_decision_restarts=False,
+    use_opponent_suit_features=True,
 ):
     """Play one training game against the fixed uniform-random agent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -569,6 +579,7 @@ def _collect_steps_vs_random(
         mode="training",
         runtime_profile=learner_policy_profile,
         ruleset=ruleset_name,
+        use_opponent_suit_features=use_opponent_suit_features,
     )
     agents = [None, None]
     agents[learner_position] = learner
@@ -587,7 +598,7 @@ def _collect_steps_vs_random(
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
     samples = _finish_episode_with_rewards(
-        learner, reward, gamma, schema["alpha"]
+        learner, reward, gamma_f, schema["reward_eta"]
     )
     _profile_worker_section(
         runtime_profile,
@@ -606,9 +617,10 @@ def collect_steps_from_restart(
     opponent_network,
     restart,
     schema,
-    gamma,
+    gamma_f,
     runtime_profile=None,
     ruleset_name=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Continue one captured state with the learner in the opponent's seat."""
     engine = DominoEngine.from_restart_state(restart.engine_state)
@@ -635,6 +647,7 @@ def collect_steps_from_restart(
         mode="training",
         runtime_profile=learner_policy_profile,
         ruleset=ruleset_name,
+        use_opponent_suit_features=use_opponent_suit_features,
     )
     if opponent_kind == "policy_snapshot":
         if opponent_network is None:
@@ -644,6 +657,7 @@ def collect_steps_from_restart(
             mode="stochastic_evaluation",
             runtime_profile=opponent_policy_profile,
             ruleset=ruleset_name,
+            use_opponent_suit_features=use_opponent_suit_features,
         )
     elif opponent_kind == "heuristic":
         if opponent_network is not None:
@@ -672,7 +686,7 @@ def collect_steps_from_restart(
     samples = _finish_episode_with_rewards(
         learner,
         reward,
-        gamma,
-        schema["alpha"],
+        gamma_f,
+        schema["reward_eta"],
     )
     return samples, event_stats, engine.winner, learner_position

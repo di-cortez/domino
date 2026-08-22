@@ -18,6 +18,10 @@ class NeuralAgent(Agent):
 
     Draw, pass, and single-option tile plays are forced by the rules engine and
     bypass both opponent inference and the neural network.
+
+    ``use_opponent_suit_features=False`` selects the ablated encoder layout and
+    skips exact opponent inference entirely, so the checkpoint it loads must
+    have been trained with the shortened input.
     """
 
     def __init__(
@@ -26,14 +30,22 @@ class NeuralAgent(Agent):
         epsilon=0.0,
         *,
         ruleset=DEFAULT_RULESET_NAME,
+        use_opponent_suit_features=True,
     ):
         self.ruleset = resolve_ruleset(ruleset)
         self.network = network
         self.epsilon = epsilon
-        self.encoder = DominoEncoder(self.ruleset)
-        self.opponent_model = ExactOpponentModel(
-            ruleset=self.ruleset,
-            record_traces=False,
+        self.use_opponent_suit_features = bool(use_opponent_suit_features)
+        self.encoder = DominoEncoder(
+            self.ruleset,
+            use_opponent_suit_features=self.use_opponent_suit_features,
+        )
+        # The model exists only to fill the encoder's trailing block. With that
+        # block ablated nothing would read its output, so it is never built.
+        self.opponent_model = (
+            ExactOpponentModel(ruleset=self.ruleset, record_traces=False)
+            if self.use_opponent_suit_features
+            else None
         )
 
     @classmethod
@@ -43,6 +55,7 @@ class NeuralAgent(Agent):
         epsilon=0.0,
         device="auto",
         ruleset=DEFAULT_RULESET_NAME,
+        use_opponent_suit_features=True,
     ):
         """Build an agent from a NumPy ``.npz`` checkpoint."""
         weights_path = weights_path or default_sl_weights_path(ruleset)
@@ -54,7 +67,10 @@ class NeuralAgent(Agent):
             input_size = architecture.input_size
             output_size = architecture.output_size
 
-            encoder = DominoEncoder(ruleset)
+            encoder = DominoEncoder(
+                ruleset,
+                use_opponent_suit_features=use_opponent_suit_features,
+            )
             if input_size != encoder.vector_size:
                 raise ValueError(
                     f"Checkpoint expects input_size={input_size}, "
@@ -74,7 +90,12 @@ class NeuralAgent(Agent):
             )
             network.load_policy_weights(data)
 
-        return cls(network, epsilon=epsilon, ruleset=ruleset)
+        return cls(
+            network,
+            epsilon=epsilon,
+            ruleset=ruleset,
+            use_opponent_suit_features=use_opponent_suit_features,
+        )
 
     def choose_move(self, state, legal_actions):
         if not legal_actions:
@@ -90,7 +111,8 @@ class NeuralAgent(Agent):
         if self.epsilon > 0.0 and np.random.rand() < self.epsilon:
             return random.choice(policy_actions)
 
-        state["opponent_suit_probabilities"] = self.opponent_model.update(state)
+        if self.opponent_model is not None:
+            state["opponent_suit_probabilities"] = self.opponent_model.update(state)
         probabilities = self.network.forward(self.encoder.encode_state(state))
         if hasattr(probabilities, "get"):
             probabilities = probabilities.get()

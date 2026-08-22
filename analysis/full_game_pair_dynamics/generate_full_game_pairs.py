@@ -25,6 +25,15 @@ from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
 from agents.heuristic_agent import StrategicAgent
 from middleware.domino_engine import DominoEngine
+from training.rl.rollout import (
+    FINAL_PIP_PENALTY,
+    LEARNER_DRAW_PENALTY,
+    LEARNER_PASS_PENALTY,
+    OPPONENT_DRAW_REWARD,
+    OPPONENT_PASS_REWARD,
+    TERMINAL_LOSS_REWARD,
+    TERMINAL_WIN_REWARD,
+)
 
 
 DEFAULT_GAMES = 10_000
@@ -175,6 +184,52 @@ def decision_class(action, tile_option_count):
     return "voluntary_choice"
 
 
+def raw_event_reward_by_seat(action, acting_player):
+    """Return undiscounted draw/pass shaping from each seat's perspective."""
+    rewards = [0.0, 0.0]
+    other_player = 1 - int(acting_player)
+    kind = action_kind(action)
+    if kind == "draw":
+        rewards[acting_player] = float(LEARNER_DRAW_PENALTY)
+        rewards[other_player] = float(OPPONENT_DRAW_REWARD)
+    elif kind == "pass":
+        rewards[acting_player] = float(LEARNER_PASS_PENALTY)
+        rewards[other_player] = float(OPPONENT_PASS_REWARD)
+    return rewards
+
+
+def raw_terminal_components(final_state):
+    """Return terminal outcome and final-pip terms separately for both seats."""
+    winner = int(final_state["winner"])
+    if winner not in (0, 1):
+        raise ValueError(f"Unexpected terminal winner {winner!r}")
+    outcome = [
+        float(TERMINAL_WIN_REWARD if seat == winner else TERMINAL_LOSS_REWARD)
+        for seat in range(2)
+    ]
+    pip_penalty = [
+        -float(FINAL_PIP_PENALTY)
+        * float(sum(int(tile[0]) + int(tile[1]) for tile in hand))
+        for hand in final_state["hands"]
+    ]
+    return outcome, pip_penalty
+
+
+def raw_reward_schema():
+    """Describe the fixed training reward constants captured by this analysis."""
+    return {
+        "terminal_win": float(TERMINAL_WIN_REWARD),
+        "terminal_loss": float(TERMINAL_LOSS_REWARD),
+        "final_pip_penalty_per_pip": -float(FINAL_PIP_PENALTY),
+        "self_draw": float(LEARNER_DRAW_PENALTY),
+        "opponent_draw": float(OPPONENT_DRAW_REWARD),
+        "self_pass": float(LEARNER_PASS_PENALTY),
+        "opponent_pass": float(OPPONENT_PASS_REWARD),
+        "temporal_discount_applied": False,
+        "alpha_mixing_applied": False,
+    }
+
+
 def play_timed_game(game_index, seed, pair, factory):
     """Play one full game and retain integer wall timings for every action."""
     game_started = time.perf_counter_ns()
@@ -230,7 +285,11 @@ def play_timed_game(game_index, seed, pair, factory):
         history.append({
             "state": state,
             "target_action": chosen_action,
+            "acting_player": current_player,
             "acting_agent": seats[current_player],
+            "raw_event_reward_by_seat": raw_event_reward_by_seat(
+                chosen_action, current_player
+            ),
             "legal_action_count": len(legal_actions),
             "tile_option_count": int(tile_option_count),
             "decision_class": decision_class(
@@ -250,6 +309,15 @@ def play_timed_game(game_index, seed, pair, factory):
 
     simulation_wall_us = elapsed_us(simulation_started)
     final_state = engine.to_dict()
+    terminal_outcome, final_pip_penalty = raw_terminal_components(final_state)
+    event_sum = [
+        float(sum(item["raw_event_reward_by_seat"][seat] for item in history))
+        for seat in range(2)
+    ]
+    total_raw = [
+        event_sum[seat] + terminal_outcome[seat] + final_pip_penalty[seat]
+        for seat in range(2)
+    ]
     return {
         "game": game_index + 1,
         "seed": seed,
@@ -258,6 +326,12 @@ def play_timed_game(game_index, seed, pair, factory):
         "initial_state": initial_state,
         "history": history,
         "final_state": final_state,
+        "raw_rewards": {
+            "event_sum_by_seat": event_sum,
+            "terminal_outcome_by_seat": terminal_outcome,
+            "final_pip_penalty_by_seat": final_pip_penalty,
+            "total_by_seat": total_raw,
+        },
         "timing_us": {
             "setup": setup_wall_us,
             "simulation": simulation_wall_us,
@@ -351,14 +425,24 @@ def selected_matchups(pattern):
 def write_manifest(args, pair_manifests, weights_metadata, run_wall_us):
     """Publish timing provenance only after every selected file succeeds."""
     manifest = {
-        "format_version": 1,
-        "purpose": "timed full games for every random/heuristic/neural pairing",
+        "format_version": 2,
+        "purpose": (
+            "timed full games plus undiscounted raw RL reward components for "
+            "every random/heuristic/neural pairing"
+        ),
         "games_per_matchup": int(args.games),
         "base_seed": int(args.base_seed),
         "matchup_order": [item["matchup"] for item in pair_manifests],
         "seat_policy": (
             "mixed matchups swap player 0/player 1 every game; self matchups "
             "have identical agent types in both seats"
+        ),
+        "raw_reward_schema": raw_reward_schema(),
+        "raw_reward_semantics": (
+            "Every action stores the immediate draw/pass shaping reward from both "
+            "seat perspectives. Terminal win/loss and final-pip penalty are stored "
+            "separately once per game. No gamma/event decay or alpha mixture is "
+            "applied anywhere in these analysis fields."
         ),
         "timing_scope": {
             "state": "DominoEngine._get_state",

@@ -55,6 +55,22 @@ PRE_CHAMPION_STATE_VERSIONS = (13,)
 PRE_PER_BUCKET_CHAMPION_STATE_VERSIONS = (14,)
 NUMBERED_CHECKPOINT_WEIGHT_RETENTION = 5
 
+# Persisted spellings of the three RL parameters renamed after these runs began.
+# Reading both forms keeps every checkpoint and run config resumable; see
+# ``training.canonical_run.identity_spelling`` for the identity side.
+RENAMED_PARAMETER_KEYS = {
+    "gamma_f": "gamma",
+    "reward_eta": "alpha",
+    "gamma_i": "event_reward_decay",
+}
+
+
+def _renamed(rl_config, current_name):
+    """Read one renamed RL parameter from a config written either way."""
+    if current_name in rl_config:
+        return rl_config[current_name]
+    return rl_config[RENAMED_PARAMETER_KEYS[current_name]]
+
 
 @dataclass(frozen=True)
 class RLTrainingConfiguration:
@@ -74,9 +90,9 @@ class RLTrainingConfiguration:
     entropy_coef: float
     use_value_head: bool
     value_coef: float
-    gamma: float
-    alpha: float
-    event_reward_decay: float
+    gamma_f: float
+    reward_eta: float
+    gamma_i: float
     normalize_advantages: bool
     weight_decay: float
     dropout_rate: float
@@ -109,6 +125,11 @@ class RLTrainingConfiguration:
         data.setdefault("run_configuration_sha256", None)
         data.setdefault("git_commit", None)
         data.setdefault("opponent_decision_restarts", False)
+        # Checkpoints written before the parameter rename spell these three the
+        # original way; a resume must keep working across the rename.
+        for current_name, original_name in RENAMED_PARAMETER_KEYS.items():
+            if current_name not in data and original_name in data:
+                data[current_name] = data[original_name]
         data["opponent_buckets"] = tuple(data["opponent_buckets"])
         configuration = cls(**{
             field.name: data[field.name]
@@ -156,9 +177,9 @@ class RLTrainingConfiguration:
             "entropy_coef": float(rl["entropy_coef"]),
             "use_value_head": bool(rl["use_value_head"]),
             "value_coef": float(rl["value_coef"]),
-            "gamma": float(rl["gamma"]),
-            "alpha": float(rl["alpha"]),
-            "event_reward_decay": float(rl["event_reward_decay"]),
+            "gamma_f": float(_renamed(rl, "gamma_f")),
+            "reward_eta": float(_renamed(rl, "reward_eta")),
+            "gamma_i": float(_renamed(rl, "gamma_i")),
             "normalize_advantages": bool(rl["normalize_advantages"]),
             "weight_decay": float(rl["weight_decay"]),
             "dropout_rate": float(rl["dropout_rate"]),
@@ -212,9 +233,17 @@ def _checkpoint_shape(network):
     return int(network.W1.shape[1]), int(output_layer.shape[0])
 
 
-def _checkpoint_matches_encoder(network, ruleset=DEFAULT_RULESET_NAME):
+def _checkpoint_matches_encoder(
+    network,
+    ruleset=DEFAULT_RULESET_NAME,
+    *,
+    use_opponent_suit_features=True,
+):
     """Return True when a loaded checkpoint matches the current encoder shape."""
-    encoder = DominoEncoder(ruleset)
+    encoder = DominoEncoder(
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    )
     input_size, output_size = _checkpoint_shape(network)
     return (
         input_size == encoder.vector_size
@@ -235,6 +264,7 @@ def _load_initial_network(
     dropout_rate=DISABLED_DROPOUT_RATE,
     ruleset=DEFAULT_RULESET_NAME,
     initialization_seed=None,
+    use_opponent_suit_features=True,
 ):
     """Load RL/SL weights or create a compatible random policy as fallback.
 
@@ -253,8 +283,15 @@ def _load_initial_network(
                 weight_decay=weight_decay,
                 dropout_rate=dropout_rate,
             )
-            encoder = DominoEncoder(ruleset)
-            if not _checkpoint_matches_encoder(network, ruleset):
+            encoder = DominoEncoder(
+                ruleset,
+                use_opponent_suit_features=use_opponent_suit_features,
+            )
+            if not _checkpoint_matches_encoder(
+                network,
+                ruleset,
+                use_opponent_suit_features=use_opponent_suit_features,
+            ):
                 input_size, output_size = _checkpoint_shape(network)
                 raise ValueError(
                     f"RL checkpoint {rl_weights_path} has shape "
@@ -285,7 +322,10 @@ def _load_initial_network(
         except FileNotFoundError:
             pass
 
-    encoder = DominoEncoder(ruleset)
+    encoder = DominoEncoder(
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    )
     try:
         network = PolicyNetwork.load_from_sl(
             sl_weights_path,
@@ -296,7 +336,10 @@ def _load_initial_network(
             dropout_rate=dropout_rate,
         )
     except FileNotFoundError:
-        architecture = architecture_for_ruleset(ruleset)
+        architecture = architecture_for_ruleset(
+            ruleset,
+            use_opponent_suit_features=use_opponent_suit_features,
+        )
         network = PolicyNetwork(
             input_size=architecture.input_size,
             output_size=architecture.output_size,
@@ -322,7 +365,11 @@ def _load_initial_network(
                 f"{architecture.hidden_sizes}."
             )
         return network
-    if not _checkpoint_matches_encoder(network, ruleset):
+    if not _checkpoint_matches_encoder(
+        network,
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    ):
         input_size, output_size = _checkpoint_shape(network)
         raise ValueError(
             f"SL checkpoint {sl_weights_path} has shape "

@@ -24,7 +24,10 @@ from diagnostics.worker_autotune import (
     MatchupSpec,
     autotune_diagnostic_workers,
 )
-from training.canonical_run import load_run_config
+from training.canonical_run import (
+    load_run_config,
+    run_config_uses_opponent_suit_features,
+)
 from training.run_artifacts import (
     periodic_diagnostics_path,
     rl_progress_csv_path,
@@ -796,6 +799,9 @@ def run_periodic_diagnostic(
         run_config = {}
     checkpoint_path = Path(checkpoint_path).resolve()
     ruleset_name = run_config.get("ruleset_name", DEFAULT_RULESET_NAME)
+    use_opponent_suit_features = run_config_uses_opponent_suit_features(
+        run_config
+    )
     diagnostic_seed = periodic_diagnostic_seed(seed)
     checkpoint_hash = file_sha256(checkpoint_path)
     identity = {
@@ -863,6 +869,7 @@ def run_periodic_diagnostic(
                 opponent="random",
                 weights=checkpoint_path,
                 ruleset_name=ruleset_name,
+                use_opponent_suit_features=use_opponent_suit_features,
             )
             tuning = autotune_diagnostic_workers(
                 matchups=(matchup,),
@@ -910,6 +917,7 @@ def run_periodic_diagnostic(
             precomputed_runtime_profile=precomputed_runtime_profile,
             save_game_records=False,
             ruleset=ruleset_name,
+            use_opponent_suit_features=use_opponent_suit_features,
         )
         add_runtime("pairwise_evaluation", section_started)
     finally:

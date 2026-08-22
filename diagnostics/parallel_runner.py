@@ -43,6 +43,7 @@ _WORKER_AGENT = None
 _WORKER_OPPONENT = None
 _WORKER_SUPPRESS_OUTPUT = True
 _WORKER_RULESET_NAME = DEFAULT_RULESET_NAME
+_WORKER_USE_OPPONENT_SUIT_FEATURES = True
 
 
 class DiagnosticMemoryPressure(RuntimeError):
@@ -189,18 +190,26 @@ def _worker_initializer(
     opponent_weights: str | None,
     suppress_agent_output: bool,
     ruleset_name: str,
+    use_opponent_suit_features: bool = True,
 ) -> None:
     """Construct one reusable agent pair inside each diagnostic worker."""
     global _WORKER_AGENT, _WORKER_OPPONENT, _WORKER_SUPPRESS_OUTPUT
-    global _WORKER_RULESET_NAME
+    global _WORKER_RULESET_NAME, _WORKER_USE_OPPONENT_SUIT_FEATURES
     ignore_parent_shutdown_signals()
     _force_cpu_environment()
     _WORKER_RULESET_NAME = resolve_ruleset(ruleset_name).name
-    _WORKER_AGENT = create_agent(agent_name, weights, _WORKER_RULESET_NAME)
+    _WORKER_USE_OPPONENT_SUIT_FEATURES = bool(use_opponent_suit_features)
+    _WORKER_AGENT = create_agent(
+        agent_name,
+        weights,
+        _WORKER_RULESET_NAME,
+        use_opponent_suit_features=_WORKER_USE_OPPONENT_SUIT_FEATURES,
+    )
     _WORKER_OPPONENT = create_agent(
         opponent_name,
         opponent_weights,
         _WORKER_RULESET_NAME,
+        use_opponent_suit_features=_WORKER_USE_OPPONENT_SUIT_FEATURES,
     )
     _WORKER_SUPPRESS_OUTPUT = suppress_agent_output
 
@@ -497,6 +506,7 @@ def evaluate_game_specs(
     progress_callback: Callable[[int, int], None] | None = None,
     safety: ParallelSafetyConfig | None = None,
     ruleset_name: str = DEFAULT_RULESET_NAME,
+    use_opponent_suit_features: bool = True,
 ) -> tuple[list[dict], ParallelRunInfo]:
     """Execute arbitrary absolute game ids, retaining work across pool fallbacks."""
     safety = safety or ParallelSafetyConfig()
@@ -539,6 +549,7 @@ def evaluate_game_specs(
         str(opponent_weights) if opponent_weights is not None else None,
         suppress_agent_output,
         ruleset_name,
+        use_opponent_suit_features,
     )
 
     def store(record: dict) -> None:

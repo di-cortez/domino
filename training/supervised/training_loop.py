@@ -126,8 +126,13 @@ def train_supervised(
     gpu_memory_reserve_mb=SUPERVISED_GPU_MEMORY_RESERVE_MB,
     seed=None,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
-    """Train a fresh policy and return scheduler, storage, batch, and memory data."""
+    """Train a fresh policy and return scheduler, storage, batch, and memory data.
+
+    ``use_opponent_suit_features=False`` trains on the ablated encoder layout,
+    which shortens both the encoded cache and the network's input layer.
+    """
     if epochs < 1:
         raise ValueError("epochs must be positive")
     ruleset = resolve_ruleset(ruleset)
@@ -139,13 +144,17 @@ def train_supervised(
     architecture = architecture_from_hidden_sizes(
         hidden_sizes,
         ruleset=ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
     )
     started = time.time()
     seed = int(seed) if seed is not None else fresh_root_seed()
     reporter = SupervisedTrainingReporter(quiet)
     reporter.startup()
 
-    encoder = DominoEncoder(ruleset)
+    encoder = DominoEncoder(
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    )
     dataset = load_or_build_dataset(
         dataset_file,
         encoder,

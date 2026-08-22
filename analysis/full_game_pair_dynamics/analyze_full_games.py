@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 from collections import Counter
 import hashlib
 import json
@@ -12,7 +13,7 @@ from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_OUTPUT = SCRIPT_DIR / "full_game_pair_analysis.json"
+DEFAULT_OUTPUT = SCRIPT_DIR / "full_game_pair_analysis.json.gz"
 MANIFEST_FILE = "full_game_pair_generation_manifest.json"
 AGENT_ORDER = ("random", "heuristic", "neural")
 MATCHUPS = (
@@ -37,6 +38,13 @@ DECISION_CLASSES = (
     "forced_tile",
     "voluntary_choice",
 )
+RAW_REWARD_COMPONENTS = (
+    "event_sum",
+    "terminal_outcome",
+    "final_pip_penalty",
+    "total",
+)
+RELATIVE_PROGRESS_BINS = 20
 PIPS = tuple(range(7))
 TILES = tuple((left, right) for left in PIPS for right in range(left, 7))
 TILE_INDEX = {tile: index for index, tile in enumerate(TILES)}
@@ -503,6 +511,329 @@ def action_kind(action):
     raise ValueError(f"Unknown action representation: {action!r}")
 
 
+def _quantile_from_sorted(values, fraction):
+    """Return a linearly interpolated quantile from sorted float samples."""
+    if not values:
+        return None
+    position = float(fraction) * (len(values) - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    return values[lower] + (values[upper] - values[lower]) * (position - lower)
+
+
+def summarize_values(values, *, include_value_counts=True):
+    """Return descriptive statistics for one finite float sample collection."""
+    if not values:
+        return None
+    finite = [float(value) for value in values]
+    if any(not math.isfinite(value) for value in finite):
+        raise ValueError("Raw reward samples contain NaN or infinity")
+    ordered = sorted(finite)
+    count = len(ordered)
+    total = sum(ordered)
+    mean = total / count
+    sum_squares = sum(value * value for value in ordered)
+    variance = max(0.0, sum_squares / count - mean * mean)
+    result = {
+        "count": count,
+        "sum": rounded(total),
+        "sum_squares": rounded(sum_squares),
+        "mean": rounded(mean),
+        "stddev": rounded(math.sqrt(variance)),
+        "min": rounded(ordered[0]),
+        "p25": rounded(_quantile_from_sorted(ordered, 0.25)),
+        "median": rounded(_quantile_from_sorted(ordered, 0.50)),
+        "p75": rounded(_quantile_from_sorted(ordered, 0.75)),
+        "p90": rounded(_quantile_from_sorted(ordered, 0.90)),
+        "p95": rounded(_quantile_from_sorted(ordered, 0.95)),
+        "p99": rounded(_quantile_from_sorted(ordered, 0.99)),
+        "max": rounded(ordered[-1]),
+    }
+    if include_value_counts:
+        counts = Counter(round(value, 10) for value in ordered)
+        if len(counts) <= 512:
+            result["value_counts"] = [
+                [rounded(value), int(count)]
+                for value, count in sorted(counts.items())
+            ]
+    return result
+
+
+def _new_component_samples():
+    return {component: [] for component in RAW_REWARD_COMPONENTS}
+
+
+def _new_agent_event_accumulator():
+    return {
+        "turns": 0,
+        "draws": 0,
+        "passes": 0,
+        "tile_plays": 0,
+        "self_event_reward": [],
+        "opponent_event_reward": [],
+    }
+
+
+def _new_reward_turn_accumulator():
+    return {
+        "actions": 0,
+        "ending_games": 0,
+        "event_sum_by_seat": [0.0, 0.0],
+        "terminal_sum_by_seat": [0.0, 0.0],
+        "pip_penalty_sum_by_seat": [0.0, 0.0],
+        "total_increment_sum_by_seat": [0.0, 0.0],
+        "cumulative_sum_by_seat": [0.0, 0.0],
+        "acting_event_sum": 0.0,
+        "opponent_event_sum": 0.0,
+        "cumulative_by_agent": {
+            agent: {"sum": 0.0, "count": 0} for agent in AGENT_ORDER
+        },
+    }
+
+
+def _new_progress_accumulator():
+    return {
+        "actions": 0,
+        "ending_games": 0,
+        "acting_event_sum": 0.0,
+        "opponent_event_sum": 0.0,
+        "acting_total_increment_sum": 0.0,
+        "cumulative_by_agent": {
+            agent: {"sum": 0.0, "count": 0} for agent in AGENT_ORDER
+        },
+    }
+
+
+def _summarize_component_samples(samples):
+    return {
+        component: summarize_values(values)
+        for component, values in samples.items()
+    }
+
+
+def analyze_reward_metrics(input_path, pair):
+    """Analyze undiscounted raw reward fields without reconstructing returns."""
+    expected_matchup = matchup_key(pair)
+    per_seat = {str(seat): _new_component_samples() for seat in range(2)}
+    per_agent = {agent: _new_component_samples() for agent in AGENT_ORDER}
+    by_outcome = {
+        "winner": _new_component_samples(),
+        "loser": _new_component_samples(),
+    }
+    events_by_agent = {
+        agent: _new_agent_event_accumulator() for agent in AGENT_ORDER
+    }
+    by_turn = []
+    progress_bins = [_new_progress_accumulator() for _ in range(RELATIVE_PROGRESS_BINS)]
+    game_count = 0
+
+    with input_path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            game_count += 1
+            game_number = int(record.get("game", line_number))
+            seats = validate_pair_record(record, expected_matchup, game_number)
+            raw = record.get("raw_rewards")
+            if not isinstance(raw, dict):
+                raise ValueError(
+                    f"Game {game_number}: missing raw_rewards; regenerate with the reward-aware generator"
+                )
+            components_by_seat = {
+                "event_sum": raw.get("event_sum_by_seat"),
+                "terminal_outcome": raw.get("terminal_outcome_by_seat"),
+                "final_pip_penalty": raw.get("final_pip_penalty_by_seat"),
+                "total": raw.get("total_by_seat"),
+            }
+            for component, values in components_by_seat.items():
+                if not isinstance(values, list) or len(values) != 2:
+                    raise ValueError(
+                        f"Game {game_number}: invalid raw reward component {component}"
+                    )
+                values = [float(value) for value in values]
+                components_by_seat[component] = values
+                for seat in range(2):
+                    per_seat[str(seat)][component].append(values[seat])
+                    per_agent[seats[seat]][component].append(values[seat])
+
+            winner = int(record["final_state"]["winner"])
+            for seat in range(2):
+                outcome = "winner" if seat == winner else "loser"
+                for component in RAW_REWARD_COMPONENTS:
+                    by_outcome[outcome][component].append(
+                        components_by_seat[component][seat]
+                    )
+
+            history = record["history"]
+            cumulative = [0.0, 0.0]
+            last_index = len(history) - 1
+            for turn, item in enumerate(history):
+                while len(by_turn) <= turn:
+                    by_turn.append(_new_reward_turn_accumulator())
+                row = by_turn[turn]
+                event = item.get("raw_event_reward_by_seat")
+                if not isinstance(event, list) or len(event) != 2:
+                    raise ValueError(
+                        f"Game {game_number}, turn {turn}: missing raw_event_reward_by_seat"
+                    )
+                event = [float(value) for value in event]
+                acting = int(item.get("acting_player", item["state"]["current_player"]))
+                if acting not in (0, 1):
+                    raise ValueError(f"Game {game_number}, turn {turn}: invalid acting player")
+                kind = action_kind(item["target_action"])
+                agent_event = events_by_agent[seats[acting]]
+                agent_event["turns"] += 1
+                agent_event[{"draw": "draws", "pass": "passes", "tile_play": "tile_plays"}[kind]] += 1
+                agent_event["self_event_reward"].append(event[acting])
+                agent_event["opponent_event_reward"].append(event[1 - acting])
+
+                increment = event.copy()
+                cumulative[0] += event[0]
+                cumulative[1] += event[1]
+                ending = turn == last_index
+                if ending:
+                    row["ending_games"] += 1
+                    for seat in range(2):
+                        terminal = components_by_seat["terminal_outcome"][seat]
+                        pip_penalty = components_by_seat["final_pip_penalty"][seat]
+                        row["terminal_sum_by_seat"][seat] += terminal
+                        row["pip_penalty_sum_by_seat"][seat] += pip_penalty
+                        increment[seat] += terminal + pip_penalty
+                        cumulative[seat] += terminal + pip_penalty
+
+                row["actions"] += 1
+                row["acting_event_sum"] += event[acting]
+                row["opponent_event_sum"] += event[1 - acting]
+                for seat in range(2):
+                    row["event_sum_by_seat"][seat] += event[seat]
+                    row["total_increment_sum_by_seat"][seat] += increment[seat]
+                    row["cumulative_sum_by_seat"][seat] += cumulative[seat]
+                    agent = seats[seat]
+                    row["cumulative_by_agent"][agent]["sum"] += cumulative[seat]
+                    row["cumulative_by_agent"][agent]["count"] += 1
+
+                progress = 1.0 if last_index <= 0 else turn / last_index
+                bin_index = min(
+                    RELATIVE_PROGRESS_BINS - 1,
+                    int(progress * RELATIVE_PROGRESS_BINS),
+                )
+                progress_row = progress_bins[bin_index]
+                progress_row["actions"] += 1
+                progress_row["ending_games"] += int(ending)
+                progress_row["acting_event_sum"] += event[acting]
+                progress_row["opponent_event_sum"] += event[1 - acting]
+                progress_row["acting_total_increment_sum"] += increment[acting]
+                for seat in range(2):
+                    agent = seats[seat]
+                    progress_row["cumulative_by_agent"][agent]["sum"] += cumulative[seat]
+                    progress_row["cumulative_by_agent"][agent]["count"] += 1
+
+    if game_count == 0:
+        raise ValueError(f"No games found in {input_path}")
+
+    turn_rows = []
+    for turn, row in enumerate(by_turn):
+        actions = row["actions"]
+        if not actions:
+            continue
+        turn_rows.append({
+            "turn": turn,
+            "games_with_action": actions,
+            "ending_games": row["ending_games"],
+            "mean_event_reward_by_seat": [
+                rounded(value / actions) for value in row["event_sum_by_seat"]
+            ],
+            "mean_acting_player_event_reward": rounded(row["acting_event_sum"] / actions),
+            "mean_opponent_event_reward": rounded(row["opponent_event_sum"] / actions),
+            "mean_terminal_outcome_by_seat": [
+                rounded(value / row["ending_games"]) if row["ending_games"] else 0.0
+                for value in row["terminal_sum_by_seat"]
+            ],
+            "mean_final_pip_penalty_by_seat": [
+                rounded(value / row["ending_games"]) if row["ending_games"] else 0.0
+                for value in row["pip_penalty_sum_by_seat"]
+            ],
+            "mean_total_reward_increment_by_seat": [
+                rounded(value / actions) for value in row["total_increment_sum_by_seat"]
+            ],
+            "mean_cumulative_raw_reward_by_seat": [
+                rounded(value / actions) for value in row["cumulative_sum_by_seat"]
+            ],
+            "mean_cumulative_raw_reward_by_agent": {
+                agent: rounded(values["sum"] / values["count"])
+                for agent, values in row["cumulative_by_agent"].items()
+                if values["count"]
+            },
+        })
+
+    progress_rows = []
+    for index, row in enumerate(progress_bins):
+        actions = row["actions"]
+        if not actions:
+            continue
+        progress_rows.append({
+            "bin": index,
+            "fraction_start": rounded(index / RELATIVE_PROGRESS_BINS),
+            "fraction_end": rounded((index + 1) / RELATIVE_PROGRESS_BINS),
+            "actions": actions,
+            "ending_games": row["ending_games"],
+            "mean_acting_player_event_reward": rounded(row["acting_event_sum"] / actions),
+            "mean_opponent_event_reward": rounded(row["opponent_event_sum"] / actions),
+            "mean_acting_player_total_increment": rounded(
+                row["acting_total_increment_sum"] / actions
+            ),
+            "mean_cumulative_raw_reward_by_agent": {
+                agent: rounded(values["sum"] / values["count"])
+                for agent, values in row["cumulative_by_agent"].items()
+                if values["count"]
+            },
+        })
+
+    event_summary = {}
+    for agent, values in events_by_agent.items():
+        if not values["turns"]:
+            continue
+        event_summary[agent] = {
+            "turns": values["turns"],
+            "draws": values["draws"],
+            "passes": values["passes"],
+            "tile_plays": values["tile_plays"],
+            "draw_rate_percent": percent(values["draws"], values["turns"]),
+            "pass_rate_percent": percent(values["passes"], values["turns"]),
+            "nonzero_event_rate_percent": percent(
+                values["draws"] + values["passes"], values["turns"]
+            ),
+            "self_event_reward_per_turn": summarize_values(
+                values["self_event_reward"]
+            ),
+            "opponent_event_reward_per_turn": summarize_values(
+                values["opponent_event_reward"]
+            ),
+        }
+
+    return {
+        "games": game_count,
+        "components": list(RAW_REWARD_COMPONENTS),
+        "per_game_by_seat": {
+            seat: _summarize_component_samples(samples)
+            for seat, samples in per_seat.items()
+        },
+        "per_game_by_agent": {
+            agent: _summarize_component_samples(samples)
+            for agent, samples in per_agent.items()
+            if samples["total"]
+        },
+        "per_game_by_outcome": {
+            outcome: _summarize_component_samples(samples)
+            for outcome, samples in by_outcome.items()
+        },
+        "event_actions_by_agent": event_summary,
+        "by_turn": turn_rows,
+        "by_relative_progress": progress_rows,
+    }
+
+
 def validate_serialized_state(game_number, state, hands, table, stock):
     """Check reconstruction against the public state saved in the JSONL."""
     if list(state["hand_sizes"]) != [len(hands[0]), len(hands[1])]:
@@ -893,13 +1224,16 @@ def analyze_all(input_dir, pairs, progress_every=1_000):
             global_accumulator,
             progress_every=progress_every,
         )
+        matchup_reports[key]["raw_reward_summary"] = analyze_reward_metrics(
+            source, pair
+        )
     manifest = load_generation_manifest(input_dir)
     validate_manifest_sources(manifest, matchup_reports)
     return {
-        "format_version": 2,
+        "format_version": 3,
         "purpose": (
-            "comparative state dynamics and wall timing for all full-game "
-            "random/heuristic/neural pairings"
+            "comparative state dynamics, wall timing, and undiscounted raw RL "
+            "reward components for all full-game random/heuristic/neural pairings"
         ),
         "games_total": sum(item["games"] for item in matchup_reports.values()),
         "matchup_order": list(matchup_reports),
@@ -925,6 +1259,12 @@ def analyze_all(input_dir, pairs, progress_every=1_000):
             "location_order": list(LOCATION_ORDER),
             "timing_component_order": list(TIMING_COMPONENTS),
             "decision_class_order": list(DECISION_CLASSES),
+            "raw_reward_semantics": (
+                "Raw rewards are copied from the generator before any temporal "
+                "discount/decay and before alpha mixing. Immediate draw/pass shaping, "
+                "terminal outcome, and final-pip penalty remain separate components."
+            ),
+            "relative_progress_bins": RELATIVE_PROGRESS_BINS,
             "tile_frequency_semantics": (
                 "tile_presence_counts counts states containing that unique "
                 "tile; tile_presence_percent divides it by observed_states."
@@ -943,11 +1283,17 @@ def analyze_all(input_dir, pairs, progress_every=1_000):
 
 
 def write_json_atomic(path, value, *, pretty):
-    """Write the compact report atomically beside its final destination."""
+    """Write the report atomically, gzip-compressing ``*.gz`` destinations."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as stream:
+        if path.suffix == ".gz":
+            stream_context = gzip.open(
+                temporary, "wt", encoding="utf-8", compresslevel=9
+            )
+        else:
+            stream_context = temporary.open("w", encoding="utf-8")
+        with stream_context as stream:
             if pretty:
                 json.dump(value, stream, ensure_ascii=False, indent=2)
             else:

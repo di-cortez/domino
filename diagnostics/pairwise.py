@@ -98,6 +98,7 @@ def evaluate_pair(
     effective_seed=None,
     return_run_info=False,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Run deterministically seeded games in one or more CPU-only workers."""
     agent_name = normalize_agent_name(agent_name)
@@ -135,6 +136,7 @@ def evaluate_pair(
         progress_callback=progress_callback,
         safety=safety_config or ParallelSafetyConfig(),
         ruleset_name=ruleset.name,
+        use_opponent_suit_features=use_opponent_suit_features,
     )
 
     metadata = {
@@ -350,6 +352,7 @@ def run_pairwise(
     display_output_dir=None,
     save_game_records=True,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Run one matchup and atomically write its requested artifacts.
 
@@ -462,6 +465,7 @@ def run_pairwise(
                 effective_seed=effective_seed,
                 return_run_info=True,
                 ruleset=ruleset,
+                use_opponent_suit_features=use_opponent_suit_features,
             )
         else:
             new_games = []

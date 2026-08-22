@@ -27,7 +27,7 @@ from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
 from training.datagen.parallel import generate_dataset_game
 from training.rl.rollout import (
-    DEFAULT_GAMMA,
+    DEFAULT_GAMMA_F,
     REWARD_SCHEMAS,
     _collect_steps_vs_snapshot,
 )
@@ -310,7 +310,7 @@ class HeadlessEngineStepTests(unittest.TestCase):
                 network,
                 network,
                 schema,
-                DEFAULT_GAMMA,
+                DEFAULT_GAMMA_F,
             )
 
         random.seed(54321)
@@ -319,7 +319,7 @@ class HeadlessEngineStepTests(unittest.TestCase):
             network,
             network,
             schema,
-            DEFAULT_GAMMA,
+            DEFAULT_GAMMA_F,
         )
 
         baseline_samples, baseline_events, baseline_winner, baseline_position = baseline

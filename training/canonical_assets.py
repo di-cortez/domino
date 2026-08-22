@@ -73,14 +73,30 @@ class ArtifactCheck:
         )
 
 
-def canonical_asset_paths(root, seed, ruleset=DEFAULT_RULESET_NAME):
-    """Return canonical dataset/cache/weights paths for one seed."""
+def canonical_asset_paths(
+    root,
+    seed,
+    ruleset=DEFAULT_RULESET_NAME,
+    *,
+    use_opponent_suit_features=True,
+):
+    """Return canonical dataset/cache/weights paths for one seed.
+
+    Reusable assets are addressed by seed, so two runs that differ only in the
+    ablation flag would otherwise fight over one supervised checkpoint: the
+    second would refuse to start on an encoder-size mismatch, and retraining it
+    would leave the first unresumable. The ablated regime therefore claims its
+    own suffix. The enabled path is byte-identical to the historical one, so no
+    existing artifact is renamed.
+    """
     root = Path(root)
     ruleset = resolve_ruleset(ruleset)
     ruleset_prefix = (
         "" if ruleset.name == DEFAULT_RULESET_NAME else f"{ruleset.name}_"
     )
     suffix = f"{ruleset_prefix}standard_seed{int(seed)}"
+    if not use_opponent_suit_features:
+        suffix = f"{suffix}_nosuit"
     dataset = root / "dataset" / f"supervised_dataset_{suffix}.jsonl"
     weights = root / "models" / f"domino_sl_{suffix}.npz"
     return CanonicalAssetPaths(
@@ -253,6 +269,7 @@ def inspect_canonical_dataset(
     dataset_games,
     generation_config,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Validate dataset metadata, structural versions, configuration, and hash."""
     if not paths.dataset.exists():
@@ -264,7 +281,10 @@ def inspect_canonical_dataset(
     if error:
         return ArtifactCheck(False, "incompatible", (error,), metadata, None)
     ruleset = resolve_ruleset(ruleset)
-    encoder = DominoEncoder(ruleset)
+    encoder = DominoEncoder(
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    )
     metadata = dict(metadata)
     if ruleset.name == DEFAULT_RULESET_NAME:
         metadata.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
@@ -311,10 +331,14 @@ def write_dataset_metadata(
     dataset_summary,
     generation_config,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Publish complete metadata for a newly generated canonical dataset."""
     ruleset = resolve_ruleset(ruleset)
-    encoder = DominoEncoder(ruleset)
+    encoder = DominoEncoder(
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    )
     digest = file_sha256(paths.dataset)
     metadata = {
         "format_version": FORMAT_VERSION,
@@ -364,6 +388,7 @@ def inspect_canonical_weights(
     training_config,
     architecture=DEFAULT_NETWORK_ARCHITECTURE,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Validate supervised weights, origin dataset, architecture, and hash."""
     if not paths.weights.exists():
@@ -375,7 +400,10 @@ def inspect_canonical_weights(
     if error:
         return ArtifactCheck(False, "incompatible", (error,), metadata, None)
     ruleset = resolve_ruleset(ruleset)
-    encoder = DominoEncoder(ruleset)
+    encoder = DominoEncoder(
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    )
     hyperparameters, randomization, execution = (
         _split_supervised_training_config(training_config)
     )
@@ -432,10 +460,14 @@ def write_weights_metadata(
     training_summary,
     architecture=DEFAULT_NETWORK_ARCHITECTURE,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Publish provenance and convergence metadata for supervised weights."""
     ruleset = resolve_ruleset(ruleset)
-    encoder = DominoEncoder(ruleset)
+    encoder = DominoEncoder(
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    )
     digest = file_sha256(paths.weights)
     hyperparameters, randomization, execution = (
         _split_supervised_training_config(training_config)

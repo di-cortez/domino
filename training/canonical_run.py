@@ -18,6 +18,7 @@ from training.rl.ppo import (
     REINFORCE_TRAINING_ALGORITHM,
 )
 from training.rl.resume import (
+    RENAMED_PARAMETER_KEYS,
     RLTrainingConfiguration,
     _validate_resume_configuration,
     load_resume_state,
@@ -120,6 +121,38 @@ def _validated_algorithm(algorithm):
     return algorithm
 
 
+def run_config_uses_opponent_suit_features(run_config):
+    """Return whether one saved run keeps the exact-model feature block.
+
+    The flag is recorded in ``locked_arguments`` rather than ``rl_config``:
+    ``rl_config`` is rebuilt from arguments on every invocation and compared as
+    an immutable key, so adding a member there would make every run created
+    before the flag existed unresumable. Reading it here keeps that reasoning in
+    one place instead of spreading argparse destination names across callers.
+    """
+    locked = (run_config or {}).get("locked_arguments") or {}
+    return not bool(locked.get("no_opponent_suit_features", False))
+
+
+def identity_spelling(mapping):
+    """Return one persisted mapping keyed by the original parameter names.
+
+    ``gamma``/``alpha``/``event_reward_decay`` were renamed to
+    ``gamma_f``/``reward_eta``/``gamma_i``. Nothing about the experiment changed,
+    so a run must keep the identity it already had and must stay resumable
+    across the rename. Both the hash payload and the immutability comparison
+    normalize to the original spelling rather than the current one, which makes
+    the rename invisible to run identity in both directions.
+    """
+    if not isinstance(mapping, dict):
+        return mapping
+    normalized = dict(mapping)
+    for current_name, original_name in RENAMED_PARAMETER_KEYS.items():
+        if current_name in normalized:
+            normalized[original_name] = normalized.pop(current_name)
+    return normalized
+
+
 def configuration_sha256(configuration):
     """Return the canonical SHA-256 for one path-independent run identity."""
     hash_version = int(configuration.get("config_hash_version", 3))
@@ -140,9 +173,11 @@ def configuration_sha256(configuration):
             "supervised_weights_sha256"
         ],
         "ppo_config": configuration["ppo_config"],
-        "rl_config": configuration["rl_config"],
+        "rl_config": identity_spelling(configuration["rl_config"]),
         "diagnostic_config": configuration["diagnostic_config"],
-        "locked_arguments": configuration.get("locked_arguments", {}),
+        "locked_arguments": identity_spelling(
+            configuration.get("locked_arguments", {})
+        ),
     }
     if hash_version >= 4:
         payload["ruleset_name"] = configuration["ruleset_name"]
@@ -290,11 +325,15 @@ def create_run_config(
     machine=None,
     network_architecture=DEFAULT_NETWORK_ARCHITECTURE,
     ruleset=DEFAULT_RULESET_NAME,
+    use_opponent_suit_features=True,
 ):
     """Atomically publish the immutable identity and requested target of a run."""
     algorithm = _validated_algorithm(algorithm)
     ruleset = resolve_ruleset(ruleset)
-    encoder = DominoEncoder(ruleset)
+    encoder = DominoEncoder(
+        ruleset,
+        use_opponent_suit_features=use_opponent_suit_features,
+    )
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     for child in (
@@ -355,9 +394,13 @@ def create_run_config(
             "machine",
         )
         differences = []
+        renamed_mappings = ("rl_config", "locked_arguments")
         for key in immutable_keys:
             existing_value = existing.get(key)
             requested_value = value.get(key)
+            if key in renamed_mappings:
+                existing_value = identity_spelling(existing_value)
+                requested_value = identity_spelling(requested_value)
             if existing_value != requested_value:
                 differences.append(key)
         target_changed = existing.get("target_rl_games") != value["target_rl_games"]

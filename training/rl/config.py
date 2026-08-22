@@ -22,9 +22,9 @@ from training.rl.ppo import (
     validate_ppo_max_epochs,
 )
 from training.rl.rollout import (
-    ALPHA,
-    DEFAULT_GAMMA,
-    EVENT_REWARD_DECAY,
+    REWARD_ETA,
+    DEFAULT_GAMMA_F,
+    GAMMA_I,
     REWARD_SCHEMAS,
 )
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
@@ -66,9 +66,12 @@ class RLTrainingOptions:
     dropout_rate: float = DISABLED_DROPOUT_RATE
     use_value_head: bool = False
     value_coef: float = VALUE_COEF
-    gamma: float = DEFAULT_GAMMA
-    alpha: float = ALPHA
-    event_reward_decay: float = EVENT_REWARD_DECAY
+    # False drops the trailing exact-model block from the encoder, shortening
+    # the policy input. Checkpoints are not interchangeable across this flag.
+    use_opponent_suit_features: bool = True
+    gamma_f: float = DEFAULT_GAMMA_F
+    reward_eta: float = REWARD_ETA
+    gamma_i: float = GAMMA_I
     normalize_advantages: bool | None = DEFAULT_NORMALIZE_ADVANTAGES
     seed: int | None = None
     ppo_max_epochs: int = DEFAULT_PPO_MAX_EPOCHS
@@ -213,15 +216,15 @@ def resolve_training_options(training, resources, execution):
     difficulty_weight = float(training.difficulty_weight)
     if not 0.0 <= difficulty_weight <= 1.0:
         raise ValueError("difficulty_weight must be between 0 and 1")
-    gamma = float(training.gamma)
-    if not 0.0 <= gamma <= 1.0:
-        raise ValueError("gamma must be between 0 and 1")
-    alpha = float(training.alpha)
-    if not 0.0 <= alpha <= 1.0:
-        raise ValueError("alpha must be between 0 and 1")
-    event_reward_decay = float(training.event_reward_decay)
-    if not 0.0 <= event_reward_decay <= 1.0:
-        raise ValueError("event_reward_decay must be between 0 and 1")
+    gamma_f = float(training.gamma_f)
+    if not 0.0 <= gamma_f <= 1.0:
+        raise ValueError("gamma_f must be between 0 and 1")
+    reward_eta = float(training.reward_eta)
+    if not 0.0 <= reward_eta <= 1.0:
+        raise ValueError("reward_eta must be between 0 and 1")
+    gamma_i = float(training.gamma_i)
+    if not 0.0 <= gamma_i <= 1.0:
+        raise ValueError("gamma_i must be between 0 and 1")
     if float(training.value_coef) < 0:
         raise ValueError("value_coef must be non-negative")
     if float(training.weight_decay) < 0:
@@ -255,9 +258,9 @@ def resolve_training_options(training, resources, execution):
         opponent_buckets=opponent_buckets,
         difficulty_weight=difficulty_weight,
         opponent_decision_restarts=bool(training.opponent_decision_restarts),
-        gamma=gamma,
-        alpha=alpha,
-        event_reward_decay=event_reward_decay,
+        gamma_f=gamma_f,
+        reward_eta=reward_eta,
+        gamma_i=gamma_i,
         normalize_advantages=normalize_advantages,
         ppo_max_epochs=ppo_max_epochs,
     )
@@ -280,7 +283,7 @@ def resolve_training_options(training, resources, execution):
         algorithm=algorithm,
         schema={
             **REWARD_SCHEMAS,
-            "event_decay": event_reward_decay,
-            "alpha": alpha,
+            "gamma_i": gamma_i,
+            "reward_eta": reward_eta,
         },
     )

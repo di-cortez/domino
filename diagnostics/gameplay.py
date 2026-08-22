@@ -73,8 +73,15 @@ def create_agent(
     agent_name,
     weights_path=None,
     ruleset=DEFAULT_RULESET_NAME,
+    *,
+    use_opponent_suit_features=True,
 ):
-    """Create an agent by name, importing checkpoint-backed classes only when used."""
+    """Create an agent by name, importing checkpoint-backed classes only when used.
+
+    ``use_opponent_suit_features`` reaches only the checkpoint-backed agents. A
+    network must be evaluated under the encoding it trained with, and the
+    heuristic reference opponent deliberately keeps its exact model either way.
+    """
     agent_name = normalize_agent_name(agent_name)
     ruleset = resolve_ruleset(ruleset)
 
@@ -87,6 +94,7 @@ def create_agent(
             mode="evaluation",
             use_value_head=_checkpoint_has_value_head(path),
             ruleset=ruleset,
+            use_opponent_suit_features=use_opponent_suit_features,
         )
     if agent_name == "neural":
         from agents.neural_agent import NeuralAgent
@@ -94,6 +102,7 @@ def create_agent(
         return NeuralAgent.load(
             str(resolve_weights_path("neural", weights_path, ruleset)),
             ruleset=ruleset,
+            use_opponent_suit_features=use_opponent_suit_features,
         )
     if agent_name == "heuristic":
         from agents.heuristic_agent import StrategicAgent

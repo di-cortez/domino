@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 from pathlib import Path
 
@@ -14,7 +15,7 @@ import numpy as np
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_INPUT = SCRIPT_DIR / "full_game_pair_analysis.json"
+DEFAULT_INPUT = SCRIPT_DIR / "full_game_pair_analysis.json.gz"
 MATCHUP_LABELS = {
     "random_vs_random": "Random × random",
     "random_vs_heuristic": "Random × heuristic",
@@ -83,7 +84,10 @@ PIP_COLORS = plt.get_cmap("tab10")(np.linspace(0, 1, 7))
 
 
 def load_report(path):
-    """Load one compact comparative analysis report."""
+    """Load one compact comparative analysis report, including gzip output."""
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8") as stream:
+            return json.load(stream)
     with path.open(encoding="utf-8") as stream:
         return json.load(stream)
 
@@ -709,6 +713,193 @@ def plot_turn_timing_heatmaps(data, output_dir, dpi):
     return save_figure(fig, output_dir, "13_turn_timing_heatmaps.png", dpi)
 
 
+def _reward_agents(matchup):
+    """Return stable agent names with per-game raw-reward summaries."""
+    summaries = matchup["raw_reward_summary"]["per_game_by_agent"]
+    return [agent for agent in AGENT_LABELS if agent in summaries]
+
+
+def plot_raw_reward_components(data, output_dir, dpi):
+    """Compare mean raw local, terminal, and pip components by matchup/agent."""
+    rows = ordered_matchups(data)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    components = (
+        ("event_sum", "Local draw/pass"),
+        ("terminal_outcome", "Terminal outcome"),
+        ("final_pip_penalty", "Final pip penalty"),
+    )
+    widths = 0.22
+    for axis, (key, matchup) in zip(axes.flat, rows):
+        agents = _reward_agents(matchup)
+        x = np.arange(len(agents), dtype=float)
+        summaries = matchup["raw_reward_summary"]["per_game_by_agent"]
+        for index, (component, label) in enumerate(components):
+            means = [summaries[agent][component]["mean"] for agent in agents]
+            offset = (index - 1) * widths
+            axis.bar(x + offset, means, width=widths, label=label)
+        axis.axhline(0.0, linewidth=0.8, color="black")
+        axis.set_xticks(x)
+        axis.set_xticklabels([AGENT_LABELS[agent] for agent in agents])
+        axis.set_title(MATCHUP_LABELS[key])
+        axis.set_ylabel("Mean raw reward / game")
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False)
+    fig.suptitle("Undiscounted raw reward components", y=1.03)
+    return save_figure(fig, output_dir, "14_raw_reward_components.png", dpi)
+
+
+def plot_raw_total_reward(data, output_dir, dpi):
+    """Show mean and standard deviation of total raw reward by matchup/agent."""
+    rows = ordered_matchups(data)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    for axis, (key, matchup) in zip(axes.flat, rows):
+        agents = _reward_agents(matchup)
+        summaries = matchup["raw_reward_summary"]["per_game_by_agent"]
+        means = np.asarray([summaries[agent]["total"]["mean"] for agent in agents])
+        stds = np.asarray([summaries[agent]["total"]["stddev"] for agent in agents])
+        x = np.arange(len(agents))
+        colors = [AGENT_COLORS[agent] for agent in agents]
+        axis.bar(x, means, yerr=stds, capsize=3, color=colors)
+        axis.axhline(0.0, linewidth=0.8, color="black")
+        axis.set_xticks(x)
+        axis.set_xticklabels([AGENT_LABELS[agent] for agent in agents])
+        axis.set_title(MATCHUP_LABELS[key])
+        axis.set_ylabel("Total raw reward / game")
+    fig.suptitle("Total undiscounted raw reward (mean ± SD)")
+    return save_figure(fig, output_dir, "15_raw_total_reward.png", dpi)
+
+
+def plot_event_reward_by_turn(data, output_dir, dpi):
+    """Plot immediate raw event reward as a function of absolute engine turn."""
+    rows = ordered_matchups(data)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    for axis, (key, matchup) in zip(axes.flat, rows):
+        turns = matchup["raw_reward_summary"]["by_turn"]
+        x = np.asarray([row["turn"] for row in turns])
+        acting = np.asarray([row["mean_acting_player_event_reward"] for row in turns])
+        opponent = np.asarray([row["mean_opponent_event_reward"] for row in turns])
+        axis.plot(x, acting, label="Acting player")
+        axis.plot(x, opponent, label="Opponent")
+        axis.axhline(0.0, linewidth=0.8, color="black")
+        axis.set_title(MATCHUP_LABELS[key])
+        axis.set_xlabel("Engine turn")
+        axis.set_ylabel("Mean immediate raw reward")
+    handles, labels = axes.flat[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False)
+    fig.suptitle("Immediate draw/pass reward along games", y=1.03)
+    return save_figure(fig, output_dir, "16_event_reward_by_turn.png", dpi)
+
+
+def plot_cumulative_raw_reward_by_turn(data, output_dir, dpi):
+    """Plot mean cumulative raw reward, including terminal terms at game end."""
+    rows = ordered_matchups(data)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    for axis, (key, matchup) in zip(axes.flat, rows):
+        turns = matchup["raw_reward_summary"]["by_turn"]
+        x = np.asarray([row["turn"] for row in turns])
+        for agent in _reward_agents(matchup):
+            y = np.asarray([
+                row["mean_cumulative_raw_reward_by_agent"].get(agent, np.nan)
+                for row in turns
+            ])
+            axis.plot(x, y, label=AGENT_LABELS[agent], color=AGENT_COLORS[agent])
+        axis.axhline(0.0, linewidth=0.8, color="black")
+        axis.set_title(MATCHUP_LABELS[key])
+        axis.set_xlabel("Engine turn")
+        axis.set_ylabel("Mean cumulative raw reward")
+    handles = [
+        plt.Line2D([0], [0], color=AGENT_COLORS[a], label=AGENT_LABELS[a])
+        for a in AGENT_LABELS
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False)
+    fig.suptitle("Cumulative raw reward along games", y=1.03)
+    return save_figure(fig, output_dir, "17_cumulative_raw_reward_by_turn.png", dpi)
+
+
+def plot_draw_pass_rates(data, output_dir, dpi):
+    """Aggregate draw/pass event rates for each agent across all six matchups."""
+    totals = {
+        agent: {"turns": 0, "draws": 0, "passes": 0}
+        for agent in AGENT_LABELS
+    }
+    for _key, matchup in ordered_matchups(data):
+        event = matchup["raw_reward_summary"]["event_actions_by_agent"]
+        for agent, row in event.items():
+            totals[agent]["turns"] += int(row["turns"])
+            totals[agent]["draws"] += int(row["draws"])
+            totals[agent]["passes"] += int(row["passes"])
+    agents = list(AGENT_LABELS)
+    x = np.arange(len(agents), dtype=float)
+    width = 0.25
+    draw = [100.0 * totals[a]["draws"] / totals[a]["turns"] for a in agents]
+    passed = [100.0 * totals[a]["passes"] / totals[a]["turns"] for a in agents]
+    nonzero = [draw[i] + passed[i] for i in range(len(agents))]
+    fig, axis = plt.subplots(figsize=(9, 5))
+    axis.bar(x - width, draw, width=width, label="Draw")
+    axis.bar(x, passed, width=width, label="Pass")
+    axis.bar(x + width, nonzero, width=width, label="Draw or pass")
+    axis.set_xticks(x)
+    axis.set_xticklabels([AGENT_LABELS[a] for a in agents])
+    axis.set_ylabel("Percent of acting turns")
+    axis.set_title("Raw-reward event frequency by agent")
+    axis.legend(frameon=False)
+    fig.tight_layout()
+    return save_figure(fig, output_dir, "18_draw_pass_rates.png", dpi)
+
+
+def plot_winner_loser_raw_reward(data, output_dir, dpi):
+    """Compare complete raw reward of winners and losers in each matchup."""
+    rows = ordered_matchups(data)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    for axis, (key, matchup) in zip(axes.flat, rows):
+        outcomes = matchup["raw_reward_summary"]["per_game_by_outcome"]
+        labels = ["Winner", "Loser"]
+        stats = [outcomes["winner"]["total"], outcomes["loser"]["total"]]
+        means = np.asarray([row["mean"] for row in stats])
+        lower = means - np.asarray([row["p25"] for row in stats])
+        upper = np.asarray([row["p75"] for row in stats]) - means
+        axis.bar(np.arange(2), means, yerr=np.vstack([lower, upper]), capsize=3)
+        axis.axhline(0.0, linewidth=0.8, color="black")
+        axis.set_xticks(np.arange(2))
+        axis.set_xticklabels(labels)
+        axis.set_title(MATCHUP_LABELS[key])
+        axis.set_ylabel("Total raw reward / game")
+    fig.suptitle("Winner vs loser total raw reward (mean, IQR error bars)")
+    return save_figure(fig, output_dir, "19_winner_loser_raw_reward.png", dpi)
+
+
+def plot_relative_progress_reward(data, output_dir, dpi):
+    """Normalize game length and compare cumulative reward trajectories."""
+    rows = ordered_matchups(data)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    for axis, (key, matchup) in zip(axes.flat, rows):
+        bins = matchup["raw_reward_summary"]["by_relative_progress"]
+        x = np.asarray([
+            0.5 * (row["fraction_start"] + row["fraction_end"])
+            for row in bins
+        ])
+        for agent in _reward_agents(matchup):
+            y = np.asarray([
+                row["mean_cumulative_raw_reward_by_agent"].get(agent, np.nan)
+                for row in bins
+            ])
+            axis.plot(x, y, marker="o", markersize=3,
+                      label=AGENT_LABELS[agent], color=AGENT_COLORS[agent])
+        axis.axhline(0.0, linewidth=0.8, color="black")
+        axis.set_xlim(0.0, 1.0)
+        axis.set_title(MATCHUP_LABELS[key])
+        axis.set_xlabel("Fraction of game completed")
+        axis.set_ylabel("Mean cumulative raw reward")
+    handles = [
+        plt.Line2D([0], [0], color=AGENT_COLORS[a], label=AGENT_LABELS[a])
+        for a in AGENT_LABELS
+    ]
+    fig.legend(handles=handles, loc="upper center", ncol=3, frameon=False)
+    fig.suptitle("Cumulative raw reward by normalized game progress", y=1.03)
+    return save_figure(fig, output_dir, "20_relative_progress_raw_reward.png", dpi)
+
+
+
 def generate_plots(data, output_dir, dpi):
     """Generate all comparative state and timing figures."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -731,6 +922,13 @@ def generate_plots(data, output_dir, dpi):
         plot_agent_time_by_turn(data, output_dir, dpi),
         plot_decision_classes(data, output_dir, dpi),
         plot_turn_timing_heatmaps(data, output_dir, dpi),
+        plot_raw_reward_components(data, output_dir, dpi),
+        plot_raw_total_reward(data, output_dir, dpi),
+        plot_event_reward_by_turn(data, output_dir, dpi),
+        plot_cumulative_raw_reward_by_turn(data, output_dir, dpi),
+        plot_draw_pass_rates(data, output_dir, dpi),
+        plot_winner_loser_raw_reward(data, output_dir, dpi),
+        plot_relative_progress_reward(data, output_dir, dpi),
     ]
 
 

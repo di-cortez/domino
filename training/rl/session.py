@@ -141,9 +141,9 @@ def _resume_inputs(training, resources, execution, reporter):
             dropout_rate=saved.dropout_rate,
             use_value_head=saved.use_value_head,
             value_coef=saved.value_coef,
-            gamma=saved.gamma,
-            alpha=saved.alpha,
-            event_reward_decay=saved.event_reward_decay,
+            gamma_f=saved.gamma_f,
+            reward_eta=saved.reward_eta,
+            gamma_i=saved.gamma_i,
             normalize_advantages=saved.normalize_advantages,
             seed=saved.effective_seed,
             ppo_max_epochs=saved.ppo_max_epochs,
@@ -253,9 +253,9 @@ def _resume_configuration(
         "entropy_coef": float(training.entropy_coef),
         "use_value_head": bool(training.use_value_head),
         "value_coef": float(training.value_coef),
-        "gamma": float(training.gamma),
-        "alpha": float(training.alpha),
-        "event_reward_decay": float(training.event_reward_decay),
+        "gamma_f": float(training.gamma_f),
+        "reward_eta": float(training.reward_eta),
+        "gamma_i": float(training.gamma_i),
         "normalize_advantages": bool(training.normalize_advantages),
         "weight_decay": float(training.weight_decay),
         "dropout_rate": float(training.dropout_rate),
@@ -364,6 +364,7 @@ def prepare_training_session(training=None, resources=None, execution=None):
         dropout_rate=training.dropout_rate,
         ruleset=training.ruleset_name,
         initialization_seed=effective_seed,
+        use_opponent_suit_features=training.use_opponent_suit_features,
     )
     if inputs.metadata is not None:
         network.load_optimizer_state_dict(inputs.metadata["optimizer_state"])
@@ -400,8 +401,9 @@ def prepare_training_session(training=None, resources=None, execution=None):
         opponent_buckets=training.opponent_buckets,
         difficulty_weight=training.difficulty_weight,
         schema=resolved.schema,
-        gamma=training.gamma,
+        gamma_f=training.gamma_f,
         ruleset_name=training.ruleset_name,
+        use_opponent_suit_features=training.use_opponent_suit_features,
         safety=resources.safety_config,
         pool_state=inputs.pool_state,
         pool_weights=inputs.pool_weights,
@@ -458,9 +460,10 @@ def prepare_training_session(training=None, resources=None, execution=None):
         network,
         opponent_buckets=training.opponent_buckets,
         schema=resolved.schema,
-        gamma=training.gamma,
+        gamma_f=training.gamma_f,
         ruleset_name=training.ruleset_name,
         safety=resources.safety_config,
+        use_opponent_suit_features=training.use_opponent_suit_features,
     )
     if inputs.pool_state is not None:
         runner.restore_opponent_pool(

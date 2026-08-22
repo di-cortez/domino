@@ -109,8 +109,9 @@ _WORKER_SHARED_HANDLES = []
 _WORKER_CURRENT_POLICY = None
 _WORKER_POOL_POLICIES = ()
 _WORKER_SCHEMA = None
-_WORKER_GAMMA = None
+_WORKER_GAMMA_F = None
 _WORKER_RULESET_NAME = DEFAULT_RULESET_NAME
+_WORKER_USE_OPPONENT_SUIT_FEATURES = True
 
 
 def _attach_policy(descriptor, segment):
@@ -139,14 +140,16 @@ def _worker_initializer(
     current_descriptor,
     pool_descriptors,
     schema,
-    gamma,
+    gamma_f,
     ruleset_name,
+    use_opponent_suit_features=True,
 ):
     """Attach every reusable policy view inside one CPU-only worker."""
     global _WORKER_SHARED_HANDLES
     global _WORKER_CURRENT_POLICY, _WORKER_POOL_POLICIES
-    global _WORKER_SCHEMA, _WORKER_GAMMA
+    global _WORKER_SCHEMA, _WORKER_GAMMA_F
     global _WORKER_RULESET_NAME
+    global _WORKER_USE_OPPONENT_SUIT_FEATURES
 
     ignore_parent_shutdown_signals()
     # The environment is already set before spawn; repeating it here protects
@@ -167,8 +170,9 @@ def _worker_initializer(
     _WORKER_CURRENT_POLICY = current
     _WORKER_POOL_POLICIES = tuple(pool_policies)
     _WORKER_SCHEMA = dict(schema)
-    _WORKER_GAMMA = float(gamma)
+    _WORKER_GAMMA_F = float(gamma_f)
     _WORKER_RULESET_NAME = resolve_ruleset(ruleset_name).name
+    _WORKER_USE_OPPONENT_SUIT_FEATURES = bool(use_opponent_suit_features)
 
 
 def _event_stats_dict(event_stats):
@@ -233,9 +237,10 @@ def _worker_collect_rollouts(job):
             assignment.opponent_kind,
             opponent_network,
             _WORKER_SCHEMA,
-            _WORKER_GAMMA,
+            _WORKER_GAMMA_F,
             runtime_profile=game_profile,
             ruleset_name=_WORKER_RULESET_NAME,
+            use_opponent_suit_features=_WORKER_USE_OPPONENT_SUIT_FEATURES,
             capture_opponent_decision_restarts=capture_restarts,
         )
         samples, events, winner, learner_position = collected[:4]
@@ -315,6 +320,7 @@ def _worker_evaluate_champion_games(job):
                 target_kind=spec.target_kind,
                 current_learner_policy=_WORKER_CURRENT_POLICY,
                 ruleset_name=_WORKER_RULESET_NAME,
+                use_opponent_suit_features=_WORKER_USE_OPPONENT_SUIT_FEATURES,
             )),
         })
     return {
@@ -355,8 +361,9 @@ def _worker_collect_restarts(job):
             opponent_network,
             restart,
             _WORKER_SCHEMA,
-            _WORKER_GAMMA,
+            _WORKER_GAMMA_F,
             ruleset_name=_WORKER_RULESET_NAME,
+            use_opponent_suit_features=_WORKER_USE_OPPONENT_SUIT_FEATURES,
         )
         results.append({
             "restart_index": int(restart.restart_index),
@@ -415,14 +422,16 @@ class RLRolloutRunner:
         *,
         opponent_buckets,
         schema,
-        gamma,
+        gamma_f,
         ruleset_name=DEFAULT_RULESET_NAME,
         safety=None,
+        use_opponent_suit_features=True,
     ):
         self.safety = safety or ParallelSafetyConfig()
         self.schema = dict(schema)
-        self.gamma = float(gamma)
+        self.gamma_f = float(gamma_f)
         self.ruleset_name = resolve_ruleset(ruleset_name).name
+        self.use_opponent_suit_features = bool(use_opponent_suit_features)
         self.bank = SharedPolicyBank(
             network,
             unique_neural_capacity(opponent_buckets),
@@ -534,8 +543,9 @@ class RLRolloutRunner:
                         self.bank.current_descriptor,
                         self.bank.opponent_descriptors,
                         self.schema,
-                        self.gamma,
+                        self.gamma_f,
                         self.ruleset_name,
+                        self.use_opponent_suit_features,
                     ),
                 )
                 # ProcessPoolExecutor starts children lazily. Submitting one

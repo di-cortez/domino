@@ -44,9 +44,22 @@ class EncoderLayout:
     vector_size: int
 
     @classmethod
-    def for_ruleset(cls, ruleset: DominoRuleset) -> "EncoderLayout":
+    def for_ruleset(
+        cls,
+        ruleset: DominoRuleset,
+        *,
+        use_opponent_suit_features: bool = True,
+    ) -> "EncoderLayout":
+        """Return the offsets for one ruleset, with or without the suit block.
+
+        The exact-model block is the last one in the layout, so dropping it
+        shortens the vector without moving any other offset. When it is absent
+        ``opponent_suit_probability`` equals ``vector_size``, marking an empty
+        trailing block instead of forcing every consumer to handle ``None``.
+        """
         tile_count = ruleset.tile_count
         suit_count = ruleset.pip_count
+        suit_blocks = 3 if use_opponent_suit_features else 2
         return cls(
             hand=0,
             played=tile_count,
@@ -60,7 +73,7 @@ class EncoderLayout:
             draw_count=5 * tile_count + 2 * suit_count + 3,
             pass_count=5 * tile_count + 2 * suit_count + 5,
             opponent_suit_probability=5 * tile_count + 2 * suit_count + 7,
-            vector_size=5 * tile_count + 3 * suit_count + 7,
+            vector_size=5 * tile_count + suit_blocks * suit_count + 7,
         )
 
 
@@ -78,6 +91,11 @@ class DominoEncoder:
     The historical double-six layout is therefore 168 features and 56 actions;
     its class-level size/offset aliases remain available for legacy callers.
     Generic code must use the ruleset-local instance attributes.
+
+    ``use_opponent_suit_features=False`` drops the trailing exact-model block,
+    giving ``5T + 2S + 7`` features and leaving the action space untouched. The
+    exact opponent model is then never consulted during encoding, even when a
+    caller already stored its output in the state. Double-six shrinks to 161.
     """
 
     # Legacy double-six aliases. Generic code must use the instance attributes
@@ -99,9 +117,18 @@ class DominoEncoder:
     PASS_COUNT_OFFSET = 159
     OPPONENT_SUIT_PROBABILITY_OFFSET = 161
 
-    def __init__(self, ruleset=DEFAULT_RULESET_NAME):
+    def __init__(
+        self,
+        ruleset=DEFAULT_RULESET_NAME,
+        *,
+        use_opponent_suit_features=True,
+    ):
         self.ruleset = resolve_ruleset(ruleset)
-        self.layout = EncoderLayout.for_ruleset(self.ruleset)
+        self.use_opponent_suit_features = bool(use_opponent_suit_features)
+        self.layout = EncoderLayout.for_ruleset(
+            self.ruleset,
+            use_opponent_suit_features=self.use_opponent_suit_features,
+        )
         self.all_tiles = list(self.ruleset.all_tiles)
         self.tile_to_index = {
             tile: index for index, tile in enumerate(self.all_tiles)
@@ -197,19 +224,24 @@ class DominoEncoder:
             )
             vector[self.PASS_COUNT_OFFSET + i, 0] = pass_counts[i] / self.MAX_TURN
 
-        # Persistent agents place the exact result in the state immediately
-        # before encoding. One-shot callers still reconstruct it from history.
-        probabilities = state.get("opponent_suit_probabilities")
-        if probabilities is None:
-            probabilities = compute_opponent_suit_probabilities(state)
-        if len(probabilities) != self.ruleset.pip_count:
-            raise ValueError(
-                "opponent_suit_probabilities has "
-                f"{len(probabilities)} values, expected "
-                f"{self.ruleset.pip_count} for {self.ruleset.name}."
-            )
-        for suit, value in enumerate(probabilities):
-            vector[self.OPPONENT_SUIT_PROBABILITY_OFFSET + suit, 0] = value
+        # Ablated layouts stop here: the vector has no trailing suit block, and
+        # a value already stored in the state is ignored rather than read, so
+        # the exact model never influences the features it is meant to be
+        # measured against.
+        if self.use_opponent_suit_features:
+            # Persistent agents place the exact result in the state immediately
+            # before encoding. One-shot callers still reconstruct it from history.
+            probabilities = state.get("opponent_suit_probabilities")
+            if probabilities is None:
+                probabilities = compute_opponent_suit_probabilities(state)
+            if len(probabilities) != self.ruleset.pip_count:
+                raise ValueError(
+                    "opponent_suit_probabilities has "
+                    f"{len(probabilities)} values, expected "
+                    f"{self.ruleset.pip_count} for {self.ruleset.name}."
+                )
+            for suit, value in enumerate(probabilities):
+                vector[self.OPPONENT_SUIT_PROBABILITY_OFFSET + suit, 0] = value
 
         return vector
 

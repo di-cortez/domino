@@ -246,7 +246,7 @@ def test_parallel_restart_results_are_invariant_to_worker_count():
             network,
             opponent_buckets=("random",),
             schema=dict(REWARD_SCHEMAS),
-            gamma=1.0,
+            gamma_f=1.0,
             ruleset_name=RULESET,
             safety=safety,
         )
@@ -301,7 +301,7 @@ def test_neural_restarts_reuse_the_source_opponent_identity_and_bank_slot():
         network,
         opponent_buckets=("recent",),
         schema=dict(REWARD_SCHEMAS),
-        gamma=1.0,
+        gamma_f=1.0,
         ruleset_name=RULESET,
         safety=ParallelSafetyConfig(
             memory_reserve_mb=0,

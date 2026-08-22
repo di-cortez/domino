@@ -31,7 +31,7 @@ from training.rl.parallel import (
     DEFAULT_RL_WORKERS,
     worker_count as parse_rl_worker_count,
 )
-from training.rl.rollout import ALPHA, DEFAULT_GAMMA, EVENT_REWARD_DECAY
+from training.rl.rollout import REWARD_ETA, DEFAULT_GAMMA_F, GAMMA_I
 from training.rl.resume import load_resume_state
 from training.utils.cli_args import add_regularization_arguments, positive_int
 from utils.runtime_status import format_duration
@@ -68,9 +68,9 @@ def unit_interval_parser(name):
 
 
 parse_difficulty_weight = unit_interval_parser("difficulty weight")
-parse_gamma = unit_interval_parser("gamma")
-parse_alpha = unit_interval_parser("alpha")
-parse_event_reward_decay = unit_interval_parser("event reward decay")
+parse_gamma_f = unit_interval_parser("gamma_f")
+parse_reward_eta = unit_interval_parser("reward_eta")
+parse_gamma_i = unit_interval_parser("gamma_i")
 
 
 def add_optional_rl_arguments(
@@ -223,26 +223,37 @@ def add_optional_rl_arguments(
     )
     group.add_argument("--value-coef", type=float, default=VALUE_COEF)
     group.add_argument(
-        "--gamma",
-        type=parse_gamma,
-        default=DEFAULT_GAMMA,
+        "--no-opponent-suit-features",
+        action="store_true",
+        help=(
+            "Drop the exact opponent model's suit-presence block from the "
+            "policy input, shortening it by one suit width (double-six: 168 "
+            "to 161). The heuristic opponent keeps using the model to decide. "
+            "Checkpoints and supervised assets are not interchangeable with "
+            "runs that keep the block."
+        ),
+    )
+    group.add_argument(
+        "--gamma-f",
+        type=parse_gamma_f,
+        default=DEFAULT_GAMMA_F,
         help="Terminal-reward discount per remaining real decision (1.0 = no discount).",
     )
     group.add_argument(
-        "--alpha",
-        type=parse_alpha,
-        default=ALPHA,
+        "--reward-eta",
+        type=parse_reward_eta,
+        default=REWARD_ETA,
         help=(
             "Convex mix of the two reward components per decision: "
-            "R = (1 - alpha) * gamma**k * terminal + alpha * local. "
+            "R = (1 - reward_eta) * gamma_f**k * terminal + reward_eta * local. "
             "0 trains on the terminal outcome alone, 1 on local event "
             "shaping alone."
         ),
     )
     group.add_argument(
-        "--event-reward-decay",
-        type=parse_event_reward_decay,
-        default=EVENT_REWARD_DECAY,
+        "--gamma-i",
+        type=parse_gamma_i,
+        default=GAMMA_I,
         help=(
             "Per-turn decay applied to a draw/pass event reward as it is "
             "credited backwards to the real decisions preceding the event "
@@ -355,9 +366,10 @@ def training_options_from_args(args):
         dropout_rate=args.dropout,
         use_value_head=args.value_head,
         value_coef=args.value_coef,
-        gamma=args.gamma,
-        alpha=args.alpha,
-        event_reward_decay=args.event_reward_decay,
+        use_opponent_suit_features=not args.no_opponent_suit_features,
+        gamma_f=args.gamma_f,
+        reward_eta=args.reward_eta,
+        gamma_i=args.gamma_i,
         normalize_advantages=args.normalize_advantages,
         seed=args.seed,
         ppo_max_epochs=args.ppo_max_epochs,

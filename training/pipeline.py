@@ -543,11 +543,17 @@ def _supervised_training_identity(args, max_epochs):
     )
 
 
+def _use_opponent_suit_features(args):
+    """Return the positive form of the ablation flag used across the pipeline."""
+    return not bool(getattr(args, "no_opponent_suit_features", False))
+
+
 def _network_architecture(args):
     """Return the one architecture selected for supervised and RL stages."""
     return architecture_from_hidden_sizes(
         supervised_cli.hidden_sizes_from_args(args),
         ruleset=args.ruleset,
+        use_opponent_suit_features=_use_opponent_suit_features(args),
     )
 
 
@@ -584,7 +590,12 @@ def ensure_canonical_supervised_assets(root, config, args):
     dataset_games = int(args.dataset_games or config.dataset_games)
     max_epochs = int(args.supervised_max_epochs or config.supervised_epochs)
     if config.reuse_supervised_assets:
-        paths = canonical_asset_paths(root, seed, ruleset=args.ruleset)
+        paths = canonical_asset_paths(
+            root,
+            seed,
+            ruleset=args.ruleset,
+            use_opponent_suit_features=_use_opponent_suit_features(args),
+        )
     else:
         paths = run_scoped_asset_paths(_pipeline_run_dir(root, config, args))
     generation_config = _dataset_generation_identity(args, dataset_games)
@@ -605,6 +616,7 @@ def ensure_canonical_supervised_assets(root, config, args):
         dataset_games=dataset_games,
         generation_config=generation_config,
         ruleset=args.ruleset,
+        use_opponent_suit_features=_use_opponent_suit_features(args),
     )
     dataset_check.require_compatible_or_missing(
         rebuild=rebuild_dataset,
@@ -639,6 +651,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             dataset_summary=dataset_summary,
             generation_config=generation_config,
             ruleset=args.ruleset,
+            use_opponent_suit_features=_use_opponent_suit_features(args),
         )
         dataset_status = "generated"
         retrain_weights = True
@@ -651,6 +664,7 @@ def ensure_canonical_supervised_assets(root, config, args):
         training_config=training_config,
         architecture=architecture,
         ruleset=args.ruleset,
+        use_opponent_suit_features=_use_opponent_suit_features(args),
     )
     weights_check.require_compatible_or_missing(
         rebuild=retrain_weights,
@@ -683,6 +697,7 @@ def ensure_canonical_supervised_assets(root, config, args):
                 gpu_memory_reserve_mb=args.sl_gpu_memory_reserve_mb,
                 seed=seed,
                 ruleset=args.ruleset,
+                use_opponent_suit_features=_use_opponent_suit_features(args),
             )
         weights_metadata = write_weights_metadata(
             paths,
@@ -693,6 +708,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             training_summary=supervised_summary,
             architecture=architecture,
             ruleset=args.ruleset,
+            use_opponent_suit_features=_use_opponent_suit_features(args),
         )
         weights_status = "trained"
 
@@ -762,9 +778,9 @@ def _rl_config(args):
         "checkpoint_interval": int(args.checkpoint_interval),
         "use_value_head": bool(args.value_head),
         "value_coef": float(args.value_coef),
-        "gamma": float(args.gamma),
-        "alpha": float(args.alpha),
-        "event_reward_decay": float(args.event_reward_decay),
+        "gamma_f": float(args.gamma_f),
+        "reward_eta": float(args.reward_eta),
+        "gamma_i": float(args.gamma_i),
         "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
         "normalize_advantages": normalize_advantages,
         "moving_average_window": int(args.moving_average_window),
@@ -1115,6 +1131,7 @@ def run_rl_pipeline(root, config, args, assets):
         ppo_config=ppo_config,
         rl_config=_rl_config(args),
         algorithm=algorithm,
+        use_opponent_suit_features=_use_opponent_suit_features(args),
         diagnostic_config={
             "periodic_seed": int(periodic_diagnostic_seed(seed)),
             "periodic_seed_namespace": "periodic_rl_vs_random",
@@ -1527,6 +1544,7 @@ def run_final_diagnostics(root, config, args, assets, rl_result):
         autotune_minimum_gain=args.diagnostic_autotune_min_gain,
         status_callback=_status,
         ruleset=args.ruleset,
+        use_opponent_suit_features=_use_opponent_suit_features(args),
         run_metadata={
             "configuration_sha256": run_configuration[
                 "configuration_sha256"

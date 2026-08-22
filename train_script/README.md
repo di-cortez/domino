@@ -77,20 +77,22 @@ Each diagnostics run is written below
 `diagnostics/results/<rl-weights-basename>/`. Existing directories are
 validated against the requested model and configuration before reuse.
 
-## Reward grid search
+## Reward-distance grid search
 
-`run_reward_grid_search.sh` sweeps the three reward tunables, running one
-`python -m training.pipeline forever` per grid point with a distinct
-`--run-name` so each point gets its own run directory under `models/rl/`.
+`run_grid_search.sh` compares all four `--reward-distance-mode` choices on the
+double-four ruleset. Each mode runs with seeds `137` and `271`, giving eight
+independent `python -m training.pipeline forever` points:
 
-A parameter is swept only where it can change the reward
-(`R_T = (1 - alpha) * gamma ** k * R_f + alpha * R_l`), which is 15 points:
-
-| alpha | Swept | Points |
+| Mode | Seeds | Points |
 |---|---|---:|
-| `0` | `--gamma` only; the local term is zeroed | 3 |
-| `0.5` | `--gamma` x `--event-reward-decay` | 9 |
-| `1` | `--event-reward-decay` only; the terminal term is zeroed | 3 |
+| `turn-turn` | `137`, `271` | 2 |
+| `decision-decision` | `137`, `271` | 2 |
+| `turn-decision` | `137`, `271` | 2 |
+| `decision-turn` | `137`, `271` | 2 |
+
+The numerical reward parameters retain their normal defaults. Each seed owns
+one canonical double-four dataset and supervised checkpoint; its four mode
+runs reuse those assets rather than regenerating or retraining them.
 
 Because `forever` has no game target, each point is capped by wall clock.
 The timer starts when the pipeline prints its `Canonical RL run` banner, so
@@ -100,17 +102,22 @@ the pipeline's own shutdown flag turns into a boundary checkpoint before a
 clean exit; if that does not land within `--grace`, the script escalates to a
 second SIGTERM and then SIGKILL, and records the point as `hard-stopped`.
 Keep `--grace` above one RL iteration so the graceful path is the one taken.
+A hard-stopped point is not considered complete and is retried on the next
+invocation.
 
 ```bash
-train_script/run_reward_grid_search.sh --dry-run     # plan only
-train_script/run_reward_grid_search.sh               # 15 points, 2h RL each
-train_script/run_reward_grid_search.sh --only 'a05_*'
+train_script/run_grid_search.sh --dry-run
+train_script/run_grid_search.sh
+train_script/run_grid_search.sh --only 'turn_turn_*'
+train_script/run_grid_search.sh --only '*_seed137'
 ```
 
-Completed points are recorded in `grid_search_results/grid_state.tsv` and
-skipped on re-invocation, so an interrupted sweep continues where it stopped;
-`--force` re-runs them. Per-point pipeline output goes to
-`grid_search_results/<run-name>.log`.
+Each point receives 1h30 of RL wall time. Dataset and supervised preparation do
+not consume that budget because timing starts at the canonical RL banner.
+Completed points are recorded below
+`grid_search_results/double_four_reward_distance/grid_state.tsv` and skipped on
+re-invocation; `--force` re-runs them. Per-point pipeline output is stored next
+to the state file as `<run-name>.log`.
 
 ## Validation
 
@@ -118,9 +125,9 @@ For script-only changes, run at least:
 
 ```bash
 bash -n train_script/run_training_pipeline.sh
-bash -n train_script/run_reward_grid_search.sh
+bash -n train_script/run_grid_search.sh
 train_script/run_training_pipeline.sh --help
-train_script/run_reward_grid_search.sh --dry-run
+train_script/run_grid_search.sh --dry-run
 python -m train_script.run_pipeline --help
 ```
 

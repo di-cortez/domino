@@ -66,6 +66,7 @@ from training.rl.ppo import (
     fixed_ppo_policy,
     ppo_is_enabled,
 )
+from training.rl.reward_distance import HISTORICAL_REWARD_DISTANCE_MODE
 from training.rl.constants import (
     RL_WORKER_AUTOTUNE_FRACTION,
     RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
@@ -374,6 +375,24 @@ def _apply_saved_run_arguments(parser, args, explicit, selected_run):
         parser.error(f"Run has no locked argument set: {selected_run}")
     has_training_state = (Path(selected_run) / "training_state.json").is_file()
     ignored_options = []
+    if "reward_distance_mode" not in locked:
+        requested = args.reward_distance_mode
+        if (
+            "reward_distance_mode" in explicit
+            and not has_training_state
+            and requested != HISTORICAL_REWARD_DISTANCE_MODE
+        ):
+            parser.error(
+                "--reward-distance-mode conflicts with the historical run "
+                "configuration (saved 'turn-decision', requested "
+                f"{requested!r})."
+            )
+        if "reward_distance_mode" in explicit:
+            ignored_options.append(
+                "--reward-distance-mode="
+                f"{requested!r} (saved 'turn-decision')"
+            )
+        args.reward_distance_mode = HISTORICAL_REWARD_DISTANCE_MODE
     for name, saved_value in locked.items():
         if name in _RESUME_OPERATIONAL_ARGUMENTS:
             continue
@@ -781,6 +800,7 @@ def _rl_config(args):
         "gamma_f": float(args.gamma_f),
         "reward_eta": float(args.reward_eta),
         "gamma_i": float(args.gamma_i),
+        "reward_distance_mode": args.reward_distance_mode,
         "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
         "normalize_advantages": normalize_advantages,
         "moving_average_window": int(args.moving_average_window),
@@ -1193,6 +1213,11 @@ def run_rl_pipeline(root, config, args, assets):
     print(
         "Regularization (SL and RL): "
         f"dropout {args.dropout:g} | weight decay {args.weight_decay:g}"
+    )
+    print(
+        "Reward shaping: "
+        f"gamma_i {args.gamma_i:g} | gamma_f {args.gamma_f:g} | "
+        f"eta {args.reward_eta:g} | distance {args.reward_distance_mode}"
     )
     print(
         "Configuration SHA-256: "

@@ -1601,7 +1601,13 @@ def test_choice_count_does_not_weight_terminal_or_local_rewards():
         TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
     ]
 
-    samples = _finish_episode_with_rewards(agent, 0.50)
+    samples = _finish_episode_with_rewards(
+        agent,
+        0.50,
+        gamma_f=1.0,
+        terminal_turn=2,
+        reward_distance_mode="turn-decision",
+    )
 
     # (1 - REWARD_ETA) * 0.50 + REWARD_ETA * 0.10 at the default REWARD_ETA of 0.5.
     assert [sample.policy_reward for sample in samples] == [0.30, 0.30]
@@ -1616,7 +1622,14 @@ def test_alpha_mixes_terminal_and_local_reward_components():
         TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
     ]
 
-    samples = _finish_episode_with_rewards(agent, 0.50, 1.0, 0.25)
+    samples = _finish_episode_with_rewards(
+        agent,
+        0.50,
+        1.0,
+        0.25,
+        terminal_turn=2,
+        reward_distance_mode="turn-turn",
+    )
 
     sample = samples[0]
     assert abs(sample.terminal_reward - 0.75 * 0.50) < 1e-12
@@ -1633,7 +1646,14 @@ def test_alpha_extremes_select_a_single_reward_component():
         agent.trajectory = [
             TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
         ]
-        return _finish_episode_with_rewards(agent, 0.50, 1.0, reward_eta)[0]
+        return _finish_episode_with_rewards(
+            agent,
+            0.50,
+            1.0,
+            reward_eta,
+            terminal_turn=2,
+            reward_distance_mode="turn-turn",
+        )[0]
 
     terminal_only = one_sample(0.0)
     assert terminal_only.policy_reward == 0.50

@@ -32,6 +32,7 @@ class FinishedTrajectoryStep:
     x: object
     action_index: int
     legal_mask: object
+    decision_turn: int
     raw_reward: float
     local_reward: float
     terminal_reward: float
@@ -374,16 +375,33 @@ class RLAgent(Agent):
                     + time.perf_counter() - profile_started
                 )
 
-    def add_decayed_event_reward(self, event_turn, base_reward, decay_lambda):
-        """Distribute one local event reward to every earlier real decision."""
-        for step in self.trajectory:
-            elapsed_actions = int(event_turn) - step.decision_turn - 1
-            if elapsed_actions < 0:
+    def add_decayed_event_reward(
+        self,
+        event_turn,
+        base_reward,
+        decay_lambda,
+        distance_metric="turn",
+    ):
+        """Distribute one event reward using turn or real-decision distance."""
+        decision_count = len(self.trajectory)
+        for index, step in enumerate(self.trajectory):
+            if distance_metric == "turn":
+                distance = int(event_turn) - step.decision_turn - 1
+            elif distance_metric == "decision":
+                distance = decision_count - 1 - index
+            else:
+                raise ValueError(
+                    "Local reward distance_metric must be 'turn' or "
+                    f"'decision', got {distance_metric!r}."
+                )
+            if distance < 0:
                 raise ValueError(
                     "Event reward chronology is invalid: "
                     f"event_turn={event_turn}, decision_turn={step.decision_turn}."
                 )
-            step.local_reward += float(base_reward) * (float(decay_lambda) ** elapsed_actions)
+            step.local_reward += float(base_reward) * (
+                float(decay_lambda) ** distance
+            )
 
     def finish_episode(self, final_reward):
         """Attach uniform terminal reward to every sampled tile-play decision."""
@@ -392,6 +410,7 @@ class RLAgent(Agent):
                 x=step.x,
                 action_index=step.action_index,
                 legal_mask=step.legal_mask,
+                decision_turn=step.decision_turn,
                 old_log_prob=step.old_log_prob,
                 raw_reward=float(final_reward) + step.local_reward,
                 local_reward=step.local_reward,

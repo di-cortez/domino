@@ -24,6 +24,10 @@ from training.rl.cli import (
 from training.rl.config import RLTrainingOptions
 from training.rl.resume import RLTrainingConfiguration
 from training.rl.rollout import DEFAULT_GAMMA_F, GAMMA_I, REWARD_ETA, REWARD_SCHEMAS
+from training.rl.reward_distance import (
+    DEFAULT_REWARD_DISTANCE_MODE,
+    HISTORICAL_REWARD_DISTANCE_MODE,
+)
 
 
 _BASE_RL_CONFIG = {
@@ -127,6 +131,28 @@ def test_run_config_reads_either_spelling(values, label):
     assert configuration.gamma_f == 1.0, label
     assert configuration.reward_eta == 0.5, label
     assert configuration.gamma_i == 0.90, label
+    assert configuration.reward_distance_mode == (
+        HISTORICAL_REWARD_DISTANCE_MODE
+    ), label
+
+
+def test_new_run_config_persists_its_explicit_distance_mode():
+    run_config = _run_config({
+        **_CURRENT_VALUES,
+        "reward_distance_mode": "decision-turn",
+    })
+    run_config["configuration_sha256"] = configuration_sha256(run_config)
+
+    configuration = RLTrainingConfiguration.from_run_config(
+        run_config,
+        total_training_games=1000,
+        selected_workers=2,
+        device="cpu",
+    )
+    restored = RLTrainingConfiguration.from_mapping(configuration.to_dict())
+
+    assert configuration.reward_distance_mode == "decision-turn"
+    assert restored.reward_distance_mode == "decision-turn"
 
 
 def test_checkpoint_metadata_reads_the_legacy_spelling():
@@ -143,6 +169,7 @@ def test_checkpoint_metadata_reads_the_legacy_spelling():
     legacy_metadata = dict(current.to_dict(), **_LEGACY_VALUES)
     for name in _CURRENT_VALUES:
         legacy_metadata.pop(name)
+    legacy_metadata.pop("reward_distance_mode")
 
     restored = RLTrainingConfiguration.from_mapping(legacy_metadata)
 
@@ -154,7 +181,12 @@ def test_cli_exposes_the_renamed_flags():
     add_optional_rl_arguments(parser)
 
     args = parser.parse_args(
-        ["--gamma-f", "0.9", "--reward-eta", "0.25", "--gamma-i", "0.5"]
+        [
+            "--gamma-f", "0.9",
+            "--reward-eta", "0.25",
+            "--gamma-i", "0.5",
+            "--reward-distance-mode", "decision-turn",
+        ]
     )
     training, _resources, _execution = training_options_from_args(args)
 
@@ -162,6 +194,7 @@ def test_cli_exposes_the_renamed_flags():
     assert training.gamma_f == 0.9
     assert training.reward_eta == 0.25
     assert training.gamma_i == 0.5
+    assert training.reward_distance_mode == "decision-turn"
 
 
 @pytest.mark.parametrize("flag", ["--gamma", "--alpha", "--event-reward-decay"])
@@ -179,7 +212,12 @@ def test_defaults_and_schema_keys_follow_the_new_names():
     assert training.gamma_f == DEFAULT_GAMMA_F
     assert training.reward_eta == REWARD_ETA
     assert training.gamma_i == GAMMA_I
+    assert training.reward_distance_mode == DEFAULT_REWARD_DISTANCE_MODE
+    assert DEFAULT_GAMMA_F == 0.95
     assert REWARD_SCHEMAS["reward_eta"] == REWARD_ETA
     assert REWARD_SCHEMAS["gamma_i"] == GAMMA_I
+    assert REWARD_SCHEMAS["reward_distance_mode"] == (
+        DEFAULT_REWARD_DISTANCE_MODE
+    )
     assert "alpha" not in REWARD_SCHEMAS
     assert "event_decay" not in REWARD_SCHEMAS

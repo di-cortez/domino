@@ -23,6 +23,7 @@ from training.rl.resume import (
     _validate_resume_configuration,
     load_resume_state,
 )
+from training.rl.reward_distance import HISTORICAL_REWARD_DISTANCE_MODE
 from training.run_artifacts import (
     existing_run_config_path,
     migrate_legacy_compact_diagnostics,
@@ -150,6 +151,18 @@ def identity_spelling(mapping):
     for current_name, original_name in RENAMED_PARAMETER_KEYS.items():
         if current_name in normalized:
             normalized[original_name] = normalized.pop(current_name)
+    return normalized
+
+
+def _comparable_rl_config(mapping):
+    """Normalize old RL configs that predate reward-distance selection."""
+    normalized = identity_spelling(mapping)
+    if not isinstance(normalized, dict):
+        return normalized
+    normalized.setdefault(
+        "reward_distance_mode",
+        HISTORICAL_REWARD_DISTANCE_MODE,
+    )
     return normalized
 
 
@@ -399,8 +412,13 @@ def create_run_config(
             existing_value = existing.get(key)
             requested_value = value.get(key)
             if key in renamed_mappings:
-                existing_value = identity_spelling(existing_value)
-                requested_value = identity_spelling(requested_value)
+                normalizer = (
+                    _comparable_rl_config
+                    if key == "rl_config"
+                    else identity_spelling
+                )
+                existing_value = normalizer(existing_value)
+                requested_value = normalizer(requested_value)
             if existing_value != requested_value:
                 differences.append(key)
         target_changed = existing.get("target_rl_games") != value["target_rl_games"]

@@ -76,6 +76,15 @@ class SolveStats:
     cache_hits: int
     cache_entries: int
     max_belief_worlds: int
+    legal_action_cache_hits: int
+    legal_action_cache_misses: int
+    legal_action_cache_entries: int
+    non_draw_transition_cache_hits: int
+    non_draw_transition_cache_misses: int
+    non_draw_transition_cache_entries: int
+    draw_transition_cache_hits: int
+    draw_transition_cache_misses: int
+    draw_transition_cache_entries: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +109,11 @@ class _FixedDealRng:
 
 class ExactVsRandomSolver:
     """Exact POMDP solver for one controlled seat against uniform random."""
+
+    CACHE_WORLD_OPERATIONS = True
+    REUSE_CACHED_LEGAL_ACTIONS_IN_APPLY = True
+    CACHE_DRAW_TRANSITIONS = True
+    VALIDATE_COMMON_HERO_ACTIONS = False
 
     def __init__(self, ruleset: str = "double-four", hero_seat: int = 0):
         if ruleset not in RULESETS:
@@ -131,6 +145,21 @@ class ExactVsRandomSolver:
         self._value_calls = 0
         self._cache_hits = 0
         self._max_belief_worlds = 0
+        self._legal_action_cache: dict[World, tuple[Action, ...]] = {}
+        self._legal_action_cache_hits = 0
+        self._legal_action_cache_misses = 0
+        self._non_draw_transition_cache: dict[
+            tuple[World, Action],
+            tuple[tuple[World, int | None, Fraction], ...],
+        ] = {}
+        self._non_draw_transition_cache_hits = 0
+        self._non_draw_transition_cache_misses = 0
+        self._draw_transition_cache: dict[
+            World,
+            tuple[tuple[int, World], ...],
+        ] = {}
+        self._draw_transition_cache_hits = 0
+        self._draw_transition_cache_misses = 0
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -178,6 +207,15 @@ class ExactVsRandomSolver:
         self._value_calls = 0
         self._cache_hits = 0
         self._max_belief_worlds = 0
+        self._legal_action_cache.clear()
+        self._legal_action_cache_hits = 0
+        self._legal_action_cache_misses = 0
+        self._non_draw_transition_cache.clear()
+        self._non_draw_transition_cache_hits = 0
+        self._non_draw_transition_cache_misses = 0
+        self._draw_transition_cache.clear()
+        self._draw_transition_cache_hits = 0
+        self._draw_transition_cache_misses = 0
 
     def stats(self) -> SolveStats:
         return SolveStats(
@@ -185,6 +223,19 @@ class ExactVsRandomSolver:
             cache_hits=self._cache_hits,
             cache_entries=len(self._cache),
             max_belief_worlds=self._max_belief_worlds,
+            legal_action_cache_hits=self._legal_action_cache_hits,
+            legal_action_cache_misses=self._legal_action_cache_misses,
+            legal_action_cache_entries=len(self._legal_action_cache),
+            non_draw_transition_cache_hits=self._non_draw_transition_cache_hits,
+            non_draw_transition_cache_misses=(
+                self._non_draw_transition_cache_misses
+            ),
+            non_draw_transition_cache_entries=len(
+                self._non_draw_transition_cache
+            ),
+            draw_transition_cache_hits=self._draw_transition_cache_hits,
+            draw_transition_cache_misses=self._draw_transition_cache_misses,
+            draw_transition_cache_entries=len(self._draw_transition_cache),
         )
 
     def solve_initial_hand(self, hero_hand_ids: Sequence[int]) -> InitialHandResult:
@@ -328,16 +379,18 @@ class ExactVsRandomSolver:
         return value
 
     def _common_hero_actions(self, belief: Belief) -> tuple[Action, ...]:
-        first_actions = tuple(self.legal_actions(belief[0][0]))
-        first_set = set(first_actions)
-        for world, _ in belief[1:]:
-            other = set(self.legal_actions(world))
-            if other != first_set:
-                raise AssertionError(
-                    "Hero legal actions differ across hidden worlds.  This indicates "
-                    "an observable branch was not partitioned correctly."
-                )
-        return tuple(sorted(first_set))
+        first_actions = self.legal_actions(belief[0][0])
+        if self.VALIDATE_COMMON_HERO_ACTIONS:
+            first_set = set(first_actions)
+            for world, _ in belief[1:]:
+                other = set(self.legal_actions(world))
+                if other != first_set:
+                    raise AssertionError(
+                        "Hero legal actions differ across hidden worlds.  This "
+                        "indicates an observable branch was not partitioned "
+                        "correctly."
+                    )
+        return first_actions
 
     def _hero_action_value(self, belief: Belief, action: Action) -> Fraction:
         total_weight = sum(weight for _, weight in belief)
@@ -513,12 +566,33 @@ class ExactVsRandomSolver:
         tile_id, side = action
         return self.tiles[tile_id], side
 
-    def legal_actions(self, world: World) -> tuple[Action, ...]:
-        engine = self._engine_from_world(world)
-        return tuple(sorted(
+    def _get_encoded_legal_actions(
+        self,
+        world: World,
+        *,
+        engine: DominoEngine | None = None,
+    ) -> tuple[Action, ...]:
+        """Return encoded legal actions through one cache/accounting path."""
+
+        if self.CACHE_WORLD_OPERATIONS:
+            cached = self._legal_action_cache.get(world)
+            if cached is not None:
+                self._legal_action_cache_hits += 1
+                return cached
+
+            self._legal_action_cache_misses += 1
+        if engine is None:
+            engine = self._engine_from_world(world)
+        actions = tuple(sorted(
             self._encode_engine_action(action)
             for action in engine.valid_actions()
         ))
+        if self.CACHE_WORLD_OPERATIONS:
+            self._legal_action_cache[world] = actions
+        return actions
+
+    def legal_actions(self, world: World) -> tuple[Action, ...]:
+        return self._get_encoded_legal_actions(world)
 
     def _apply_engine_action(
         self,
@@ -528,7 +602,22 @@ class ExactVsRandomSolver:
         drawn_tile: int | None = None,
     ) -> World:
         engine = self._engine_from_world(world, first_stock_tile=drawn_tile)
-        legal_actions = engine.valid_actions()
+        if (
+            self.CACHE_WORLD_OPERATIONS
+            and self.REUSE_CACHED_LEGAL_ACTIONS_IN_APPLY
+        ):
+            encoded_legal_actions = self._get_encoded_legal_actions(
+                world,
+                engine=engine,
+            )
+            # DominoEngine.step() intentionally distinguishes the pass-only
+            # list [None], so preserve its list-shaped valid_actions contract.
+            legal_actions = [
+                self._decode_action(encoded_action)
+                for encoded_action in encoded_legal_actions
+            ]
+        else:
+            legal_actions = engine.valid_actions()
         engine_action = self._decode_action(action)
         if engine_action not in legal_actions:
             raise ValueError(f"Illegal action {action} in world {world}")
@@ -546,23 +635,54 @@ class ExactVsRandomSolver:
     ) -> tuple[tuple[World, int | None, Fraction], ...]:
         """Return exact engine transitions, integrating unknown stock order."""
         if action != DRAW_ACTION:
-            return ((self._apply_engine_action(world, action), None, Fraction(1)),)
+            cache_key = (world, action)
+            if self.CACHE_WORLD_OPERATIONS:
+                cached = self._non_draw_transition_cache.get(cache_key)
+                if cached is not None:
+                    self._non_draw_transition_cache_hits += 1
+                    return cached
+
+                self._non_draw_transition_cache_misses += 1
+            outcomes = (
+                (self._apply_engine_action(world, action), None, Fraction(1)),
+            )
+            if self.CACHE_WORLD_OPERATIONS:
+                self._non_draw_transition_cache[cache_key] = outcomes
+            return outcomes
+
+        if self.CACHE_WORLD_OPERATIONS and self.CACHE_DRAW_TRANSITIONS:
+            cached_draws = self._draw_transition_cache.get(world)
+            if cached_draws is not None:
+                self._draw_transition_cache_hits += 1
+                probability = Fraction(1, len(cached_draws))
+                return tuple(
+                    (next_world, drawn_tile, probability)
+                    for drawn_tile, next_world in cached_draws
+                )
+
+            self._draw_transition_cache_misses += 1
 
         stock_ids = self.mask_to_ids(world.stock_mask)
         if not stock_ids:
             raise ValueError("DRAW requested with an empty stock.")
-        probability = Fraction(1, len(stock_ids))
-        return tuple(
+        compact_draws = tuple(
             (
+                tile_id,
                 self._apply_engine_action(
                     world,
                     action,
                     drawn_tile=tile_id,
                 ),
-                tile_id,
-                probability,
             )
             for tile_id in stock_ids
+        )
+        if self.CACHE_WORLD_OPERATIONS and self.CACHE_DRAW_TRANSITIONS:
+            self._draw_transition_cache[world] = compact_draws
+
+        probability = Fraction(1, len(compact_draws))
+        return tuple(
+            (next_world, drawn_tile, probability)
+            for drawn_tile, next_world in compact_draws
         )
 
     def apply_action(self, world: World, action: Action) -> tuple[World, int | None]:
@@ -632,6 +752,8 @@ class CheaterVsRandomSolver(ExactVsRandomSolver):
     solver therefore recurses directly on one ``World`` and never constructs a
     hidden-state belief.
     """
+
+    CACHE_WORLD_OPERATIONS = False
 
     def solve_initial_hand(self, hero_hand_ids: Sequence[int]) -> InitialHandResult:
         """Return exact P(win) when every compatible world is observable."""

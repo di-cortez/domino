@@ -24,8 +24,44 @@ Run the complete workflow from the repository root:
 
 The driver processes normal seat 0, normal seat 1, cheater seat 0, and cheater
 seat 1, in that order, then creates both aggregate summaries. Each pass
-displays one `tqdm` progress bar. Completed hands are appended durably to
-separate JSONL files, so rerunning the same command resumes all four passes.
+displays one `tqdm` progress bar. Ten fixed worker processes use a dynamic
+queue with one complete initial hand per task, so a worker that finishes a
+hand immediately receives the next available one. Only the parent process
+writes results. Completed hands are appended durably as they arrive, so
+rerunning the same command resumes all four passes. At the end of each pass,
+the parent atomically rewrites its JSONL in canonical `hand_index` order.
+
+For partial-information hands, each worker keeps four cache layers scoped to
+its current hand:
+
+1. `Belief -> Fraction` stores the exact value of a complete information-state
+   distribution.
+2. `World -> tuple[Action, ...]` stores encoded legal actions. Both public
+   legal-action requests and transition execution use the same lookup helper,
+   so a transition does not call `DominoEngine.valid_actions()` again after a
+   cache hit.
+3. `(World, non-draw Action) -> exact transition` stores deterministic play and
+   pass successors.
+4. `World -> tuple[(drawn tile id, next World), ...]` compactly stores all exact
+   DRAW successors. Uniform probabilities are reconstructed when requested,
+   rather than retaining redundant `Fraction` objects in the cache.
+
+All World-operation caches are discarded before the worker accepts its next
+hand. The perfect-information solver disables them: its existing
+`World -> value` cache already makes every legal-action and transition lookup
+unique, so these additional caches would have zero hits. Every computed JSONL
+row records deterministic hit, miss, and entry counts for the legal-action,
+non-draw-transition, and DRAW-transition caches. The DRAW fields are named
+`draw_transition_cache_hits`, `draw_transition_cache_misses`, and
+`draw_transition_cache_entries`. Rows from runs created before those fields
+were introduced remain valid and resumable.
+
+At a hero decision, production recursion trusts the solver invariant that all
+hidden Worlds in one observable belief expose the same legal actions and uses
+the first World's cached tuple directly. Development validation can set
+`ExactVsRandomSolver.VALIDATE_COMMON_HERO_ACTIONS = True` to scan every World
+and assert the invariant explicitly; complete double-three validation runs use
+this mode before performance changes are accepted.
 
 The cheater does not know the future order of the stock. A draw remains a
 uniform exact chance event, but after either player draws, the cheater observes

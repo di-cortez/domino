@@ -75,6 +75,7 @@ from training.rl.rollout import (
     _finish_episode_with_rewards,
 )
 from training.rl.reporting import _reward_signal_summary
+from training.rl.baseline import BaselineSpec
 from training.rl.training_loop import _reinforce_policy_update
 from training.rl.cli import parse_args as parse_rl_args
 from training.pipeline import (
@@ -647,6 +648,7 @@ def test_rl_dropout_is_absent_from_rollout_and_evaluation_forward_passes():
         samples,
         entropy_coef=0.0,
         normalize_advantages=False,
+        baseline=BaselineSpec(kind="zero"),
         use_value_head=False,
         value_coef=0.5,
     )
@@ -1756,6 +1758,7 @@ def test_legacy_value_head_update_reports_pre_update_predictions():
         samples,
         entropy_coef=0.0,
         normalize_advantages=False,
+        baseline=BaselineSpec(kind="value-head"),
         use_value_head=True,
         value_coef=0.5,
         collect_value_predictions=True,

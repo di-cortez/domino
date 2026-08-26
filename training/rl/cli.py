@@ -26,6 +26,7 @@ from training.rl.config import (
     SL_WEIGHTS,
     VALUE_COEF,
 )
+from training.rl import baseline as baselines
 from training.rl.pool import DEFAULT_OPPONENT_BUCKETS, canonicalize_bucket_names
 from training.rl.parallel import (
     DEFAULT_RL_WORKERS,
@@ -234,6 +235,22 @@ def add_optional_rl_arguments(
         ),
     )
     group.add_argument(
+        "--opponent-bucket-features",
+        action="store_true",
+        help=(
+            "Append a one-hot of the opponent bucket to the policy input, so "
+            "the agent knows which kind of opponent it is facing: heuristic, "
+            "random, recent, medium_term, historical_uniform, "
+            "champion_vs_heuristic, or champion_vs_learner. The block is one "
+            "slot per bucket the registry defines, not per bucket "
+            "--opponent-buckets selects, so the input size never depends on "
+            "the selection (double-six: 168 to 175). Each seat is told about "
+            "its own adversary, so a frozen snapshot is told 'recent' because "
+            "it faces the current learner. Checkpoints and supervised assets "
+            "are not interchangeable with runs that omit the block."
+        ),
+    )
+    group.add_argument(
         "--gamma-f",
         type=parse_gamma_f,
         default=DEFAULT_GAMMA_F,
@@ -321,6 +338,7 @@ def add_optional_rl_arguments(
             f"canonical forever defaults to {MAX_PPO_EPOCHS}."
         ),
     )
+    baselines.add_argument(parser)
     return parser
 
 
@@ -339,7 +357,7 @@ def parse_args(argv=None):
             "final summary instead of per-iteration/checkpoint logs."
         ),
     )
-    return parser.parse_args(argv)
+    return baselines.validate_arguments(parser, parser.parse_args(argv))
 
 
 def training_options_from_args(args):
@@ -367,10 +385,12 @@ def training_options_from_args(args):
         use_value_head=args.value_head,
         value_coef=args.value_coef,
         use_opponent_suit_features=not args.no_opponent_suit_features,
+        use_opponent_bucket_features=args.opponent_bucket_features,
         gamma_f=args.gamma_f,
         reward_eta=args.reward_eta,
         gamma_i=args.gamma_i,
         normalize_advantages=args.normalize_advantages,
+        baseline=args.baseline,
         seed=args.seed,
         ppo_max_epochs=args.ppo_max_epochs,
     )

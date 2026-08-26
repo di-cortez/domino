@@ -15,6 +15,7 @@ from typing import Iterable
 
 import numpy as np
 
+from training.rl import baseline as baselines
 from training.utils.seeding import stable_seed
 from utils.resource_limits import effective_gpu_available_bytes
 
@@ -90,18 +91,24 @@ def _to_numpy(value, *, dtype=None):
     return np.asarray(value, dtype=dtype)
 
 
-def normalize_advantages(values, epsilon=ADVANTAGE_EPSILON):
-    """Normalize one complete iteration globally, safely handling zero variance."""
+def scale_advantages(values, epsilon=ADVANTAGE_EPSILON):
+    """Rescale one complete iteration globally, safely handling zero variance.
+
+    Only the scale is touched. Subtracting a center is the baseline's job (see
+    ``training/rl/baseline.py``); re-centering here would silently reimpose the
+    batch mean on top of whichever baseline the run selected. With the
+    ``batch-mean`` baseline the input is already centered, so this reproduces
+    the original mean-and-standard-deviation normalization exactly.
+    """
     advantages = np.asarray(values, dtype=np.float32).reshape(-1)
     if not np.all(np.isfinite(advantages)):
         raise ValueError("PPO advantages contain NaN or infinity.")
     mean = float(np.mean(advantages, dtype=np.float64))
     std = float(np.std(advantages, dtype=np.float64))
-    centered = advantages - np.float32(mean)
     if std <= float(epsilon):
-        return np.ascontiguousarray(centered, dtype=np.float32), True, mean, std
-    normalized = centered / np.float32(std + float(epsilon))
-    return np.ascontiguousarray(normalized, dtype=np.float32), False, mean, std
+        return np.ascontiguousarray(advantages, dtype=np.float32), True, mean, std
+    scaled = advantages / np.float32(std + float(epsilon))
+    return np.ascontiguousarray(scaled, dtype=np.float32), False, mean, std
 
 
 @dataclass(frozen=True)
@@ -120,15 +127,24 @@ class PPOBuffer:
     advantage_std_zero: bool
     raw_advantage_mean: float
     raw_advantage_std: float
+    baseline: baselines.BaselineSpec
+    baseline_mean: float
 
     @classmethod
     def from_samples(
         cls,
         samples: Iterable,
         *,
+        baseline=None,
         normalize=True,
         old_values=None,
     ):
+        """Build one immutable buffer from the iteration's decisions.
+
+        ``baseline`` is the term subtracted from every return. ``None`` keeps
+        the pre-``--baseline`` behavior: the critic when its predictions were
+        supplied, the batch mean otherwise.
+        """
         samples = list(samples)
         if not samples:
             raise ValueError("Cannot build a PPO buffer without real decisions.")
@@ -189,13 +205,31 @@ class PPOBuffer:
             raise ValueError("PPO buffer contains an action outside its legal mask.")
         if not np.all(np.isfinite(old_log_probs)):
             raise ValueError("PPO old_log_probs contain NaN or infinity.")
-        raw_advantages = (
-            returns.copy()
-            if old_values is None
-            else returns - old_values
+        if baseline is None:
+            baseline = baselines.BaselineSpec(
+                kind=(
+                    baselines.BATCH_MEAN
+                    if old_values is None
+                    else baselines.VALUE_HEAD
+                )
+            )
+        if baseline.requires_value_head and old_values is None:
+            raise ValueError(
+                "The value-head baseline needs one critic prediction per "
+                "decision, but none were supplied."
+            )
+        baseline_values = baselines.baseline_values(
+            baseline,
+            returns,
+            value_predictions=old_values,
+        )
+        baseline_mean = float(np.mean(baseline_values, dtype=np.float64))
+        raw_advantages = np.ascontiguousarray(
+            returns - baseline_values,
+            dtype=np.float32,
         )
         if normalize:
-            advantages, std_zero, raw_mean, raw_std = normalize_advantages(
+            advantages, std_zero, raw_mean, raw_std = scale_advantages(
                 raw_advantages
             )
         else:
@@ -216,6 +250,8 @@ class PPOBuffer:
             advantage_std_zero=std_zero,
             raw_advantage_mean=raw_mean,
             raw_advantage_std=raw_std,
+            baseline=baseline,
+            baseline_mean=baseline_mean,
         )
         for array in (
             buffer.states,
@@ -513,11 +549,14 @@ def _validate_first_minibatch(network, storage, indices):
         for index in range(1, network.layer_count)
     )
     parameter_names = list(network.weight_names)
-    if getattr(network, "use_value_head", False):
-        parameter_names.extend(("Wv", "bv"))
+    # Whatever the critic is -- a shared linear head or a network of its own --
+    # the probe has to reserve every array the real update will touch.
+    critic_names = tuple(getattr(network, "critic_parameter_names", ()))
+    if critic_names:
+        parameter_names.extend(critic_names)
         workspace.append(xp.empty((1, batch["states"].shape[1]), dtype=xp.float32))
     workspace.extend(
-        xp.empty_like(getattr(network, name))
+        xp.empty_like(network.parameter_array(name))
         for name in parameter_names
     )
     network.synchronize()
@@ -599,10 +638,7 @@ def evaluate_full_buffer(
         value_losses = None
         value_delta = None
         if getattr(network, "use_value_head", False):
-            values = xp.dot(
-                network.Wv,
-                network.cache[network.last_hidden_activation_key],
-            ) + network.bv
+            values = network.critic_values(batch["states"])
             value_losses, _value_gradient, value_delta = (
                 network.clipped_value_loss_terms(
                     values,
@@ -788,6 +824,8 @@ def ppo_update(
             "advantage_std_zero": bool(buffer.advantage_std_zero),
             "raw_advantage_mean": float(buffer.raw_advantage_mean),
             "raw_advantage_std": float(buffer.raw_advantage_std),
+            "baseline": buffer.baseline.label,
+            "baseline_mean": float(buffer.baseline_mean),
             "target_kl": PPO_TARGET_KL,
             "stop_kl": PPO_STOP_KL,
             "clip_epsilon": PPO_CLIP_EPSILON,
@@ -974,6 +1012,8 @@ def ppo_update(
             "advantage_std_zero": bool(buffer.advantage_std_zero),
             "raw_advantage_mean": float(buffer.raw_advantage_mean),
             "raw_advantage_std": float(buffer.raw_advantage_std),
+            "baseline": buffer.baseline.label,
+            "baseline_mean": float(buffer.baseline_mean),
             "target_kl": PPO_TARGET_KL,
             "stop_kl": PPO_STOP_KL,
             "clip_epsilon": PPO_CLIP_EPSILON,
@@ -1051,6 +1091,7 @@ def update_from_samples(
     value_coef,
     normalize_advantages,
     max_epochs,
+    baseline=None,
     collect_value_predictions=False,
 ):
     """Build the immutable PPO buffer and update one on-policy iteration."""
@@ -1077,6 +1118,7 @@ def update_from_samples(
         ).reshape(-1)
     decision_buffer = PPOBuffer.from_samples(
         samples,
+        baseline=baseline,
         normalize=normalize_advantages,
         old_values=old_values,
     )

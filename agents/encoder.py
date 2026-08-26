@@ -24,6 +24,49 @@ MAX_TURN = 52
 DEFAULT_VECTOR_SIZE = 168
 DEFAULT_ACTION_SIZE = 56
 
+# One feature per logical RL opponent bucket, in ``training.rl.pool``'s registry
+# order. The width is fixed at every bucket the registry defines rather than at
+# the buckets one run selects, so ``--opponent-buckets`` never changes the
+# policy's input size and a checkpoint stays loadable under a different
+# selection. ``tests/test_opponent_bucket_features.py`` fails if the two orders
+# ever drift apart; the vocabulary lives here because the encoder owns its own
+# layout and ``agents`` must not import ``training``.
+OPPONENT_BUCKET_FEATURE_ORDER = (
+    "heuristic",
+    "random",
+    "recent",
+    "medium_term",
+    "historical_uniform",
+    "champion_vs_heuristic",
+    "champion_vs_learner",
+)
+OPPONENT_BUCKET_FEATURE_WIDTH = len(OPPONENT_BUCKET_FEATURE_ORDER)
+OPPONENT_BUCKET_FEATURE_INDEX = {
+    name: index for index, name in enumerate(OPPONENT_BUCKET_FEATURE_ORDER)
+}
+
+
+def opponent_bucket_feature_index(bucket):
+    """Return the one-hot position of one opponent bucket, or ``None``.
+
+    ``None`` is the deliberate no-bucket state: the seat's adversary belongs to
+    no bucket at all. It leaves the block at zero instead of inventing a
+    membership the caller cannot justify. Note that zero is not a neutral input
+    to a policy that trained on a one-hot block, only an honest one, which is
+    why the UI hands a human the ``heuristic`` slot instead
+    (``ui.ui_agents.UI_OPPONENT_BUCKET``).
+    """
+    if bucket is None:
+        return None
+    try:
+        return OPPONENT_BUCKET_FEATURE_INDEX[str(bucket)]
+    except KeyError:
+        raise ValueError(
+            f"Unknown opponent bucket {bucket!r}; choose one of "
+            + ", ".join(OPPONENT_BUCKET_FEATURE_ORDER)
+            + " or None for a seat whose adversary has no bucket."
+        ) from None
+
 
 @dataclass(frozen=True)
 class EncoderLayout:
@@ -41,6 +84,7 @@ class EncoderLayout:
     draw_count: int
     pass_count: int
     opponent_suit_probability: int
+    opponent_bucket: int
     vector_size: int
 
     @classmethod
@@ -49,17 +93,24 @@ class EncoderLayout:
         ruleset: DominoRuleset,
         *,
         use_opponent_suit_features: bool = True,
+        use_opponent_bucket_features: bool = False,
     ) -> "EncoderLayout":
-        """Return the offsets for one ruleset, with or without the suit block.
+        """Return the offsets for one ruleset and its two optional blocks.
 
-        The exact-model block is the last one in the layout, so dropping it
-        shortens the vector without moving any other offset. When it is absent
-        ``opponent_suit_probability`` equals ``vector_size``, marking an empty
-        trailing block instead of forcing every consumer to handle ``None``.
+        Both optional blocks are trailing, so dropping either shortens the
+        vector without moving any offset that precedes it. When a block is
+        absent its offset equals the offset that would follow it, marking an
+        empty span instead of forcing every consumer to handle ``None``. The
+        opponent-bucket block sits last precisely so that a run that leaves it
+        off keeps the historical layout byte for byte.
         """
         tile_count = ruleset.tile_count
         suit_count = ruleset.pip_count
         suit_blocks = 3 if use_opponent_suit_features else 2
+        bucket_width = (
+            OPPONENT_BUCKET_FEATURE_WIDTH if use_opponent_bucket_features else 0
+        )
+        opponent_bucket = 5 * tile_count + suit_blocks * suit_count + 7
         return cls(
             hand=0,
             played=tile_count,
@@ -73,7 +124,8 @@ class EncoderLayout:
             draw_count=5 * tile_count + 2 * suit_count + 3,
             pass_count=5 * tile_count + 2 * suit_count + 5,
             opponent_suit_probability=5 * tile_count + 2 * suit_count + 7,
-            vector_size=5 * tile_count + suit_blocks * suit_count + 7,
+            opponent_bucket=opponent_bucket,
+            vector_size=opponent_bucket + bucket_width,
         )
 
 
@@ -96,6 +148,21 @@ class DominoEncoder:
     giving ``5T + 2S + 7`` features and leaving the action space untouched. The
     exact opponent model is then never consulted during encoding, even when a
     caller already stored its output in the state. Double-six shrinks to 161.
+
+    ``use_opponent_bucket_features=True`` appends one further block of
+    ``OPPONENT_BUCKET_FEATURE_WIDTH`` features holding a one-hot of
+    ``opponent_bucket``: which logical RL opponent bucket the seat being encoded
+    is playing against. Double-six grows to 175. The block is last, so leaving
+    it off reproduces the historical layout exactly, and its width is the whole
+    bucket registry rather than the buckets one run selected, so the input size
+    never depends on ``--opponent-buckets``.
+
+    ``opponent_bucket`` describes the adversary of the seat this encoder serves,
+    not the match as a whole: in a game between the learner and a frozen
+    ``medium_term`` snapshot the learner's encoder is given ``medium_term`` and
+    the snapshot's is given ``recent``, because the snapshot faces the current
+    learner. ``None`` leaves the block at zero and means the adversary belongs
+    to no bucket, which is the human seat in the UI.
     """
 
     # Legacy double-six aliases. Generic code must use the instance attributes
@@ -116,18 +183,29 @@ class DominoEncoder:
     DRAW_COUNT_OFFSET = 157
     PASS_COUNT_OFFSET = 159
     OPPONENT_SUIT_PROBABILITY_OFFSET = 161
+    OPPONENT_BUCKET_OFFSET = 168
 
     def __init__(
         self,
         ruleset=DEFAULT_RULESET_NAME,
         *,
         use_opponent_suit_features=True,
+        use_opponent_bucket_features=False,
+        opponent_bucket=None,
     ):
         self.ruleset = resolve_ruleset(ruleset)
         self.use_opponent_suit_features = bool(use_opponent_suit_features)
+        self.use_opponent_bucket_features = bool(use_opponent_bucket_features)
+        # Validated here rather than at encoding time so a misspelled bucket
+        # fails once, on the agent that owns it, instead of once per decision.
+        self.opponent_bucket_index = opponent_bucket_feature_index(
+            opponent_bucket
+        )
+        self.opponent_bucket = opponent_bucket
         self.layout = EncoderLayout.for_ruleset(
             self.ruleset,
             use_opponent_suit_features=self.use_opponent_suit_features,
+            use_opponent_bucket_features=self.use_opponent_bucket_features,
         )
         self.all_tiles = list(self.ruleset.all_tiles)
         self.tile_to_index = {
@@ -152,6 +230,7 @@ class DominoEncoder:
         self.OPPONENT_SUIT_PROBABILITY_OFFSET = (
             self.layout.opponent_suit_probability
         )
+        self.OPPONENT_BUCKET_OFFSET = self.layout.opponent_bucket
 
         self.all_actions = []
         for tile in self.all_tiles:
@@ -242,6 +321,19 @@ class DominoEncoder:
                 )
             for suit, value in enumerate(probabilities):
                 vector[self.OPPONENT_SUIT_PROBABILITY_OFFSET + suit, 0] = value
+
+        # Constant for the whole game, so it comes from the encoder rather than
+        # from the per-turn state: the seat's adversary cannot change mid-game,
+        # and threading it through every state dict would let one stale turn
+        # silently relabel the matchup. A ``None`` bucket leaves the block at
+        # zero, which is the encoded form of "this adversary has no bucket".
+        if (
+            self.use_opponent_bucket_features
+            and self.opponent_bucket_index is not None
+        ):
+            vector[
+                self.OPPONENT_BUCKET_OFFSET + self.opponent_bucket_index, 0
+            ] = 1.0
 
         return vector
 

@@ -43,6 +43,7 @@ from training.rl.resume import (
     _training_state_payload,
 )
 from training.rl.rollout import REWARD_ZERO_EPSILON
+from training.rl import baseline as baselines
 from utils.resource_limits import ensure_ram_available
 
 
@@ -356,11 +357,17 @@ def _reinforce_policy_update(
     *,
     entropy_coef,
     normalize_advantages,
+    baseline,
     use_value_head,
     value_coef,
     collect_value_predictions=False,
 ):
-    """Apply the one-full-buffer update selected by ``ppo_max_epochs=1``."""
+    """Apply the one-full-buffer update selected by ``ppo_max_epochs=1``.
+
+    ``baseline`` is the term subtracted from the returns. The critic head is
+    independent of it: when the head is on it is always trained through the
+    value loss, whether or not this baseline reads its predictions.
+    """
     xp = network.xp
     x_batch = xp.hstack([xp.asarray(sample.x) for sample in batch])
     actions = [sample.action_index for sample in batch]
@@ -374,24 +381,29 @@ def _reinforce_policy_update(
     ).reshape(1, -1)
     value_returns = None
     value_predictions = None
-    policy_signal = rewards
+    values = None
     # This forward pass owns the cache that ``backward_policy_gradient``
     # differentiates, so it is the update pass and must apply dropout.
     if use_value_head:
         values = network.predict_values(x_batch, training=True)
         if collect_value_predictions:
             value_predictions = _value_prediction_summary(values)
-        policy_signal = rewards - values
         value_returns = rewards
     else:
         network.forward(x_batch, training=True)
+    policy_signal = baselines.subtract(
+        baseline,
+        rewards,
+        value_predictions=values,
+        xp=xp,
+    )
+    # Only the scale is adjusted here; the center is the baseline's alone, so
+    # ``zero`` and ``constant`` stay observable instead of being re-centered
+    # back into ``batch-mean``.
     if normalize_advantages:
-        mean = xp.mean(policy_signal)
         std = float(xp.std(policy_signal))
         if std > REWARD_ZERO_EPSILON:
-            policy_signal = (policy_signal - mean) / (std + REWARD_ZERO_EPSILON)
-        else:
-            policy_signal = policy_signal - mean
+            policy_signal = policy_signal / (std + REWARD_ZERO_EPSILON)
     metrics = network.backward_policy_gradient(
         actions,
         policy_signal,
@@ -444,6 +456,7 @@ def _update_policy(context, state, batch, iteration):
             value_coef=training.value_coef,
             normalize_advantages=training.normalize_advantages,
             max_epochs=training.ppo_max_epochs,
+            baseline=training.baseline,
             collect_value_predictions=collect_values,
         )
         profile.add(
@@ -463,6 +476,7 @@ def _update_policy(context, state, batch, iteration):
             batch,
             entropy_coef=training.entropy_coef,
             normalize_advantages=training.normalize_advantages,
+            baseline=training.baseline,
             use_value_head=training.use_value_head,
             value_coef=training.value_coef,
             collect_value_predictions=collect_values,

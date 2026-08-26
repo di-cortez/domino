@@ -31,14 +31,20 @@ class NeuralAgent(Agent):
         *,
         ruleset=DEFAULT_RULESET_NAME,
         use_opponent_suit_features=True,
+        use_opponent_bucket_features=False,
+        opponent_bucket=None,
     ):
         self.ruleset = resolve_ruleset(ruleset)
         self.network = network
         self.epsilon = epsilon
         self.use_opponent_suit_features = bool(use_opponent_suit_features)
+        self.use_opponent_bucket_features = bool(use_opponent_bucket_features)
+        self.opponent_bucket = opponent_bucket
         self.encoder = DominoEncoder(
             self.ruleset,
             use_opponent_suit_features=self.use_opponent_suit_features,
+            use_opponent_bucket_features=self.use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
         # The model exists only to fill the encoder's trailing block. With that
         # block ablated nothing would read its output, so it is never built.
@@ -56,6 +62,8 @@ class NeuralAgent(Agent):
         device="auto",
         ruleset=DEFAULT_RULESET_NAME,
         use_opponent_suit_features=True,
+        use_opponent_bucket_features=False,
+        opponent_bucket=None,
     ):
         """Build an agent from a NumPy ``.npz`` checkpoint."""
         weights_path = weights_path or default_sl_weights_path(ruleset)
@@ -70,6 +78,8 @@ class NeuralAgent(Agent):
             encoder = DominoEncoder(
                 ruleset,
                 use_opponent_suit_features=use_opponent_suit_features,
+                use_opponent_bucket_features=use_opponent_bucket_features,
+                opponent_bucket=opponent_bucket,
             )
             if input_size != encoder.vector_size:
                 raise ValueError(
@@ -95,6 +105,8 @@ class NeuralAgent(Agent):
             epsilon=epsilon,
             ruleset=ruleset,
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
 
     def choose_move(self, state, legal_actions):

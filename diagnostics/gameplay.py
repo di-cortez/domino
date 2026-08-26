@@ -69,18 +69,39 @@ def _checkpoint_has_value_head(path):
         return all(name in weights.files for name in VALUE_WEIGHT_NAMES)
 
 
+def opponent_bucket_for_agent(agent_name):
+    """Return the RL opponent bucket one named diagnostic agent stands for.
+
+    Diagnostics play canonical agents, not pool members, so the bucket is read
+    off what the agent *is*: the heuristic and random references are exactly the
+    two programmatic buckets, and any checkpoint-backed neural agent is a frozen
+    learner policy, which is what ``recent`` holds. This is the value handed to
+    the agent's *counterpart*, never to itself.
+    """
+    agent_name = normalize_agent_name(agent_name)
+    if agent_name in ("heuristic", "random"):
+        return agent_name
+    return "recent"
+
+
 def create_agent(
     agent_name,
     weights_path=None,
     ruleset=DEFAULT_RULESET_NAME,
     *,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
+    opponent_bucket=None,
 ):
     """Create an agent by name, importing checkpoint-backed classes only when used.
 
     ``use_opponent_suit_features`` reaches only the checkpoint-backed agents. A
     network must be evaluated under the encoding it trained with, and the
     heuristic reference opponent deliberately keeps its exact model either way.
+    The same holds for ``use_opponent_bucket_features``; ``opponent_bucket``
+    names the bucket this agent's adversary belongs to, which the caller knows
+    because it builds the pair, and :func:`opponent_bucket_for_agent` maps a
+    counterpart's name onto it.
     """
     agent_name = normalize_agent_name(agent_name)
     ruleset = resolve_ruleset(ruleset)
@@ -95,6 +116,8 @@ def create_agent(
             use_value_head=_checkpoint_has_value_head(path),
             ruleset=ruleset,
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
     if agent_name == "neural":
         from agents.neural_agent import NeuralAgent
@@ -103,6 +126,8 @@ def create_agent(
             str(resolve_weights_path("neural", weights_path, ruleset)),
             ruleset=ruleset,
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
     if agent_name == "heuristic":
         from agents.heuristic_agent import StrategicAgent
@@ -186,14 +211,19 @@ def _new_value_head_stats(agent):
 
 
 def _record_value_head_prediction(agent, stats):
-    """Record V(s) from the policy forward cache without another forward pass."""
+    """Record V(s) from the policy forward pass the agent just ran.
+
+    A shared value head costs nothing here: it reads the cache that decision
+    already filled. A critic with its own network has no such cache, so it
+    replays the same cached input through itself.
+    """
     if stats is None:
         return
     network = agent.network
     hidden = network.cache.get(network.last_hidden_activation_key)
     if hidden is None:
         raise RuntimeError("RL value diagnostics require a completed policy forward pass.")
-    value = network.xp.dot(network.Wv, hidden) + network.bv
+    value = network.critic_values(network.cache["X"])
     if hasattr(value, "get"):
         value = value.get()
     scalar = float(np.asarray(value).reshape(-1)[0])

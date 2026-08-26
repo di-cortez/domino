@@ -13,6 +13,7 @@ import numpy as np
 from agents.encoder import DominoEncoder
 from agents.network_architecture import DEFAULT_NETWORK_ARCHITECTURE
 from middleware.domino_engine import RULESET_VERSION
+from training.rl.baseline import from_run_config as baseline_from_run_config
 from training.rl.ppo import (
     PPO_TRAINING_ALGORITHM,
     REINFORCE_TRAINING_ALGORITHM,
@@ -22,6 +23,8 @@ from training.rl.resume import (
     RLTrainingConfiguration,
     _validate_resume_configuration,
     load_resume_state,
+    run_config_uses_opponent_bucket_features as
+    _resume_uses_opponent_bucket_features,
 )
 from training.run_artifacts import (
     existing_run_config_path,
@@ -132,6 +135,26 @@ def run_config_uses_opponent_suit_features(run_config):
     """
     locked = (run_config or {}).get("locked_arguments") or {}
     return not bool(locked.get("no_opponent_suit_features", False))
+
+
+def run_config_uses_opponent_bucket_features(run_config):
+    """Return whether one saved run appends the opponent-bucket one-hot.
+
+    Defined in ``training.rl.resume`` and re-exported here so both encoder
+    ablations are reachable from the same place; this module already imports
+    that one, so the reader cannot live beside its sibling above.
+    """
+    return _resume_uses_opponent_bucket_features(run_config)
+
+
+def run_config_baseline(run_config):
+    """Return the baseline one saved run was created with, or ``None``.
+
+    Recorded in ``locked_arguments`` for the same reason as the feature flag
+    above; ``training.rl.baseline`` owns the accessor so that ``resume.py`` can
+    share it without importing this module back.
+    """
+    return baseline_from_run_config(run_config)
 
 
 def identity_spelling(mapping):
@@ -326,6 +349,7 @@ def create_run_config(
     network_architecture=DEFAULT_NETWORK_ARCHITECTURE,
     ruleset=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Atomically publish the immutable identity and requested target of a run."""
     algorithm = _validated_algorithm(algorithm)
@@ -333,6 +357,7 @@ def create_run_config(
     encoder = DominoEncoder(
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)

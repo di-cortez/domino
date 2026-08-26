@@ -38,6 +38,13 @@ Every game-producing entry point accepts one of four closed names through
 | `double-four` | 15 | 5 | 5 | 97 | 128 x 64 | 30 |
 | `double-three` | 10 | 4 | 2 | 69 | 96 x 48 | 20 |
 
+The `Input` column is the default layout. `--no-opponent-suit-features` removes
+the trailing exact-model block (`-S` features) and `--opponent-bucket-features`
+appends a 7-wide one-hot of the opponent bucket the agent is facing, so
+double-six ranges over 161, 168, and 175 inputs. Both flags change the input
+size, so checkpoints and supervised assets are not interchangeable across them
+and each non-default regime claims its own asset suffix.
+
 Datasets, encoded caches, checkpoints, canonical runs, and `forever` pointers
 are ruleset-specific. A compact checkpoint cannot be loaded into another
 ruleset and no padding, remapping, or transfer learning is performed. Legacy
@@ -161,6 +168,97 @@ For PPO actor-critic training:
 python -m training.pipeline forever --value-head --run-name critic
 python -m training.pipeline forever
 ```
+
+### Policy-gradient baseline
+
+`--baseline` selects the only term subtracted from a return before the policy
+gradient. Advantage normalization only rescales, so the baseline alone decides
+what is subtracted:
+
+| Flag | Baseline `b` | Advantage |
+| --- | --- | --- |
+| `--baseline zero` | `0` | `R` |
+| `--baseline 2` | `2` | `R - 2` |
+| `--baseline batch-mean` | `mean(R)` over the iteration buffer | `R - mean(R)` |
+| `--baseline value-head` | `V(s)`, shared trunk, critic trains it | `R - V(s)` |
+| `--baseline value-head-no-up` | `V(s)`, shared trunk, critic does not train it | `R - V(s)` |
+| `--baseline value-head-own-nn` | `V(s)` from a separate network | `R - V(s)` |
+
+```bash
+python -m training.pipeline forever --baseline zero --run-name no_baseline
+python -m training.pipeline forever --baseline 2 --run-name const2
+python -m training.pipeline forever --value-head --baseline batch-mean \
+  --run-name critic_trained_not_used
+python -m training.pipeline forever --value-head --baseline value-head-own-nn \
+  --run-name critic_own_network
+```
+
+A constant is spelled as the number itself. **The number is its value, never a
+position in the table**: `--baseline 2` is the constant 2, not `batch-mean`.
+`--baseline 0` is the constant zero, which gives the same gradient as
+`--baseline zero` but stays a distinct, separately auditable request.
+
+The three value-head kinds subtract exactly the same `V(s)` and differ only in
+how the critic is wired: `value-head` lets the critic's loss train the shared
+trunk, `value-head-no-up` stops that loss at the critic head, and
+`value-head-own-nn` gives the critic a network of its own. All three require
+`--value-head`. See
+[`training/README.md`](training/README.md#the-three-critics) for the details.
+
+Leaving the flag unset keeps the behavior that predates it, so the default is
+numerically unchanged: the critic when `--value-head` is on, otherwise the batch
+mean whenever advantage normalization is on and no baseline at all when it is
+off.
+
+#### `batch-mean` versus the previous behavior
+
+`batch-mean` is not a new estimator — it is the name for the baseline the
+project has always used without calling it one. As derived in
+[`ppo_sem_critico.tex`](references/explicacoes/ppo_with_out_critic/ppo_sem_critico.tex),
+the old `normalize_advantages` subtracted the buffer mean and divided by the
+buffer standard deviation in a single step, so the advantage reaching the
+clipped objective was already `(R - mu_B) / (sigma_B + eps)`. The mean was a
+baseline in every mathematical sense; it simply arrived as a side effect of a
+variance-reduction step instead of as a choice.
+
+What changed is that the two operations are factored apart:
+
+```
+before:  advantage = (R - mu_B) / (sigma_B + eps)     # one inseparable step
+after:   advantage = (R - b)    / (sigma   + eps)     # b chosen, then scaled
+```
+
+`--baseline batch-mean` with normalization on is therefore bit-for-bit the
+previous default. The denominator does not move for three of the four kinds
+either: `zero`, `constant` and `batch-mean` subtract the same value from every
+decision, and a standard deviation is invariant under a constant shift, so
+`sigma(R - b)` equals `sigma(R)` exactly. Only `value-head` changes the scale
+too, because `V(s)` differs per decision.
+
+Two combinations that were previously unreachable now are:
+
+- **Centered but unscaled.** Turning normalization off used to remove the
+  centering with it, leaving the raw return. `--baseline batch-mean
+  --no-normalize-advantages` now gives `R - mu_B` without the division.
+- **A zero-variance iteration keeps its offset.** It used to collapse to all
+  zeros because the mean was always removed. It now keeps whatever offset the
+  selected baseline implies — still zero for `batch-mean`, but not for
+  `constant`.
+
+One existing configuration does change numerically. With `--value-head` the
+advantage was `(R - V - mean(R - V)) / sigma(R - V)`; that extra centering was
+an artifact of normalization doing double duty, and the advantage is now
+`(R - V) / sigma(R - V)`.
+
+The critic head and the baseline are independent. `--baseline value-head`
+requires `--value-head`; every other choice may be combined with it, which keeps
+training `V(s)` through the value loss without subtracting it — the combination
+that separates the cost of training the critic from the effect of using it.
+
+The positional pipeline level must come before `--baseline`, because
+`constant` takes its value as a following token. The selected baseline is an
+immutable resume field, reloaded from the saved run configuration like the
+algorithm.
 
 The network defaults to the two ruleset-specific hidden layers in the table
 above (256 and 128 for the default double-six game).

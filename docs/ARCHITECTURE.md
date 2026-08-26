@@ -89,6 +89,53 @@ values it produces `5T + 3S + 7` public-information features and maps real tile
 decisions to `2T` outputs. Draw, pass, and single-option tile plays are forced
 by the engine and bypass neural inference and policy-gradient sampling.
 
+Two trailing feature blocks are optional, and each is last in the layout while
+it is present, so toggling either one moves no offset before it:
+
+| Block | Flag | Width | double-six |
+|---|---|---|---|
+| Exact-model suit presence | `--no-opponent-suit-features` removes it | `S` | 168 to 161 |
+| Opponent bucket one-hot | `--opponent-bucket-features` adds it | 7 | 168 to 175 |
+
+The opponent-bucket block holds a one-hot of which logical opponent bucket the
+seat being encoded is playing against, so the policy can condition on the kind
+of opponent it faces. Its width is every bucket in `training/rl/pool.py`'s
+`BUCKET_REGISTRY`, not the subset `--opponent-buckets` selects, so the input
+size never depends on the bucket selection and a checkpoint stays loadable
+under a different one. The vocabulary is duplicated in `agents/encoder.py`
+because `agents` must not import `training`;
+`tests/test_opponent_bucket_features.py` fails if the two orders drift apart.
+
+The block names *that seat's* adversary rather than the match, so the two
+players in one game normally receive different values: a learner facing a
+frozen `medium_term` snapshot is given `medium_term`, and the snapshot is given
+`recent`, because what it faces is the current learner. Outside the RL rollout
+the value comes from the same rule. The supervised dataset is `StrategicAgent`
+against `StrategicAgent`, so every example is encoded as `heuristic`, keeping
+pretraining inside a distribution RL reproduces; champion racing gives the
+candidate `heuristic` or `recent` by target, and the learner seat
+`champion_vs_learner`; the pairwise diagnostics map each agent's counterpart
+through `diagnostics.gameplay.opponent_bucket_for_agent`. An all-zero block is
+the explicit no-bucket state, reserved for an adversary that belongs to no
+bucket at all.
+
+The UI does not use it. A human belongs to no bucket, but the block is one-hot
+in every vector the policy trained on, so all-zero is a pattern it has never
+seen rather than a neutral input. `ui.ui_agents.UI_OPPONENT_BUCKET` hands the
+`heuristic` slot instead — the bucket the supervised dataset is encoded with,
+and therefore the one pattern every checkpoint has seen from its first gradient
+step. It is a stand-in, not a claim about how the human plays. The UI reads the
+layout off the checkpoint's input width, since it has no run configuration:
+only the widened vector is decided that way, and a default-width vector keeps
+the historical layout.
+
+The two flags are independent, and for double-six they are not distinguishable
+by size: dropping the suit block while adding the bucket block restores exactly
+168 inputs with seven different trailing features. A checkpoint shape check
+cannot see that swap, which is why `use_opponent_bucket_features` is recorded in
+the durable resume configuration and why each non-default regime claims its own
+supervised-asset suffix (`_nosuit`, `_bucket`).
+
 `SupervisedNeuralNetwork` is a float32 compact MLP. Defaults are
 `168-256-128-56`, `130-192-96-42`, `97-128-64-30`, and `69-96-48-20` from
 double-six through double-three. The hidden-layer count and every width have a single
@@ -151,12 +198,25 @@ root seed and derivation contract.
 
 RL uses fresh on-policy trajectories: all games in an iteration observe the
 same frozen policy. The default update stores masked collection-time
-log-probabilities, normalizes advantages once over the complete decision
-buffer, and runs masked PPO in deterministic minibatches. Direct and finite
-canonical runs default to at most four epochs; `forever` defaults to 16, with
-a whole-buffer KL guard after every completed epoch. With the optional value
-head, collection-time `V(s)` predictions define the advantages and PPO also
-optimizes a clipped critic loss. The optional `reinforce_v1` update instead applies one
+log-probabilities, subtracts a baseline, rescales advantages once over the
+complete decision buffer, and runs masked PPO in deterministic minibatches.
+Direct and finite canonical runs default to at most four epochs; `forever`
+defaults to 16, with a whole-buffer KL guard after every completed epoch.
+
+`training/rl/baseline.py` owns the only term subtracted from a return, selected
+by `--baseline`: `zero`, `constant VALUE`, `batch-mean`, or `value-head`.
+Advantage normalization only rescales; centering belongs to the baseline alone,
+because a normalizer that also removed the batch mean would silently reimpose
+`batch-mean` and make `zero` and `constant` unobservable. An unset flag keeps
+the behavior that predates it — the critic when its head is on, otherwise the
+batch mean whenever normalization is on and no baseline at all when it is off —
+so the default is numerically unchanged. The critic head and the baseline are
+independent: `value-head` requires `--value-head`, while every other choice may
+be combined with it to keep training `V(s)` without subtracting it. The
+selected baseline is recorded in `locked_arguments` rather than `rl_config`,
+which is compared as an immutable run key, so runs created before the flag
+existed stay resumable. With the value head PPO also optimizes a clipped critic
+loss. The optional `reinforce_v1` update instead applies one
 full-buffer policy-gradient step and skips PPO buffer construction, ratios,
 clipping, KL control, minibatches, and post-update full-buffer evaluation.
 There is no replay buffer or cross-iteration reuse in either mode. Decision

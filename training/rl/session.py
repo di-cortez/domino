@@ -10,6 +10,7 @@ import time
 import numpy as np
 
 from diagnostics.parallel_runner import ParallelSafetyConfig
+from training.rl import baseline as baselines
 from training.rl.adaptive_tuning import (
     atomic_write_json as atomic_write_tuning_json,
     hardware_metadata,
@@ -145,6 +146,7 @@ def _resume_inputs(training, resources, execution, reporter):
             reward_eta=saved.reward_eta,
             gamma_i=saved.gamma_i,
             normalize_advantages=saved.normalize_advantages,
+            baseline=baselines.BaselineSpec.from_mapping(saved.baseline),
             seed=saved.effective_seed,
             ppo_max_epochs=saved.ppo_max_epochs,
         ),
@@ -257,6 +259,14 @@ def _resume_configuration(
         "reward_eta": float(training.reward_eta),
         "gamma_i": float(training.gamma_i),
         "normalize_advantages": bool(training.normalize_advantages),
+        "use_opponent_bucket_features": bool(
+            training.use_opponent_bucket_features
+        ),
+        "baseline": (
+            None
+            if training.baseline is None
+            else training.baseline.as_mapping()
+        ),
         "weight_decay": float(training.weight_decay),
         "dropout_rate": float(training.dropout_rate),
         "effective_seed": int(effective_seed),
@@ -357,6 +367,12 @@ def prepare_training_session(training=None, resources=None, execution=None):
         initial_weights,
         quiet=execution.quiet,
         use_value_head=training.use_value_head,
+        # The baseline is what selects how the critic is wired, so the two
+        # value-head variants reach the network here rather than through a
+        # flag of their own. ``training.baseline`` is already resolved by
+        # ``resolve_training_options``, which runs before this point.
+        critic_updates_trunk=training.baseline.critic_updates_trunk,
+        critic_owns_network=training.baseline.critic_owns_network,
         device=device,
         fresh_from_sl=execution.fresh_from_sl,
         expected_training_algorithm=resolved.algorithm,
@@ -365,6 +381,9 @@ def prepare_training_session(training=None, resources=None, execution=None):
         ruleset=training.ruleset_name,
         initialization_seed=effective_seed,
         use_opponent_suit_features=training.use_opponent_suit_features,
+        use_opponent_bucket_features=(
+            training.use_opponent_bucket_features
+        ),
     )
     if inputs.metadata is not None:
         network.load_optimizer_state_dict(inputs.metadata["optimizer_state"])
@@ -404,6 +423,9 @@ def prepare_training_session(training=None, resources=None, execution=None):
         gamma_f=training.gamma_f,
         ruleset_name=training.ruleset_name,
         use_opponent_suit_features=training.use_opponent_suit_features,
+        use_opponent_bucket_features=(
+            training.use_opponent_bucket_features
+        ),
         safety=resources.safety_config,
         pool_state=inputs.pool_state,
         pool_weights=inputs.pool_weights,
@@ -464,6 +486,9 @@ def prepare_training_session(training=None, resources=None, execution=None):
         ruleset_name=training.ruleset_name,
         safety=resources.safety_config,
         use_opponent_suit_features=training.use_opponent_suit_features,
+        use_opponent_bucket_features=(
+            training.use_opponent_bucket_features
+        ),
     )
     if inputs.pool_state is not None:
         runner.restore_opponent_pool(

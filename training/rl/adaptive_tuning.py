@@ -47,10 +47,11 @@ TUNING_VERSION = 5
 def _policy_arrays(network):
     arrays = {}
     names = list(network.weight_names)
-    if hasattr(network, "Wv") and hasattr(network, "bv"):
-        names.extend(("Wv", "bv"))
+    # Includes a separate critic network's stack, so two runs that differ only
+    # in how the critic is wired never hash to the same policy digest.
+    names.extend(getattr(network, "critic_parameter_names", ()))
     for name in names:
-        value = getattr(network, name)
+        value = network.parameter_array(name)
         if hasattr(value, "get"):
             value = value.get()
         arrays[name] = np.asarray(value).copy()
@@ -278,6 +279,7 @@ def _new_runner(
     gamma_f,
     ruleset_name=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
     safety,
     pool_state,
     pool_weights,
@@ -292,6 +294,7 @@ def _new_runner(
         ruleset_name=ruleset_name,
         safety=safety,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     if pool_state is not None:
         # The throwaway runner owns its own rotation object, so benchmark plans
@@ -325,6 +328,7 @@ def benchmark_worker_candidates(
     gamma_f,
     ruleset_name=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
     safety,
     pool_state=None,
     pool_weights=None,
@@ -350,6 +354,7 @@ def benchmark_worker_candidates(
         gamma_f=gamma_f,
         ruleset_name=ruleset_name,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
         safety=safety,
         pool_state=pool_state,
         pool_weights=pool_weights,
@@ -576,6 +581,7 @@ def run_worker_tuning(
     gamma_f,
     ruleset_name=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
     safety,
     pool_state=None,
     pool_weights=None,
@@ -648,6 +654,7 @@ def run_worker_tuning(
                 gamma_f=gamma_f,
                 ruleset_name=ruleset_name,
                 use_opponent_suit_features=use_opponent_suit_features,
+                use_opponent_bucket_features=use_opponent_bucket_features,
                 safety=safety,
                 pool_state=pool_state,
                 pool_weights=pool_weights,

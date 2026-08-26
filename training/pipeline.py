@@ -27,6 +27,7 @@ from diagnostics.rl_progress import (
 from diagnostics.runtime_profile import RuntimeProfileRecorder
 from diagnostics.parallel_runner import MAX_DIAGNOSTIC_WORKERS, ParallelSafetyConfig
 from training.datagen import generator as dataset_generator
+from training.rl import baseline as rl_baseline
 from training.rl import cli as rl_cli
 from training.rl.config import DEFAULT_GPI
 from training.rl import training_loop as rl_training_loop
@@ -548,12 +549,23 @@ def _use_opponent_suit_features(args):
     return not bool(getattr(args, "no_opponent_suit_features", False))
 
 
+def _use_opponent_bucket_features(args):
+    """Return whether the opponent-bucket one-hot is appended to the input.
+
+    The supervised stage needs it too: the dataset, its encoded cache, and the
+    SL weights all take the RL encoder's width, so a pipeline that appends the
+    block in RL has to generate a dataset that carries it as well.
+    """
+    return bool(getattr(args, "opponent_bucket_features", False))
+
+
 def _network_architecture(args):
     """Return the one architecture selected for supervised and RL stages."""
     return architecture_from_hidden_sizes(
         supervised_cli.hidden_sizes_from_args(args),
         ruleset=args.ruleset,
         use_opponent_suit_features=_use_opponent_suit_features(args),
+        use_opponent_bucket_features=_use_opponent_bucket_features(args),
     )
 
 
@@ -595,6 +607,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             seed,
             ruleset=args.ruleset,
             use_opponent_suit_features=_use_opponent_suit_features(args),
+            use_opponent_bucket_features=_use_opponent_bucket_features(args),
         )
     else:
         paths = run_scoped_asset_paths(_pipeline_run_dir(root, config, args))
@@ -617,6 +630,7 @@ def ensure_canonical_supervised_assets(root, config, args):
         generation_config=generation_config,
         ruleset=args.ruleset,
         use_opponent_suit_features=_use_opponent_suit_features(args),
+        use_opponent_bucket_features=_use_opponent_bucket_features(args),
     )
     dataset_check.require_compatible_or_missing(
         rebuild=rebuild_dataset,
@@ -652,6 +666,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             generation_config=generation_config,
             ruleset=args.ruleset,
             use_opponent_suit_features=_use_opponent_suit_features(args),
+            use_opponent_bucket_features=_use_opponent_bucket_features(args),
         )
         dataset_status = "generated"
         retrain_weights = True
@@ -665,6 +680,7 @@ def ensure_canonical_supervised_assets(root, config, args):
         architecture=architecture,
         ruleset=args.ruleset,
         use_opponent_suit_features=_use_opponent_suit_features(args),
+        use_opponent_bucket_features=_use_opponent_bucket_features(args),
     )
     weights_check.require_compatible_or_missing(
         rebuild=retrain_weights,
@@ -698,6 +714,7 @@ def ensure_canonical_supervised_assets(root, config, args):
                 seed=seed,
                 ruleset=args.ruleset,
                 use_opponent_suit_features=_use_opponent_suit_features(args),
+                use_opponent_bucket_features=_use_opponent_bucket_features(args),
             )
         weights_metadata = write_weights_metadata(
             paths,
@@ -709,6 +726,7 @@ def ensure_canonical_supervised_assets(root, config, args):
             architecture=architecture,
             ruleset=args.ruleset,
             use_opponent_suit_features=_use_opponent_suit_features(args),
+            use_opponent_bucket_features=_use_opponent_bucket_features(args),
         )
         weights_status = "trained"
 
@@ -759,12 +777,17 @@ def _rl_algorithm(args):
     )
 
 
-def _rl_config(args):
-    normalize_advantages = (
+def _normalize_advantages(args):
+    """Return whether whole-buffer advantage rescaling is on for one run."""
+    return (
         ppo_is_enabled(args.ppo_max_epochs)
         if args.normalize_advantages is None
         else bool(args.normalize_advantages)
     )
+
+
+def _rl_config(args):
+    normalize_advantages = _normalize_advantages(args)
     return {
         "games_per_iteration": int(args.gpi),
         "opponent_buckets": list(args.opponent_buckets),
@@ -1132,6 +1155,7 @@ def run_rl_pipeline(root, config, args, assets):
         rl_config=_rl_config(args),
         algorithm=algorithm,
         use_opponent_suit_features=_use_opponent_suit_features(args),
+        use_opponent_bucket_features=_use_opponent_bucket_features(args),
         diagnostic_config={
             "periodic_seed": int(periodic_diagnostic_seed(seed)),
             "periodic_seed_namespace": "periodic_rl_vs_random",
@@ -1545,6 +1569,7 @@ def run_final_diagnostics(root, config, args, assets, rl_result):
         status_callback=_status,
         ruleset=args.ruleset,
         use_opponent_suit_features=_use_opponent_suit_features(args),
+        use_opponent_bucket_features=_use_opponent_bucket_features(args),
         run_metadata={
             "configuration_sha256": run_configuration[
                 "configuration_sha256"
@@ -1722,6 +1747,8 @@ def parse_args(argv=None):
         supervised_cli.resolve_architecture_arguments(args)
     except ValueError as exc:
         parser.error(str(exc))
+    # Checked once --value-head and any resumed baseline are both settled.
+    rl_baseline.validate_arguments(parser, args)
     return _resolve_execution_identity(args)
 
 

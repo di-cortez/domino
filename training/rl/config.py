@@ -21,6 +21,7 @@ from training.rl.ppo import (
     ppo_is_enabled,
     validate_ppo_max_epochs,
 )
+from training.rl.baseline import resolve as resolve_baseline
 from training.rl.rollout import (
     REWARD_ETA,
     DEFAULT_GAMMA_F,
@@ -48,6 +49,11 @@ DEFAULT_MOVING_AVERAGE_WINDOW = 10
 # Explicit advantage-normalization CLI flags still win.
 DEFAULT_NORMALIZE_ADVANTAGES = None
 
+# ``None`` resolves to the baseline the run implied before ``--baseline``
+# existed: the critic when its head is on, otherwise the batch mean whenever
+# normalization is on and no baseline at all when it is off.
+DEFAULT_BASELINE = None
+
 
 @dataclass(frozen=True)
 class RLTrainingOptions:
@@ -69,10 +75,19 @@ class RLTrainingOptions:
     # False drops the trailing exact-model block from the encoder, shortening
     # the policy input. Checkpoints are not interchangeable across this flag.
     use_opponent_suit_features: bool = True
+    # True appends a one-hot of the bucket each seat's adversary was drawn
+    # from, lengthening the policy input by the whole bucket registry. Like the
+    # flag above it changes the input size, so checkpoints are not
+    # interchangeable across it.
+    use_opponent_bucket_features: bool = False
     gamma_f: float = DEFAULT_GAMMA_F
     reward_eta: float = REWARD_ETA
     gamma_i: float = GAMMA_I
     normalize_advantages: bool | None = DEFAULT_NORMALIZE_ADVANTAGES
+    # The term subtracted from every return. ``None`` resolves to the choice
+    # the run already implied before ``--baseline`` existed; see
+    # ``training/rl/baseline.py``.
+    baseline: Any = DEFAULT_BASELINE
     seed: int | None = None
     ppo_max_epochs: int = DEFAULT_PPO_MAX_EPOCHS
 
@@ -242,6 +257,11 @@ def resolve_training_options(training, resources, execution):
         if training.normalize_advantages is None
         else bool(training.normalize_advantages)
     )
+    baseline = resolve_baseline(
+        training.baseline,
+        use_value_head=bool(training.use_value_head),
+        normalize_advantages=normalize_advantages,
+    )
     workers = resources.workers
     if workers != "auto":
         workers = int(workers)
@@ -262,6 +282,7 @@ def resolve_training_options(training, resources, execution):
         reward_eta=reward_eta,
         gamma_i=gamma_i,
         normalize_advantages=normalize_advantages,
+        baseline=baseline,
         ppo_max_epochs=ppo_max_epochs,
     )
     resolved_resources = replace(

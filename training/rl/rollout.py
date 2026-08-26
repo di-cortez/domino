@@ -34,6 +34,13 @@ REWARD_ETA = 0.5
 
 REWARD_ZERO_EPSILON = 1e-8
 
+# The bucket a frozen opponent is told it faces. Every opponent in the pool
+# plays the current learner, and the learner is by definition the newest policy
+# of the ``recent`` band, so this is what "who am I playing against" resolves to
+# from the opposite seat. It is deliberately not the learner's own bucket: that
+# one names the learner's adversary, not the match.
+LEARNER_OPPONENT_BUCKET = "recent"
+
 # The single set of terminal and local event reward constants. The mutable
 # mapping shape remains part of the historical self-play compatibility surface:
 # it is copied per run, overridden with the tunables resolved from the CLI, and
@@ -386,6 +393,8 @@ def _collect_steps_vs_snapshot(
     ruleset_name=DEFAULT_RULESET_NAME,
     capture_opponent_decision_restarts=False,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
+    opponent_bucket=None,
 ):
     """Play against one already-selected frozen neural opponent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -407,6 +416,8 @@ def _collect_steps_vs_snapshot(
         runtime_profile=learner_policy_profile,
         ruleset=ruleset_name,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
+        opponent_bucket=opponent_bucket,
     )
     opponent = RLAgent(
         opponent_network,
@@ -414,6 +425,8 @@ def _collect_steps_vs_snapshot(
         runtime_profile=opponent_policy_profile,
         ruleset=ruleset_name,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
+        opponent_bucket=LEARNER_OPPONENT_BUCKET,
     )
     agents = [None, None]
     agents[learner_position] = learner
@@ -455,8 +468,18 @@ def collect_steps_for_assignment(
     ruleset_name=DEFAULT_RULESET_NAME,
     capture_opponent_decision_restarts=False,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
+    opponent_bucket=None,
 ):
-    """Dispatch one preselected assignment without knowing pool policy."""
+    """Dispatch one preselected assignment without knowing pool policy.
+
+    ``opponent_bucket`` is the assignment's bucket name, forwarded verbatim so
+    the learner is told which bucket its adversary was drawn from. It stays a
+    caller-supplied value rather than being derived from ``opponent_kind``
+    because several buckets share one kind: every neural bucket dispatches
+    through ``policy_snapshot``, and the champion buckets deliberately overlap
+    the chronological bands.
+    """
     if opponent_kind == "policy_snapshot":
         if opponent_network is None:
             raise ValueError("A policy-snapshot assignment requires weights")
@@ -471,6 +494,8 @@ def collect_steps_for_assignment(
                 capture_opponent_decision_restarts
             ),
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
     if opponent_kind == "heuristic":
         if opponent_network is not None:
@@ -485,6 +510,8 @@ def collect_steps_for_assignment(
                 capture_opponent_decision_restarts
             ),
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
     if opponent_kind == "random":
         if opponent_network is not None:
@@ -499,6 +526,8 @@ def collect_steps_for_assignment(
                 capture_opponent_decision_restarts
             ),
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
     raise ValueError(f"Unknown RL opponent kind: {opponent_kind!r}")
 
@@ -511,6 +540,8 @@ def _collect_steps_vs_heuristic(
     ruleset_name=DEFAULT_RULESET_NAME,
     capture_opponent_decision_restarts=False,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
+    opponent_bucket=None,
 ):
     """Play one training game against the fixed heuristic agent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -526,6 +557,8 @@ def _collect_steps_vs_heuristic(
         runtime_profile=learner_policy_profile,
         ruleset=ruleset_name,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
+        opponent_bucket=opponent_bucket,
     )
     agents = [None, None]
     agents[learner_position] = learner
@@ -565,6 +598,8 @@ def _collect_steps_vs_random(
     ruleset_name=DEFAULT_RULESET_NAME,
     capture_opponent_decision_restarts=False,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
+    opponent_bucket=None,
 ):
     """Play one training game against the fixed uniform-random agent."""
     section_started = _profile_worker_start(runtime_profile)
@@ -580,6 +615,8 @@ def _collect_steps_vs_random(
         runtime_profile=learner_policy_profile,
         ruleset=ruleset_name,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
+        opponent_bucket=opponent_bucket,
     )
     agents = [None, None]
     agents[learner_position] = learner
@@ -621,6 +658,8 @@ def collect_steps_from_restart(
     runtime_profile=None,
     ruleset_name=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
+    opponent_bucket=None,
 ):
     """Continue one captured state with the learner in the opponent's seat."""
     engine = DominoEngine.from_restart_state(restart.engine_state)
@@ -648,6 +687,8 @@ def collect_steps_from_restart(
         runtime_profile=learner_policy_profile,
         ruleset=ruleset_name,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
+        opponent_bucket=opponent_bucket,
     )
     if opponent_kind == "policy_snapshot":
         if opponent_network is None:
@@ -658,6 +699,8 @@ def collect_steps_from_restart(
             runtime_profile=opponent_policy_profile,
             ruleset=ruleset_name,
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=LEARNER_OPPONENT_BUCKET,
         )
     elif opponent_kind == "heuristic":
         if opponent_network is not None:

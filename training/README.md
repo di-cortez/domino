@@ -32,6 +32,13 @@ policy dimensions are:
 | `double-four` | 15 | 5 | 5 | 97 | 128 x 64 | 30 |
 | `double-three` | 10 | 4 | 2 | 69 | 96 x 48 | 20 |
 
+The `Input` column is the default layout. `--no-opponent-suit-features` removes
+the trailing exact-model block (`-S` features) and `--opponent-bucket-features`
+appends a 7-wide one-hot of the opponent bucket the agent is facing, so
+double-six ranges over 161, 168, and 175 inputs. Both flags change the input
+size, so checkpoints and supervised assets are not interchangeable across them
+and each non-default regime claims its own asset suffix.
+
 Dataset/cache/model metadata records the canonical name. Compact canonical
 asset and run names include it; historical double-six names are unchanged.
 Resume locks the ruleset, and cross-ruleset checkpoint loading is rejected.
@@ -150,6 +157,205 @@ canonical PPO actor-critic run can be started and resumed with:
 python -m training.pipeline forever --value-head --run-name critic
 python -m training.pipeline forever
 ```
+
+### Opponent-bucket input features
+
+`--opponent-bucket-features` appends a one-hot to the policy input naming which
+opponent bucket the agent is playing against, so the policy can condition on the
+kind of opponent it faces. The block is 7 wide — one slot per bucket in
+`training/rl/pool.py`'s registry, not per bucket `--opponent-buckets` selects —
+so the input size never depends on the selection and double-six grows from 168
+to 175 features.
+
+| Position | Bucket | double-six encoding |
+| ---: | --- | --- |
+| 0 | `heuristic` | `1000000` |
+| 1 | `random` | `0100000` |
+| 2 | `recent` | `0010000` |
+| 3 | `medium_term` | `0001000` |
+| 4 | `historical_uniform` | `0000100` |
+| 5 | `champion_vs_heuristic` | `0000010` |
+| 6 | `champion_vs_learner` | `0000001` |
+
+```bash
+python -m training.pipeline forever --opponent-bucket-features \
+  --opponent-buckets heuristic,random,recent --run-name knows_opponent
+```
+
+The one-hot names *that seat's* adversary, not the match, so the two players in
+one game normally see different values. A learner drawn against a frozen
+`medium_term` snapshot is given `medium_term`; the snapshot is given `recent`,
+because what it faces is the current learner. The bucket comes from the match
+assignment rather than from the opponent's kind, because several buckets share
+one kind: every neural bucket dispatches as a policy snapshot, and the two
+champion buckets deliberately overlap the chronological bands.
+
+Outside the RL rollout the same rule fills the block. The supervised dataset is
+`StrategicAgent` against `StrategicAgent`, so pretraining encodes `heuristic` —
+a bucket RL reuses, rather than a pattern it would never show again. Champion
+racing gives the candidate `heuristic` or `recent` by target and the learner
+seat `champion_vs_learner`; the pairwise diagnostics map each agent's
+counterpart onto the bucket it stands for. An all-zero block is the explicit
+no-bucket state, reserved for an adversary with no bucket at all.
+
+The UI is not one of those cases. A human belongs to no bucket, but since the
+block is one-hot in every training vector, all-zero is a pattern the policy has
+never seen rather than a neutral input, so `ui.ui_agents.UI_OPPONENT_BUCKET`
+hands it the `heuristic` slot — the bucket pretraining is encoded with. That is
+a stand-in for an input the policy can read, not a claim that a human plays like
+`StrategicAgent`, and no bucket value makes the conditioning transfer to human
+play.
+
+The flag changes the input size, so its checkpoints and supervised assets are
+not interchangeable with runs that omit it, and it claims its own asset suffix
+(`_bucket`). Note that it is not distinguishable from the suit ablation by size
+alone: `--no-opponent-suit-features --opponent-bucket-features` restores exactly
+168 double-six inputs with seven different trailing features. A shape check
+cannot catch that swap, so the flag is recorded in the durable resume
+configuration as well.
+
+### Policy-gradient baseline
+
+`--baseline` selects the only term subtracted from a return before the policy
+gradient. Advantage normalization only rescales, so the baseline alone decides
+what is subtracted:
+
+| Flag | Baseline `b` | Advantage |
+| --- | --- | --- |
+| `--baseline zero` | `0` | `R` |
+| `--baseline 2` | `2` | `R - 2` |
+| `--baseline batch-mean` | `mean(R)` over the iteration buffer | `R - mean(R)` |
+| `--baseline value-head` | `V(s)`, shared trunk, critic trains it | `R - V(s)` |
+| `--baseline value-head-no-up` | `V(s)`, shared trunk, critic does not train it | `R - V(s)` |
+| `--baseline value-head-own-nn` | `V(s)` from a separate network | `R - V(s)` |
+
+```bash
+python -m training.pipeline forever --baseline zero --run-name no_baseline
+python -m training.pipeline forever --baseline 2 --run-name const2
+python -m training.pipeline forever --value-head --baseline batch-mean \
+  --run-name critic_trained_not_used
+```
+
+Leaving the flag unset keeps the behavior that predates it, so the default is
+numerically unchanged: the critic when `--value-head` is on, otherwise the batch
+mean whenever advantage normalization is on and no baseline at all when it is
+off.
+
+#### The constant is a bare number
+
+A constant baseline is spelled as the number itself: `--baseline 2` subtracts
+2, `--baseline -0.5` subtracts -0.5. No baseline name parses as a number, so
+this can never shadow one.
+
+**The number is the constant's value, never a position in the table above.**
+`--baseline 2` is the constant 2 and not `batch-mean`; `--baseline 3` is the
+constant 3 and not `value-head`. This is the one real trap in the grammar.
+
+`--baseline 0` is the constant zero. It produces the same gradient as
+`--baseline zero` but stays a distinct request: the two record different
+`locked_arguments` and therefore different `configuration_sha256`, which is what
+lets a later audit tell which one a run actually asked for.
+
+Anything after the number is an error rather than silently absorbed, so
+`--baseline 2 forever` is refused instead of running at the wrong pipeline
+level. Put positional arguments before the flag. The older
+`--baseline constant 2` spelling still parses, because that is how the value is
+persisted and every existing run has to stay resumable.
+
+#### The three critics
+
+`value-head`, `value-head-no-up` and `value-head-own-nn` subtract exactly the
+same thing -- one `V(s)` per decision -- and differ only in how the critic is
+attached to the policy. Together they separate the critic's worth *as a
+baseline* from its effect *on the shared representation*:
+
+| Kind | Shared trunk | Critic shapes the trunk |
+| --- | --- | --- |
+| `value-head` | yes | yes |
+| `value-head-no-up` | yes | no |
+| `value-head-own-nn` | no | no (there is no shared trunk) |
+
+```bash
+python -m training.pipeline forever --value-head --baseline value-head-no-up \
+  --run-name critic_reads_only
+python -m training.pipeline forever --value-head --baseline value-head-own-nn \
+  --run-name critic_own_network
+```
+
+`value-head-no-up` keeps the linear head over the policy's last hidden
+activation and keeps training it, but its loss stops at `Wv`/`bv`. The head
+still learns exactly as fast: those gradients read the hidden activation as
+data, not as a node to differentiate through, so cutting the trunk contribution
+cannot change them. What changes is the hidden stack, which is then trained by
+the policy gradient alone.
+
+`value-head-own-nn` gives the critic its own network, mirroring the policy's
+hidden widths with a single linear output and sharing no weights at all. It
+roughly doubles the trained parameters and adds one forward and one backward
+pass per minibatch, so a per-iteration time comparison against the other kinds
+is not like-for-like. Its weights are stored in the checkpoint under a
+`critic.` prefix; a frozen opponent in the pool never carries them, because an
+opponent only acts and never evaluates.
+
+Every value-head kind requires `--value-head`. That flag still means "build and
+train a critic", and `--baseline` chooses which one, so
+`--value-head --baseline batch-mean` keeps working as the way to pay the
+critic's cost without using its output.
+
+One reporting caveat: gradient norms are summed over every gradient in the
+update. `value-head-no-up` drops the term the critic used to inject into the
+trunk, and `value-head-own-nn` adds a whole second network's gradients, so
+reported `grad norm` is not comparable across the three kinds.
+
+#### `batch-mean` versus the previous behavior
+
+`batch-mean` is not a new estimator — it is the name for the baseline the
+project has always used without calling it one. As derived in
+[`ppo_sem_critico.tex`](../references/explicacoes/ppo_with_out_critic/ppo_sem_critico.tex),
+the old `normalize_advantages` subtracted the buffer mean and divided by the
+buffer standard deviation in a single step, so the advantage reaching the
+clipped objective was already `(R - mu_B) / (sigma_B + eps)`. The mean was a
+baseline in every mathematical sense; it simply arrived as a side effect of a
+variance-reduction step instead of as a choice.
+
+What changed is that the two operations are factored apart:
+
+```
+before:  advantage = (R - mu_B) / (sigma_B + eps)     # one inseparable step
+after:   advantage = (R - b)    / (sigma   + eps)     # b chosen, then scaled
+```
+
+`--baseline batch-mean` with normalization on is therefore bit-for-bit the
+previous default. The denominator does not move for three of the four kinds
+either: `zero`, `constant` and `batch-mean` subtract the same value from every
+decision, and a standard deviation is invariant under a constant shift, so
+`sigma(R - b)` equals `sigma(R)` exactly. Only `value-head` changes the scale
+too, because `V(s)` differs per decision.
+
+Two combinations that were previously unreachable now are:
+
+- **Centered but unscaled.** Turning normalization off used to remove the
+  centering with it, leaving the raw return. `--baseline batch-mean
+  --no-normalize-advantages` now gives `R - mu_B` without the division.
+- **A zero-variance iteration keeps its offset.** It used to collapse to all
+  zeros because the mean was always removed. It now keeps whatever offset the
+  selected baseline implies — still zero for `batch-mean`, but not for
+  `constant`.
+
+One existing configuration does change numerically. With `--value-head` the
+advantage was `(R - V - mean(R - V)) / sigma(R - V)`; that extra centering was
+an artifact of normalization doing double duty, and the advantage is now
+`(R - V) / sigma(R - V)`.
+
+The critic head and the baseline are independent. `--baseline value-head`
+requires `--value-head`; every other choice may be combined with it, which keeps
+training `V(s)` through the value loss without subtracting it — the combination
+that separates the cost of training the critic from the effect of using it.
+
+The positional pipeline level must come before `--baseline`, because
+`constant` takes its value as a following token. The selected baseline is an
+immutable resume field, reloaded from the saved run configuration like the
+algorithm.
 
 The optional value accepted by `--resume` is a convenience alias for
 `--resume-from`. In `forever`, diagnostic-worker autotuning is performed once,

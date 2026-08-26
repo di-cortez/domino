@@ -23,7 +23,11 @@ from typing import Callable, Iterable
 
 import numpy as np
 
-from diagnostics.gameplay import create_agent, play_game
+from diagnostics.gameplay import (
+    create_agent,
+    opponent_bucket_for_agent,
+    play_game,
+)
 from utils.resource_limits import MIB, available_ram_mb, process_rss_bytes
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 
@@ -44,6 +48,7 @@ _WORKER_OPPONENT = None
 _WORKER_SUPPRESS_OUTPUT = True
 _WORKER_RULESET_NAME = DEFAULT_RULESET_NAME
 _WORKER_USE_OPPONENT_SUIT_FEATURES = True
+_WORKER_USE_OPPONENT_BUCKET_FEATURES = False
 
 
 class DiagnosticMemoryPressure(RuntimeError):
@@ -191,25 +196,34 @@ def _worker_initializer(
     suppress_agent_output: bool,
     ruleset_name: str,
     use_opponent_suit_features: bool = True,
+    use_opponent_bucket_features: bool = False,
 ) -> None:
     """Construct one reusable agent pair inside each diagnostic worker."""
     global _WORKER_AGENT, _WORKER_OPPONENT, _WORKER_SUPPRESS_OUTPUT
     global _WORKER_RULESET_NAME, _WORKER_USE_OPPONENT_SUIT_FEATURES
+    global _WORKER_USE_OPPONENT_BUCKET_FEATURES
     ignore_parent_shutdown_signals()
     _force_cpu_environment()
     _WORKER_RULESET_NAME = resolve_ruleset(ruleset_name).name
     _WORKER_USE_OPPONENT_SUIT_FEATURES = bool(use_opponent_suit_features)
+    _WORKER_USE_OPPONENT_BUCKET_FEATURES = bool(use_opponent_bucket_features)
+    # Each agent is told what the *other* one is, which is the only place in
+    # the diagnostics where both names are known at once.
     _WORKER_AGENT = create_agent(
         agent_name,
         weights,
         _WORKER_RULESET_NAME,
         use_opponent_suit_features=_WORKER_USE_OPPONENT_SUIT_FEATURES,
+        use_opponent_bucket_features=_WORKER_USE_OPPONENT_BUCKET_FEATURES,
+        opponent_bucket=opponent_bucket_for_agent(opponent_name),
     )
     _WORKER_OPPONENT = create_agent(
         opponent_name,
         opponent_weights,
         _WORKER_RULESET_NAME,
         use_opponent_suit_features=_WORKER_USE_OPPONENT_SUIT_FEATURES,
+        use_opponent_bucket_features=_WORKER_USE_OPPONENT_BUCKET_FEATURES,
+        opponent_bucket=opponent_bucket_for_agent(agent_name),
     )
     _WORKER_SUPPRESS_OUTPUT = suppress_agent_output
 
@@ -507,6 +521,7 @@ def evaluate_game_specs(
     safety: ParallelSafetyConfig | None = None,
     ruleset_name: str = DEFAULT_RULESET_NAME,
     use_opponent_suit_features: bool = True,
+    use_opponent_bucket_features: bool = False,
 ) -> tuple[list[dict], ParallelRunInfo]:
     """Execute arbitrary absolute game ids, retaining work across pool fallbacks."""
     safety = safety or ParallelSafetyConfig()
@@ -550,6 +565,7 @@ def evaluate_game_specs(
         suppress_agent_output,
         ruleset_name,
         use_opponent_suit_features,
+        use_opponent_bucket_features,
     )
 
     def store(record: dict) -> None:

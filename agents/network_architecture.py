@@ -188,18 +188,21 @@ def architecture_from_hidden_sizes(
     *hidden_sizes,
     ruleset=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Build a policy architecture with one ruleset's policy dimensions.
 
     ``use_opponent_suit_features=False`` shortens ``input_size`` by one suit
-    block, so an ablated run never builds a network shaped for features its
-    encoder does not produce.
+    block and ``use_opponent_bucket_features=True`` lengthens it by the opponent
+    bucket one-hot, so a run never builds a network shaped for features its
+    encoder does not produce, in either direction.
     """
     if len(hidden_sizes) == 1 and not isinstance(hidden_sizes[0], int):
         hidden_sizes = tuple(hidden_sizes[0])
     encoder = DominoEncoder(
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     return NetworkArchitecture(
         hidden_sizes=hidden_sizes,
@@ -213,6 +216,7 @@ def architecture_for_ruleset(
     hidden_sizes=None,
     *,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Return the compact default or an explicit hidden stack for a ruleset."""
     resolved = resolve_ruleset(ruleset)
@@ -222,6 +226,7 @@ def architecture_for_ruleset(
         hidden_sizes,
         ruleset=resolved,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
 
 

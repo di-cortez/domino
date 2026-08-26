@@ -51,6 +51,12 @@ class RLAgent(Agent):
     ``use_opponent_suit_features=False`` selects the ablated encoder layout and
     skips exact opponent inference entirely, so the policy it wraps must have
     been trained with the shortened input. The shape check below enforces that.
+
+    ``use_opponent_bucket_features=True`` appends the opponent-bucket one-hot,
+    and ``opponent_bucket`` names the bucket *this* agent is playing against.
+    Each seat is told about its own adversary, so in a game between the learner
+    and a frozen snapshot the two agents receive different buckets. ``None``
+    leaves the block at zero for an adversary that belongs to no bucket.
     """
 
     VALID_MODES = {"training", "stochastic_evaluation", "evaluation"}
@@ -63,6 +69,8 @@ class RLAgent(Agent):
         *,
         ruleset=DEFAULT_RULESET_NAME,
         use_opponent_suit_features=True,
+        use_opponent_bucket_features=False,
+        opponent_bucket=None,
     ):
         if mode not in self.VALID_MODES:
             raise ValueError(
@@ -73,9 +81,13 @@ class RLAgent(Agent):
         self.network = network
         self.mode = mode
         self.use_opponent_suit_features = bool(use_opponent_suit_features)
+        self.use_opponent_bucket_features = bool(use_opponent_bucket_features)
+        self.opponent_bucket = opponent_bucket
         self.encoder = DominoEncoder(
             self.ruleset,
             use_opponent_suit_features=self.use_opponent_suit_features,
+            use_opponent_bucket_features=self.use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
         first_weight = getattr(network, "W1", None)
         layer_count = getattr(network, "layer_count", None)
@@ -125,6 +137,8 @@ class RLAgent(Agent):
         use_value_head=False,
         ruleset=DEFAULT_RULESET_NAME,
         use_opponent_suit_features=True,
+        use_opponent_bucket_features=False,
+        opponent_bucket=None,
     ):
         """Load an RL policy and optionally restore its persisted value head."""
         weights_path = weights_path or default_rl_weights_path(ruleset)
@@ -137,6 +151,8 @@ class RLAgent(Agent):
             mode=mode,
             ruleset=ruleset,
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=opponent_bucket,
         )
 
     def choose_move(self, state, legal_actions):

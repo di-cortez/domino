@@ -28,6 +28,7 @@ from training.rl.ppo import (
     fixed_ppo_policy,
     ppo_is_enabled,
 )
+from training.rl import baseline as baselines
 from training.rl.checkpoint_archive import archive_policy_manifest
 from training.rl.matchmaking import matchmaking_policy_manifest
 from training.rl.pool import pool_policy_manifest
@@ -65,6 +66,21 @@ RENAMED_PARAMETER_KEYS = {
 }
 
 
+def run_config_uses_opponent_bucket_features(run_config):
+    """Return whether one saved run appends the opponent-bucket one-hot.
+
+    Read from ``locked_arguments`` rather than ``rl_config`` for the reason
+    ``training.canonical_run.run_config_uses_opponent_suit_features`` documents:
+    ``rl_config`` is rebuilt from arguments on every invocation and compared as
+    an immutable run key, so a new member there would make every run created
+    before the flag existed unresumable. It lives here rather than beside its
+    sibling in ``training.canonical_run`` because that module imports this one,
+    and this module needs the value; ``canonical_run`` re-exports it.
+    """
+    locked = (run_config or {}).get("locked_arguments") or {}
+    return bool(locked.get("opponent_bucket_features", False))
+
+
 def _renamed(rl_config, current_name):
     """Read one renamed RL parameter from a config written either way."""
     if current_name in rl_config:
@@ -94,6 +110,16 @@ class RLTrainingConfiguration:
     reward_eta: float
     gamma_i: float
     normalize_advantages: bool
+    # Recorded even though the encoder ablations are usually caught by the
+    # checkpoint's own input width, because these two are not independent: the
+    # suit block and the bucket block differ in width by zero for double-six,
+    # so dropping the first while adding the second reproduces the historical
+    # 168 inputs with seven completely different trailing features. A shape
+    # check cannot see that swap; this field can.
+    use_opponent_bucket_features: bool
+    # JSON mapping (or None) rather than the typed spec, so one configuration
+    # stays directly comparable between a checkpoint and a run config.
+    baseline: dict | None
     weight_decay: float
     dropout_rate: float
     effective_seed: int
@@ -125,6 +151,18 @@ class RLTrainingConfiguration:
         data.setdefault("run_configuration_sha256", None)
         data.setdefault("git_commit", None)
         data.setdefault("opponent_decision_restarts", False)
+        # Checkpoints written before the flag existed never had the block.
+        data.setdefault("use_opponent_bucket_features", False)
+        data["use_opponent_bucket_features"] = bool(
+            data["use_opponent_bucket_features"]
+        )
+        # Checkpoints written before --baseline existed record no baseline,
+        # which resolves to the one the run already used.
+        data.setdefault("baseline", None)
+        if data["baseline"] is not None:
+            data["baseline"] = baselines.BaselineSpec.from_mapping(
+                data["baseline"]
+            ).as_mapping()
         # Checkpoints written before the parameter rename spell these three the
         # original way; a resume must keep working across the rename.
         for current_name, original_name in RENAMED_PARAMETER_KEYS.items():
@@ -181,6 +219,14 @@ class RLTrainingConfiguration:
             "reward_eta": float(_renamed(rl, "reward_eta")),
             "gamma_i": float(_renamed(rl, "gamma_i")),
             "normalize_advantages": bool(rl["normalize_advantages"]),
+            # From locked_arguments, not rl_config, for the same reason the
+            # baseline is; see ``training.canonical_run``.
+            "use_opponent_bucket_features": run_config_uses_opponent_bucket_features(
+                run_config
+            ),
+            # From locked_arguments, not rl_config; see
+            # ``training.rl.baseline.from_run_config``.
+            "baseline": baselines.from_run_config(run_config),
             "weight_decay": float(rl["weight_decay"]),
             "dropout_rate": float(rl["dropout_rate"]),
             "effective_seed": int(run_config["seed"]),
@@ -238,11 +284,13 @@ def _checkpoint_matches_encoder(
     ruleset=DEFAULT_RULESET_NAME,
     *,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Return True when a loaded checkpoint matches the current encoder shape."""
     encoder = DominoEncoder(
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     input_size, output_size = _checkpoint_shape(network)
     return (
@@ -257,6 +305,8 @@ def _load_initial_network(
     rl_weights_path,
     quiet=False,
     use_value_head=False,
+    critic_updates_trunk=True,
+    critic_owns_network=False,
     device="auto",
     fresh_from_sl=False,
     expected_training_algorithm=None,
@@ -265,6 +315,7 @@ def _load_initial_network(
     ruleset=DEFAULT_RULESET_NAME,
     initialization_seed=None,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Load RL/SL weights or create a compatible random policy as fallback.
 
@@ -279,6 +330,8 @@ def _load_initial_network(
                 rl_weights_path,
                 learning_rate=learning_rate,
                 use_value_head=use_value_head,
+                critic_updates_trunk=critic_updates_trunk,
+                critic_owns_network=critic_owns_network,
                 device=device,
                 weight_decay=weight_decay,
                 dropout_rate=dropout_rate,
@@ -286,11 +339,13 @@ def _load_initial_network(
             encoder = DominoEncoder(
                 ruleset,
                 use_opponent_suit_features=use_opponent_suit_features,
+                use_opponent_bucket_features=use_opponent_bucket_features,
             )
             if not _checkpoint_matches_encoder(
                 network,
                 ruleset,
                 use_opponent_suit_features=use_opponent_suit_features,
+                use_opponent_bucket_features=use_opponent_bucket_features,
             ):
                 input_size, output_size = _checkpoint_shape(network)
                 raise ValueError(
@@ -325,12 +380,15 @@ def _load_initial_network(
     encoder = DominoEncoder(
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     try:
         network = PolicyNetwork.load_from_sl(
             sl_weights_path,
             learning_rate=learning_rate,
             use_value_head=use_value_head,
+            critic_updates_trunk=critic_updates_trunk,
+            critic_owns_network=critic_owns_network,
             device=device,
             weight_decay=weight_decay,
             dropout_rate=dropout_rate,
@@ -339,6 +397,7 @@ def _load_initial_network(
         architecture = architecture_for_ruleset(
             ruleset,
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
         )
         network = PolicyNetwork(
             input_size=architecture.input_size,
@@ -351,6 +410,8 @@ def _load_initial_network(
                 else int(initialization_seed) & 0xFFFFFFFF
             ),
             use_value_head=use_value_head,
+            critic_updates_trunk=critic_updates_trunk,
+            critic_owns_network=critic_owns_network,
             device=device,
             weight_decay=weight_decay,
             dropout_rate=dropout_rate,
@@ -369,6 +430,7 @@ def _load_initial_network(
         network,
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     ):
         input_size, output_size = _checkpoint_shape(network)
         raise ValueError(

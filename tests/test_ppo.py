@@ -16,8 +16,8 @@ from training.rl.ppo import (
     effective_minibatches,
     log_ratio_statistics,
     minibatch_indices,
-    normalize_advantages,
     ppo_update,
+    scale_advantages,
     requested_minibatches,
 )
 
@@ -81,6 +81,15 @@ class _FakePPONetwork:
     @property
     def last_hidden_activation_key(self):
         return f"A{len(self.hidden_sizes)}"
+
+    @property
+    def critic_parameter_names(self):
+        """No critic: this double never enables a value head."""
+        return ()
+
+    def parameter_array(self, name):
+        """Resolve one parameter name the way ``PolicyNetwork`` does."""
+        return getattr(self, name)
 
     def evaluate_actions(self, states, legal_masks, actions):
         self.eval_calls += 1
@@ -367,18 +376,27 @@ def test_fewer_than_minimum_decisions_produces_an_explicit_noop():
     assert network.optimizer_step_count == 0
 
 
-def test_advantages_are_normalized_once_globally_and_zero_std_is_safe():
-    normalized, std_zero, raw_mean, raw_std = normalize_advantages([1, 2, 3, 4])
+def test_advantages_are_scaled_once_globally_and_zero_std_is_safe():
+    # Scaling is deliberately center-free: the baseline owns the center, so a
+    # non-zero mean must survive to keep zero and constant baselines visible.
+    scaled, std_zero, raw_mean, raw_std = scale_advantages([1, 2, 3, 4])
     assert not std_zero
     assert raw_mean == 2.5
     assert raw_std > 0
-    assert abs(float(normalized.mean())) < 1e-7
-    assert np.isclose(float(normalized.std()), 1.0, atol=1e-6)
+    assert float(scaled.mean()) > 0.0
+    assert np.isclose(float(scaled.std()), 1.0, atol=1e-6)
 
-    constant, std_zero, _mean, raw_std = normalize_advantages([7, 7, 7])
+    centered, std_zero, raw_mean, raw_std = scale_advantages(
+        np.asarray([1, 2, 3, 4], dtype=np.float32) - 2.5
+    )
+    assert not std_zero
+    assert abs(float(centered.mean())) < 1e-7
+    assert np.isclose(float(centered.std()), 1.0, atol=1e-6)
+
+    constant, std_zero, _mean, raw_std = scale_advantages([7, 7, 7])
     assert std_zero
     assert raw_std == 0.0
-    assert np.all(constant == 0.0)
+    assert np.all(constant == 7.0)
     assert np.all(np.isfinite(constant))
 
 

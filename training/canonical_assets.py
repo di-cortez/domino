@@ -79,15 +79,19 @@ def canonical_asset_paths(
     ruleset=DEFAULT_RULESET_NAME,
     *,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Return canonical dataset/cache/weights paths for one seed.
 
-    Reusable assets are addressed by seed, so two runs that differ only in the
-    ablation flag would otherwise fight over one supervised checkpoint: the
+    Reusable assets are addressed by seed, so two runs that differ only in an
+    encoder flag would otherwise fight over one supervised checkpoint: the
     second would refuse to start on an encoder-size mismatch, and retraining it
-    would leave the first unresumable. The ablated regime therefore claims its
-    own suffix. The enabled path is byte-identical to the historical one, so no
-    existing artifact is renamed.
+    would leave the first unresumable. Each non-default regime therefore claims
+    its own suffix, and both suffixes are independent because the two flags are:
+    dropping the suit block while adding the bucket block happens to restore the
+    historical double-six width, so the size alone cannot tell the two apart.
+    The all-default path is byte-identical to the historical one, so no existing
+    artifact is renamed.
     """
     root = Path(root)
     ruleset = resolve_ruleset(ruleset)
@@ -97,6 +101,8 @@ def canonical_asset_paths(
     suffix = f"{ruleset_prefix}standard_seed{int(seed)}"
     if not use_opponent_suit_features:
         suffix = f"{suffix}_nosuit"
+    if use_opponent_bucket_features:
+        suffix = f"{suffix}_bucket"
     dataset = root / "dataset" / f"supervised_dataset_{suffix}.jsonl"
     weights = root / "models" / f"domino_sl_{suffix}.npz"
     return CanonicalAssetPaths(
@@ -270,6 +276,7 @@ def inspect_canonical_dataset(
     generation_config,
     ruleset=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Validate dataset metadata, structural versions, configuration, and hash."""
     if not paths.dataset.exists():
@@ -284,6 +291,7 @@ def inspect_canonical_dataset(
     encoder = DominoEncoder(
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     metadata = dict(metadata)
     if ruleset.name == DEFAULT_RULESET_NAME:
@@ -332,12 +340,14 @@ def write_dataset_metadata(
     generation_config,
     ruleset=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Publish complete metadata for a newly generated canonical dataset."""
     ruleset = resolve_ruleset(ruleset)
     encoder = DominoEncoder(
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     digest = file_sha256(paths.dataset)
     metadata = {
@@ -389,6 +399,7 @@ def inspect_canonical_weights(
     architecture=DEFAULT_NETWORK_ARCHITECTURE,
     ruleset=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Validate supervised weights, origin dataset, architecture, and hash."""
     if not paths.weights.exists():
@@ -403,6 +414,7 @@ def inspect_canonical_weights(
     encoder = DominoEncoder(
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     hyperparameters, randomization, execution = (
         _split_supervised_training_config(training_config)
@@ -461,12 +473,14 @@ def write_weights_metadata(
     architecture=DEFAULT_NETWORK_ARCHITECTURE,
     ruleset=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Publish provenance and convergence metadata for supervised weights."""
     ruleset = resolve_ruleset(ruleset)
     encoder = DominoEncoder(
         ruleset,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
     )
     digest = file_sha256(paths.weights)
     hyperparameters, randomization, execution = (

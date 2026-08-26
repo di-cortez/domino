@@ -37,6 +37,7 @@ class MatchupSpec:
     opponent_weights: str | Path | None = None
     ruleset_name: str = DEFAULT_RULESET_NAME
     use_opponent_suit_features: bool = True
+    use_opponent_bucket_features: bool = False
 
     @property
     def key(self):
@@ -225,6 +226,9 @@ def autotune_diagnostic_workers(
                     ruleset_name=matchup.ruleset_name,
                     use_opponent_suit_features=(
                         matchup.use_opponent_suit_features
+                    ),
+                    use_opponent_bucket_features=(
+                        matchup.use_opponent_bucket_features
                     ),
                 )
             except DiagnosticExecutionError as exc:

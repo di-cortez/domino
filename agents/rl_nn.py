@@ -18,12 +18,51 @@ _OPTIMIZER_STEP_KEY = "optimizer_step_count"
 _ALGORITHM_KEY = "rl_training_algorithm"
 
 
+# Gradient names carrying this prefix belong to the separate critic network of
+# the ``value-head-own-nn`` baseline rather than to the policy. Routing by name
+# keeps one joint gradient dict, so clipping, weight decay, and the optimizer
+# step counter stay exactly as they are for every other baseline.
+CRITIC_GRADIENT_PREFIX = "critic."
+
+
+class _CriticNetwork(SupervisedNeuralNetwork):
+    """The ``value-head-own-nn`` critic: an MLP with one linear output.
+
+    It shares no weights with the policy. Only the output activation differs
+    from the parent: a critic predicts a scalar return, not a distribution.
+    """
+
+    def forward(self, x, training=False):
+        """Return ``V(s)`` per column, leaving the cache ready for backprop."""
+        super().forward(x, training=training)
+        values = self.cache[self.logits_key]
+        # The parent softmaxes the output layer. Over a single output that is
+        # the constant 1.0 and says nothing, so the cached activation is
+        # replaced by the value itself and the cache stays truthful.
+        self.cache[f"A{self.layer_count}"] = values
+        return values
+
+
+def _shared_gradient_hook(shared_hidden_gradient):
+    """Return the backward hook that folds a critic's loss into the trunk.
+
+    ``None`` means nothing is folded in, which covers both a run without a
+    critic and the ``value-head-no-up`` wiring where the critic is trained but
+    deliberately kept from shaping the shared representation.
+    """
+    if shared_hidden_gradient is None:
+        return None
+    return lambda gradient: gradient + shared_hidden_gradient
+
+
 class PolicyNetwork(SupervisedNeuralNetwork):
     """Supervised policy architecture with masked PPO/REINFORCE gradients.
 
     PPO is the default self-play algorithm. ``use_value_head=True`` adds a
     linear ``V(s)`` critic that reads the last hidden activation and is shared
-    by PPO and the legacy REINFORCE path.
+    by PPO and the legacy REINFORCE path. ``critic_updates_trunk=False`` keeps
+    that critic but stops its loss at the critic's own weights, so the policy
+    trunk is trained by the policy gradient alone.
 
     The hidden stack is whatever the parent class was built with, so an RL run
     always adopts the depth and widths stored in the checkpoint it starts from.
@@ -39,19 +78,67 @@ class PolicyNetwork(SupervisedNeuralNetwork):
     weight decay is applied as a decoupled shrink after gradient clipping.
     """
 
-    def __init__(self, *args, use_value_head=False, device="auto", **kwargs):
+    def __init__(
+        self,
+        *args,
+        use_value_head=False,
+        critic_updates_trunk=True,
+        critic_owns_network=False,
+        device="auto",
+        **kwargs,
+    ):
         super().__init__(*args, device=device, **kwargs)
         self.use_value_head = use_value_head
+        # ``critic_updates_trunk=False`` is the ``value-head-no-up`` baseline:
+        # the critic still reads the last hidden activation and is still
+        # trained, but its loss stops at ``Wv``/``bv`` instead of flowing back
+        # into the hidden stack. Expressed as a plain boolean rather than a
+        # baseline name so this module keeps knowing nothing about
+        # ``training.rl.baseline``.
+        self.critic_updates_trunk = bool(critic_updates_trunk)
+        # ``critic_owns_network=True`` is the ``value-head-own-nn`` baseline.
+        # There is then no shared trunk at all, so the wiring above becomes
+        # vacuous and the linear head is replaced by a full network.
+        self.critic_owns_network = bool(critic_owns_network)
         # The current optimizer is plain SGD and therefore has no momentum or
         # adaptive tensors. Its step counter is still checkpointed so resume
         # metadata and PPO optimizer-step accounting remain exact.
         self.optimizer_step_count = 0
-        if use_value_head:
+        self.critic_network = None
+        if use_value_head and self.critic_owns_network:
+            # The critic mirrors the policy's hidden stack, learning rate and
+            # regularizers. A second configurable architecture would multiply
+            # the experiment space before anything shows it matters.
+            self.critic_network = _CriticNetwork(
+                input_size=self.W1.shape[1],
+                output_size=1,
+                hidden_sizes=self.hidden_sizes,
+                learning_rate=self.lr,
+                random_seed=None,
+                device=self.device,
+                weight_decay=self.weight_decay,
+                dropout_rate=self.dropout_rate,
+            )
+        elif use_value_head:
             self.Wv = self.xp.zeros(
                 (1, self.hidden_sizes[-1]),
                 dtype=self.xp.float32,
             )
             self.bv = self.xp.zeros((1, 1), dtype=self.xp.float32)
+
+    @property
+    def critic_weight_names(self):
+        """Return the prefixed gradient names of a separate critic network.
+
+        Empty unless the ``value-head-own-nn`` baseline built one. The prefix
+        is what lets a single gradient mapping address two networks.
+        """
+        critic = getattr(self, "critic_network", None)
+        if critic is None:
+            return ()
+        return tuple(
+            f"{CRITIC_GRADIENT_PREFIX}{name}" for name in critic.weight_names
+        )
 
     @property
     def decayed_weight_names(self):
@@ -62,7 +149,44 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         """
         return tuple(
             f"W{index}" for index in range(1, self.layer_count + 1)
-        ) + ("Wv",)
+        ) + ("Wv",) + tuple(
+            name for name in self.critic_weight_names
+            if name.rpartition(".")[2].startswith("W")
+        )
+
+    @property
+    def critic_parameter_names(self):
+        """Return the trainable critic parameters, however the critic is wired.
+
+        ``("Wv", "bv")`` for a shared head, the prefixed stack for a separate
+        critic network, and empty without a critic. Callers that need to size,
+        hash, or probe every trainable array use this instead of naming the
+        shared head's two arrays directly, so they keep working when the critic
+        is a whole network.
+        """
+        if not getattr(self, "use_value_head", False):
+            return ()
+        if getattr(self, "critic_network", None) is None:
+            return _VALUE_WEIGHTS
+        return self.critic_weight_names
+
+    def parameter_array(self, name):
+        """Return the array one policy or critic parameter name addresses."""
+        return getattr(*self._gradient_target(name))
+
+    def _gradient_target(self, name):
+        """Return the object and attribute one gradient name addresses.
+
+        Policy gradients name their own attributes directly; a separate
+        critic's are prefixed, so one update can carry both without either
+        network needing to know the other exists.
+        """
+        if name.startswith(CRITIC_GRADIENT_PREFIX):
+            return (
+                self.critic_network,
+                name[len(CRITIC_GRADIENT_PREFIX):],
+            )
+        return self, name
 
     def _cast_weights_to_device(self):
         """Move the policy weights built by the parent class to ``self.xp``."""
@@ -89,6 +213,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         path,
         learning_rate,
         use_value_head=False,
+        critic_updates_trunk=True,
+        critic_owns_network=False,
         device="auto",
         weight_decay=DISABLED_WEIGHT_DECAY,
         dropout_rate=DISABLED_DROPOUT_RATE,
@@ -107,6 +233,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 hidden_sizes=architecture.hidden_sizes,
                 learning_rate=learning_rate,
                 use_value_head=use_value_head,
+                critic_updates_trunk=critic_updates_trunk,
+                critic_owns_network=critic_owns_network,
                 device=device,
                 weight_decay=weight_decay,
                 dropout_rate=dropout_rate,
@@ -127,6 +255,25 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                             dtype=network.xp.float32,
                         ),
                     )
+            # A checkpoint written before ``value-head-own-nn`` existed, or by
+            # any other baseline, simply carries no critic arrays; the freshly
+            # initialized critic above is then the right starting point.
+            critic = network.critic_network
+            if critic is not None:
+                stored = [
+                    f"{CRITIC_GRADIENT_PREFIX}{name}"
+                    for name in critic.weight_names
+                ]
+                if all(name in data for name in stored):
+                    for prefixed, name in zip(stored, critic.weight_names):
+                        setattr(
+                            critic,
+                            name,
+                            critic.xp.asarray(
+                                data[prefixed],
+                                dtype=critic.xp.float32,
+                            ),
+                        )
             if _OPTIMIZER_STEP_KEY in data:
                 network.optimizer_step_count = int(
                     np.asarray(data[_OPTIMIZER_STEP_KEY]).item()
@@ -143,6 +290,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         sl_weights_path="models/domino_sl_weights.npz",
         learning_rate=0.001,
         use_value_head=False,
+        critic_updates_trunk=True,
+        critic_owns_network=False,
         device="auto",
         weight_decay=DISABLED_WEIGHT_DECAY,
         dropout_rate=DISABLED_DROPOUT_RATE,
@@ -152,6 +301,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             sl_weights_path,
             learning_rate,
             use_value_head=use_value_head,
+            critic_updates_trunk=critic_updates_trunk,
+            critic_owns_network=critic_owns_network,
             device=device,
             weight_decay=weight_decay,
             dropout_rate=dropout_rate,
@@ -163,6 +314,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         rl_weights_path,
         learning_rate=0.001,
         use_value_head=False,
+        critic_updates_trunk=True,
+        critic_owns_network=False,
         device="auto",
         weight_decay=DISABLED_WEIGHT_DECAY,
         dropout_rate=DISABLED_DROPOUT_RATE,
@@ -172,6 +325,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             rl_weights_path,
             learning_rate,
             use_value_head=use_value_head,
+            critic_updates_trunk=critic_updates_trunk,
+            critic_owns_network=critic_owns_network,
             device=device,
             weight_decay=weight_decay,
             dropout_rate=dropout_rate,
@@ -188,10 +343,13 @@ class PolicyNetwork(SupervisedNeuralNetwork):
 
         weight_names = self.weight_names
         if getattr(self, "use_value_head", False):
-            weight_names += _VALUE_WEIGHTS
+            if getattr(self, "critic_network", None) is None:
+                weight_names += _VALUE_WEIGHTS
+            else:
+                weight_names += self.critic_weight_names
 
         arrays = {
-            name: to_numpy(getattr(self, name))
+            name: to_numpy(getattr(*self._gradient_target(name)))
             for name in weight_names
         }
         arrays[_OPTIMIZER_STEP_KEY] = np.asarray(
@@ -203,13 +361,23 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         np.savez(weights_path, **arrays)
 
     def clone(self):
-        """Return a frozen copy for the self-play opponent pool."""
+        """Return a frozen copy for the self-play opponent pool.
+
+        The critic is deliberately not copied when it owns a network: a frozen
+        opponent only ever acts, so it never calls ``predict_values``, and
+        duplicating a critic the size of the policy would double the copy for
+        nothing.
+        """
+        owns_network = getattr(self, "critic_network", None) is not None
         clone = PolicyNetwork(
             input_size=self.W1.shape[1],
             output_size=getattr(self, f"W{self.layer_count}").shape[0],
             hidden_sizes=self.hidden_sizes,
             learning_rate=self.lr,
-            use_value_head=getattr(self, "use_value_head", False),
+            use_value_head=(
+                getattr(self, "use_value_head", False) and not owns_network
+            ),
+            critic_updates_trunk=getattr(self, "critic_updates_trunk", True),
             device=self.device,
             weight_decay=self.weight_decay,
             dropout_rate=self.dropout_rate,
@@ -248,10 +416,17 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         self.optimizer_step_count = int(state["step_count"])
 
     def predict_values(self, x, training=False):
-        """Return ``V(s)`` for each state column when the value head is enabled."""
+        """Return ``V(s)`` for each state column when the value head is enabled.
+
+        The policy's forward pass runs either way, because callers rely on this
+        method leaving the policy cache ready for the update that follows.
+        """
         if not getattr(self, "use_value_head", False):
             raise RuntimeError("The value head is not enabled for this network.")
         self.forward(x, training=training)
+        critic = getattr(self, "critic_network", None)
+        if critic is not None:
+            return critic.forward(x, training=training)
         return self.xp.dot(
             self.Wv,
             self.cache[self.last_hidden_activation_key],
@@ -334,8 +509,83 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         )
         return xp.maximum(losses, clipped_losses), gradient, delta
 
+    def _critic_gradients(self, weighted_gradient, last_hidden, inverse_count):
+        """Return one critic's gradients and its contribution to the trunk.
+
+        Three wirings share this one place. A separate critic backpropagates
+        through its own stack and contributes nothing to the policy; a shared
+        head produces ``Wv``/``bv`` and, unless the ``value-head-no-up`` wiring
+        forbids it, a gradient folded into the last hidden activation.
+        """
+        xp = self.xp
+        critic = getattr(self, "critic_network", None)
+        if critic is not None:
+            critic_gradients = critic.backpropagate_layers(
+                weighted_gradient,
+                inverse_count,
+            )
+            return {
+                f"{CRITIC_GRADIENT_PREFIX}{name}": gradient
+                for name, gradient in critic_gradients.items()
+            }, None
+        gradients = {
+            "Wv": inverse_count * xp.dot(weighted_gradient, last_hidden.T),
+            "bv": inverse_count * xp.sum(
+                weighted_gradient,
+                axis=1,
+                keepdims=True,
+            ),
+        }
+        # ``None`` when the critic must not shape the shared trunk. The
+        # gradients above are unaffected either way: they use ``last_hidden``
+        # as data, not as a node to differentiate through.
+        shared = (
+            xp.dot(self.Wv.T, weighted_gradient)
+            if getattr(self, "critic_updates_trunk", True)
+            else None
+        )
+        return gradients, shared
+
+    def _critic_values(self, x, last_hidden, *, training):
+        """Return ``V(s)`` from whichever critic this network was built with.
+
+        ``x is None`` means the caller already produced the critic's forward
+        pass and its cache must be reused rather than recomputed. That is the
+        REINFORCE path, where ``predict_values`` ran first: recomputing would
+        draw a fresh dropout mask and the values feeding the baseline would
+        stop matching the values whose loss is being taken. A shared head has
+        the same property for free, because it reads the one policy cache.
+        """
+        critic = getattr(self, "critic_network", None)
+        if critic is None:
+            return self.xp.dot(self.Wv, last_hidden) + self.bv
+        if x is not None:
+            return critic.forward(x, training=training)
+        cached = getattr(critic, "cache", None)
+        if not cached:
+            raise RuntimeError(
+                "The separate critic has no forward pass to reuse; call "
+                "predict_values before the update."
+            )
+        return cached[critic.logits_key]
+
+    def critic_values(self, x, *, training=False):
+        """Return ``V(s)`` for a policy forward pass the caller already ran.
+
+        A shared head reads the policy cache and costs nothing extra. A
+        separate critic has no cache from that pass, so it runs its own forward
+        over ``x`` -- which is why callers must supply the input even when a
+        shared head would not need it.
+        """
+        return self._critic_values(
+            x,
+            self.cache[self.last_hidden_activation_key],
+            training=training,
+        )
+
     def _ppo_value_update_terms(
         self,
+        x,
         last_hidden,
         returns,
         old_values,
@@ -361,7 +611,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         old_values = xp.asarray(old_values, dtype=dtype).reshape(1, -1)
         if returns.shape[1] != sample_count or old_values.shape[1] != sample_count:
             raise ValueError("PPO returns and old_values must match the batch size.")
-        values = xp.dot(self.Wv, last_hidden) + self.bv
+        values = self._critic_values(x, last_hidden, training=True)
         losses, value_gradient, value_delta = self.clipped_value_loss_terms(
             values,
             returns,
@@ -373,20 +623,18 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             raise FloatingPointError("PPO value loss produced NaN/Inf.")
         inverse_count = xp.asarray(1.0 / sample_count, dtype=dtype)
         weighted_gradient = float(value_coef) * value_gradient
+        gradients, shared = self._critic_gradients(
+            weighted_gradient,
+            last_hidden,
+            inverse_count,
+        )
         return {
             "loss": self._as_float(xp.mean(losses)),
             "clip_fraction": self._as_float(
                 xp.mean(xp.abs(value_delta) > float(clip_epsilon))
             ),
-            "gradients": {
-                "Wv": inverse_count * xp.dot(weighted_gradient, last_hidden.T),
-                "bv": inverse_count * xp.sum(
-                    weighted_gradient,
-                    axis=1,
-                    keepdims=True,
-                ),
-            },
-            "shared_hidden_gradient": xp.dot(self.Wv.T, weighted_gradient),
+            "gradients": gradients,
+            "shared_hidden_gradient": shared,
         }
 
     def _apply_gradient_step(self, gradients, grad_norm, clip_grad_norm, dtype):
@@ -409,7 +657,12 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             applied_grad_norm = float(clip_grad_norm)
         learning_rate = xp.asarray(self.lr, dtype=dtype)
         for name, gradient in gradients.items():
-            setattr(self, name, getattr(self, name) - learning_rate * gradient)
+            target, attribute = self._gradient_target(name)
+            setattr(
+                target,
+                attribute,
+                getattr(target, attribute) - learning_rate * gradient,
+            )
         if self.weight_decay > 0.0:
             shrink = xp.asarray(
                 1.0 - self.lr * self.weight_decay,
@@ -417,7 +670,12 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             )
             for name in self.decayed_weight_names:
                 if name in gradients:
-                    setattr(self, name, getattr(self, name) * shrink)
+                    target, attribute = self._gradient_target(name)
+                    setattr(
+                        target,
+                        attribute,
+                        getattr(target, attribute) * shrink,
+                    )
         self.optimizer_step_count = int(
             getattr(self, "optimizer_step_count", 0)
         ) + 1
@@ -512,6 +770,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         inverse_count = xp.asarray(1.0 / sample_count, dtype=dz3.dtype)
 
         value_terms = self._ppo_value_update_terms(
+            x,
             last_hidden,
             returns,
             old_values,
@@ -523,9 +782,9 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         gradients = self.backpropagate_layers(
             dz3,
             inverse_count,
-            hidden_gradient_hook=(
+            hidden_gradient_hook=_shared_gradient_hook(
                 None if value_terms is None
-                else lambda gradient: gradient + value_terms["shared_hidden_gradient"]
+                else value_terms["shared_hidden_gradient"]
             ),
         )
         if value_terms is not None:
@@ -655,16 +914,16 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 value_returns,
                 dtype=z3.dtype,
             ).reshape(1, m)
-            values = xp.dot(self.Wv, last_hidden) + self.bv
+            values = self._critic_values(None, last_hidden, training=True)
             value_error = values - value_returns
             value_loss = float(xp.mean(0.5 * value_error ** 2))
 
             dzv = value_coef * value_error
-            value_gradients = {
-                "Wv": (1.0 / m) * xp.dot(dzv, last_hidden.T),
-                "bv": (1.0 / m) * xp.sum(dzv, axis=1, keepdims=True),
-            }
-            shared_hidden_gradient = xp.dot(self.Wv.T, dzv)
+            value_gradients, shared_hidden_gradient = self._critic_gradients(
+                dzv,
+                last_hidden,
+                1.0 / m,
+            )
         elif value_returns is not None:
             raise ValueError(
                 "value_returns were provided, but the value head is disabled."
@@ -673,10 +932,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         gradients = self.backpropagate_layers(
             dz3,
             1.0 / m,
-            hidden_gradient_hook=(
-                None if shared_hidden_gradient is None
-                else lambda gradient: gradient + shared_hidden_gradient
-            ),
+            hidden_gradient_hook=_shared_gradient_hook(shared_hidden_gradient),
         )
         gradients.update(value_gradients)
 

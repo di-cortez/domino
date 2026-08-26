@@ -29,7 +29,9 @@ from training.rl.pool import (
     CHAMPION_FINAL_SURVIVORS,
     CHAMPION_VS_HEURISTIC_BUCKET,
     CHAMPION_VS_LEARNER_BUCKET,
+    HEURISTIC_KIND,
 )
+from training.rl.rollout import LEARNER_OPPONENT_BUCKET
 from training.utils.seeding import stable_seed
 from middleware.rulesets import DEFAULT_RULESET_NAME
 
@@ -544,6 +546,7 @@ def play_champion_game(
     current_learner_policy=None,
     ruleset_name=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
+    use_opponent_bucket_features=False,
 ):
     """Play one frozen candidate against this bucket's target, return a winner.
 
@@ -563,15 +566,32 @@ def play_champion_game(
     from agents.rl_agent import RLAgent
     from diagnostics.gameplay import play_game
 
+    # Each seat is told which bucket its own adversary belongs to, exactly as
+    # in a training rollout, so a racing game looks to the candidate like the
+    # games that produced it. Against the heuristic that is ``heuristic`` for
+    # the candidate and nothing for the target, which is not a neural agent.
+    # Against the current learner the candidate faces the newest policy of the
+    # recent band, while the learner faces a candidate for this very bucket.
+    if target_kind == CHAMPION_TARGET_HEURISTIC:
+        candidate_bucket = HEURISTIC_KIND
+        target_bucket = None
+    elif target_kind == CHAMPION_TARGET_CURRENT_LEARNER:
+        candidate_bucket = LEARNER_OPPONENT_BUCKET
+        target_bucket = CHAMPION_VS_LEARNER_BUCKET
+    else:
+        raise ValueError(f"Unknown champion target kind: {target_kind!r}")
+
     candidate = RLAgent(
         policy,
         mode=CHAMPION_EVALUATION_MODE,
         ruleset=ruleset_name,
         use_opponent_suit_features=use_opponent_suit_features,
+        use_opponent_bucket_features=use_opponent_bucket_features,
+        opponent_bucket=candidate_bucket,
     )
     if target_kind == CHAMPION_TARGET_HEURISTIC:
         target = StrategicAgent(ruleset=ruleset_name)
-    elif target_kind == CHAMPION_TARGET_CURRENT_LEARNER:
+    else:
         if current_learner_policy is None:
             raise ValueError(
                 "A champion game against the current learner needs the "
@@ -583,9 +603,9 @@ def play_champion_game(
             mode=CHAMPION_EVALUATION_MODE,
             ruleset=ruleset_name,
             use_opponent_suit_features=use_opponent_suit_features,
+            use_opponent_bucket_features=use_opponent_bucket_features,
+            opponent_bucket=target_bucket,
         )
-    else:
-        raise ValueError(f"Unknown champion target kind: {target_kind!r}")
     record = play_game(
         candidate,
         target,

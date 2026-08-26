@@ -1,4 +1,4 @@
-"""Sequential batch driver for the engine-backed exact solvers.
+"""Parallel batch driver for the engine-backed exact solvers.
 
 Typical use from this directory:
 
@@ -7,7 +7,8 @@ Typical use from this directory:
 The command solves the partial-information player in seats 0 and 1, followed
 by the perfect-information cheater in seats 0 and 1, then writes both
 aggregates. Each pass has its own tqdm progress bar. Results are appended one
-completed initial hand at a time, so an interrupted run resumes safely.
+completed initial hand at a time by the parent process, so an interrupted run
+resumes safely. Ten workers dynamically receive one hand at a time.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import json
 import os
 from itertools import combinations
 from math import comb
+from multiprocessing import get_context
 from pathlib import Path
 
 from tqdm.auto import tqdm
@@ -31,6 +33,7 @@ from solver import (
 
 
 INFORMATION_MODES = ("partial", "perfect")
+HAND_WORKERS = 10
 
 
 def output_name(ruleset: str, seat: int, information_mode: str) -> str:
@@ -96,12 +99,37 @@ def _load_and_repair_jsonl(
     return completed
 
 
+def _encode_row(row: dict) -> bytes:
+    return (json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+
+
 def _append_durable(path: Path, row: dict) -> None:
-    encoded = (json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+    encoded = _encode_row(row)
     with path.open("ab") as f:
         f.write(encoded)
         f.flush()
         os.fsync(f.fileno())
+
+
+def _canonicalize_durable(
+    path: Path,
+    completed: dict[tuple[int, ...], dict],
+) -> None:
+    """Atomically rewrite a completed stage in canonical hand-index order."""
+
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    ordered_rows = sorted(
+        completed.values(),
+        key=lambda row: (int(row["hand_index"]), tuple(row["hand_ids"])),
+    )
+    with temporary_path.open("wb") as f:
+        for row in ordered_rows:
+            f.write(_encode_row(row))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temporary_path, path)
 
 
 def _computed_row(
@@ -137,9 +165,48 @@ def _computed_row(
         "cache_hits": result.stats.cache_hits,
         "cache_entries": result.stats.cache_entries,
         "max_belief_worlds": result.stats.max_belief_worlds,
+        "legal_action_cache_hits": result.stats.legal_action_cache_hits,
+        "legal_action_cache_misses": result.stats.legal_action_cache_misses,
+        "legal_action_cache_entries": result.stats.legal_action_cache_entries,
+        "non_draw_transition_cache_hits": (
+            result.stats.non_draw_transition_cache_hits
+        ),
+        "non_draw_transition_cache_misses": (
+            result.stats.non_draw_transition_cache_misses
+        ),
+        "non_draw_transition_cache_entries": (
+            result.stats.non_draw_transition_cache_entries
+        ),
+        "draw_transition_cache_hits": result.stats.draw_transition_cache_hits,
+        "draw_transition_cache_misses": result.stats.draw_transition_cache_misses,
+        "draw_transition_cache_entries": result.stats.draw_transition_cache_entries,
         "stock_order_mode": "unordered_exact_draw_chance_v1",
         "result_origin": "computed",
     }
+
+
+def _solve_hand_worker(task):
+    """Solve one hand in an isolated process and return its complete row."""
+
+    ruleset, seat, hand_index, hand_ids, information_mode = task
+    solver_class = (
+        CheaterVsRandomSolver
+        if information_mode == "perfect"
+        else ExactVsRandomSolver
+    )
+    solver = solver_class(ruleset=ruleset, hero_seat=seat)
+    result = solver.solve_initial_hand(hand_ids)
+    row = _computed_row(
+        ruleset,
+        seat,
+        hand_index,
+        hand_ids,
+        result,
+        information_mode,
+    )
+    del solver
+    gc.collect()
+    return row
 
 
 def _copied_row(
@@ -179,6 +246,15 @@ def _copied_row(
         "cache_hits": 0,
         "cache_entries": 0,
         "max_belief_worlds": 0,
+        "legal_action_cache_hits": 0,
+        "legal_action_cache_misses": 0,
+        "legal_action_cache_entries": 0,
+        "non_draw_transition_cache_hits": 0,
+        "non_draw_transition_cache_misses": 0,
+        "non_draw_transition_cache_entries": 0,
+        "draw_transition_cache_hits": 0,
+        "draw_transition_cache_misses": 0,
+        "draw_transition_cache_entries": 0,
         "stock_order_mode": "unordered_exact_draw_chance_v1",
         "result_origin": origin,
     }
@@ -240,13 +316,20 @@ def solve_seat(
         information_mode,
     )
 
-    target_count = total_hands
-    if limit is not None:
-        target_count = min(total_hands, len(completed) + limit)
-    solved_now = 0
+    missing_hands = [
+        (hand_index, tuple(hand_ids))
+        for hand_index, hand_ids in enumerate(
+            combinations(range(tile_count), hand_size)
+        )
+        if tuple(hand_ids) not in completed
+    ]
+    selected_hands = missing_hands if limit is None else missing_hands[:limit]
+    target_count = len(completed) + len(selected_hands)
     copied_now = 0
     geometry = ExactVsRandomSolver(ruleset=ruleset, hero_seat=seat)
     expected_worlds = comb(tile_count - hand_size, hand_size)
+    worker_tasks = []
+
     with tqdm(
         total=target_count,
         initial=min(len(completed), target_count),
@@ -254,13 +337,7 @@ def solve_seat(
         unit="hand",
         dynamic_ncols=True,
     ) as progress:
-        for hand_index, hand_ids in enumerate(combinations(range(tile_count), hand_size)):
-            hand_ids = tuple(hand_ids)
-            if hand_ids in completed:
-                continue
-            if limit is not None and solved_now >= limit:
-                break
-
+        for hand_index, hand_ids in selected_hands:
             source = None if symmetry_source is None else symmetry_source.get(hand_ids)
             if (
                 source is not None
@@ -273,7 +350,6 @@ def solve_seat(
                     information_mode,
                 )
                 copied_now += 1
-                cache_entries = 0
             elif information_mode == "perfect":
                 partial_source = (
                     None
@@ -290,49 +366,58 @@ def solve_seat(
                         expected_worlds,
                     )
                     copied_now += 1
-                    cache_entries = 0
                 else:
-                    solver = CheaterVsRandomSolver(
-                        ruleset=ruleset,
-                        hero_seat=seat,
+                    worker_tasks.append(
+                        (ruleset, seat, hand_index, hand_ids, information_mode)
                     )
-                    result = solver.solve_initial_hand(hand_ids)
-                    row = _computed_row(
-                        ruleset,
-                        seat,
-                        hand_index,
-                        hand_ids,
-                        result,
-                        information_mode,
-                    )
-                    cache_entries = result.stats.cache_entries
-                    del solver
-                    gc.collect()
+                    continue
             else:
-                # One solver per hand bounds memory and preserves durable resume.
-                solver = ExactVsRandomSolver(ruleset=ruleset, hero_seat=seat)
-                result = solver.solve_initial_hand(hand_ids)
-                row = _computed_row(
-                    ruleset,
-                    seat,
-                    hand_index,
-                    hand_ids,
-                    result,
-                    information_mode,
+                worker_tasks.append(
+                    (ruleset, seat, hand_index, hand_ids, information_mode)
                 )
-                cache_entries = result.stats.cache_entries
-                del solver
-                gc.collect()
+                continue
 
             _append_durable(path, row)
             completed[hand_ids] = row
-            solved_now += 1
             progress.update(1)
             progress.set_postfix(
                 win=f"{float(row['value_decimal']):.6f}",
-                cache=cache_entries,
+                cache=0,
                 copied=copied_now,
             )
+
+        if worker_tasks:
+            progress.write(
+                f"Computing {len(worker_tasks):,} hands with "
+                f"{HAND_WORKERS} dynamic workers..."
+            )
+            worker_pool = get_context("fork").Pool(processes=HAND_WORKERS)
+            try:
+                result_rows = worker_pool.imap_unordered(
+                    _solve_hand_worker,
+                    worker_tasks,
+                    chunksize=1,
+                )
+                for row in result_rows:
+                    hand_ids = tuple(int(tile_id) for tile_id in row["hand_ids"])
+                    _append_durable(path, row)
+                    completed[hand_ids] = row
+                    progress.update(1)
+                    progress.set_postfix(
+                        win=f"{float(row['value_decimal']):.6f}",
+                        cache=int(row["cache_entries"]),
+                        copied=copied_now,
+                    )
+            except BaseException:
+                worker_pool.terminate()
+                worker_pool.join()
+                raise
+            else:
+                worker_pool.close()
+                worker_pool.join()
+
+    if completed:
+        _canonicalize_durable(path, completed)
     return completed
 
 

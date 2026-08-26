@@ -37,7 +37,7 @@ from utils.runtime_status import format_duration, print_memory_report
 
 
 TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"
-TRAINING_METRICS_VERSION = 6
+TRAINING_METRICS_VERSION = 7
 BUCKET_RESULT_COLUMNS = ("games", "wins", "losses")
 EVENT_RESULT_COLUMNS = (
     "opponent_draws",
@@ -141,6 +141,7 @@ def build_training_metrics_header(
             "gamma_f": float(training.gamma_f),
             "reward_eta": float(training.reward_eta),
             "gamma_i": float(training.gamma_i),
+            "reward_distance_mode": training.reward_distance_mode,
             "reward_constants": dict(context.schema),
             "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
             "normalize_advantages": bool(training.normalize_advantages),
@@ -379,6 +380,7 @@ def build_training_summary(
         "gamma_f": training.gamma_f,
         "reward_eta": training.reward_eta,
         "gamma_i": training.gamma_i,
+        "reward_distance_mode": training.reward_distance_mode,
         "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
         "normalize_advantages": training.normalize_advantages,
         "baseline": training.baseline.as_mapping(),
@@ -507,6 +509,10 @@ class RLTrainingReporter:
         opponent_buckets,
         difficulty_weight,
         opponent_decision_restarts,
+        gamma_i,
+        gamma_f,
+        reward_eta,
+        reward_distance_mode,
     ):
         """Describe the selected fixed algorithm policy once per invocation."""
         policy = fixed_ppo_policy(ppo_max_epochs)
@@ -520,6 +526,11 @@ class RLTrainingReporter:
             "Opponent-decision restarts: "
             + ("on" if opponent_decision_restarts else "off")
             + "."
+        )
+        self.status(
+            "Reward shaping: "
+            f"gamma_i {gamma_i:g} | gamma_f {gamma_f:g} | "
+            f"eta {reward_eta:g} | distance {reward_distance_mode}."
         )
         self.status("RL update configuration:")
         self.status(

@@ -145,6 +145,7 @@ def _resume_inputs(training, resources, execution, reporter):
             gamma_f=saved.gamma_f,
             reward_eta=saved.reward_eta,
             gamma_i=saved.gamma_i,
+            reward_distance_mode=saved.reward_distance_mode,
             normalize_advantages=saved.normalize_advantages,
             baseline=baselines.BaselineSpec.from_mapping(saved.baseline),
             seed=saved.effective_seed,
@@ -258,6 +259,7 @@ def _resume_configuration(
         "gamma_f": float(training.gamma_f),
         "reward_eta": float(training.reward_eta),
         "gamma_i": float(training.gamma_i),
+        "reward_distance_mode": training.reward_distance_mode,
         "normalize_advantages": bool(training.normalize_advantages),
         "use_opponent_bucket_features": bool(
             training.use_opponent_bucket_features
@@ -448,6 +450,10 @@ def prepare_training_session(training=None, resources=None, execution=None):
         opponent_buckets=training.opponent_buckets,
         difficulty_weight=training.difficulty_weight,
         opponent_decision_restarts=training.opponent_decision_restarts,
+        gamma_i=training.gamma_i,
+        gamma_f=training.gamma_f,
+        reward_eta=training.reward_eta,
+        reward_distance_mode=training.reward_distance_mode,
     )
     resume_configuration = _resume_configuration(
         inputs,

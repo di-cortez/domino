@@ -9,6 +9,10 @@ from agents.heuristic_agent import StrategicAgent
 from agents.rl_agent import RLAgent
 from middleware.domino_engine import DominoEngine
 from middleware.rulesets import DEFAULT_RULESET_NAME
+from training.rl.reward_distance import (
+    DEFAULT_REWARD_DISTANCE_MODE,
+    resolve_reward_distance_mode,
+)
 from training.rl.restarts import CapturedOpponentDecision
 
 TERMINAL_WIN_REWARD = 1
@@ -24,9 +28,9 @@ LEARNER_PASS_PENALTY = -OPPONENT_PASS_REWARD
 # the real decisions that preceded the event.
 GAMMA_I = 0.90
 
-# Terminal-reward discount applied per remaining real decision (1.0 keeps the
-# historical undiscounted terminal outcome).
-DEFAULT_GAMMA_F = 1.0
+# Terminal-reward discount applied using the terminal metric selected by the
+# reward-distance mode. The historical value was 1.0 (no discount).
+DEFAULT_GAMMA_F = 0.95
 
 # Convex mixture weight between the two reward components of one decision:
 # 0.0 trains on the terminal outcome alone, 1.0 on local event shaping alone.
@@ -55,6 +59,7 @@ REWARD_SCHEMAS = {
     "learner_pass": LEARNER_PASS_PENALTY,
     "gamma_i": GAMMA_I,
     "reward_eta": REWARD_ETA,
+    "reward_distance_mode": DEFAULT_REWARD_DISTANCE_MODE,
 }
 
 
@@ -139,7 +144,13 @@ def _terminal_reward(engine, learner_position, schema):
 
 
 def _finish_episode_with_rewards(
-    learner_agent, terminal_reward, gamma_f=DEFAULT_GAMMA_F, reward_eta=REWARD_ETA
+    learner_agent,
+    terminal_reward,
+    gamma_f=DEFAULT_GAMMA_F,
+    reward_eta=REWARD_ETA,
+    *,
+    terminal_turn,
+    reward_distance_mode,
 ):
     """Finalize one learner trajectory into policy-gradient training samples.
 
@@ -147,14 +158,12 @@ def _finish_episode_with_rewards(
 
         R_T = (1 - reward_eta) * gamma_f ** k * R_f + reward_eta * R_l
 
-    where ``R_f`` is the episode's terminal reward, ``k`` the number of real
-    decisions still remaining after this one, and ``R_l`` the decayed local
-    event reward already accumulated on the step. ``gamma_f`` therefore discounts
-    the terminal component per remaining decision, so earlier decisions receive
-    a more heavily discounted share of the final outcome than the last one,
-    while ``reward_eta`` trades the two components off against each other:
-    ``reward_eta=0`` trains on the terminal outcome alone and ``reward_eta=1`` on local
-    event shaping alone.
+    where ``R_f`` is the episode's terminal reward, ``k`` is measured in
+    remaining real decisions or intervening engine turns according to
+    ``reward_distance_mode``, and ``R_l`` is the decayed local event reward
+    already accumulated on the step. ``reward_eta`` trades the components off:
+    ``reward_eta=0`` trains on terminal outcome alone and ``reward_eta=1`` on
+    local event shaping alone.
 
     The stored ``terminal_reward`` and ``local_reward`` components are the
     scaled halves, so ``policy_reward == terminal_reward + local_reward``
@@ -162,9 +171,21 @@ def _finish_episode_with_rewards(
     """
     finished_steps = learner_agent.finish_episode(terminal_reward)
     step_count = len(finished_steps)
+    _local_metric, terminal_metric = resolve_reward_distance_mode(
+        reward_distance_mode
+    )
     samples = []
     for index, step in enumerate(finished_steps):
-        remaining_after = step_count - 1 - index
+        if terminal_metric == "decision":
+            remaining_after = step_count - 1 - index
+        else:
+            remaining_after = int(terminal_turn) - step.decision_turn - 1
+            if remaining_after < 0:
+                raise ValueError(
+                    "Terminal reward chronology is invalid: "
+                    f"terminal_turn={terminal_turn}, "
+                    f"decision_turn={step.decision_turn}."
+                )
         discounted_terminal = (1.0 - reward_eta) * step.terminal_reward * (
             gamma_f ** remaining_after
         )
@@ -237,6 +258,9 @@ def _play_training_game_unprofiled(
         engine = DominoEngine(player_count=len(agents), ruleset=ruleset_name)
     event_stats = EventStats()
     captures = [] if capture_opponent_decision_restarts else None
+    local_distance_metric, _terminal_distance_metric = (
+        resolve_reward_distance_mode(schema["reward_distance_mode"])
+    )
     while not engine.game_over:
         state = engine._get_state()
         current_player = state["current_player"]
@@ -265,6 +289,7 @@ def _play_training_game_unprofiled(
                 event_turn=state["turn"],
                 base_reward=event_reward,
                 decay_lambda=schema["gamma_i"],
+                distance_metric=local_distance_metric,
             )
         engine.step(
             action,
@@ -303,6 +328,9 @@ def _play_training_game(
         engine = DominoEngine(player_count=len(agents), ruleset=ruleset_name)
     event_stats = EventStats()
     captures = [] if capture_opponent_decision_restarts else None
+    local_distance_metric, _terminal_distance_metric = (
+        resolve_reward_distance_mode(schema["reward_distance_mode"])
+    )
     _profile_worker_section(
         runtime_profile,
         "engine_initialization",
@@ -362,6 +390,7 @@ def _play_training_game(
                 event_turn=state["turn"],
                 base_reward=event_reward,
                 decay_lambda=schema["gamma_i"],
+                distance_metric=local_distance_metric,
             )
         _profile_worker_section(
             runtime_profile,
@@ -445,7 +474,12 @@ def _collect_steps_vs_snapshot(
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
     samples = _finish_episode_with_rewards(
-        learner, reward, gamma_f, schema["reward_eta"]
+        learner,
+        reward,
+        gamma_f,
+        schema["reward_eta"],
+        terminal_turn=engine.turn,
+        reward_distance_mode=schema["reward_distance_mode"],
     )
     _profile_worker_section(
         runtime_profile,
@@ -577,7 +611,12 @@ def _collect_steps_vs_heuristic(
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
     samples = _finish_episode_with_rewards(
-        learner, reward, gamma_f, schema["reward_eta"]
+        learner,
+        reward,
+        gamma_f,
+        schema["reward_eta"],
+        terminal_turn=engine.turn,
+        reward_distance_mode=schema["reward_distance_mode"],
     )
     _profile_worker_section(
         runtime_profile,
@@ -635,7 +674,12 @@ def _collect_steps_vs_random(
     section_started = _profile_worker_start(runtime_profile)
     reward = _terminal_reward(engine, learner_position, schema)
     samples = _finish_episode_with_rewards(
-        learner, reward, gamma_f, schema["reward_eta"]
+        learner,
+        reward,
+        gamma_f,
+        schema["reward_eta"],
+        terminal_turn=engine.turn,
+        reward_distance_mode=schema["reward_distance_mode"],
     )
     _profile_worker_section(
         runtime_profile,
@@ -731,5 +775,7 @@ def collect_steps_from_restart(
         reward,
         gamma_f,
         schema["reward_eta"],
+        terminal_turn=engine.turn,
+        reward_distance_mode=schema["reward_distance_mode"],
     )
     return samples, event_stats, engine.winner, learner_position

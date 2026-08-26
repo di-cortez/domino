@@ -22,6 +22,10 @@ from training.rl.ppo import (
     validate_ppo_max_epochs,
 )
 from training.rl.baseline import resolve as resolve_baseline
+from training.rl.reward_distance import (
+    DEFAULT_REWARD_DISTANCE_MODE,
+    resolve_reward_distance_mode,
+)
 from training.rl.rollout import (
     REWARD_ETA,
     DEFAULT_GAMMA_F,
@@ -83,6 +87,7 @@ class RLTrainingOptions:
     gamma_f: float = DEFAULT_GAMMA_F
     reward_eta: float = REWARD_ETA
     gamma_i: float = GAMMA_I
+    reward_distance_mode: str = DEFAULT_REWARD_DISTANCE_MODE
     normalize_advantages: bool | None = DEFAULT_NORMALIZE_ADVANTAGES
     # The term subtracted from every return. ``None`` resolves to the choice
     # the run already implied before ``--baseline`` existed; see
@@ -240,6 +245,8 @@ def resolve_training_options(training, resources, execution):
     gamma_i = float(training.gamma_i)
     if not 0.0 <= gamma_i <= 1.0:
         raise ValueError("gamma_i must be between 0 and 1")
+    reward_distance_mode = str(training.reward_distance_mode)
+    resolve_reward_distance_mode(reward_distance_mode)
     if float(training.value_coef) < 0:
         raise ValueError("value_coef must be non-negative")
     if float(training.weight_decay) < 0:
@@ -281,6 +288,7 @@ def resolve_training_options(training, resources, execution):
         gamma_f=gamma_f,
         reward_eta=reward_eta,
         gamma_i=gamma_i,
+        reward_distance_mode=reward_distance_mode,
         normalize_advantages=normalize_advantages,
         baseline=baseline,
         ppo_max_epochs=ppo_max_epochs,
@@ -306,5 +314,6 @@ def resolve_training_options(training, resources, execution):
             **REWARD_SCHEMAS,
             "gamma_i": gamma_i,
             "reward_eta": reward_eta,
+            "reward_distance_mode": reward_distance_mode,
         },
     )

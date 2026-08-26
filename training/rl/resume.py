@@ -32,6 +32,12 @@ from training.rl import baseline as baselines
 from training.rl.checkpoint_archive import archive_policy_manifest
 from training.rl.matchmaking import matchmaking_policy_manifest
 from training.rl.pool import pool_policy_manifest
+from training.rl.reward_distance import (
+    HISTORICAL_GAMMA_F,
+    HISTORICAL_REWARD_DISTANCE_MODE,
+    resolve_reward_distance_mode,
+)
+from training.rl.rollout import GAMMA_I, REWARD_ETA
 from utils.repository import current_git_commit
 
 
@@ -42,8 +48,12 @@ from utils.repository import current_git_commit
 # reinterpreted under the new semantics without silently changing what the
 # saved memberships mean. No converter exists, so they are rejected rather
 # than migrated.
-RESUME_STATE_VERSION = 15
-SUPPORTED_RESUME_STATE_VERSIONS = (RESUME_STATE_VERSION,)
+# Version 16 persists the independently configurable local/terminal reward
+# distance metrics. Version 15 is still unambiguous: absence of the field means
+# the historical turn-decision behavior, including the historical numeric
+# defaults when an unusually old durable config omitted those too.
+RESUME_STATE_VERSION = 16
+SUPPORTED_RESUME_STATE_VERSIONS = (15, RESUME_STATE_VERSION)
 OVERLAPPING_MEDIUM_TERM_STATE_VERSIONS = (10, 11)
 # States written before the uniform member remainder rotated. They carry no
 # rotation anchor, so their next match plan cannot be reproduced.
@@ -63,6 +73,11 @@ RENAMED_PARAMETER_KEYS = {
     "gamma_f": "gamma",
     "reward_eta": "alpha",
     "gamma_i": "event_reward_decay",
+}
+HISTORICAL_REWARD_PARAMETER_DEFAULTS = {
+    "gamma_f": HISTORICAL_GAMMA_F,
+    "reward_eta": REWARD_ETA,
+    "gamma_i": GAMMA_I,
 }
 
 
@@ -85,7 +100,10 @@ def _renamed(rl_config, current_name):
     """Read one renamed RL parameter from a config written either way."""
     if current_name in rl_config:
         return rl_config[current_name]
-    return rl_config[RENAMED_PARAMETER_KEYS[current_name]]
+    original_name = RENAMED_PARAMETER_KEYS[current_name]
+    if original_name in rl_config:
+        return rl_config[original_name]
+    return HISTORICAL_REWARD_PARAMETER_DEFAULTS[current_name]
 
 
 @dataclass(frozen=True)
@@ -109,6 +127,7 @@ class RLTrainingConfiguration:
     gamma_f: float
     reward_eta: float
     gamma_i: float
+    reward_distance_mode: str
     normalize_advantages: bool
     # Recorded even though the encoder ablations are usually caught by the
     # checkpoint's own input width, because these two are not independent: the
@@ -163,6 +182,15 @@ class RLTrainingConfiguration:
             data["baseline"] = baselines.BaselineSpec.from_mapping(
                 data["baseline"]
             ).as_mapping()
+        data.setdefault(
+            "reward_distance_mode",
+            HISTORICAL_REWARD_DISTANCE_MODE,
+        )
+        resolve_reward_distance_mode(data["reward_distance_mode"])
+        for name, default in HISTORICAL_REWARD_PARAMETER_DEFAULTS.items():
+            original_name = RENAMED_PARAMETER_KEYS[name]
+            if name not in data and original_name not in data:
+                data[name] = default
         # Checkpoints written before the parameter rename spell these three the
         # original way; a resume must keep working across the rename.
         for current_name, original_name in RENAMED_PARAMETER_KEYS.items():
@@ -218,6 +246,10 @@ class RLTrainingConfiguration:
             "gamma_f": float(_renamed(rl, "gamma_f")),
             "reward_eta": float(_renamed(rl, "reward_eta")),
             "gamma_i": float(_renamed(rl, "gamma_i")),
+            "reward_distance_mode": rl.get(
+                "reward_distance_mode",
+                HISTORICAL_REWARD_DISTANCE_MODE,
+            ),
             "normalize_advantages": bool(rl["normalize_advantages"]),
             # From locked_arguments, not rl_config, for the same reason the
             # baseline is; see ``training.canonical_run``.
@@ -704,6 +736,17 @@ def _validate_resume_configuration(
     """Reject a resume that would silently continue a different experiment."""
     saved = dict(metadata.get("configuration") or {})
     saved.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
+    saved.setdefault(
+        "reward_distance_mode",
+        HISTORICAL_REWARD_DISTANCE_MODE,
+    )
+    for current_name, original_name in RENAMED_PARAMETER_KEYS.items():
+        if current_name not in saved and original_name in saved:
+            saved[current_name] = saved.pop(original_name)
+        elif current_name not in saved:
+            saved[current_name] = HISTORICAL_REWARD_PARAMETER_DEFAULTS[
+                current_name
+            ]
     expected = expected.to_dict()
     if saved.get("git_commit") != expected.get("git_commit"):
         emit_status(

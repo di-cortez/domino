@@ -173,6 +173,7 @@ def _rl_config_from_summary(summary):
         "gamma_f": summary["gamma_f"],
         "reward_eta": summary["reward_eta"],
         "gamma_i": summary["gamma_i"],
+        "reward_distance_mode": summary["reward_distance_mode"],
         "clip_grad_norm": summary["clip_grad_norm"],
         "normalize_advantages": summary["normalize_advantages"],
         "worker_memory_reserve_mb": 0,

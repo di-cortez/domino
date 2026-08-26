@@ -1826,6 +1826,7 @@ class ParallelRLTests(unittest.TestCase):
                 "quiet": True,
                 "numbered_checkpoints": True,
                 "ppo_max_epochs": 1,
+                "reward_distance_mode": "decision-turn",
             }
 
             full = self._train(
@@ -1854,16 +1855,24 @@ class ParallelRLTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "inconsistent"):
                 load_resume_state(full["rl_weights_path"], partial_state)
 
+            conflicting_resume = {
+                **common,
+                "reward_distance_mode": "turn-turn",
+            }
             resumed = self._train(
                 iterations=4,
                 rl_weights_path=str(resumed_base),
                 resume_weights_path=str(partial_weights),
                 resume_state_file=str(partial_state),
                 gamma_f=0.97,
-                **common,
+                **conflicting_resume,
             )
-            self.assertEqual(resumed["gamma_f"], common.get("gamma_f", 1.0))
+            self.assertEqual(
+                resumed["gamma_f"],
+                common.get("gamma_f", 0.95),
+            )
             self.assertEqual(resumed["rl_training_algorithm"], "reinforce_v1")
+            self.assertEqual(resumed["reward_distance_mode"], "decision-turn")
             with np.load(full["rl_weights_path"], allow_pickle=False) as left:
                 with np.load(resumed["rl_weights_path"], allow_pickle=False) as right:
                     self.assertEqual(left.files, right.files)

@@ -16,7 +16,7 @@ def output_name(ruleset: str, seat: int, information_mode: str) -> str:
     stem = ruleset.replace("-", "_")
     if information_mode == "partial":
         return f"{stem}_player{seat}.jsonl"
-    return f"{stem}_cheater_player{seat}.jsonl"
+    return f"{stem}_cheater_player{seat}.jsonl" 
 
 
 def load_rows(

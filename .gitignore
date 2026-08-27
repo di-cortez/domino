@@ -59,3 +59,13 @@ references/*
 temporary/*
 domino_opponent_pool_cache_benchmark/*
 train_script/grid_search_results/
+
+analysis/exact_vs_random-double-three/double_three_cheater_player0.jsonl
+analysis/exact_vs_random-double-three/double_three_cheater_player1.jsonl
+analysis/exact_vs_random-double-three/double_three_player0.jsonl
+analysis/exact_vs_random-double-three/double_three_player1.jsonl
+
+analysis/exact_vs_random-double-four/double_four_cheater_player0.jsonl
+analysis/exact_vs_random-double-four/double_four_cheater_player1.jsonl
+analysis/exact_vs_random-double-four/double_four_player0.jsonl
+analysis/exact_vs_random-double-four/double_four_player1.jsonl

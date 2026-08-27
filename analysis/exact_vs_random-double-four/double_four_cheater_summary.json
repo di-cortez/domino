@@ -1,0 +1,99 @@
+{
+  "complete": true,
+  "equal_probability_player0_player1": {
+    "decimal": "0.804970687895983",
+    "den": 16140437913600,
+    "num": 12992579410253
+  },
+  "hand_size": 5,
+  "information_mode": "perfect",
+  "number_of_initial_hands_per_seat": 3003,
+  "probability_of_each_unordered_initial_hand": {
+    "den": 3003,
+    "num": 1
+  },
+  "ruleset": "double-four",
+  "seats": {
+    "player0": {
+      "completed_hands": 3003,
+      "expected_hands": 3003,
+      "win_probability": {
+        "decimal": "0.80500849065576",
+        "den": 112983065395200,
+        "num": 90952326943451
+      }
+    },
+    "player1": {
+      "completed_hands": 3003,
+      "expected_hands": 3003,
+      "win_probability": {
+        "decimal": "0.804932885136206",
+        "den": 112983065395200,
+        "num": 90943784800091
+      }
+    }
+  },
+  "tile_count": 15,
+  "tile_id_map": [
+    [
+      0,
+      0
+    ],
+    [
+      0,
+      1
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      0,
+      3
+    ],
+    [
+      0,
+      4
+    ],
+    [
+      1,
+      1
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      1,
+      4
+    ],
+    [
+      2,
+      2
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      2,
+      4
+    ],
+    [
+      3,
+      3
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      4,
+      4
+    ]
+  ]
+}

@@ -49,6 +49,31 @@ marked incomplete:
 .venv/bin/python analysis/exact_vs_random-double-three/run.py --limit 1
 ```
 
+## Results
+
+Both information modes are complete: all 210 unordered initial hands were
+solved for each seat, and every unordered initial hand is equally likely with
+probability 1/210. Seat 0 and seat 1 reach the same value, which is the
+expected consequence of the label-swap argument above: every double-three deal
+guarantees a compulsory double opener, so the two seats are exchangeable.
+
+| Information mode | Seat | Exact win probability | Decimal |
+| --- | --- | --- | --- |
+| Partial (belief) | player 0 | 9791647 / 13608000 | 0.719550778953557 |
+| Partial (belief) | player 1 | 9791647 / 13608000 | 0.719550778953557 |
+| Perfect (cheater) | player 0 | 2656043 / 3402000 | 0.78072986478542 |
+| Perfect (cheater) | player 1 | 2656043 / 3402000 | 0.78072986478542 |
+
+An optimal belief-based player therefore beats the uniform `RandomAgent` in
+about 71.96% of double-three games, and about 78.07% when it also observes the
+opponent hand and the stock membership. Perfect information is worth about
+6.12 percentage points here. Because both seats coincide, the seat-averaged
+values are identical to the per-seat ones.
+
+These numbers are read from `double_three_summary.json` and
+`double_three_cheater_summary.json`, whose `complete` flag is `true` and whose
+`completed_hands` equals `expected_hands` for both seats.
+
 Outputs:
 
 - `double_three_player0.jsonl`

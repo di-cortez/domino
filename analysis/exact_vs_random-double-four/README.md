@@ -85,6 +85,39 @@ marked incomplete:
 .venv/bin/python analysis/exact_vs_random-double-four/run.py --limit 1
 ```
 
+## Results
+
+Both information modes are complete: all 3,003 unordered initial hands were
+solved for each seat, and every unordered initial hand is equally likely with
+probability 1/3003. Unlike double-three, the two seats do not coincide. The
+2,751 hands that force a double opener are label-symmetric, but the 252
+no-double hero hands can leave all five doubles in the stock and then trigger
+the asymmetric player-0 fallback opening rule, which gives seat 0 a small edge.
+
+| Information mode | Seat | Exact win probability | Decimal |
+| --- | --- | --- | --- |
+| Partial (belief) | player 0 | 116981237213033 / 164766970368000 | 0.709979900411839 |
+| Partial (belief) | player 1 | 116968733940713 / 164766970368000 | 0.709904015831986 |
+| Partial (belief) | seat-averaged | 116974985576873 / 164766970368000 | 0.709941958121912 |
+| Perfect (cheater) | player 0 | 90952326943451 / 112983065395200 | 0.80500849065576 |
+| Perfect (cheater) | player 1 | 90943784800091 / 112983065395200 | 0.804932885136206 |
+| Perfect (cheater) | seat-averaged | 12992579410253 / 16140437913600 | 0.804970687895983 |
+
+The seat-averaged row is the value of a game in which the controlled player is
+assigned to seat 0 or seat 1 with equal probability; it is the mean of the two
+seat values, reported as `equal_probability_player0_player1` in the summaries.
+
+An optimal belief-based player therefore beats the uniform `RandomAgent` in
+about 70.99% of double-four games, and about 80.50% when it also observes the
+opponent hand and the stock membership. Perfect information is worth about
+9.50 percentage points here, noticeably more than the 6.12 points it is worth
+in double-three, because the larger stock and hand hide more state. The seat
+advantage is small in both modes: about 0.008 percentage points.
+
+These numbers are read from `double_four_summary.json` and
+`double_four_cheater_summary.json`, whose `complete` flag is `true` and whose
+`completed_hands` equals `expected_hands` for both seats.
+
 Outputs:
 
 - `double_four_player0.jsonl`

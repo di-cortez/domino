@@ -1,0 +1,40 @@
+{
+  "common_fixed_panel_across_checkpoints": true,
+  "completed_points": 124,
+  "diagnostic_games_per_checkpoint": 10000,
+  "diagnostic_opponent": "random",
+  "diagnostic_seed": 6648275836226358204,
+  "diagnostic_workers": 10,
+  "finished_at": "2026-08-28T15:26:01.692878+00:00",
+  "format": "domino_rl_ruleset_learning_curve_diagnostics",
+  "policy_mode": "deterministic evaluation",
+  "rulesets": {
+    "double-five": {
+      "byte_identical_iteration_weights": true,
+      "evaluated_repetitions": [
+        1
+      ]
+    },
+    "double-four": {
+      "byte_identical_iteration_weights": true,
+      "evaluated_repetitions": [
+        1
+      ]
+    },
+    "double-six": {
+      "byte_identical_iteration_weights": true,
+      "evaluated_repetitions": [
+        1
+      ]
+    },
+    "double-three": {
+      "byte_identical_iteration_weights": true,
+      "evaluated_repetitions": [
+        1
+      ]
+    }
+  },
+  "started_at": "2026-08-28T15:20:58.602406+00:00",
+  "training_seed": 20260828,
+  "version": 1
+}

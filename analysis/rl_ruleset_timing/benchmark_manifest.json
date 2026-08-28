@@ -1,0 +1,202 @@
+{
+  "configuration": {
+    "device": "gpu",
+    "difficulty_weight": 0.5,
+    "gpi": 2000,
+    "initialization": "ruleset-default random policy from fixed seed",
+    "opponent_buckets": [
+      "heuristic",
+      "recent"
+    ],
+    "periodic_diagnostics": false,
+    "ppo_max_epochs": 16,
+    "repetitions": 3,
+    "rulesets": [
+      "double-three",
+      "double-four",
+      "double-five",
+      "double-six"
+    ],
+    "seed": 20260828,
+    "supervised_training": false,
+    "training_games_per_run": 24000,
+    "workers": 10
+  },
+  "finished_at": "2026-08-28T14:05:47.452307+00:00",
+  "format": "domino_rl_ruleset_timing_benchmark",
+  "machine_after": {
+    "captured_at": "2026-08-28T14:05:47.423291+00:00",
+    "git_commit": "06dd3a9b7324972fc888e59c994abdb961e51d45",
+    "load_average": [
+      3.89697265625,
+      3.0849609375,
+      1.76513671875
+    ],
+    "logical_cpus": 20,
+    "nvidia_smi": "NVIDIA GeForce GTX 1650, 4096, 649, 13, 43",
+    "platform": "Linux-7.0.0-29-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]"
+  },
+  "machine_before": {
+    "captured_at": "2026-08-28T13:58:49.473623+00:00",
+    "git_commit": "06dd3a9b7324972fc888e59c994abdb961e51d45",
+    "load_average": [
+      0.41748046875,
+      0.41650390625,
+      0.4560546875
+    ],
+    "logical_cpus": 20,
+    "nvidia_smi": "NVIDIA GeForce GTX 1650, 4096, 875, 14, 36",
+    "platform": "Linux-7.0.0-29-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]"
+  },
+  "runs": [
+    {
+      "console_log": "raw/double-three/rep1.console.log",
+      "output_directory": "raw/double-three/rep1",
+      "repetition": 1,
+      "returncode": 0,
+      "ruleset": "double-three",
+      "subprocess_wall_seconds": 19.03124854300404
+    },
+    {
+      "console_log": "raw/double-four/rep1.console.log",
+      "output_directory": "raw/double-four/rep1",
+      "repetition": 1,
+      "returncode": 0,
+      "ruleset": "double-four",
+      "subprocess_wall_seconds": 31.2651907739928
+    },
+    {
+      "console_log": "raw/double-five/rep1.console.log",
+      "output_directory": "raw/double-five/rep1",
+      "repetition": 1,
+      "returncode": 0,
+      "ruleset": "double-five",
+      "subprocess_wall_seconds": 39.497047554003075
+    },
+    {
+      "console_log": "raw/double-six/rep1.console.log",
+      "output_directory": "raw/double-six/rep1",
+      "repetition": 1,
+      "returncode": 0,
+      "ruleset": "double-six",
+      "subprocess_wall_seconds": 48.731836297985865
+    },
+    {
+      "console_log": "raw/double-six/rep2.console.log",
+      "output_directory": "raw/double-six/rep2",
+      "repetition": 2,
+      "returncode": 0,
+      "ruleset": "double-six",
+      "subprocess_wall_seconds": 49.28927984999609
+    },
+    {
+      "console_log": "raw/double-five/rep2.console.log",
+      "output_directory": "raw/double-five/rep2",
+      "repetition": 2,
+      "returncode": 0,
+      "ruleset": "double-five",
+      "subprocess_wall_seconds": 39.190897766005946
+    },
+    {
+      "console_log": "raw/double-four/rep2.console.log",
+      "output_directory": "raw/double-four/rep2",
+      "repetition": 2,
+      "returncode": 0,
+      "ruleset": "double-four",
+      "subprocess_wall_seconds": 31.739868555014255
+    },
+    {
+      "console_log": "raw/double-three/rep2.console.log",
+      "output_directory": "raw/double-three/rep2",
+      "repetition": 2,
+      "returncode": 0,
+      "ruleset": "double-three",
+      "subprocess_wall_seconds": 18.4353841090051
+    },
+    {
+      "console_log": "raw/double-five/rep3.console.log",
+      "output_directory": "raw/double-five/rep3",
+      "repetition": 3,
+      "returncode": 0,
+      "ruleset": "double-five",
+      "subprocess_wall_seconds": 40.24722520800424
+    },
+    {
+      "console_log": "raw/double-three/rep3.console.log",
+      "output_directory": "raw/double-three/rep3",
+      "repetition": 3,
+      "returncode": 0,
+      "ruleset": "double-three",
+      "subprocess_wall_seconds": 19.030236549006077
+    },
+    {
+      "console_log": "raw/double-six/rep3.console.log",
+      "output_directory": "raw/double-six/rep3",
+      "repetition": 3,
+      "returncode": 0,
+      "ruleset": "double-six",
+      "subprocess_wall_seconds": 49.13177039398579
+    },
+    {
+      "console_log": "raw/double-four/rep3.console.log",
+      "output_directory": "raw/double-four/rep3",
+      "repetition": 3,
+      "returncode": 0,
+      "ruleset": "double-four",
+      "subprocess_wall_seconds": 32.294179190008435
+    }
+  ],
+  "schedule": [
+    {
+      "repetition": 1,
+      "ruleset": "double-three"
+    },
+    {
+      "repetition": 1,
+      "ruleset": "double-four"
+    },
+    {
+      "repetition": 1,
+      "ruleset": "double-five"
+    },
+    {
+      "repetition": 1,
+      "ruleset": "double-six"
+    },
+    {
+      "repetition": 2,
+      "ruleset": "double-six"
+    },
+    {
+      "repetition": 2,
+      "ruleset": "double-five"
+    },
+    {
+      "repetition": 2,
+      "ruleset": "double-four"
+    },
+    {
+      "repetition": 2,
+      "ruleset": "double-three"
+    },
+    {
+      "repetition": 3,
+      "ruleset": "double-five"
+    },
+    {
+      "repetition": 3,
+      "ruleset": "double-three"
+    },
+    {
+      "repetition": 3,
+      "ruleset": "double-six"
+    },
+    {
+      "repetition": 3,
+      "ruleset": "double-four"
+    }
+  ],
+  "version": 1
+}

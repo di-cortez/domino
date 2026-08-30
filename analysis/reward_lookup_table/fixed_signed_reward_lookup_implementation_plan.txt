@@ -1,0 +1,507 @@
+IMPLEMENTATION SPECIFICATION: FIXED SIGNED REWARD LOOKUP TABLES
+
+POST-PLAN EXTENSION
+-------------------
+
+The implemented format was subsequently extended with terminal remaining pips
+as a fourth unit component. Each pip contributes nonnegative +1 before the
+external -0.05 reward multiplier. The runtime artifact therefore has eight
+logical histograms (final, pips, pass, and draw under turn and decision
+clocks). References below to six tables or only final/pass/draw describe the
+original specification and are superseded by this extension.
+
+Context
+-------
+
+The repository already contains complete sampled game histories and the following
+derived files under:
+
+    analysis/reward_lookup_table/derived/
+
+    double-three_reward_lookup_manifest.json
+    double-three_reward_lookup_samples.json.gz
+    double-four_reward_lookup_manifest.json
+    double-four_reward_lookup_samples.json.gz
+    double-five_reward_lookup_manifest.json
+    double-five_reward_lookup_samples.json.gz
+    double-six_reward_lookup_manifest.json
+    double-six_reward_lookup_samples.json.gz
+
+Create a standalone analysis script that reads these files and builds fixed,
+runtime-ready reward lookup tables. Do not modify the training pipeline in this
+task. The script should only construct, validate, and write the fixed lookup
+artifacts.
+
+The lookup tables will later be used as state-dependent baselines or expected
+future reward estimates. A state cell is identified by:
+
+    (agent_hand_size, opponent_hand_size)
+
+For example, the key "2,3" means that the neural agent has two tiles and the
+opponent has three tiles at the sampled agent decision.
+
+
+1. Required logical tables
+--------------------------
+
+For every ruleset, build six logical lookup tables:
+
+    1. final reward, turn clock
+    2. final reward, decision clock
+    3. pass reward, turn clock
+    4. pass reward, decision clock
+    5. draw reward, turn clock
+    6. draw reward, decision clock
+
+It is preferable to store the six logical tables in one output file per
+ruleset, rather than creating six separate files.
+
+All reward pairs are guaranteed to remain symmetric:
+
+    terminal win             +R_final
+    terminal loss            -R_final
+
+    opponent passes          +R_pass
+    neural agent passes      -R_pass
+
+    opponent draws           +R_draw
+    neural agent draws       -R_draw
+
+The lookup files must be independent of the actual positive magnitudes
+R_final, R_pass, and R_draw. Build them using unit signs +1 and -1. The current
+training configuration will multiply each component by its actual reward
+magnitude later.
+
+The lookup files must also be independent of gamma, eta, and the selected time
+unit. Gamma is applied when a histogram is evaluated, not when it is built.
+
+
+2. Cell eligibility rule
+------------------------
+
+Only create entries for cells containing at least 0.5% of all decision samples
+for that ruleset.
+
+For a ruleset with N_ruleset decisions, define:
+
+    threshold = ceil(0.005 * N_ruleset)
+
+A cell is eligible when:
+
+    N_cell >= threshold
+
+Use summary.decisions from the ruleset manifest as N_ruleset, and use
+cell_sample_counts["i,j"] as N_cell.
+
+For the current manifests, the expected thresholds are:
+
+    double-three: ceil(0.005 * 153697) = 769
+    double-four:  ceil(0.005 * 233262) = 1167
+    double-five:  ceil(0.005 * 314774) = 1574
+    double-six:   ceil(0.005 * 421010) = 2106
+
+The eligibility test is based only on the number of starting decision samples
+in the cell. It is not based on the number of terminal, pass, or draw events.
+
+Do not create interpolated entries for ineligible cells. Omit those keys from
+the final lookup file. The consuming code can decide later whether a missing
+cell should produce a zero baseline or another fallback.
+
+
+3. Fundamental representation
+------------------------------
+
+Do not store separate win and loss histograms. Do not store separate
+agent-event and opponent-event histograms. Do not store total event histograms.
+Do not store N_cell in the final runtime lookup file.
+
+The sample count is used only while constructing and validating the fixed
+table. Once the normalized signed histogram has been produced, the table is
+fixed. If better data are produced in the future, the complete table will be
+rebuilt from scratch.
+
+For each eligible cell c and discount-exponent bin k, store only the normalized
+signed difference.
+
+Final reward:
+
+    q_final[c, k]
+        = (number of wins in bin k - number of losses in bin k) / N_cell
+
+Pass reward:
+
+    q_pass[c, k]
+        = (number of opponent-pass events in bin k
+           - number of neural-agent-pass events in bin k) / N_cell
+
+Draw reward:
+
+    q_draw[c, k]
+        = (number of opponent-draw events in bin k
+           - number of neural-agent-draw events in bin k) / N_cell
+
+Create each of these for both the turn clock and the decision clock.
+
+The denominator is always the total number of starting samples in the cell.
+Never normalize a bin by the number of events in that bin.
+
+Pass and draw trajectories can contain multiple future events. Every future
+event contributes its sign to the appropriate bin. Therefore pass and draw
+histograms represent expected signed future event counts per starting decision,
+not probabilities of exactly one event.
+
+
+4. Histogram index and discount convention
+-------------------------------------------
+
+The histogram index should be the actual exponent applied to gamma, not an
+ambiguous human-readable distance.
+
+Use the convention:
+
+    histogram[k] multiplies gamma**k
+
+Consequently, histogram[0] contains rewards that the existing return
+calculation treats as undiscounted from the sampled decision.
+
+Before implementing the distance calculation, inspect the current trainer's
+return code and the existing turn/decision discount logic. Reuse the existing
+clock or helper functions whenever practical. Do not independently invent a
+second definition of "turn" or "decision".
+
+In particular, resolve the following exactly from the current code:
+
+    - whether a terminal reward produced by the sampled action has exponent 0;
+    - whether an immediate pass/draw reward produced by the sampled action has
+      exponent 0;
+    - what increments the turn clock;
+    - what increments the decision clock;
+    - how rewards occurring between two neural-agent decisions are indexed by
+      the decision clock;
+    - whether forced actions count as decisions under the current semantics.
+
+If the raw history stores a distance D where D=1 means "the next reward", but
+the trainer uses gamma**0 for that reward, convert D to exponent D-1 while
+building the histogram. The runtime lookup evaluator should not need an
+off-by-one correction.
+
+
+5. Events included from each starting sample
+--------------------------------------------
+
+Each raw sample corresponds to an agent decision in a particular cell. From
+that point, process only the trajectory suffix beginning at that decision and
+ending at the terminal outcome.
+
+For one starting sample:
+
+    Final table:
+        Add +1 to the terminal bin if the neural agent eventually wins.
+        Add -1 to the terminal bin if the neural agent eventually loses.
+        There must be exactly one terminal contribution per starting sample.
+
+    Pass table:
+        Add +1 for every future opponent pass.
+        Add -1 for every future neural-agent pass.
+
+    Draw table:
+        Add +1 for every future opponent draw reward event.
+        Add -1 for every future neural-agent draw reward event.
+
+For draw events, match the exact reward semantics already used by the trainer.
+If the trainer rewards each tile drawn, count each tile. If it rewards one draw
+action regardless of the number of tiles, count one draw action. Do not infer
+this from names alone; inspect the production reward code.
+
+Likewise, count exactly the pass events that trigger pass rewards in the
+trainer. Do not add new events merely because they could conceptually be called
+a pass.
+
+The same future event can appear in the suffixes of multiple starting decision
+samples from one game. This is correct. The lookup estimates expected future
+reward at a randomly encountered agent decision, so every sampled decision is
+one observation.
+
+
+6. Exact lookup evaluation
+---------------------------
+
+For a normalized histogram q and gamma, evaluate:
+
+    value(q, gamma) = sum(q[k] * gamma**k for k in range(len(q)))
+
+Use an iterative power calculation in runtime-oriented helper code if desired:
+
+    power = 1.0
+    value = 0.0
+    for coefficient in histogram:
+        value += coefficient * power
+        power *= gamma
+
+For a cell c, the unit-magnitude components are:
+
+    V_final_turn(c, gamma_f)
+    V_final_decision(c, gamma_f)
+    V_pass_turn(c, gamma_i)
+    V_pass_decision(c, gamma_i)
+    V_draw_turn(c, gamma_i)
+    V_draw_decision(c, gamma_i)
+
+Later, the training code can select the relevant final and immediate clocks
+and apply the actual symmetric reward magnitudes. Conceptually:
+
+    terminal_component
+        = R_final * evaluate(selected_final_histogram, gamma_f)
+
+    immediate_component
+        = R_pass * evaluate(selected_pass_histogram, gamma_i)
+        + R_draw * evaluate(selected_draw_histogram, gamma_i)
+
+The existing training code must remain authoritative for how eta or other
+mixture weights combine the terminal and immediate components. Do not embed
+eta in these fixed lookup tables.
+
+
+7. Recommended output schema
+----------------------------
+
+Write one deterministic JSON or JSON.GZ file per ruleset. Recommended filename:
+
+    <ruleset>_fixed_signed_reward_lookup.json.gz
+
+Recommended logical schema:
+
+    {
+      "format": "domino_fixed_signed_reward_lookup",
+      "format_version": 1,
+      "ruleset_name": "double-three",
+      "cell_key_order": ["agent_hand_size", "opponent_hand_size"],
+      "histogram_index": "discount_exponent",
+      "normalization": "signed_event_difference_per_cell_sample",
+      "eligibility_fraction": 0.005,
+      "tables": {
+        "final": {
+          "turn": {
+            "2,3": [0.0, 0.0123, -0.0041]
+          },
+          "decision": {
+            "2,3": [0.0012, 0.0068, 0.0002]
+          }
+        },
+        "pass": {
+          "turn": {
+            "2,3": [0.0021, -0.0014]
+          },
+          "decision": {
+            "2,3": [0.0007, 0.0, -0.0003]
+          }
+        },
+        "draw": {
+          "turn": {
+            "2,3": [-0.0031, 0.0018]
+          },
+          "decision": {
+            "2,3": [-0.0020, 0.0007]
+          }
+        }
+      }
+    }
+
+The numeric values above are illustrative only.
+
+All six logical tables must contain the same eligible cell keys. If an eligible
+cell has an identically zero normalized histogram for an event type, store an
+empty list or [0.0] consistently. Prefer an empty list if the evaluator treats
+it naturally as zero.
+
+Dense arrays are recommended because evaluation is a simple dot product with
+powers of gamma. Trim trailing zero bins, but never remove leading or internal
+zeros because array position is the discount exponent.
+
+Do not include the following in the runtime file:
+
+    - N_cell;
+    - N_ruleset;
+    - wins and losses;
+    - agent-event and opponent-event counts;
+    - total counts by bin;
+    - confidence intervals;
+    - raw trajectories;
+    - gamma, eta, or reward magnitudes.
+
+Use ordinary double-precision floats. Python's normal JSON float serialization
+is sufficient. Do not round coefficients to a small number of decimal places.
+
+If gzip is used, make output deterministic if practical: stable key ordering,
+stable separators, UTF-8, and a fixed gzip timestamp such as mtime=0.
+
+
+8. Build-time validation requirements
+--------------------------------------
+
+The script must fail loudly on inconsistent data. At minimum, implement the
+following checks for every ruleset.
+
+Manifest and sample reconciliation:
+
+    - The number of parsed starting samples per cell must equal
+      manifest.cell_sample_counts[cell].
+    - The total number of parsed samples must equal summary.decisions.
+    - The eligible cell set must exactly match the 0.5% rule.
+
+Terminal checks:
+
+    - Every starting sample contributes exactly one terminal sign.
+    - Every terminal sign is +1 or -1.
+    - For a cell, the sum of the turn final histogram before normalization must
+      equal wins - losses.
+    - The same must hold for the decision final histogram.
+    - After normalization, the sum of a final histogram must lie in [-1, 1].
+
+Clock-invariance checks at gamma=1:
+
+Changing the clock only changes the event distances. It cannot change which
+signed events occurred. Therefore, for every eligible cell and event type:
+
+    sum(final_turn_hist) == sum(final_decision_hist)
+    sum(pass_turn_hist)  == sum(pass_decision_hist)
+    sum(draw_turn_hist)  == sum(draw_decision_hist)
+
+Use a tight floating-point tolerance after normalization, for example 1e-12.
+The corresponding unnormalized integer sums should match exactly.
+
+Direct-return equivalence:
+
+For several cells, several trajectories, both clocks, and several gamma values
+such as 0.0, 0.5, 0.9, 0.95, and 1.0, compare:
+
+    A. the average signed discounted reward calculated directly from the raw
+       trajectory suffixes;
+
+    B. the value produced by evaluating the constructed normalized histogram.
+
+These must agree within floating-point tolerance for final, pass, and draw
+components independently.
+
+General checks:
+
+    - No NaN or infinity.
+    - No negative histogram indices.
+    - No unknown player identity on a pass/draw event.
+    - No unknown terminal outcome.
+    - Cell keys must use canonical "i,j" formatting.
+    - The six logical tables must contain exactly the same eligible keys.
+
+Print a compact build summary containing, for each ruleset:
+
+    - ruleset decision count;
+    - 0.5% threshold;
+    - number of eligible cells;
+    - maximum turn exponent;
+    - maximum decision exponent;
+    - output path and SHA-256 checksum.
+
+These values are build diagnostics only and must not be placed in the runtime
+lookup table unless they are non-count format metadata explicitly listed in the
+recommended schema.
+
+
+9. Synthetic tests
+------------------
+
+Add focused tests for the histogram builder before running it on the complete
+datasets. Include at least:
+
+    1. Immediate terminal win:
+       The final histogram has +1/N in bin 0.
+
+    2. Immediate terminal loss:
+       The final histogram has -1/N in bin 0.
+
+    3. Symmetric cancellation:
+       A win and loss in the same bin cancel to zero.
+
+    4. Pass signs:
+       Opponent pass is positive; neural-agent pass is negative.
+
+    5. Draw signs:
+       Opponent draw is positive; neural-agent draw is negative.
+
+    6. Multiple events:
+       One trajectory can contribute several pass/draw events.
+
+    7. Multiple events sharing one decision exponent:
+       They must accumulate in the same decision histogram bin.
+
+    8. Turn versus decision clocks:
+       Different distance distributions but identical sums at gamma=1.
+
+    9. Eligibility boundary:
+       A cell at ceil(0.005 * N_ruleset) is included; one immediately below is
+       omitted.
+
+    10. Missing cells:
+        No placeholder or invented histogram is written.
+
+    11. Histogram evaluation:
+        Direct trajectory returns equal histogram-evaluated returns at several
+        gamma values.
+
+
+10. Performance and implementation notes
+----------------------------------------
+
+The compressed sample files may be large. Stream them with gzip rather than
+loading the entire file into memory unless the existing format requires a
+different access pattern.
+
+First inspect the actual JSON.GZ structure. It may be JSON Lines, one large JSON
+array, or another repository-specific structure. Reuse existing repository
+loaders if available. Do not guess field names in the implementation.
+
+Precompute the eligible cell set from the manifest before processing the raw
+samples. Skip histogram accumulation for ineligible starting cells as early as
+possible.
+
+Accumulate signed histogram bins as integers during the full scan. Divide by
+N_cell only after all samples have been processed and all integer validation
+checks have passed.
+
+Use dynamically extended Python lists, Counter objects keyed by exponent, or
+NumPy integer arrays. A Counter is convenient during construction; convert it
+to a dense normalized list when writing the final lookup.
+
+The build should be deterministic. Sort rulesets, cell keys numerically, event
+types, and clock names before serialization.
+
+Write to a temporary output file and atomically rename it only after every
+validation succeeds. A failed build must not leave a partially written lookup
+that could be mistaken for valid output.
+
+
+11. Scope boundaries
+--------------------
+
+This task includes:
+
+    - inspecting the raw sample schema and current discount semantics;
+    - creating the standalone fixed-table generation script;
+    - creating tests for the generator;
+    - generating the six logical normalized signed tables per ruleset;
+    - validating the output thoroughly;
+    - documenting the command needed to run the generator.
+
+This task does not include:
+
+    - modifying PPO or supervised training;
+    - changing reward definitions;
+    - adding online table updates;
+    - storing sample counts in the runtime lookup;
+    - smoothing or interpolating missing cells;
+    - implementing a fallback for missing lookup cells;
+    - changing gamma, eta, or time-mode defaults;
+    - integrating the generated lookup into the current baseline.
+
+Return the implemented script, tests, exact run command, output filenames, and
+a concise validation summary. Do not change production training code as part of
+this task.

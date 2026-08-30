@@ -1,0 +1,53 @@
+{
+  "ad_hoc_modifications": {
+    "copied_cells": [
+      {
+        "source": "5,2",
+        "target": "6,2"
+      }
+    ],
+    "removed_cells": [
+      "1,1",
+      "1,2"
+    ],
+    "runtime_cells": 21,
+    "zero_tail_trimming": {
+      "decimal_places": 3,
+      "removed_coefficients": {
+        "decision": 33,
+        "total": 74,
+        "turn": 41
+      }
+    }
+  },
+  "direct_return_validation_cells": [
+    "1,1",
+    "2,4",
+    "4,1",
+    "4,6",
+    "6,3"
+  ],
+  "direct_return_validation_gammas": [
+    0.0,
+    0.5,
+    0.9,
+    0.95,
+    1.0
+  ],
+  "eligibility_fraction": 0.005,
+  "eligibility_threshold": 1167,
+  "eligible_cells": 22,
+  "format": "domino_fixed_signed_reward_lookup",
+  "format_version": 2,
+  "maximum_decision_exponent": 6,
+  "maximum_turn_exponent": 23,
+  "output_bytes": 14386,
+  "output_file": "double-four_fixed_signed_reward_lookup.json.gz",
+  "output_sha256": "9969fdcc7c2e51fd006b4547f8fa8658e1a5fd1af20a3e2ca1f70df584c7be4f",
+  "ruleset_decisions": 233262,
+  "ruleset_name": "double-four",
+  "source_file": "double-four_reward_lookup_samples.json.gz",
+  "source_file_sha256": "b362b1f794c7319e832ec809afad49620334970173387ece840b225a026ab7a3",
+  "source_manifest": "double-four_reward_lookup_manifest.json",
+  "source_manifest_sha256": "917d8d97aa685f96337eddcfa172b5225f5dbfe40897bbb12756cac3276ef803"
+}

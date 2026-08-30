@@ -5,8 +5,8 @@ advantage reaches the policy gradient::
 
     advantage = return - b
 
-Every choice of ``b`` here is unbiased in expectation, so selecting one is a
-pure variance-reduction experiment. The six kinds are:
+Every choice of ``b`` here is independent of the sampled action, so selecting
+one preserves the policy-gradient expectation. The seven kinds are:
 
 ``zero``
     ``b = 0``. The raw REINFORCE signal, kept as the reference point.
@@ -16,6 +16,10 @@ pure variance-reduction experiment. The six kinds are:
     index into this list, so ``--baseline 2`` is ``b = 2``, not ``batch-mean``.
 ``batch-mean``
     ``b = mean(returns)`` over the complete on-policy iteration buffer.
+``lookup-table``
+    ``b = E[R | learner hand size, opponent hand size]`` from the fixed
+    ruleset-specific reward histograms. Runtime reward constants, discount
+    factors, distance clocks, and ``reward_eta`` remain outside the artifact.
 ``value-head``
     ``b = V(s)`` from a linear critic reading the policy's last hidden
     activation. The critic's loss is backpropagated into that shared trunk.
@@ -62,11 +66,12 @@ What changed is that the two operations are now factored apart::
     after:   advantage = (R - b)    / (sigma   + eps)     # b chosen, then scaled
 
 So ``--baseline batch-mean`` with normalization on is bit-for-bit the previous
-default, and the denominator does not move for three of the four kinds: ``zero``,
-``constant`` and ``batch-mean`` all subtract the same value from every decision,
-and a standard deviation is invariant under a constant shift, so ``sigma(R - b)``
-equals ``sigma(R)`` exactly. Only ``value-head`` changes the scale as well,
-because ``V(s)`` differs per decision.
+default, and the denominator does not move for the three state-independent
+kinds: ``zero``, ``constant`` and ``batch-mean`` all subtract the same value
+from every decision, and a standard deviation is invariant under a constant
+shift, so ``sigma(R - b)`` equals ``sigma(R)`` exactly. ``lookup-table`` and
+the critic kinds can change the scale because their baselines differ per
+decision.
 
 Two behaviors that were previously unreachable now are. Turning normalization
 off used to remove the centering with it, leaving the raw return; ``--baseline
@@ -93,6 +98,7 @@ import numpy as np
 ZERO = "zero"
 CONSTANT = "constant"
 BATCH_MEAN = "batch-mean"
+LOOKUP_TABLE = "lookup-table"
 VALUE_HEAD = "value-head"
 VALUE_HEAD_OWN_NN = "value-head-own-nn"
 VALUE_HEAD_NO_UP = "value-head-no-up"
@@ -101,6 +107,7 @@ BASELINE_KINDS = (
     ZERO,
     CONSTANT,
     BATCH_MEAN,
+    LOOKUP_TABLE,
     VALUE_HEAD,
     VALUE_HEAD_OWN_NN,
     VALUE_HEAD_NO_UP,
@@ -128,6 +135,9 @@ _KIND_ALIASES = {
     "batch-mean": BATCH_MEAN,
     "batch_mean": BATCH_MEAN,
     "mean": BATCH_MEAN,
+    "lookup-table": LOOKUP_TABLE,
+    "lookup_table": LOOKUP_TABLE,
+    "lookup": LOOKUP_TABLE,
     "value-head": VALUE_HEAD,
     "value_head": VALUE_HEAD,
     "critic": VALUE_HEAD,
@@ -189,6 +199,11 @@ class BaselineSpec:
     def requires_value_head(self):
         """Return whether this baseline reads the critic's predictions."""
         return self.kind in CRITIC_KINDS
+
+    @property
+    def requires_lookup_table(self):
+        """Return whether this baseline reads the packaged reward lookup."""
+        return self.kind == LOOKUP_TABLE
 
     @property
     def critic_wiring(self):
@@ -351,7 +366,14 @@ def resolve(baseline, *, use_value_head, normalize_advantages):
     return spec
 
 
-def baseline_values(spec, returns, *, value_predictions=None, xp=np):
+def baseline_values(
+    spec,
+    returns,
+    *,
+    value_predictions=None,
+    lookup_values=None,
+    xp=np,
+):
     """Return the per-decision baseline array shaped like ``returns``.
 
     ``xp`` is the array backend, so the same definition serves the NumPy PPO
@@ -364,6 +386,17 @@ def baseline_values(spec, returns, *, value_predictions=None, xp=np):
     if spec.kind == BATCH_MEAN:
         mean = float(xp.mean(returns, dtype=xp.float64))
         return xp.full_like(returns, mean)
+    if spec.kind == LOOKUP_TABLE:
+        if lookup_values is None:
+            raise ValueError(
+                "The lookup-table baseline needs one table value per decision."
+            )
+        values = xp.asarray(lookup_values, dtype=returns.dtype)
+        if values.size != returns.size:
+            raise ValueError(
+                "The lookup-table baseline value count differs from returns."
+            )
+        return values.reshape(returns.shape)
     # Every critic kind subtracts the same thing: one prediction per decision.
     # How that prediction was produced, and whether its loss reached the policy
     # trunk, is the network's business and not visible here.
@@ -375,14 +408,41 @@ def baseline_values(spec, returns, *, value_predictions=None, xp=np):
     return value_predictions
 
 
-def subtract(spec, returns, *, value_predictions=None, xp=np):
+def subtract(
+    spec,
+    returns,
+    *,
+    value_predictions=None,
+    lookup_values=None,
+    xp=np,
+):
     """Return ``returns`` minus the baseline, as one advantage array."""
     return returns - baseline_values(
         spec,
         returns,
         value_predictions=value_predictions,
+        lookup_values=lookup_values,
         xp=xp,
     )
+
+
+def lookup_values_for_samples(spec, samples, *, ruleset_name, schema):
+    """Return table values for one batch, or ``None`` for another baseline."""
+    if spec.kind != LOOKUP_TABLE:
+        return None
+    from training.rl.reward_lookup_tables import load_reward_lookup
+
+    return load_reward_lookup(ruleset_name).baseline_values(samples, schema)
+
+
+def artifact_sha256(spec, ruleset_name):
+    """Return the lookup identity affecting ``spec``, if any."""
+    spec = BaselineSpec.from_mapping(spec)
+    if spec is None or spec.kind != LOOKUP_TABLE:
+        return None
+    from training.rl.reward_lookup_tables import artifact_sha256 as lookup_sha256
+
+    return lookup_sha256(ruleset_name)
 
 
 class _BaselineAction(argparse.Action):
@@ -419,7 +479,8 @@ def add_argument(parser):
             "value: '--baseline 2' subtracts 2, '--baseline -0.5' subtracts "
             "-0.5. It is never an index into the list of kinds, so "
             "'--baseline 2' is the constant 2 and not the second kind. The "
-            "named kinds are 'zero', 'batch-mean', 'value-head' (a linear "
+            "named kinds are 'zero', 'batch-mean', 'lookup-table' (a fixed "
+            "state-conditioned expected reward), 'value-head' (a linear "
             "critic on the policy's last hidden layer, whose loss also trains "
             "that shared trunk), 'value-head-no-up' (the same critic, but its "
             "loss updates only the critic head and never the trunk), and "

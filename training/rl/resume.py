@@ -139,6 +139,7 @@ class RLTrainingConfiguration:
     # JSON mapping (or None) rather than the typed spec, so one configuration
     # stays directly comparable between a checkpoint and a run config.
     baseline: dict | None
+    baseline_artifact_sha256: str | None
     weight_decay: float
     dropout_rate: float
     effective_seed: int
@@ -182,6 +183,7 @@ class RLTrainingConfiguration:
             data["baseline"] = baselines.BaselineSpec.from_mapping(
                 data["baseline"]
             ).as_mapping()
+        data.setdefault("baseline_artifact_sha256", None)
         data.setdefault(
             "reward_distance_mode",
             HISTORICAL_REWARD_DISTANCE_MODE,
@@ -223,12 +225,11 @@ class RLTrainingConfiguration:
         """Build the exact RL identity from one immutable canonical run config."""
         rl = run_config["rl_config"]
         ppo = run_config["ppo_config"]
+        ruleset_name = run_config.get("ruleset_name", DEFAULT_RULESET_NAME)
+        baseline = baselines.from_run_config(run_config)
         configuration = cls.from_mapping({
             "total_training_games": int(total_training_games),
-            "ruleset_name": run_config.get(
-                "ruleset_name",
-                DEFAULT_RULESET_NAME,
-            ),
+            "ruleset_name": ruleset_name,
             "selected_gpi": int(rl["games_per_iteration"]),
             "selected_workers": int(selected_workers),
             "log_interval": int(rl["log_interval"]),
@@ -258,7 +259,11 @@ class RLTrainingConfiguration:
             ),
             # From locked_arguments, not rl_config; see
             # ``training.rl.baseline.from_run_config``.
-            "baseline": baselines.from_run_config(run_config),
+            "baseline": baseline,
+            "baseline_artifact_sha256": baselines.artifact_sha256(
+                baseline,
+                ruleset_name,
+            ),
             "weight_decay": float(rl["weight_decay"]),
             "dropout_rate": float(rl["dropout_rate"]),
             "effective_seed": int(run_config["seed"]),
@@ -736,6 +741,8 @@ def _validate_resume_configuration(
     """Reject a resume that would silently continue a different experiment."""
     saved = dict(metadata.get("configuration") or {})
     saved.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
+    saved.setdefault("baseline", None)
+    saved.setdefault("baseline_artifact_sha256", None)
     saved.setdefault(
         "reward_distance_mode",
         HISTORICAL_REWARD_DISTANCE_MODE,

@@ -1,0 +1,56 @@
+{
+  "ad_hoc_modifications": {
+    "copied_cells": [
+      {
+        "source": "4,1",
+        "target": "5,1"
+      },
+      {
+        "source": "5,2",
+        "target": "6,2"
+      }
+    ],
+    "removed_cells": [
+      "1,1"
+    ],
+    "runtime_cells": 15,
+    "zero_tail_trimming": {
+      "decimal_places": 3,
+      "removed_coefficients": {
+        "decision": 2,
+        "total": 6,
+        "turn": 4
+      }
+    }
+  },
+  "direct_return_validation_cells": [
+    "1,1",
+    "2,3",
+    "3,3",
+    "4,1",
+    "5,2"
+  ],
+  "direct_return_validation_gammas": [
+    0.0,
+    0.5,
+    0.9,
+    0.95,
+    1.0
+  ],
+  "eligibility_fraction": 0.005,
+  "eligibility_threshold": 769,
+  "eligible_cells": 14,
+  "format": "domino_fixed_signed_reward_lookup",
+  "format_version": 2,
+  "maximum_decision_exponent": 3,
+  "maximum_turn_exponent": 13,
+  "output_bytes": 4658,
+  "output_file": "double-three_fixed_signed_reward_lookup.json.gz",
+  "output_sha256": "7fc783d4e6449ede1aa7218c7b728a80242bd920167c1607806fead0a3dd1e48",
+  "ruleset_decisions": 153697,
+  "ruleset_name": "double-three",
+  "source_file": "double-three_reward_lookup_samples.json.gz",
+  "source_file_sha256": "2a5c90bec48f1f0e85d68656188e210c012c4b382a0e43e34e9bfeeda8dfecb0",
+  "source_manifest": "double-three_reward_lookup_manifest.json",
+  "source_manifest_sha256": "a5be927e88c6a69432eaa8497421261651c6c0b4a56a36574637ff3b59526760"
+}

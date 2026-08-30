@@ -64,8 +64,13 @@ run_rl_experiment_sequence() {
                 point_description="normal, 2x, 4x, 8x, and 16x PPO learning rate"
                 ;;
             baselines)
-                point_count=6
-                point_description="zero, constants +5/-5, and the three critic layouts at PPO LR 0.01"
+                if [[ "${INCLUDE_LOOKUP_BASELINE:-0}" == "1" ]]; then
+                    point_count=7
+                    point_description="fixed lookup, zero, constants +5/-5, and the three critic layouts at PPO LR 0.01"
+                else
+                    point_count=6
+                    point_description="zero, constants +5/-5, and the three critic layouts at PPO LR 0.01"
+                fi
                 ;;
             *)
                 echo "Unsupported EXPERIMENT_KIND: $EXPERIMENT_KIND" >&2
@@ -171,6 +176,12 @@ EOF
             "critic_updates_shared_trunk value-head baseline_value_head_${MACHINE_SLUG}"
             "critic_head_only value-head-no-up baseline_value_head_no_up_${MACHINE_SLUG}"
         )
+        if [[ "${INCLUDE_LOOKUP_BASELINE:-0}" == "1" ]]; then
+            all_points=(
+                "fixed_hand_size_lookup lookup-table baseline_lookup_table_${MACHINE_SLUG}"
+                "${all_points[@]}"
+            )
+        fi
     else
         echo "Unsupported EXPERIMENT_KIND: $EXPERIMENT_KIND" >&2
         return 1
@@ -477,7 +488,7 @@ EOF
         elif [[ "$EXPERIMENT_KIND" == "baselines" ]]; then
             command_ref+=(--learning-rate 0.01)
             case "$value" in
-                zero|5|-5)
+                zero|5|-5|lookup-table)
                     command_ref+=(--baseline "$value")
                     ;;
                 value-head|value-head-no-up|value-head-own-nn)

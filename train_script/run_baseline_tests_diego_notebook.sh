@@ -8,6 +8,7 @@ TIME_COEFFICIENT="1.0"
 EXPERIMENT_KIND="baselines"
 RULESET="double-three"
 RL_TIME_LIMIT=7200
+INCLUDE_LOOKUP_BASELINE=1
 
 # shellcheck source=train_script/_sequential_rl_experiment_runner.bash
 source "$SCRIPT_DIR/_sequential_rl_experiment_runner.bash"

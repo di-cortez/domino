@@ -137,7 +137,8 @@ ruleset matches.
 
 The baseline sequence is currently assigned to the Diego notebook and Rick
 desktop. It uses `double-three`, fixes PPO learning rate at `0.01` (10x the
-default), and runs six baseline choices in order:
+default), starts with `--baseline lookup-table`, and then runs the original six
+baseline choices in order:
 
 1. `--baseline zero`;
 2. `--baseline 5`;
@@ -146,9 +147,9 @@ default), and runs six baseline choices in order:
 5. `--value-head --baseline value-head`;
 6. `--value-head --baseline value-head-no-up`.
 
-The fixed state-calculated `lookup-table` baseline is deliberately outside
-this original six-point sequence. Adding it to the implementation does not
-change the identity, order, or resume state of these six experiments.
+The added lookup point has its own stable machine-specific run name. It does
+not change the identity, order, or resume state of the original six
+experiments.
 
 | Machine | Coefficient | Buckets per point | PPO LR per point | Baseline per point |
 |---|---:|---:|---:|---:|

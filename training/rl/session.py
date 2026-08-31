@@ -269,6 +269,10 @@ def _resume_configuration(
             if training.baseline is None
             else training.baseline.as_mapping()
         ),
+        "baseline_artifact_sha256": baselines.artifact_sha256(
+            training.baseline,
+            training.ruleset_name,
+        ),
         "weight_decay": float(training.weight_decay),
         "dropout_rate": float(training.dropout_rate),
         "effective_seed": int(effective_seed),

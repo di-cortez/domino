@@ -60,6 +60,11 @@ temporary/*
 domino_opponent_pool_cache_benchmark/*
 train_script/grid_search_results/
 
+# Fixed runtime inputs for the state-conditioned RL baseline are deliberately
+# versioned even though similarly named analysis outputs are generated data.
+!training/rl/reward_lookup_tables/*.json.gz
+!training/rl/reward_lookup_tables/*_manifest.json
+
 analysis/exact_vs_random-double-three/double_three_cheater_player0.jsonl
 analysis/exact_vs_random-double-three/double_three_cheater_player1.jsonl
 analysis/exact_vs_random-double-three/double_three_player0.jsonl

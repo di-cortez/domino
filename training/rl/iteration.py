@@ -361,6 +361,7 @@ def _reinforce_policy_update(
     use_value_head,
     value_coef,
     collect_value_predictions=False,
+    lookup_values=None,
 ):
     """Apply the one-full-buffer update selected by ``ppo_max_epochs=1``.
 
@@ -395,6 +396,7 @@ def _reinforce_policy_update(
         baseline,
         rewards,
         value_predictions=values,
+        lookup_values=lookup_values,
         xp=xp,
     )
     # Only the scale is adjusted here; the center is the baseline's alone, so
@@ -445,6 +447,19 @@ def _update_policy(context, state, batch, iteration):
         and iteration % context.execution.log_interval == 0
     )
     update_started = time.perf_counter()
+    lookup_values = None
+    if training.baseline.requires_lookup_table:
+        lookup_started = time.perf_counter()
+        lookup_values = baselines.lookup_values_for_samples(
+            training.baseline,
+            batch,
+            ruleset_name=training.ruleset_name,
+            schema=context.schema,
+        )
+        profile.add(
+            "lookup_baseline_evaluation",
+            time.perf_counter() - lookup_started,
+        )
     ppo_metrics = None
     if ppo_is_enabled(training.ppo_max_epochs):
         ppo_result = update_from_samples(
@@ -457,6 +472,7 @@ def _update_policy(context, state, batch, iteration):
             normalize_advantages=training.normalize_advantages,
             max_epochs=training.ppo_max_epochs,
             baseline=training.baseline,
+            lookup_values=lookup_values,
             collect_value_predictions=collect_values,
         )
         profile.add(
@@ -480,6 +496,7 @@ def _update_policy(context, state, batch, iteration):
             use_value_head=training.use_value_head,
             value_coef=training.value_coef,
             collect_value_predictions=collect_values,
+            lookup_values=lookup_values,
         )
         context.network.synchronize()
         profile.add(

@@ -19,6 +19,7 @@ Owned by `training/rl/`.
 | `resume.py` | Loads compatible policies and atomically saves, validates, and restores exact numbered RL resume pairs. |
 | `reporting.py` | Owns iteration summaries, durable metrics JSONL writes, worker metadata aggregation, and cumulative RL runtime profiles. |
 | `ppo.py` | Builds immutable decision buffers, selects minibatches, manages GPU/RAM storage, and performs KL-limited PPO epochs. |
+| `baseline.py` / `reward_lookup_tables/` | Select policy-gradient baselines and load the fixed state-conditioned unit-reward artifacts. |
 | `adaptive_tuning.py` | Selects rollout workers with isolated seed streams, state restoration, safety checks, and `adaptive_tuning.json`. |
 | `parallel.py` | Shares frozen policy snapshots with deterministic CPU-only rollout workers and retains completed real games across memory fallback. |
 
@@ -491,6 +492,7 @@ Rollouts remain parallel while all updates stay in the parent:
 | `--opponent-decision-restarts` | Continue once from every same-iteration pre-action opponent state with at least two tile plays; the learner swaps seats and all decisions join one update | off |
 | `--ppo-max-epochs` | `1` selects one-update REINFORCE; `2`–`16` select masked PPO | `4` standalone/finite, `16` forever |
 | `--value-head` | Train a linear critic with PPO or REINFORCE | off |
+| `--baseline` | Term subtracted from each return: zero, constant, batch mean, fixed lookup, or one of three critic wirings | configuration-dependent historical default |
 | `--weight-decay [COEFFICIENT]` | Decoupled L2 shrink on every weight matrix and `Wv` after clipping; shared with supervised training | off (`0.0001`) |
 | `--dropout [RATE]` | Hidden-layer dropout shared with supervised training | off (`0.1`) |
 | `--value-coef` | Critic loss coefficient when the value head is enabled | `0.5` |
@@ -624,6 +626,15 @@ Reward constants:
 | learner draw | `-0.20` |
 | learner pass | `-0.10` |
 | final remaining pips | `-0.05 * remaining_pips` |
+
+The optional `--baseline lookup-table` evaluates source-controlled histograms
+conditioned only on the two hand sizes at each genuine learner decision.
+Final outcome and unit remaining-pip counts use the terminal clock and
+`gamma_f`; signed pass/draw unit counts use the local clock and `gamma_i`.
+Their current reward magnitudes and `reward_eta` are applied at runtime, so the
+same artifact serves every reward configuration. The artifact checksum is part
+of exact resume identity. See `reward_lookup_tables/README.md` for cell
+resolution and artifact ownership.
 
 A learner draw/pass penalty is applied to all earlier real decisions with the
 selected decay rule, not just to the most recent decision. The final pip

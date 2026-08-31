@@ -180,6 +180,7 @@ what is subtracted:
 | `--baseline zero` | `0` | `R` |
 | `--baseline 2` | `2` | `R - 2` |
 | `--baseline batch-mean` | `mean(R)` over the iteration buffer | `R - mean(R)` |
+| `--baseline lookup-table` | Fixed expected reward by the two hand sizes | `R - lookup(state)` |
 | `--baseline value-head` | `V(s)`, shared trunk, critic trains it | `R - V(s)` |
 | `--baseline value-head-no-up` | `V(s)`, shared trunk, critic does not train it | `R - V(s)` |
 | `--baseline value-head-own-nn` | `V(s)` from a separate network | `R - V(s)` |
@@ -187,6 +188,8 @@ what is subtracted:
 ```bash
 python -m training.pipeline forever --baseline zero --run-name no_baseline
 python -m training.pipeline forever --baseline 2 --run-name const2
+python -m training.pipeline forever --baseline lookup-table \
+  --run-name fixed_lookup
 python -m training.pipeline forever --value-head --baseline batch-mean \
   --run-name critic_trained_not_used
 python -m training.pipeline forever --value-head --baseline value-head-own-nn \

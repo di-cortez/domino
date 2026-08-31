@@ -1,0 +1,9 @@
+raw/
+derived/
+fixed/
+ad_hoc/*.json.gz
+ad_hoc/*_manifest.json
+__pycache__/
+*.npz
+*.pdf
+*.xlsx

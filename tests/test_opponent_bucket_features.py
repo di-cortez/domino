@@ -56,7 +56,7 @@ from training.rl.resume import (
 )
 from training.rl.rollout import (
     LEARNER_OPPONENT_BUCKET,
-    REWARD_SCHEMAS,
+    DEFAULT_REWARD_SCHEMA,
     collect_steps_for_assignment,
 )
 from training.supervised.training_loop import (
@@ -332,7 +332,7 @@ def test_the_learner_sees_the_bucket_its_assignment_named(
         network,
         opponent_kind,
         opponent,
-        REWARD_SCHEMAS,
+        DEFAULT_REWARD_SCHEMA,
         1.0,
         use_opponent_bucket_features=True,
         opponent_bucket=bucket,
@@ -364,7 +364,7 @@ def test_the_frozen_opponent_is_told_it_faces_the_recent_learner(monkeypatch):
         _rollout_network(31),
         "policy_snapshot",
         _rollout_network(32),
-        REWARD_SCHEMAS,
+        DEFAULT_REWARD_SCHEMA,
         1.0,
         use_opponent_bucket_features=True,
         opponent_bucket="historical_uniform",
@@ -391,7 +391,7 @@ def test_the_block_stays_empty_while_the_flag_is_off():
         network,
         "heuristic",
         None,
-        REWARD_SCHEMAS,
+        DEFAULT_REWARD_SCHEMA,
         1.0,
         opponent_bucket="heuristic",
     )
@@ -538,6 +538,10 @@ def _configuration_mapping(**overrides):
         "use_value_head": False,
         "value_coef": 0.5,
         "gamma_f": 1.0,
+        "terminal_empty_hand_weight": 1.0,
+        "terminal_blocked_weight": 1.0,
+        "immediate_draw_weight": 1.0,
+        "immediate_pass_weight": 1.0,
         "reward_eta": 0.5,
         "gamma_i": 0.9,
         "normalize_advantages": True,

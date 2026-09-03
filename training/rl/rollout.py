@@ -13,28 +13,19 @@ from training.rl.reward_distance import (
     DEFAULT_REWARD_DISTANCE_MODE,
     resolve_reward_distance_mode,
 )
+from training.rl.reward_model import (
+    BLOCKED_WIN_REASONS,
+    DEFAULT_GAMMA_F,
+    DEFAULT_GAMMA_I,
+    DEFAULT_REWARD_ETA,
+    DRAW_EVENT,
+    PASS_EVENT,
+    combine_terminal_components,
+    resolved_reward_scales,
+    scaled_event_reward,
+    terminal_reward_components,
+)
 from training.rl.restarts import CapturedOpponentDecision
-
-TERMINAL_WIN_REWARD = 1
-TERMINAL_LOSS_REWARD = -TERMINAL_WIN_REWARD
-FINAL_PIP_PENALTY = TERMINAL_WIN_REWARD/20
-
-OPPONENT_DRAW_REWARD = TERMINAL_WIN_REWARD/5
-LEARNER_DRAW_PENALTY = -OPPONENT_DRAW_REWARD
-OPPONENT_PASS_REWARD = OPPONENT_DRAW_REWARD/2
-LEARNER_PASS_PENALTY = -OPPONENT_PASS_REWARD
-
-# Per-turn decay applied to a local event reward as it is credited backwards to
-# the real decisions that preceded the event.
-GAMMA_I = 0.90
-
-# Terminal-reward discount applied using the terminal metric selected by the
-# reward-distance mode. The historical value was 1.0 (no discount).
-DEFAULT_GAMMA_F = 0.95
-
-# Convex mixture weight between the two reward components of one decision:
-# 0.0 trains on the terminal outcome alone, 1.0 on local event shaping alone.
-REWARD_ETA = 0.5
 
 REWARD_ZERO_EPSILON = 1e-8
 
@@ -45,20 +36,15 @@ REWARD_ZERO_EPSILON = 1e-8
 # one names the learner's adversary, not the match.
 LEARNER_OPPONENT_BUCKET = "recent"
 
-# The single set of terminal and local event reward constants. The mutable
-# mapping shape remains part of the historical self-play compatibility surface:
-# it is copied per run, overridden with the tunables resolved from the CLI, and
-# shipped unchanged to every rollout worker.
-REWARD_SCHEMAS = {
-    "terminal_win": TERMINAL_WIN_REWARD,
-    "terminal_loss": TERMINAL_LOSS_REWARD,
-    "final_pip_penalty": FINAL_PIP_PENALTY,
-    "opponent_draw": OPPONENT_DRAW_REWARD,
-    "learner_draw": LEARNER_DRAW_PENALTY,
-    "opponent_pass": OPPONENT_PASS_REWARD,
-    "learner_pass": LEARNER_PASS_PENALTY,
-    "gamma_i": GAMMA_I,
-    "reward_eta": REWARD_ETA,
+# The resolved reward definition one run ships unchanged to every rollout
+# worker. It carries the four raw weights for provenance and the normalized
+# scales the workers actually multiply by, so ``max(a, b)`` is divided out once
+# per run rather than once per event. ``training.rl.config`` copies this mapping
+# and overrides it with the values resolved from the CLI.
+DEFAULT_REWARD_SCHEMA = {
+    **resolved_reward_scales(),
+    "gamma_i": DEFAULT_GAMMA_I,
+    "reward_eta": DEFAULT_REWARD_ETA,
     "reward_distance_mode": DEFAULT_REWARD_DISTANCE_MODE,
 }
 
@@ -77,6 +63,36 @@ class EventStats:
         self.opponent_passes += other.opponent_passes
         self.learner_draws += other.learner_draws
         self.learner_passes += other.learner_passes
+
+
+@dataclass
+class TerminalStats:
+    """Per-batch terminal-outcome counts and blocked pip-margin totals.
+
+    The aggregate the reward redesign needs and the return statistics cannot
+    supply: ``reward_mean`` cannot say whether the agent is trading ordinary
+    wins for a preferred *kind* of win, because both endings land in the same
+    scalar. These are sums rather than distributions so one iteration stays one
+    flat metrics row; ``blocked_margin_sum`` over the blocked game count is the
+    mean margin, and ``blocked_magnitude_sum`` likewise gives mean
+    ``m(Delta_p)`` -- the effective blocked/empty-hand ratio before any weight
+    is applied.
+    """
+
+    empty_hand_wins: int = 0
+    empty_hand_losses: int = 0
+    blocked_wins: int = 0
+    blocked_losses: int = 0
+    blocked_margin_sum: int = 0
+    blocked_magnitude_sum: float = 0.0
+
+    def add(self, other):
+        self.empty_hand_wins += other.empty_hand_wins
+        self.empty_hand_losses += other.empty_hand_losses
+        self.blocked_wins += other.blocked_wins
+        self.blocked_losses += other.blocked_losses
+        self.blocked_margin_sum += other.blocked_margin_sum
+        self.blocked_magnitude_sum += other.blocked_magnitude_sum
 
 
 @dataclass(frozen=True)
@@ -105,71 +121,111 @@ def _tile_play_actions(legal_actions):
 def _event_reward_for_action(
     current_player, learner_position, action, event_stats, schema=None
 ):
-    """Return the local event reward for draw/pass actions and update counts."""
+    """Return the weighted unit event reward for a draw/pass and count it.
+
+    Detection and ``EventStats`` accounting live here; the value itself is the
+    unit ``r_D``/``r_P`` of ``training.rl.reward_model`` multiplied by the
+    pair-normalized scale the run resolved. The event is not decayed yet:
+    ``gamma_i`` is applied by the caller once the event's distance to each
+    earlier decision is known.
+    """
     if schema is None:
-        schema = REWARD_SCHEMAS
-    if current_player != learner_position:
-        if action == ("DRAW", None):
-            event_stats.opponent_draws += 1
-            return schema["opponent_draw"]
-        if action is None:
-            event_stats.opponent_passes += 1
-            return schema["opponent_pass"]
+        schema = DEFAULT_REWARD_SCHEMA
+    by_learner = current_player == learner_position
+    if action == ("DRAW", None):
+        event_kind = DRAW_EVENT
+    elif action is None:
+        event_kind = PASS_EVENT
     else:
-        if action == ("DRAW", None):
+        return None
+    if by_learner:
+        if event_kind == DRAW_EVENT:
             event_stats.learner_draws += 1
-            return schema["learner_draw"]
-        if action is None:
+        else:
             event_stats.learner_passes += 1
-            return schema["learner_pass"]
-    return None
-
-
-def _remaining_pips(hand):
-    return sum(tile[0] + tile[1] for tile in hand)
-
-
-def _terminal_reward(engine, learner_position, schema):
-    """Return terminal outcome reward plus final remaining-pip penalty."""
-    winner = engine.winner
-    if winner == learner_position:
-        outcome_reward = schema["terminal_win"]
     else:
-        outcome_reward = schema["terminal_loss"]
-
-    pip_penalty = schema["final_pip_penalty"] * _remaining_pips(
-        engine.hands[learner_position]
+        if event_kind == DRAW_EVENT:
+            event_stats.opponent_draws += 1
+        else:
+            event_stats.opponent_passes += 1
+    return scaled_event_reward(
+        event_kind,
+        by_learner=by_learner,
+        draw_scale=schema["draw_scale"],
+        pass_scale=schema["pass_scale"],
     )
-    return outcome_reward - pip_penalty
+
+
+def _terminal_outcome(engine, learner_position, schema):
+    """Return ``(U_T, TerminalStats)`` for one finished game.
+
+    An empty-hand ending contributes the binary ``R_E``; a blocked ending
+    contributes ``R_B = +/-m(Delta_p)``, whose magnitude is the pip margin
+    between the blocked winner and loser saturated at ``2 * max_pip``. The two
+    are mutually exclusive and are combined with the run's normalized terminal
+    scales. Temporal discounting and the ``reward_eta`` mixture are applied
+    later, by ``_finish_episode_with_rewards``.
+
+    The decomposition is already computed here, so the diagnostic counts come
+    with it rather than costing a second pass over the terminal state.
+    """
+    components = terminal_reward_components(engine, learner_position)
+    utility = combine_terminal_components(
+        components,
+        empty_hand_scale=schema["empty_hand_scale"],
+        blocked_scale=schema["blocked_scale"],
+    )
+    stats = TerminalStats()
+    won = engine.winner == learner_position
+    if components["win_reason"] in BLOCKED_WIN_REASONS:
+        if won:
+            stats.blocked_wins += 1
+        else:
+            stats.blocked_losses += 1
+        # Margin and magnitude describe the game rather than the seat, so they
+        # are accumulated once whichever seat the learner held.
+        stats.blocked_margin_sum += int(components["pip_margin"])
+        stats.blocked_magnitude_sum += float(components["blocked_magnitude"])
+    elif won:
+        stats.empty_hand_wins += 1
+    else:
+        stats.empty_hand_losses += 1
+    return utility, stats
 
 
 def _finish_episode_with_rewards(
     learner_agent,
-    terminal_reward,
+    terminal_utility,
     gamma_f=DEFAULT_GAMMA_F,
-    reward_eta=REWARD_ETA,
+    reward_eta=DEFAULT_REWARD_ETA,
     *,
     terminal_turn,
     reward_distance_mode,
 ):
     """Finalize one learner trajectory into policy-gradient training samples.
 
-    Each decision's total reward is the convex combination
+    Each decision's total return is the convex combination
 
-        R_T = (1 - reward_eta) * gamma_f ** k * R_f + reward_eta * R_l
+        G(t) = (1 - reward_eta) * gamma_f ** k_T(t) * U_T + reward_eta * G_I(t)
 
-    where ``R_f`` is the episode's terminal reward, ``k`` is measured in
-    remaining real decisions or intervening engine turns according to
-    ``reward_distance_mode``, and ``R_l`` is the decayed local event reward
-    already accumulated on the step. ``reward_eta`` trades the components off:
-    ``reward_eta=0`` trains on terminal outcome alone and ``reward_eta=1`` on
-    local event shaping alone.
+    where ``U_T`` is the episode's undiscounted terminal utility, ``k_T(t)`` is
+    measured in remaining real decisions or intervening engine turns according
+    to ``reward_distance_mode``, and ``G_I(t)`` is the weighted draw/pass
+    return already accumulated on the step by ``gamma_i`` decay.
+    ``reward_eta`` trades the two subsystems off only after each one is
+    complete: ``reward_eta=0`` trains on the terminal outcome alone and
+    ``reward_eta=1`` on event shaping alone.
+
+    ``U_T`` is not necessarily binary. An empty-hand ending gives it the sign
+    of the outcome scaled by ``empty_hand_scale``; a blocked ending gives it
+    ``+/-blocked_scale * m(Delta_p)``.
 
     The stored ``terminal_reward`` and ``local_reward`` components are the
-    scaled halves, so ``policy_reward == terminal_reward + local_reward``
-    remains an identity for the PPO buffer and the reward diagnostics.
+    mixed halves ``(1 - reward_eta) * G_T`` and ``reward_eta * G_I``, so
+    ``policy_reward == terminal_reward + local_reward`` remains an identity for
+    the PPO buffer and the reward diagnostics.
     """
-    finished_steps = learner_agent.finish_episode(terminal_reward)
+    finished_steps = learner_agent.finish_episode(terminal_utility)
     step_count = len(finished_steps)
     _local_metric, terminal_metric = resolve_reward_distance_mode(
         reward_distance_mode
@@ -472,10 +528,12 @@ def _collect_steps_vs_snapshot(
         capture_opponent_decision_restarts=capture_opponent_decision_restarts,
     )
     section_started = _profile_worker_start(runtime_profile)
-    reward = _terminal_reward(engine, learner_position, schema)
+    terminal_utility, terminal_stats = _terminal_outcome(
+        engine, learner_position, schema
+    )
     samples = _finish_episode_with_rewards(
         learner,
-        reward,
+        terminal_utility,
         gamma_f,
         schema["reward_eta"],
         terminal_turn=engine.turn,
@@ -486,7 +544,9 @@ def _collect_steps_vs_snapshot(
         "terminal_reward_and_trajectory_finalization",
         section_started,
     )
-    result = (samples, event_stats, engine.winner, learner_position)
+    result = (
+        samples, event_stats, engine.winner, learner_position, terminal_stats
+    )
     if capture_opponent_decision_restarts:
         return (*result, tuple(captures))
     return result
@@ -609,10 +669,12 @@ def _collect_steps_vs_heuristic(
         capture_opponent_decision_restarts=capture_opponent_decision_restarts,
     )
     section_started = _profile_worker_start(runtime_profile)
-    reward = _terminal_reward(engine, learner_position, schema)
+    terminal_utility, terminal_stats = _terminal_outcome(
+        engine, learner_position, schema
+    )
     samples = _finish_episode_with_rewards(
         learner,
-        reward,
+        terminal_utility,
         gamma_f,
         schema["reward_eta"],
         terminal_turn=engine.turn,
@@ -623,7 +685,9 @@ def _collect_steps_vs_heuristic(
         "terminal_reward_and_trajectory_finalization",
         section_started,
     )
-    result = (samples, event_stats, engine.winner, learner_position)
+    result = (
+        samples, event_stats, engine.winner, learner_position, terminal_stats
+    )
     if capture_opponent_decision_restarts:
         return (*result, tuple(captures))
     return result
@@ -672,10 +736,12 @@ def _collect_steps_vs_random(
         capture_opponent_decision_restarts=capture_opponent_decision_restarts,
     )
     section_started = _profile_worker_start(runtime_profile)
-    reward = _terminal_reward(engine, learner_position, schema)
+    terminal_utility, terminal_stats = _terminal_outcome(
+        engine, learner_position, schema
+    )
     samples = _finish_episode_with_rewards(
         learner,
-        reward,
+        terminal_utility,
         gamma_f,
         schema["reward_eta"],
         terminal_turn=engine.turn,
@@ -686,7 +752,9 @@ def _collect_steps_vs_random(
         "terminal_reward_and_trajectory_finalization",
         section_started,
     )
-    result = (samples, event_stats, engine.winner, learner_position)
+    result = (
+        samples, event_stats, engine.winner, learner_position, terminal_stats
+    )
     if capture_opponent_decision_restarts:
         return (*result, tuple(captures))
     return result
@@ -769,13 +837,17 @@ def collect_steps_from_restart(
         ruleset_name=ruleset_name,
         engine=engine,
     )
-    reward = _terminal_reward(engine, learner_position, schema)
+    terminal_utility, terminal_stats = _terminal_outcome(
+        engine, learner_position, schema
+    )
     samples = _finish_episode_with_rewards(
         learner,
-        reward,
+        terminal_utility,
         gamma_f,
         schema["reward_eta"],
         terminal_turn=engine.turn,
         reward_distance_mode=schema["reward_distance_mode"],
     )
-    return samples, event_stats, engine.winner, learner_position
+    return (
+        samples, event_stats, engine.winner, learner_position, terminal_stats
+    )

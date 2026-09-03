@@ -52,7 +52,7 @@ from training.rl.cli import (
 )
 from training.rl.parallel import RLRolloutRunner
 from training.rl.ppo import PPO_TRAINING_ALGORITHM
-from training.rl.rollout import REWARD_SCHEMAS, collect_steps_for_assignment
+from training.rl.rollout import DEFAULT_REWARD_SCHEMA, collect_steps_for_assignment
 from training.rl.resume import _checkpoint_matches_encoder
 from training.datagen.parallel import (
     _is_real_decision_state,
@@ -529,15 +529,17 @@ def test_ablated_rollout_collects_real_decisions_end_to_end():
     )
     random.seed(2026)
 
-    samples, events, winner, learner_position = collect_steps_for_assignment(
+    (
+        samples, events, winner, learner_position, _terminal
+    ) = collect_steps_for_assignment(
         network,
         "heuristic",
         None,
-        REWARD_SCHEMAS,
+        DEFAULT_REWARD_SCHEMA,
         1.0,
         ruleset_name="double-six",
         use_opponent_suit_features=False,
-    )[:4]
+    )[:5]
 
     assert winner in (0, 1)
     assert learner_position in (0, 1)
@@ -562,7 +564,7 @@ def test_rollout_runner_forwards_the_flag_to_its_workers():
     runner = RLRolloutRunner(
         network,
         opponent_buckets=("heuristic",),
-        schema=REWARD_SCHEMAS,
+        schema=DEFAULT_REWARD_SCHEMA,
         gamma_f=1.0,
         ruleset_name="double-six",
         use_opponent_suit_features=False,
@@ -785,7 +787,7 @@ def test_adaptive_tuning_runner_inherits_the_regime():
     runner = _new_runner(
         network,
         opponent_buckets=("heuristic",),
-        schema=REWARD_SCHEMAS,
+        schema=DEFAULT_REWARD_SCHEMA,
         gamma_f=1.0,
         ruleset_name="double-six",
         use_opponent_suit_features=False,

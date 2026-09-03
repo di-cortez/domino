@@ -29,6 +29,7 @@ from agents.network_architecture import (
     hidden_layer_count_from_weights,
     policy_layer_names,
 )
+from agents.rl_nn import NonFinitePolicyError
 from diagnostics.parallel_runner import (
     DEEP_PROFILE_SAMPLE_INTERVAL,
     MAX_PARALLEL_WORKERS,
@@ -71,8 +72,40 @@ class RLRolloutExecutionError(RuntimeError):
         self.__cause__ = cause
 
 
+def _rollout_failure_message(worker_count, exc, *, typed):
+    """Return the operator-facing summary of an unrecoverable rollout failure.
+
+    A diverged policy is the one cause an operator can act on immediately and
+    the one whose bare traceback is most misleading, so it gets the recovery
+    hint appended. Everything else keeps the message it always had.
+    """
+    detail = f"{type(exc).__name__}: {exc}" if typed else str(exc)
+    message = (
+        f"RL rollout generation failed with {worker_count} worker(s): {detail}"
+    )
+    if isinstance(exc, NonFinitePolicyError):
+        message += (
+            " The learner policy is unusable, so no worker can play a game "
+            "with it. Inspect the run's checkpoints with "
+            "analysis/rl_weight_health.py to find the last finite one, and "
+            "check policy_weight_max_abs in the run metrics for the drift "
+            "that led here."
+        )
+    return message
+
+
 class _CPUInferencePolicy:
-    """Minimal NumPy policy wrapper backed directly by shared arrays."""
+    """Minimal NumPy policy wrapper backed directly by shared arrays.
+
+    It publishes the same ``cache`` / ``logits_key`` contract as
+    ``SupervisedNeuralNetwork``. ``RLAgent`` rebuilds its sampling distribution
+    from those logits over the legal subset alone, which is the only form that
+    survives a confident policy: renormalizing the full-support softmax instead
+    flushes a legal action to exactly zero once its logit sits more than about
+    87 nats below the global maximum. Without the contract every rollout
+    decision silently took that fallback, because this class -- not
+    ``PolicyNetwork`` -- is what runs inside a worker.
+    """
 
     xp = np
     device = "cpu"
@@ -81,10 +114,16 @@ class _CPUInferencePolicy:
         for name, value in weights.items():
             setattr(self, name, value)
         self.layer_count = hidden_layer_count_from_weights(weights) + 1
+        self.cache = {}
 
     @property
     def weight_names(self):
         return policy_layer_names(self.layer_count - 1)
+
+    @property
+    def logits_key(self):
+        """Return the cache key of the pre-softmax output layer."""
+        return f"Z{self.layer_count}"
 
     def forward(self, x):
         # The encoder emits float64, so cast to match the float32 weights.
@@ -101,6 +140,9 @@ class _CPUInferencePolicy:
             np.dot(getattr(self, f"W{self.layer_count}"), activation)
             + getattr(self, f"b{self.layer_count}")
         )
+        # One dict store per decision, reusing the array the softmax already
+        # needs, so the precise masked path costs no extra allocation.
+        self.cache[self.logits_key] = logits
         exp_z = np.exp(logits - np.max(logits, axis=0, keepdims=True))
         return exp_z / np.sum(exp_z, axis=0, keepdims=True)
 
@@ -191,6 +233,18 @@ def _event_stats_dict(event_stats):
     }
 
 
+def _terminal_stats_dict(terminal_stats):
+    """Return the compact terminal-outcome counters for the parent process."""
+    return {
+        "empty_hand_wins": int(terminal_stats.empty_hand_wins),
+        "empty_hand_losses": int(terminal_stats.empty_hand_losses),
+        "blocked_wins": int(terminal_stats.blocked_wins),
+        "blocked_losses": int(terminal_stats.blocked_losses),
+        "blocked_margin_sum": int(terminal_stats.blocked_margin_sum),
+        "blocked_magnitude_sum": float(terminal_stats.blocked_magnitude_sum),
+    }
+
+
 def _add_numeric_tree(target, source):
     """Recursively sum a compact worker timing payload."""
     for key, value in source.items():
@@ -253,14 +307,15 @@ def _worker_collect_rollouts(job):
             opponent_bucket=assignment.bucket_name,
             capture_opponent_decision_restarts=capture_restarts,
         )
-        samples, events, winner, learner_position = collected[:4]
-        captured_restarts = collected[4] if capture_restarts else ()
+        samples, events, winner, learner_position, terminal = collected[:5]
+        captured_restarts = collected[5] if capture_restarts else ()
         section_started = time.perf_counter() if profile_game else None
         results.append({
             "game_index": int(game_index),
             "game_seed": int(seed),
             "samples": samples,
             "event_stats": _event_stats_dict(events),
+            "terminal_stats": _terminal_stats_dict(terminal),
             "winner": int(winner),
             "learner_position": int(learner_position),
             "bucket_name": assignment.bucket_name,
@@ -368,7 +423,9 @@ def _worker_collect_restarts(job):
             if restart.bank_slot is None
             else _WORKER_POOL_POLICIES[restart.bank_slot]
         )
-        samples, events, winner, learner_position = collect_steps_from_restart(
+        (
+            samples, events, winner, learner_position, terminal
+        ) = collect_steps_from_restart(
             _WORKER_CURRENT_POLICY,
             restart.opponent_kind,
             opponent_network,
@@ -393,6 +450,7 @@ def _worker_collect_restarts(job):
             ),
             "samples": samples,
             "event_stats": _event_stats_dict(events),
+            "terminal_stats": _terminal_stats_dict(terminal),
             "winner": int(winner),
             "learner_position": int(learner_position),
             "bucket_name": restart.bucket_name,
@@ -761,8 +819,11 @@ class RLRolloutRunner:
                 if not self.safety.fallback_on_error or self.worker_count <= 1:
                     results = [results_by_index[index] for index in sorted(results_by_index)]
                     raise RLRolloutExecutionError(
-                        f"RL rollout generation failed with {self.worker_count} "
-                        f"worker(s): {exc}",
+                        _rollout_failure_message(
+                            self.worker_count,
+                            exc,
+                            typed=False,
+                        ),
                         results,
                         run_info,
                         exc,
@@ -781,8 +842,11 @@ class RLRolloutRunner:
             except Exception as exc:
                 results = [results_by_index[index] for index in sorted(results_by_index)]
                 raise RLRolloutExecutionError(
-                    f"RL rollout generation failed with {self.worker_count} "
-                    f"worker(s): {type(exc).__name__}: {exc}",
+                    _rollout_failure_message(
+                        self.worker_count,
+                        exc,
+                        typed=True,
+                    ),
                     results,
                     run_info,
                     exc,

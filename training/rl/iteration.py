@@ -351,6 +351,26 @@ def _event_totals(results):
     }
 
 
+def _terminal_totals(results):
+    """Sum the terminal-outcome counters without mixing result domains."""
+    names = (
+        "empty_hand_wins",
+        "empty_hand_losses",
+        "blocked_wins",
+        "blocked_losses",
+        "blocked_margin_sum",
+    )
+    totals = {
+        name: sum(int(result["terminal_stats"][name]) for result in results)
+        for name in names
+    }
+    totals["blocked_magnitude_sum"] = sum(
+        float(result["terminal_stats"]["blocked_magnitude_sum"])
+        for result in results
+    )
+    return totals
+
+
 def _reinforce_policy_update(
     network,
     batch,
@@ -742,6 +762,10 @@ def run_iteration(context, state, iteration):
         "restart_decisions": int(len(restart_batch)),
         "normal_events": _event_totals(rollout_results),
         "restart_events": _event_totals(restart_results),
+        # Normal rollouts only: a restart continuation resumes mid-game from a
+        # captured state, so its ending is not a sample from the ruleset's own
+        # distribution of terminal outcomes and would skew the blocked share.
+        "terminal_outcomes": _terminal_totals(rollout_results),
         "seconds": float(restart_elapsed),
     }
     section_started = time.perf_counter()

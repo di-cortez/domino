@@ -41,6 +41,16 @@ PPO_MAX_MINIBATCHES = 256
 PPO_PREFER_GPU_BUFFER = True
 PPO_GPU_BUFFER_SAFETY_FRACTION = 0.70
 POLICY_GRADIENT_CLIP_NORM = 5.0
+# Bound on ``log(pi_new / pi_old)`` inside the gradient path only. The rollout
+# floors the behavior probability at the smallest positive float32, so an
+# unbounded log ratio reaches +/-87.34, and exp(87.34) times an advantage
+# overflows float32 into the 0 * inf = NaN gradient described in the numerical
+# stability plan. exp(20) = 4.85e8 sits four orders of magnitude above any
+# ratio a converging run produces -- PPO extracts no signal beyond ratio ~10
+# with clip_epsilon 0.2 -- and 29 orders of magnitude below the overflow.
+# Reporting paths keep the true unclamped ratio on purpose; see
+# ``evaluate_full_buffer`` and ``log_ratio_statistics``.
+PPO_LOG_RATIO_LIMIT = 20.0
 ADVANTAGE_EPSILON = 1e-8
 
 
@@ -615,6 +625,7 @@ def evaluate_full_buffer(
     ratio_sum = 0.0
     ratio_min = float("inf")
     ratio_max = float("-inf")
+    legal_logit_deficit_max = float("-inf")
     value_loss_sum = 0.0
     value_sum = 0.0
     value_square_sum = 0.0
@@ -634,6 +645,13 @@ def evaluate_full_buffer(
         new_log_probs, entropy, _policy = network.evaluate_actions(
             batch["states"], batch["legal_masks"], batch["actions"]
         )
+        # Read before the critic forward, which shares the cache on the
+        # value-head baselines and would overwrite the policy logits.
+        batch_deficit = _legal_logit_deficit_max(network, batch["legal_masks"])
+        if batch_deficit is not None:
+            legal_logit_deficit_max = max(
+                legal_logit_deficit_max, batch_deficit
+            )
         values = None
         value_losses = None
         value_delta = None
@@ -701,6 +719,11 @@ def evaluate_full_buffer(
         "ratio_mean": float(ratio_sum / total),
         "ratio_min": ratio_min,
         "ratio_max": ratio_max,
+        "legal_logit_deficit_max": (
+            None
+            if legal_logit_deficit_max == float("-inf")
+            else legal_logit_deficit_max
+        ),
         "value_loss": None,
         "value_clip_fraction": None,
         "value_mean": None,
@@ -745,6 +768,138 @@ def evaluate_full_buffer(
             "sections_seconds": timing,
         })
     return result
+
+
+def _max_or_none(values):
+    """Return the largest non-``None`` value, or ``None`` when there is none."""
+    present = [value for value in values if value is not None]
+    return float(max(present)) if present else None
+
+
+def _legal_logit_deficit_max(network, legal_masks):
+    """Return ``max(global logit) - max(legal logit)`` over one batch.
+
+    This is the exact crash-proximity signal for the rollout sampler. A legal
+    action whose logit sits this far below the global maximum contributes
+    ``exp(-deficit)`` to the full-support softmax, which flushes to zero in
+    float32 past about 87 nats; once every legal action of a decision is past
+    it there is no probability mass left to sample from.
+
+    ``max_abs_weight`` does not see this coming: a policy can sharpen for tens
+    of millions of games with its weights flat, because the deficit is driven
+    by unbounded ReLU activations accumulating through the output layer.
+
+    Returns ``None`` for any network that does not publish a logits cache, so
+    no caller has to know which network class it holds.
+    """
+    cache = getattr(network, "cache", None)
+    logits_key = getattr(network, "logits_key", None)
+    if not cache or logits_key is None:
+        return None
+    logits = cache.get(logits_key)
+    if logits is None or logits.shape != legal_masks.shape:
+        return None
+    xp = network.xp
+    masked = xp.where(legal_masks, logits, -xp.inf)
+    deficit = xp.max(logits, axis=0) - xp.max(masked, axis=0)
+    return float(network._as_float(xp.max(deficit)))
+
+
+def _policy_weight_max_abs(network):
+    """Return ``max(abs(W))`` over the policy weights, the divergence signal.
+
+    The float32 forward pass overflows as a function of the largest weight
+    times the largest activation, so this is the direct precursor of a
+    non-finite rollout policy. The gradient norm does not show it: a run can
+    drift for millions of games with clipping never firing once.
+    """
+    xp = network.xp
+    return max(
+        float(network._as_float(xp.max(xp.abs(network.parameter_array(name)))))
+        for name in network.weight_names
+    )
+
+
+def _no_update_result(
+    buffer,
+    timing,
+    total_seconds,
+    *,
+    requested,
+    omitted_decisions,
+    buffer_location,
+    buffer_preflight,
+    insufficient_decisions=False,
+    diverged_epoch=None,
+    divergence_reason=None,
+    rejected_minibatches=0,
+):
+    """Return the metrics of an iteration that left the policy unchanged.
+
+    Two situations reach it: a buffer too small to partition, and an epoch
+    whose divergence was rolled back before any epoch completed. Both mean
+    "no optimizer step survived", so both must report the same shape as a
+    completed update with every policy statistic absent rather than zero.
+    """
+    return {
+        "requested_minibatches": int(requested),
+        "effective_minibatches": 0,
+        "minibatch_sizes": [],
+        "epochs_completed": 0,
+        "stopped_by_kl": False,
+        "optimizer_steps": 0,
+        "final_approx_kl": None,
+        "max_approx_kl": None,
+        "final_clip_fraction": None,
+        "final_entropy": None,
+        "final_policy_loss": None,
+        "final_value_loss": None,
+        "final_value_clip_fraction": None,
+        "final_value_mean": None,
+        "final_value_std": None,
+        "final_explained_variance": None,
+        "gradient_norm_mean": 0.0,
+        "gradient_norm_max": 0.0,
+        "buffer_location": buffer_location,
+        "buffer_bytes": int(buffer.nbytes),
+        "buffer_preflight": dict(buffer_preflight),
+        "advantage_std_zero": bool(buffer.advantage_std_zero),
+        "raw_advantage_mean": float(buffer.raw_advantage_mean),
+        "raw_advantage_std": float(buffer.raw_advantage_std),
+        "baseline": buffer.baseline.label,
+        "baseline_mean": float(buffer.baseline_mean),
+        "target_kl": PPO_TARGET_KL,
+        "stop_kl": PPO_STOP_KL,
+        "clip_epsilon": PPO_CLIP_EPSILON,
+        "log_ratio_limit": PPO_LOG_RATIO_LIMIT,
+        "target_decisions_per_minibatch": (
+            PPO_TARGET_DECISIONS_PER_MINIBATCH
+        ),
+        "min_decisions_per_minibatch": PPO_MIN_DECISIONS_PER_MINIBATCH,
+        "max_minibatches": PPO_MAX_MINIBATCHES,
+        "decisions_used_per_epoch": 0,
+        "decisions_omitted_per_epoch": int(omitted_decisions),
+        "insufficient_decisions": bool(insufficient_decisions),
+        "diverged_epoch": diverged_epoch,
+        "divergence_reason": divergence_reason,
+        "rejected_minibatches": int(rejected_minibatches),
+        "policy_weight_max_abs": None,
+        "legal_logit_deficit_max": None,
+        "epoch_metrics": [],
+        "entropy": None,
+        "grad_norm": 0.0,
+        "applied_grad_norm": 0.0,
+        "grad_clipped": False,
+        "value_loss": None,
+        "runtime_timing_seconds": {
+            "total": float(total_seconds),
+            **{key: float(value) for key, value in timing.items()},
+        },
+        "runtime_profile_detail": {
+            "optimizer_step": {},
+            "full_buffer_evaluation": {},
+        },
+    }
 
 
 def ppo_update(
@@ -797,61 +952,18 @@ def ppo_update(
     if not first_partitions:
         total_seconds = time.perf_counter() - profile_started
         timing["unaccounted"] = max(0.0, total_seconds - sum(timing.values()))
-        return {
-            "requested_minibatches": int(requested),
-            "effective_minibatches": 0,
-            "minibatch_sizes": [],
-            "epochs_completed": 0,
-            "stopped_by_kl": False,
-            "optimizer_steps": 0,
-            "final_approx_kl": None,
-            "max_approx_kl": None,
-            "final_clip_fraction": None,
-            "final_entropy": None,
-            "final_policy_loss": None,
-            "final_value_loss": None,
-            "final_value_clip_fraction": None,
-            "final_value_mean": None,
-            "final_value_std": None,
-            "final_explained_variance": None,
-            "gradient_norm_mean": 0.0,
-            "gradient_norm_max": 0.0,
-            "buffer_location": "not_prepared",
-            "buffer_bytes": int(buffer.nbytes),
-            "buffer_preflight": {
+        return _no_update_result(
+            buffer,
+            timing,
+            total_seconds,
+            requested=requested,
+            omitted_decisions=int(first_omitted.size),
+            buffer_location="not_prepared",
+            buffer_preflight={
                 "fallback_reason": "fewer than 256 PPO decisions",
             },
-            "advantage_std_zero": bool(buffer.advantage_std_zero),
-            "raw_advantage_mean": float(buffer.raw_advantage_mean),
-            "raw_advantage_std": float(buffer.raw_advantage_std),
-            "baseline": buffer.baseline.label,
-            "baseline_mean": float(buffer.baseline_mean),
-            "target_kl": PPO_TARGET_KL,
-            "stop_kl": PPO_STOP_KL,
-            "clip_epsilon": PPO_CLIP_EPSILON,
-            "target_decisions_per_minibatch": (
-                PPO_TARGET_DECISIONS_PER_MINIBATCH
-            ),
-            "min_decisions_per_minibatch": PPO_MIN_DECISIONS_PER_MINIBATCH,
-            "max_minibatches": PPO_MAX_MINIBATCHES,
-            "decisions_used_per_epoch": 0,
-            "decisions_omitted_per_epoch": int(first_omitted.size),
-            "insufficient_decisions": True,
-            "epoch_metrics": [],
-            "entropy": None,
-            "grad_norm": 0.0,
-            "applied_grad_norm": 0.0,
-            "grad_clipped": False,
-            "value_loss": None,
-            "runtime_timing_seconds": {
-                "total": float(total_seconds),
-                **{key: float(value) for key, value in timing.items()},
-            },
-            "runtime_profile_detail": {
-                "optimizer_step": {},
-                "full_buffer_evaluation": {},
-            },
-        }
+            insufficient_decisions=True,
+        )
     evaluation_partitions = full_buffer_indices(buffer.size)
     storage_started = time.perf_counter()
     storage = prepare_storage(
@@ -862,6 +974,9 @@ def ppo_update(
     timing["storage_prepare"] = time.perf_counter() - storage_started
     epoch_rows = []
     stopped_by_kl = False
+    diverged_epoch = None
+    divergence_reason = None
+    rejected_minibatches = 0
     optimizer_steps = 0
     result = None
     try:
@@ -881,6 +996,8 @@ def ppo_update(
             batch_grad_norms = []
             batch_applied_grad_norms = []
             batch_clipped = 0
+            batch_rejected = 0
+            epoch_snapshot = network.snapshot_parameters()
             step_before_epoch = int(getattr(network, "optimizer_step_count", 0))
             for indices in partitions:
                 materialization_started = time.perf_counter()
@@ -903,15 +1020,23 @@ def ppo_update(
                     clip_epsilon=PPO_CLIP_EPSILON,
                     entropy_coef=entropy_coef,
                     clip_grad_norm=POLICY_GRADIENT_CLIP_NORM,
+                    log_ratio_limit=PPO_LOG_RATIO_LIMIT,
                 )
                 timing["optimizer_steps"] += time.perf_counter() - optimizer_started
                 step_detail = step_metrics.pop("runtime_profile_detail", {})
                 _merge_numeric_profile(optimizer_step_detail, step_detail)
-                batch_grad_norms.append(float(step_metrics["grad_norm"]))
-                batch_applied_grad_norms.append(
-                    float(step_metrics["applied_grad_norm"])
-                )
-                batch_clipped += int(step_metrics["grad_clipped"])
+                if step_metrics.get("grad_rejected"):
+                    # A rejected step wrote nothing, and its norm is NaN or
+                    # infinite. Averaging it in would turn every reported
+                    # gradient statistic into NaN, hiding the healthy
+                    # minibatches of the same epoch.
+                    batch_rejected += 1
+                else:
+                    batch_grad_norms.append(float(step_metrics["grad_norm"]))
+                    batch_applied_grad_norms.append(
+                        float(step_metrics["applied_grad_norm"])
+                    )
+                    batch_clipped += int(step_metrics["grad_clipped"])
             synchronization_started = time.perf_counter()
             network.synchronize()
             timing["optimizer_synchronization"] += (
@@ -921,17 +1046,38 @@ def ppo_update(
                 int(getattr(network, "optimizer_step_count", 0))
                 - step_before_epoch
             )
-            if steps_this_epoch != len(partitions):
+            if steps_this_epoch + batch_rejected != len(partitions):
                 raise AssertionError("PPO optimizer-step count does not match minibatches.")
             optimizer_steps += steps_this_epoch
+            rejected_minibatches += batch_rejected
             evaluation_started = time.perf_counter()
-            whole = evaluate_full_buffer(
-                network,
-                storage,
-                evaluation_partitions,
-                PPO_CLIP_EPSILON,
-                runtime_profile=full_buffer_detail,
-            )
+            try:
+                whole = evaluate_full_buffer(
+                    network,
+                    storage,
+                    evaluation_partitions,
+                    PPO_CLIP_EPSILON,
+                    runtime_profile=full_buffer_detail,
+                )
+            except FloatingPointError as exc:
+                # The epoch produced a policy that cannot be evaluated on the
+                # data that trained it. Undo the whole epoch rather than let a
+                # diverged policy reach the next rollout, where the failure
+                # would surface as an unrecoverable worker crash. The
+                # iteration is reported as diverged, never as a KL stop.
+                network.restore_parameters(epoch_snapshot)
+                # The step counter is checkpointed, so leaving it ahead of the
+                # weights would give two runs that diverged differently
+                # different metadata for identical parameters. A rolled-back
+                # epoch must be indistinguishable from one that never ran.
+                network.optimizer_step_count = step_before_epoch
+                optimizer_steps -= steps_this_epoch
+                diverged_epoch = epoch + 1
+                divergence_reason = str(exc)
+                timing["full_buffer_evaluation"] += (
+                    time.perf_counter() - evaluation_started
+                )
+                break
             timing["full_buffer_evaluation"] += (
                 time.perf_counter() - evaluation_started
             )
@@ -939,12 +1085,20 @@ def ppo_update(
             row = {
                 "epoch": epoch + 1,
                 **whole,
-                "gradient_norm_mean": float(np.mean(batch_grad_norms)),
-                "gradient_norm_max": float(np.max(batch_grad_norms)),
-                "applied_gradient_norm_mean": float(
-                    np.mean(batch_applied_grad_norms)
+                "gradient_norm_mean": (
+                    float(np.mean(batch_grad_norms)) if batch_grad_norms else 0.0
+                ),
+                "gradient_norm_max": (
+                    float(np.max(batch_grad_norms)) if batch_grad_norms else 0.0
+                ),
+                "applied_gradient_norm_mean": (
+                    float(np.mean(batch_applied_grad_norms))
+                    if batch_applied_grad_norms
+                    else 0.0
                 ),
                 "clipped_gradient_minibatches": int(batch_clipped),
+                "rejected_minibatches": int(batch_rejected),
+                "policy_weight_max_abs": _policy_weight_max_abs(network),
                 "optimizer_steps": int(steps_this_epoch),
                 "decisions": int(buffer.size),
                 "minibatches": int(len(partitions)),
@@ -962,87 +1116,119 @@ def ppo_update(
             timing["epoch_metrics_and_kl_control"] += (
                 time.perf_counter() - metrics_started
             )
-        final = epoch_rows[-1]
-        result = {
-            "requested_minibatches": int(requested),
-            "effective_minibatches": int(effective),
-            "minibatch_sizes": list(epoch_rows[0]["minibatch_sizes"]),
-            "epochs_completed": int(len(epoch_rows)),
-            "stopped_by_kl": bool(stopped_by_kl),
-            "optimizer_steps": int(optimizer_steps),
-            "final_approx_kl": float(final["approx_kl"]),
-            "max_approx_kl": float(max(row["approx_kl"] for row in epoch_rows)),
-            "final_clip_fraction": float(final["clip_fraction"]),
-            "final_entropy": float(final["entropy"]),
-            "final_policy_loss": float(final["policy_loss"]),
-            "final_value_loss": (
-                None
-                if final["value_loss"] is None
-                else float(final["value_loss"])
-            ),
-            "final_value_clip_fraction": (
-                None
-                if final["value_clip_fraction"] is None
-                else float(final["value_clip_fraction"])
-            ),
-            "final_value_mean": (
-                None
-                if final["value_mean"] is None
-                else float(final["value_mean"])
-            ),
-            "final_value_std": (
-                None
-                if final["value_std"] is None
-                else float(final["value_std"])
-            ),
-            "final_explained_variance": (
-                None
-                if final["explained_variance"] is None
-                else float(final["explained_variance"])
-            ),
-            "gradient_norm_mean": float(np.mean([
-                row["gradient_norm_mean"] for row in epoch_rows
-            ])),
-            "gradient_norm_max": float(max(
-                row["gradient_norm_max"] for row in epoch_rows
-            )),
-            "buffer_location": storage.location,
-            "buffer_bytes": int(buffer.nbytes),
-            "buffer_preflight": dict(storage.preflight),
-            "advantage_std_zero": bool(buffer.advantage_std_zero),
-            "raw_advantage_mean": float(buffer.raw_advantage_mean),
-            "raw_advantage_std": float(buffer.raw_advantage_std),
-            "baseline": buffer.baseline.label,
-            "baseline_mean": float(buffer.baseline_mean),
-            "target_kl": PPO_TARGET_KL,
-            "stop_kl": PPO_STOP_KL,
-            "clip_epsilon": PPO_CLIP_EPSILON,
-            "target_decisions_per_minibatch": (
-                PPO_TARGET_DECISIONS_PER_MINIBATCH
-            ),
-            "min_decisions_per_minibatch": PPO_MIN_DECISIONS_PER_MINIBATCH,
-            "max_minibatches": PPO_MAX_MINIBATCHES,
-            "decisions_used_per_epoch": int(final["decisions_used"]),
-            "decisions_omitted_per_epoch": int(final["decisions_omitted"]),
-            "insufficient_decisions": False,
-            "epoch_metrics": epoch_rows,
-            # Compatibility with the old one-update metric keys.
-            "entropy": float(final["entropy"]),
-            "grad_norm": float(max(
-                row["gradient_norm_max"] for row in epoch_rows
-            )),
-            "applied_grad_norm": float(max(
-                row["applied_gradient_norm_mean"] for row in epoch_rows
-            )),
-            "grad_clipped": bool(any(
-                row["clipped_gradient_minibatches"] for row in epoch_rows
-            )),
-            "value_loss": (
-                None
-                if final["value_loss"] is None
-                else float(final["value_loss"])
-            ),
-        }
+        if not epoch_rows:
+            # Every epoch was rolled back, so the policy is exactly the one
+            # that collected this buffer. Report an iteration that applied
+            # nothing rather than index an empty epoch list.
+            result = _no_update_result(
+                buffer,
+                timing,
+                time.perf_counter() - profile_started,
+                requested=requested,
+                omitted_decisions=int(first_omitted.size),
+                buffer_location=storage.location,
+                buffer_preflight=dict(storage.preflight),
+                diverged_epoch=diverged_epoch,
+                divergence_reason=divergence_reason,
+                rejected_minibatches=rejected_minibatches,
+            )
+        else:
+            final = epoch_rows[-1]
+            result = {
+                "requested_minibatches": int(requested),
+                "effective_minibatches": int(effective),
+                "minibatch_sizes": list(epoch_rows[0]["minibatch_sizes"]),
+                "epochs_completed": int(len(epoch_rows)),
+                "stopped_by_kl": bool(stopped_by_kl),
+                "optimizer_steps": int(optimizer_steps),
+                "final_approx_kl": float(final["approx_kl"]),
+                "max_approx_kl": float(max(row["approx_kl"] for row in epoch_rows)),
+                "final_clip_fraction": float(final["clip_fraction"]),
+                "final_entropy": float(final["entropy"]),
+                "final_policy_loss": float(final["policy_loss"]),
+                "final_value_loss": (
+                    None
+                    if final["value_loss"] is None
+                    else float(final["value_loss"])
+                ),
+                "final_value_clip_fraction": (
+                    None
+                    if final["value_clip_fraction"] is None
+                    else float(final["value_clip_fraction"])
+                ),
+                "final_value_mean": (
+                    None
+                    if final["value_mean"] is None
+                    else float(final["value_mean"])
+                ),
+                "final_value_std": (
+                    None
+                    if final["value_std"] is None
+                    else float(final["value_std"])
+                ),
+                "final_explained_variance": (
+                    None
+                    if final["explained_variance"] is None
+                    else float(final["explained_variance"])
+                ),
+                "gradient_norm_mean": float(np.mean([
+                    row["gradient_norm_mean"] for row in epoch_rows
+                ])),
+                "gradient_norm_max": float(max(
+                    row["gradient_norm_max"] for row in epoch_rows
+                )),
+                "rejected_minibatches": int(rejected_minibatches),
+                "policy_weight_max_abs": float(
+                    epoch_rows[-1]["policy_weight_max_abs"]
+                ),
+                # The worst decision of the iteration is the one that decides
+                # whether the rollout sampler survives, so this reduces with
+                # max across epochs rather than taking the last epoch.
+                "legal_logit_deficit_max": _max_or_none(
+                    row.get("legal_logit_deficit_max") for row in epoch_rows
+                ),
+                "buffer_location": storage.location,
+                "buffer_bytes": int(buffer.nbytes),
+                "buffer_preflight": dict(storage.preflight),
+                "advantage_std_zero": bool(buffer.advantage_std_zero),
+                "raw_advantage_mean": float(buffer.raw_advantage_mean),
+                "raw_advantage_std": float(buffer.raw_advantage_std),
+                "baseline": buffer.baseline.label,
+                "baseline_mean": float(buffer.baseline_mean),
+                "target_kl": PPO_TARGET_KL,
+                "stop_kl": PPO_STOP_KL,
+                "clip_epsilon": PPO_CLIP_EPSILON,
+                "log_ratio_limit": PPO_LOG_RATIO_LIMIT,
+                "target_decisions_per_minibatch": (
+                    PPO_TARGET_DECISIONS_PER_MINIBATCH
+                ),
+                "min_decisions_per_minibatch": PPO_MIN_DECISIONS_PER_MINIBATCH,
+                "max_minibatches": PPO_MAX_MINIBATCHES,
+                "decisions_used_per_epoch": int(final["decisions_used"]),
+                "decisions_omitted_per_epoch": int(final["decisions_omitted"]),
+                "insufficient_decisions": False,
+                # A rolled-back epoch is not a KL stop. The learning-rate study
+                # reads ``stopped_by_kl``, so divergence gets its own field.
+                "diverged_epoch": diverged_epoch,
+                "divergence_reason": divergence_reason,
+                "epoch_metrics": epoch_rows,
+                # Compatibility with the old one-update metric keys.
+                "entropy": float(final["entropy"]),
+                "grad_norm": float(max(
+                    row["gradient_norm_max"] for row in epoch_rows
+                )),
+                "applied_grad_norm": float(max(
+                    row["applied_gradient_norm_mean"] for row in epoch_rows
+                )),
+                "grad_clipped": bool(any(
+                    row["clipped_gradient_minibatches"] for row in epoch_rows
+                )),
+                "value_loss": (
+                    None
+                    if final["value_loss"] is None
+                    else float(final["value_loss"])
+                ),
+            }
     finally:
         cleanup_started = time.perf_counter()
         storage.close()

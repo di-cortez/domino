@@ -15,7 +15,7 @@ import sys
 import time
 
 from agents.network_architecture import architecture_from_hidden_sizes
-from agents.nn import resolve_device
+from agents.nn import GPUContextLostError, resolve_device
 from diagnostics import evaluate
 from diagnostics.rl_progress import (
     final_diagnostic_seed,
@@ -101,6 +101,9 @@ PERIODIC_DIAGNOSTIC_TUNING_FORMAT_VERSION = 1
 PERIODIC_DIAGNOSTIC_TUNING_FILE = "periodic_diagnostic_tuning.json"
 FOREVER_ACTIVE_RUN_FORMAT_VERSION = 1
 FOREVER_ACTIVE_RUN_FILE = "active_forever_run.json"
+# A dedicated exit code so an unattended supervisor can tell a GPU that was
+# reset underneath the process from a configuration error it must not retry.
+GPU_CONTEXT_LOST_EXIT_CODE = 70
 _RESUME_OPERATIONAL_ARGUMENTS = frozenset({
     "artifact_root",
     "execution_id",
@@ -824,6 +827,10 @@ def _rl_config(args):
         "reward_eta": float(args.reward_eta),
         "gamma_i": float(args.gamma_i),
         "reward_distance_mode": args.reward_distance_mode,
+        "terminal_empty_hand_weight": float(args.terminal_empty_hand_weight),
+        "terminal_blocked_weight": float(args.terminal_blocked_weight),
+        "immediate_draw_weight": float(args.immediate_draw_weight),
+        "immediate_pass_weight": float(args.immediate_pass_weight),
         "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
         "normalize_advantages": normalize_advantages,
         "moving_average_window": int(args.moving_average_window),
@@ -1242,6 +1249,13 @@ def run_rl_pipeline(root, config, args, assets):
         "Reward shaping: "
         f"gamma_i {args.gamma_i:g} | gamma_f {args.gamma_f:g} | "
         f"eta {args.reward_eta:g} | distance {args.reward_distance_mode}"
+    )
+    print(
+        "Reward weights: "
+        f"empty-hand {args.terminal_empty_hand_weight:g} | "
+        f"blocked {args.terminal_blocked_weight:g} | "
+        f"draw {args.immediate_draw_weight:g} | "
+        f"pass {args.immediate_pass_weight:g}"
     )
     print(
         "Configuration SHA-256: "
@@ -1885,5 +1899,26 @@ def main(argv=None):
     }
 
 
+def run_cli(argv=None):
+    """Run the pipeline as a process, exiting hard on a lost CUDA context.
+
+    ``main`` stays exception-based so callers and tests keep ordinary control
+    flow; only the process entry point converts a dead context into an exit
+    code, because that is the one context where unwinding does harm.
+    """
+    try:
+        main(argv)
+    except GPUContextLostError as exc:
+        print(f"\n[gpu] {exc}", file=sys.stderr, flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # os._exit skips interpreter teardown deliberately. Unwinding runs
+        # CuPy's module destructors against the dead context, which turned one
+        # diagnosis into 76 identical CUDA_ERROR_LAUNCH_FAILED tracebacks in
+        # the log this handler was written from -- and can hang there instead
+        # of merely printing them.
+        os._exit(GPU_CONTEXT_LOST_EXIT_CODE)
+
+
 if __name__ == "__main__":
-    main()
+    run_cli()

@@ -2,6 +2,7 @@
 
 import argparse
 from dataclasses import replace
+import math
 import time
 
 from agents.rl_nn import DEVICES
@@ -36,7 +37,15 @@ from training.rl.reward_distance import (
     DEFAULT_REWARD_DISTANCE_MODE,
     REWARD_DISTANCE_MODES,
 )
-from training.rl.rollout import REWARD_ETA, DEFAULT_GAMMA_F, GAMMA_I
+from training.rl.reward_model import (
+    DEFAULT_GAMMA_F,
+    DEFAULT_GAMMA_I,
+    DEFAULT_IMMEDIATE_DRAW_WEIGHT,
+    DEFAULT_IMMEDIATE_PASS_WEIGHT,
+    DEFAULT_REWARD_ETA,
+    DEFAULT_TERMINAL_BLOCKED_WEIGHT,
+    DEFAULT_TERMINAL_EMPTY_HAND_WEIGHT,
+)
 from training.rl.resume import load_resume_state
 from training.utils.cli_args import add_regularization_arguments, positive_int
 from utils.runtime_status import format_duration
@@ -72,10 +81,46 @@ def unit_interval_parser(name):
     return parse
 
 
+def nonnegative_float_parser(name):
+    """Build a parser for one finite non-negative ratio named ``name``.
+
+    Reward-component weights are ratios, not probabilities: only the quotient
+    inside a pair survives the ``max`` normalization, so ``2`` and ``1`` is the
+    same objective as ``1`` and ``0.5`` and neither may be rejected.
+    """
+
+    def parse(value):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError) as exc:
+            raise argparse.ArgumentTypeError(
+                f"{name} must be a non-negative number"
+            ) from exc
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise argparse.ArgumentTypeError(
+                f"{name} must be finite and non-negative"
+            )
+        return parsed
+
+    return parse
+
+
 parse_difficulty_weight = unit_interval_parser("difficulty weight")
 parse_gamma_f = unit_interval_parser("gamma_f")
 parse_reward_eta = unit_interval_parser("reward_eta")
 parse_gamma_i = unit_interval_parser("gamma_i")
+parse_terminal_empty_hand_weight = nonnegative_float_parser(
+    "terminal_empty_hand_weight"
+)
+parse_terminal_blocked_weight = nonnegative_float_parser(
+    "terminal_blocked_weight"
+)
+parse_immediate_draw_weight = nonnegative_float_parser(
+    "immediate_draw_weight"
+)
+parse_immediate_pass_weight = nonnegative_float_parser(
+    "immediate_pass_weight"
+)
 
 
 def add_optional_rl_arguments(
@@ -258,27 +303,70 @@ def add_optional_rl_arguments(
         "--gamma-f",
         type=parse_gamma_f,
         default=DEFAULT_GAMMA_F,
-        help="Terminal-reward discount per remaining real decision (1.0 = no discount).",
+        help=(
+            "Terminal discount factor per selected terminal-distance unit "
+            "(1.0 = no discount). See --reward-distance-mode for the clock."
+        ),
     )
     group.add_argument(
         "--reward-eta",
         type=parse_reward_eta,
-        default=REWARD_ETA,
+        default=DEFAULT_REWARD_ETA,
         help=(
-            "Convex mix of the two reward components per decision: "
-            "R = (1 - reward_eta) * gamma_f**k * terminal + reward_eta * local. "
-            "0 trains on the terminal outcome alone, 1 on local event "
+            "Convex mix of the two return components per decision: "
+            "G = (1 - reward_eta) * G_terminal + reward_eta * G_immediate. "
+            "0 trains on the terminal outcome alone, 1 on draw/pass event "
             "shaping alone."
         ),
     )
     group.add_argument(
         "--gamma-i",
         type=parse_gamma_i,
-        default=GAMMA_I,
+        default=DEFAULT_GAMMA_I,
         help=(
-            "Per-turn decay applied to a draw/pass event reward as it is "
-            "credited backwards to the real decisions preceding the event "
-            "(0 credits only the immediately preceding decision)."
+            "Immediate-event discount factor per selected local-distance unit, "
+            "applied as a draw/pass event reward is credited backwards to the "
+            "decisions preceding it (0 credits only the immediately preceding "
+            "decision). See --reward-distance-mode for the clock."
+        ),
+    )
+    group.add_argument(
+        "--terminal-empty-hand-weight",
+        type=parse_terminal_empty_hand_weight,
+        default=DEFAULT_TERMINAL_EMPTY_HAND_WEIGHT,
+        help=(
+            "Weight a_E of the empty-hand terminal component. The terminal "
+            "pair is normalized by max(a_E, a_B), so only the ratio matters: "
+            "2 and 1 is the same objective as 1 and 0.5."
+        ),
+    )
+    group.add_argument(
+        "--terminal-blocked-weight",
+        type=parse_terminal_blocked_weight,
+        default=DEFAULT_TERMINAL_BLOCKED_WEIGHT,
+        help=(
+            "Weight a_B of the blocked-game terminal component, whose "
+            "magnitude m(pip margin) already lies in [0.1, 1]. This decides "
+            "how much a blocked result is worth, not how decisive it was. "
+            "a_E and a_B cannot both be zero."
+        ),
+    )
+    group.add_argument(
+        "--immediate-draw-weight",
+        type=parse_immediate_draw_weight,
+        default=DEFAULT_IMMEDIATE_DRAW_WEIGHT,
+        help=(
+            "Weight a_D of draw events. Draw and pass events are both unit "
+            "events, so this pair carries their whole relative importance."
+        ),
+    )
+    group.add_argument(
+        "--immediate-pass-weight",
+        type=parse_immediate_pass_weight,
+        default=DEFAULT_IMMEDIATE_PASS_WEIGHT,
+        help=(
+            "Weight a_P of pass events, normalized against a_D by "
+            "max(a_D, a_P). The two cannot both be zero."
         ),
     )
     group.add_argument(
@@ -404,6 +492,10 @@ def training_options_from_args(args):
         reward_eta=args.reward_eta,
         gamma_i=args.gamma_i,
         reward_distance_mode=args.reward_distance_mode,
+        terminal_empty_hand_weight=args.terminal_empty_hand_weight,
+        terminal_blocked_weight=args.terminal_blocked_weight,
+        immediate_draw_weight=args.immediate_draw_weight,
+        immediate_pass_weight=args.immediate_pass_weight,
         normalize_advantages=args.normalize_advantages,
         baseline=args.baseline,
         seed=args.seed,

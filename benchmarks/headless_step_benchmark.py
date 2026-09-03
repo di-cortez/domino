@@ -31,9 +31,9 @@ from agents.neural_agent import NeuralAgent
 from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
 from middleware.domino_engine import DominoEngine
+from training.rl.reward_model import DEFAULT_GAMMA_F
 from training.rl.rollout import (
-    DEFAULT_GAMMA,
-    REWARD_SCHEMAS,
+    DEFAULT_REWARD_SCHEMA,
     _collect_steps_vs_snapshot,
 )
 
@@ -188,7 +188,7 @@ def _run_rl_rollouts(game_count: int, base_seed: int, optimized: bool):
         str(ROOT / "models" / "domino_rl_weights.npz"),
         device="cpu",
     )
-    schema = dict(REWARD_SCHEMAS)
+    schema = dict(DEFAULT_REWARD_SCHEMA)
     digest = hashlib.sha256()
 
     with _count_engine_calls(force_default_step=not optimized) as counters:
@@ -197,11 +197,13 @@ def _run_rl_rollouts(game_count: int, base_seed: int, optimized: bool):
             seed = base_seed + game_index
             random.seed(seed)
             np.random.seed(seed & 0xFFFFFFFF)
-            samples, events, winner, learner_position = _collect_steps_vs_snapshot(
+            (
+                samples, events, winner, learner_position, _terminal
+            ) = _collect_steps_vs_snapshot(
                 network,
                 network,
                 schema,
-                DEFAULT_GAMMA,
+                DEFAULT_GAMMA_F,
             )
             _sample_fingerprint(
                 digest,

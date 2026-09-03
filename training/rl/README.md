@@ -485,9 +485,13 @@ Rollouts remain parallel while all updates stay in the parent:
 |---|---|---:|
 | `--fresh-from-sl` / `--continue-existing-rl` | Force initialization from SL or allow a compatible existing RL checkpoint | continue existing RL (standalone); canonical continuation uses `--resume` |
 | `--gamma-f` | Terminal/final-reward discount using the mode's second distance metric | `0.95` |
-| `--reward-eta` | Convex mix of the two reward components per decision: `0` trains on terminal outcome alone, `1` on local draw/pass shaping alone | `0.5` |
+| `--reward-eta` | Convex mix of the terminal and immediate returns per decision: `0` trains on the terminal outcome alone, `1` on draw/pass shaping alone | `0.5` |
 | `--gamma-i` | Local/immediate-event discount using the mode's first distance metric | `0.90` |
 | `--reward-distance-mode` | Distance units in `gamma_i`/`gamma_f` order: `turn-turn`, `decision-decision`, `turn-decision`, or `decision-turn` | `turn-turn` |
+| `--terminal-empty-hand-weight` | Weight `a_E` of the empty-hand terminal component; only the `a_E`/`a_B` ratio matters | `1.0` |
+| `--terminal-blocked-weight` | Weight `a_B` of the blocked terminal component; `a_E` and `a_B` cannot both be zero | `1.0` |
+| `--immediate-draw-weight` | Weight `a_D` of draw events; only the `a_D`/`a_P` ratio matters | `1.0` |
+| `--immediate-pass-weight` | Weight `a_P` of pass events; `a_D` and `a_P` cannot both be zero | `1.0` |
 | `--opponent-decision-restarts` | Continue once from every same-iteration pre-action opponent state with at least two tile plays; the learner swaps seats and all decisions join one update | off |
 | `--ppo-max-epochs` | `1` selects one-update REINFORCE; `2`–`16` select masked PPO | `4` standalone/finite, `16` forever |
 | `--value-head` | Train a linear critic with PPO or REINFORCE | off |
@@ -572,15 +576,35 @@ overlapping `medium_term` cannot be converted without silently changing what
 its saved memberships mean, and no migration is implemented for the other
 selections either; start a new run.
 
-The RL reward combines a discounted terminal reward with temporally discounted
-local draw/pass shaping. A "decision" is exactly one compressed PPO trajectory
+The RL reward combines a discounted terminal return with temporally discounted
+draw/pass event shaping. A "decision" is exactly one compressed PPO trajectory
 step: a learner tile choice with at least two legal tile actions. Forced tile
-plays, draws, passes, and opponent actions are not decisions. For decision `j`:
+plays, draws, passes, and opponent actions are not decisions. For decision `t`:
 
 ```text
-R(j) = (1 - eta) * R_f * gamma_f ** d_f(j)
-     + eta * sum(event_reward * gamma_i ** d_i(j, event))
+G(t) = (1 - eta) * G_T(t) + eta * G_I(t)
 ```
+
+with the terminal half
+
+```text
+G_T(t) = gamma_f ** k_T(t) * U_T
+U_T    = (a_E * R_E + a_B * R_B) / max(a_E, a_B)
+```
+
+and the immediate half
+
+```text
+G_I(t) = (a_D * G_D(t) + a_P * G_P(t)) / max(a_D, a_P)
+G_D(t) = sum over later draw events of gamma_i ** k_e(t) * r_D(e)
+G_P(t) = sum over later pass events of gamma_i ** k_e(t) * r_P(e)
+```
+
+`G_D` and `G_P` already contain their `gamma_i`-discounted event sums, so `eta`
+mixes two returns that are each complete. The four layers stay separate on
+purpose: `a_E`/`a_B` and `a_D`/`a_P` say what a result is worth, `gamma_f` and
+`gamma_i` say how far back it is credited, and `eta` says how the two
+subsystems trade off. No one of them is used to compensate for another.
 
 The single `--reward-distance-mode` flag selects both distances. Its first word
 always controls `gamma_i`; its second always controls `gamma_f`:
@@ -604,6 +628,10 @@ gamma_i = 0.90
 gamma_f = 0.95
 eta = 0.50
 reward_distance_mode = turn-turn
+terminal_empty_hand_weight = 1.0
+terminal_blocked_weight    = 1.0
+immediate_draw_weight      = 1.0
+immediate_pass_weight      = 1.0
 ```
 
 Thus both components use actual engine time by default. `reward_eta` trades the
@@ -613,22 +641,72 @@ unambiguously restored as `turn-decision`, with the historical defaults
 `gamma_i=0.90`, `gamma_f=1.0`, and `reward_eta=0.50`; resume never silently
 changes their objective.
 
-Reward constants:
+Runs and checkpoints created before the reward redesign are a different case
+and are **rejected** rather than restored. They record none of the four weights
+because their terminal reward was the binary outcome minus `0.05` per pip of
+the learner's own hand, an objective the empty-hand/blocked decomposition
+replaces. Filling the missing weights with today's defaults would make such a
+run look identical to a new one, so `RLTrainingConfiguration.from_mapping`
+raises instead. Start a new RL run; an existing supervised checkpoint is
+unaffected and can still seed it.
 
-| Event | Reward |
-|---|---:|
-| terminal win | `+1.00` |
-| terminal loss | `-1.00` |
-| opponent draw | `+0.20` |
-| opponent pass | `+0.10` |
-| learner draw | `-0.20` |
-| learner pass | `-0.10` |
-| final remaining pips | `-0.05 * remaining_pips` |
+### Reward components
+
+Every component is normalized before any weight is applied, so a weight
+expresses importance and nothing else.
+
+| Component | Value | Applies to |
+|---|---:|---|
+| `R_E` empty-hand win | `+1` | the game ended because a hand emptied |
+| `R_E` empty-hand loss | `-1` | the game ended because a hand emptied |
+| `R_B` blocked win | `+m(dp)` | the game ended blocked |
+| `R_B` blocked loss | `-m(dp)` | the game ended blocked |
+| `r_D` opponent draw | `+1` | one draw event |
+| `r_D` learner draw | `-1` | one draw event |
+| `r_P` opponent pass | `+1` | one pass event |
+| `r_P` learner pass | `-1` | one pass event |
+
+The two terminal components are mutually exclusive: an empty-hand ending has
+`R_B = 0` and a blocked ending has `R_E = 0`. The blocked magnitude is
+
+```text
+m(dp) = 0.1 + 0.9 * min(dp / (2 * max_pip), 1)
+dp    = loser_final_pips - winner_final_pips >= 0
+```
+
+so it lies in `[0.1, 1]` and saturates at a margin of `2 * max_pip`, taken from
+the ruleset rather than a table (`double-three` 6, `double-four` 8,
+`double-five` 10, `double-six` 12). `dp = 0` is legal and maps to the `0.1`
+floor: the engine compares pip totals first, so a blocked win resolved by
+`blocked_fewest_tiles` or `blocked_last_valid_play` is a real but minimally
+decisive win. All three blocked win reasons are blocked endings.
+
+There is no longer a per-pip penalty on the learner's own final hand. The pip
+story now lives entirely in the blocked margin, where it is zero-sum between
+the seats, instead of being applied to both ending kinds against one seat only.
+
+### Reward weights
+
+| Flag | Symbol | Meaning |
+|---|---|---|
+| `--terminal-empty-hand-weight` | `a_E` | value of an empty-hand result |
+| `--terminal-blocked-weight` | `a_B` | value of a blocked result |
+| `--immediate-draw-weight` | `a_D` | value of one draw event |
+| `--immediate-pass-weight` | `a_P` | value of one pass event |
+
+Each pair is divided by its own larger member, so only the ratio inside a pair
+reaches training: `--terminal-empty-hand-weight 2 --terminal-blocked-weight 1`
+is the same objective as `1` and `0.5`. The weights are finite and
+non-negative, they need not sum to one, and a pair may not be `(0, 0)`. A zero
+on one side deletes that component only.
+
+`G_I(t)` is deliberately not renormalized to `[-1, 1]`: one decision may be
+followed by several draw and pass events, and the normalization is of event
+values, not of the accumulated trajectory.
 
 A learner draw/pass penalty is applied to all earlier real decisions with the
-selected decay rule, not just to the most recent decision. The final pip
-penalty is applied to the learner's own final hand. The number of legal choices
-does not rescale a decision's return. The final training weight is:
+selected decay rule, not just to the most recent decision. The number of legal
+choices does not rescale a decision's return. The final training weight is:
 
 ```text
 policy_reward = terminal_reward + local_reward
@@ -660,3 +738,135 @@ unchanged by this stage; see
 `--hidden-layers`/`--hidden<n>-size` controls. The shared
 `--weight-decay`/`--dropout` flags are documented in
 [`../utils/README.md`](../utils/README.md).
+
+## Numerical stability guards
+
+The policy is trained in float32 by plain SGD, so a single non-finite value can
+end a run that has already cost tens of millions of games. Five guards make
+that impossible to do silently. None of them is a tunable: they are module
+constants deliberately kept out of `rl_config`, because `rl_config` is hashed
+into the run identity and any key added to it makes every existing run
+unresumable.
+
+Two distinct failures live here and must not be conflated. A **diverged
+learner** loses its weights to NaN or infinity. An **unsamplable rollout
+policy** keeps perfectly finite weights and simply becomes too confident for
+float32 to represent on a non-maximizing action. The first four guards address
+the former; the last addresses the latter, and no observable of the former
+gives any warning of the latter.
+
+| Guard | Where | Effect |
+|---|---|---|
+| Non-finite gradient rejection | `PolicyNetwork._apply_gradient_step` | A NaN or infinite gradient norm skips the optimizer step instead of being clipped. Clipping cannot repair either: `nan > clip` is False, so a NaN bypasses clipping, and `inf * (clip / inf)` is NaN. |
+| Log-ratio bound | `PolicyNetwork.backward_ppo`, `PPO_LOG_RATIO_LIMIT = 20.0` | Bounds `log(pi_new / pi_old)` in the gradient path. The rollout floors the behavior probability at the smallest float32, so an unbounded ratio reaches `exp(87)`, and `exp(87) * advantage` overflows float32 into an infinite `active_weights`, where every illegal action then computes `0 * inf = NaN`. |
+| Epoch rollback | `training/rl/ppo.py` epoch loop | If `evaluate_full_buffer` cannot evaluate the updated policy, the whole epoch is undone from a snapshot taken before its first minibatch and the iteration reports `diverged_epoch`. |
+| Rollout diagnosis | `agents/rl_agent.py`, `NonFinitePolicyError` | Names the non-finite logits and counts them, instead of accusing the legal mask. After the max-subtraction `sum(exp(logits - max))` is at least 1.0 for every finite input, so the mask can never be the cause. |
+| Masked rollout sampling | `_CPUInferencePolicy.cache`, `_masked_rollout_probabilities` | The worker-side policy publishes its logits, so the agent builds the sampling distribution over the legal subset instead of renormalizing the full-support softmax. The latter flushes a legal action to zero once it sits more than 87.3 nats below the global maximum, and a decision whose legal actions have all flushed has no mass left to sample. |
+
+Reporting paths are deliberately **not** bounded. `evaluate_full_buffer` and
+`log_ratio_statistics` keep the true, unclamped ratio, KL and clip fraction,
+because those statistics are what a learning-rate study compares across runs.
+
+`diverged_epoch` is separate from `stopped_by_kl` on purpose. A rolled-back
+epoch is not a KL stop, and reporting it as one would corrupt the trust-region
+statistics of the run.
+
+### Metrics
+
+The iteration log gains a numerical-health line:
+
+```text
+  PPO/10: policy weight max|W| 1.5925 avg/1.5925 max
+  PPO/10: legal logit deficit 1.69 avg/1.91 max nats (float32 limit 87.34)
+```
+
+`policy_weight_max_abs` is `max(abs(W))` over the policy weights. The float32
+forward pass overflows as a function of the largest weight times the largest
+activation, so it is the direct precursor of a non-finite policy; the gradient
+norm does not show it, because a run can drift for millions of games with
+clipping never firing once.
+
+`legal_logit_deficit_max` is `max(global logit) - max(legal logit)`, the exact
+crash-proximity signal for the rollout sampler, and it is the one observable
+that moves when a policy sharpens. `d6_maxwr_lr032` held `max|W|` between 1.97
+and 2.66 for its whole 28,000,000-game life while this reached 84.5 against a
+float32 limit of 87.34 -- so the weight signal alone gives no warning at all. A
+fresh policy sits near 1.7. The threshold is `-log(tiny)`, a property of
+float32 rather than a tuned number: past it a legal action's contribution to a
+full-support softmax is denormal and heading for zero.
+
+Three warning lines follow, printed **only** when they fire, so silence is the
+healthy state:
+
+| Warning | Meaning |
+|---|---|
+| `N minibatch(es) had a non-finite gradient and were skipped` | The gradient guard absorbed a state that would previously have written NaN into every weight. |
+| `rolled back diverged epoch N` | The policy could not be evaluated on the data that trained it, and the epoch was undone. Not a KL stop. |
+| `legal logit deficit N nats exceeds the float32 limit` | The policy is sharp enough that a full-support softmax can no longer represent some legal action. Sampling is unaffected while the rollout policy publishes its logits cache; it is a trend to watch, not a failure. |
+
+Both warnings are emitted as `[numerical]` status messages rather than as part
+of the iteration report, because the canonical pipeline runs the reporter with
+`quiet=True` and only status messages survive that. They also ignore
+`--log-interval`: a numerical failure is reported when it happens, not up to
+ten iterations later. In a `python -m training.pipeline forever` log they look
+like this:
+
+```text
+  [numerical] iteration 9632: 2 minibatch(es) had a non-finite gradient and were skipped; the weights were left untouched.
+  [numerical] iteration 9632: rolled back diverged epoch 3 (PPO full-buffer metrics produced NaN/Inf.). The policy is the one that collected this buffer; training continues.
+```
+
+These five are deliberately **not** columns of `training_metrics.jsonl`. That
+file is a fixed 59-column schema with a version that `_prepare_metrics_file`
+re-validates on every resume, so adding columns would make every existing run
+unresumable. The durable per-checkpoint history of `max(abs(W))` comes from
+`analysis/rl_weight_health.py` instead, which reconstructs it from the saved
+`.npz` files and therefore also works on runs that predate this change.
+
+### Triaging a diverged run
+
+`analysis/rl_weight_health.py` reports, per saved checkpoint, whether it is
+finite and how large its largest weight is. It is read-only and never writes
+into a run directory.
+
+```bash
+python -m analysis.rl_weight_health models/rl/<run directory>
+python -m analysis.rl_weight_health models/rl/<run directory> --per-layer
+```
+
+For reference, every run in this repository -- the seven-point `double-three`
+learning-rate grid from `lr = 0.001` to `lr = 0.064`, and eleven `double-six`
+runs -- keeps `max_abs_weight` between 1.49 and 2.09 for its whole life, and
+the largest gradient norm ever recorded across that grid is 2.90, well under
+the clip at 5.0. A run outside those bands is the anomaly.
+
+## GPU context loss
+
+The guards above all assume the process still owns a working device. A
+separate failure mode does not: the CUDA context can be destroyed underneath a
+perfectly healthy run by an NVIDIA module reload from an unattended driver
+upgrade, an Xid fault, a display-server restart, or a power or thermal event.
+CuPy then reports `cudaErrorLaunchFailure: unspecified launch failure`.
+
+It is not a training fault, and it must not be read as one. CUDA surfaces an
+asynchronous failure at the next synchronization, so the traceback blames
+whichever line happened to copy a scalar to the host -- in the
+`d6_maxwr_lradaptativev4` run that was `_reward_signal_summary`, which is only
+the first GPU touch of an iteration after the CPU rollout.
+
+Nothing about the interrupted iteration can be saved. The policy weights and
+the Adam moments live on the dead device, so a checkpoint cannot even be
+written; recovery is entirely the last checkpoint, at most
+`checkpoint_interval` iterations back.
+
+| Piece | Where | Effect |
+|---|---|---|
+| Fault classification | `agents/nn.py`, `is_gpu_context_loss` | Separates a dead context from a full one by the CUDA status name. Both arrive as the same CuPy exception types, so `_is_backend_memory_error` used to rename a lost context into "exhausted memory at fixed batch N" and retry into a device that can no longer run a kernel. |
+| Diagnosis | `training/rl/training_loop.py`, `GPUContextLostError` | Names the iteration, the games completed, and the checkpoint to resume from, and points at `dmesg`, the driver upgrade log, and `nvidia-smi`. The worker pool still closes through the existing `finally`. |
+| Hard exit | `training/pipeline.py`, `run_cli`, exit code 70 | Leaves through `os._exit` on purpose. Unwinding runs CuPy's module destructors against the dead context, which turned one diagnosis into 76 identical `CUDA_ERROR_LAUNCH_FAILED` tracebacks in the log this was written from, and can hang instead of merely printing them. `main` itself stays exception-based so callers and tests keep ordinary control flow. |
+| Restart | `train_script/run_forever_supervised.sh` | Resumes the run. Exit code 70 is the signal it keys on; it declines to restart on `SIGINT`/`SIGTERM` and stops when two consecutive attempts complete the same number of games. |
+
+A GPU reset is a machine problem. Diagnose it with `sudo dmesg -T | grep -i
+xid`, `grep -i nvidia /var/log/apt/history.log`, and `nvidia-smi -q -d
+TEMPERATURE,POWER`; `HW Slowdown: Active` points at sustained-load cooling,
+where capping the clocks buys stability at a small throughput cost.

@@ -6,6 +6,8 @@ import json
 from unittest import mock
 
 from training.rl.reporting import (
+    LEGAL_LOGIT_DEFICIT_WARNING,
+    RLTrainingReporter,
     TRAINING_METRIC_COLUMNS,
     TRAINING_METRICS_VERSION,
     _prepare_metrics_file,
@@ -146,3 +148,94 @@ def test_metrics_resume_truncates_after_the_checkpoint_and_checks_hash(tmp_path)
         assert "configuration hash" in str(exc)
     else:
         raise AssertionError("Expected a configuration-hash mismatch")
+
+
+def _report_iteration(reporter, iteration, ppo_window):
+    """Drive one reporter iteration with the minimum a health check needs."""
+    reporter.iteration(
+        iteration=iteration,
+        log_interval=10,
+        games=2000,
+        completed_games=iteration * 2000,
+        total_games=None,
+        reward_summary=None,
+        wins=0,
+        moving_win_rate=0.0,
+        win_window_size=0,
+        opponent_buckets=("heuristic",),
+        difficulty_weight=0.5,
+        opponent_count=1,
+        unique_neural_opponent_count=0,
+        opponent_pool_state=None,
+        uniform_rotation_anchors=None,
+        bucket_results={},
+        gradient_metrics=None,
+        use_value_head=False,
+        value_loss_window=[],
+        ppo_window=ppo_window,
+        ppo_max_epochs=16,
+        restart_summary=None,
+    )
+
+
+def test_logit_deficit_warning_survives_the_quiet_pipeline_reporter():
+    """The rollout sampler's precursor must reach the operator too.
+
+    ``policy_weight_max_abs`` stayed flat at 2.6 for the whole 28M-game run
+    that died on an unsamplable decision, so the weight signal alone cannot
+    warn about this failure. The deficit is the quantity that actually moved,
+    and its threshold is the float32 limit rather than a tuned number.
+    """
+    captured = []
+    reporter = RLTrainingReporter(quiet=True, status_callback=captured.append)
+    base = {"rejected_minibatches": 0, "diverged_epoch": None}
+    healthy = {**base, "legal_logit_deficit_max": 42.0}
+    sharp = {
+        **base,
+        "legal_logit_deficit_max": LEGAL_LOGIT_DEFICIT_WARNING + 5.0,
+    }
+
+    _report_iteration(reporter, 1, [healthy])
+    assert captured == []
+
+    _report_iteration(reporter, 2, [healthy, sharp])
+    assert len(captured) == 1
+    assert "legal logit deficit" in captured[0]
+    assert "not diverged" in captured[0]
+
+    # A row without the key at all -- any pre-existing window entry -- is silent
+    # rather than an AttributeError.
+    _report_iteration(reporter, 3, [healthy, sharp, dict(base)])
+    assert len(captured) == 1
+
+
+def test_numerical_warnings_survive_the_quiet_pipeline_reporter():
+    """The canonical pipeline runs the reporter quiet; a NaN must still speak.
+
+    ``training/pipeline.py`` constructs the RL reporter with ``quiet=True``, so
+    everything gated on ``log_interval`` is invisible in a ``forever`` run.
+    A rejected minibatch or a rolled-back epoch has to reach the operator
+    anyway, and it must not wait for the next log interval either.
+    """
+    captured = []
+    reporter = RLTrainingReporter(quiet=True, status_callback=captured.append)
+    healthy = {"rejected_minibatches": 0, "diverged_epoch": None}
+    diverged = {
+        "rejected_minibatches": 2,
+        "diverged_epoch": 3,
+        "divergence_reason": "PPO full-buffer metrics produced NaN/Inf.",
+    }
+
+    _report_iteration(reporter, 1, [healthy])
+    assert captured == []
+
+    # Iteration 2 is not a multiple of log_interval, so the ordinary report is
+    # suppressed twice over: by quiet and by the interval. The warning is not.
+    _report_iteration(reporter, 2, [healthy, diverged])
+    assert len(captured) == 2
+    assert "2 minibatch(es)" in captured[0]
+    assert "rolled back diverged epoch 3" in captured[1]
+
+    # An iteration that produced no update leaves the same row at the tail.
+    _report_iteration(reporter, 3, [healthy, diverged])
+    assert len(captured) == 2

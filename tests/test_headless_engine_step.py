@@ -26,9 +26,9 @@ from diagnostics.pairwise import play_game
 from middleware.domino_engine import DominoEngine
 from middleware.middleware import GameManager
 from training.datagen.parallel import generate_dataset_game
+from training.rl.reward_model import DEFAULT_GAMMA_F
 from training.rl.rollout import (
-    DEFAULT_GAMMA_F,
-    REWARD_SCHEMAS,
+    DEFAULT_REWARD_SCHEMA,
     _collect_steps_vs_snapshot,
 )
 from utils.myrandom import SeedPlan
@@ -301,7 +301,7 @@ class HeadlessEngineStepTests(unittest.TestCase):
             random_seed=7,
             device="cpu",
         )
-        schema = dict(REWARD_SCHEMAS)
+        schema = dict(DEFAULT_REWARD_SCHEMA)
 
         random.seed(54321)
         np.random.seed(54321)
@@ -322,11 +322,16 @@ class HeadlessEngineStepTests(unittest.TestCase):
             DEFAULT_GAMMA_F,
         )
 
-        baseline_samples, baseline_events, baseline_winner, baseline_position = baseline
-        optimized_samples, optimized_events, optimized_winner, optimized_position = (
-            optimized
-        )
+        (
+            baseline_samples, baseline_events, baseline_winner,
+            baseline_position, baseline_terminal,
+        ) = baseline
+        (
+            optimized_samples, optimized_events, optimized_winner,
+            optimized_position, optimized_terminal,
+        ) = optimized
         self.assertEqual(baseline_events, optimized_events)
+        self.assertEqual(baseline_terminal, optimized_terminal)
         self.assertEqual(baseline_winner, optimized_winner)
         self.assertEqual(baseline_position, optimized_position)
         self.assertEqual(len(baseline_samples), len(optimized_samples))

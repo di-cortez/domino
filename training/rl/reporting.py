@@ -6,6 +6,7 @@ reintroducing the rollout/orchestrator import cycle.
 """
 
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -24,6 +25,7 @@ from training.rl.constants import (
 )
 from training.rl.ppo import (
     POLICY_GRADIENT_CLIP_NORM,
+    PPO_LOG_RATIO_LIMIT,
     fixed_ppo_policy,
     ppo_is_enabled,
 )
@@ -37,7 +39,7 @@ from utils.runtime_status import format_duration, print_memory_report
 
 
 TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"
-TRAINING_METRICS_VERSION = 7
+TRAINING_METRICS_VERSION = 8
 BUCKET_RESULT_COLUMNS = ("games", "wins", "losses")
 EVENT_RESULT_COLUMNS = (
     "opponent_draws",
@@ -45,6 +47,15 @@ EVENT_RESULT_COLUMNS = (
     "learner_draws",
     "learner_passes",
 )
+TERMINAL_RESULT_COLUMNS = (
+    "empty_hand_wins",
+    "empty_hand_losses",
+    "blocked_wins",
+    "blocked_losses",
+    "blocked_margin_sum",
+    "blocked_magnitude_sum",
+)
+EMPTY_TERMINAL_OUTCOMES = [0, 0, 0, 0, 0, 0.0]
 TRAINING_METRIC_COLUMNS = (
     "iteration",
     "total_iterations",
@@ -64,11 +75,15 @@ TRAINING_METRIC_COLUMNS = (
     "restart_event_stats",
     "wins_in_batch",
     "batch_win_rate",
+    "terminal_outcomes",
     "moving_average_win_rate",
     "reward_mean",
     "reward_std",
     "reward_min",
     "reward_max",
+    "terminal_mean",
+    "terminal_abs_mean",
+    "local_abs_mean",
     "good_pct",
     "neutral_pct",
     "bad_pct",
@@ -144,6 +159,7 @@ def build_training_metrics_header(
             "reward_distance_mode": training.reward_distance_mode,
             "reward_constants": dict(context.schema),
             "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
+            "log_ratio_limit": PPO_LOG_RATIO_LIMIT,
             "normalize_advantages": bool(training.normalize_advantages),
             "baseline": training.baseline.as_mapping(),
             "weight_decay": float(training.weight_decay),
@@ -242,11 +258,18 @@ def build_iteration_metrics_row(
         ],
         "wins_in_batch": int(wins),
         "batch_win_rate": float(wins / games),
+        "terminal_outcomes": [
+            restart_summary["terminal_outcomes"][name]
+            for name in TERMINAL_RESULT_COLUMNS
+        ],
         "moving_average_win_rate": float(moving_win_rate),
         "reward_mean": reward.get("reward_mean"),
         "reward_std": reward.get("reward_std"),
         "reward_min": reward.get("reward_min"),
         "reward_max": reward.get("reward_max"),
+        "terminal_mean": reward.get("terminal_mean"),
+        "terminal_abs_mean": reward.get("terminal_abs_mean"),
+        "local_abs_mean": reward.get("local_abs_mean"),
         "good_pct": reward.get("good_pct"),
         "neutral_pct": reward.get("neutral_pct"),
         "bad_pct": reward.get("bad_pct"),
@@ -381,7 +404,12 @@ def build_training_summary(
         "reward_eta": training.reward_eta,
         "gamma_i": training.gamma_i,
         "reward_distance_mode": training.reward_distance_mode,
+        "terminal_empty_hand_weight": training.terminal_empty_hand_weight,
+        "terminal_blocked_weight": training.terminal_blocked_weight,
+        "immediate_draw_weight": training.immediate_draw_weight,
+        "immediate_pass_weight": training.immediate_pass_weight,
         "clip_grad_norm": POLICY_GRADIENT_CLIP_NORM,
+        "log_ratio_limit": PPO_LOG_RATIO_LIMIT,
         "normalize_advantages": training.normalize_advantages,
         "baseline": training.baseline.as_mapping(),
         "weight_decay": training.weight_decay,
@@ -473,6 +501,7 @@ class RLTrainingReporter:
 
     def __init__(self, *, quiet=False, status_callback=None):
         self.quiet = bool(quiet)
+        self._last_health_row = None
         if status_callback is not None:
             self._status_callback = status_callback
         elif self.quiet:
@@ -513,6 +542,10 @@ class RLTrainingReporter:
         gamma_f,
         reward_eta,
         reward_distance_mode,
+        terminal_empty_hand_weight,
+        terminal_blocked_weight,
+        immediate_draw_weight,
+        immediate_pass_weight,
     ):
         """Describe the selected fixed algorithm policy once per invocation."""
         policy = fixed_ppo_policy(ppo_max_epochs)
@@ -531,6 +564,15 @@ class RLTrainingReporter:
             "Reward shaping: "
             f"gamma_i {gamma_i:g} | gamma_f {gamma_f:g} | "
             f"eta {reward_eta:g} | distance {reward_distance_mode}."
+        )
+        # The raw weights rather than the normalized scales, so the line shows
+        # what was asked for; only the ratio inside each pair reaches training.
+        self.status(
+            "Reward weights: "
+            f"empty-hand {terminal_empty_hand_weight:g} | "
+            f"blocked {terminal_blocked_weight:g} | "
+            f"draw {immediate_draw_weight:g} | "
+            f"pass {immediate_pass_weight:g}."
         )
         self.status("RL update configuration:")
         self.status(
@@ -693,6 +735,7 @@ class RLTrainingReporter:
         ppo_max_epochs,
         restart_summary,
     ):
+        self._report_numerical_health(iteration, ppo_window)
         if self.quiet or iteration % log_interval:
             return
         if reward_summary is None:
@@ -720,6 +763,47 @@ class RLTrainingReporter:
             f"{wins}/{games} (avg/{win_window_size}: {moving_win_rate:.1%})"
             f" | opponents: {opponent_count} ({unique_neural_opponent_count} "
             f"neural) | grad: {_gradient_log_text(gradient_metrics)}"
+        )
+        # The line the aggregated return cannot give: whether the agent is
+        # trading ordinary wins for a preferred kind of win, and whether the
+        # nominal reward_eta matches the influence the two halves actually
+        # carry.
+        outcomes = restart_summary["terminal_outcomes"]
+        empty_games = outcomes["empty_hand_wins"] + outcomes["empty_hand_losses"]
+        blocked_games = outcomes["blocked_wins"] + outcomes["blocked_losses"]
+        decided = empty_games + blocked_games
+        magnitude = (
+            reward_summary["terminal_abs_mean"] + reward_summary["local_abs_mean"]
+        )
+        if empty_games:
+            empty_text = (
+                f"{empty_games} ({empty_games / decided:.0%}) at "
+                f"{outcomes['empty_hand_wins'] / empty_games:.1%} wins"
+            )
+        else:
+            empty_text = "none"
+        if blocked_games:
+            blocked_text = (
+                f"{blocked_games} ({blocked_games / decided:.0%}) at "
+                f"{outcomes['blocked_wins'] / blocked_games:.1%} wins, "
+                f"mean margin {outcomes['blocked_margin_sum'] / blocked_games:.2f}, "
+                f"mean m {outcomes['blocked_magnitude_sum'] / blocked_games:.3f}"
+            )
+        else:
+            blocked_text = "none"
+        print(
+            f"  Terminal outcomes: empty-hand {empty_text} | "
+            f"blocked {blocked_text}"
+        )
+        share_text = (
+            f" | immediate share {reward_summary['local_abs_mean'] / magnitude:.0%}"
+            if magnitude
+            else ""
+        )
+        print(
+            "  Reward mixture: |terminal| "
+            f"{reward_summary['terminal_abs_mean']:.3f} | |immediate| "
+            f"{reward_summary['local_abs_mean']:.3f}{share_text}"
         )
         available = opponent_pool_state["available_buckets"]
         # One short identity per bucket is enough to audit the rotation; a
@@ -801,6 +885,47 @@ class RLTrainingReporter:
             )
         if ppo_is_enabled(ppo_max_epochs):
             _print_ppo_window(ppo_window)
+
+    def _report_numerical_health(self, iteration, ppo_window):
+        """Announce a rejected minibatch or a rolled-back epoch immediately.
+
+        These go through ``status`` rather than ``print`` because the canonical
+        pipeline runs the reporter with ``quiet=True`` and only status messages
+        survive that; and they ignore ``log_interval`` because a numerical
+        failure is not something to report ten iterations late. Only the newest
+        window entry is inspected, and an iteration that produced no update
+        leaves the previous entry at the tail, so the row already announced is
+        remembered and never announced twice.
+        """
+        if not ppo_window:
+            return
+        row = ppo_window[-1]
+        if id(row) == self._last_health_row:
+            return
+        self._last_health_row = id(row)
+        rejected = int(row.get("rejected_minibatches") or 0)
+        if rejected:
+            self.status(
+                f"  [numerical] iteration {iteration}: {rejected} minibatch(es) "
+                "had a non-finite gradient and were skipped; the weights were "
+                "left untouched."
+            )
+        diverged = row.get("diverged_epoch")
+        if diverged:
+            self.status(
+                f"  [numerical] iteration {iteration}: rolled back diverged "
+                f"epoch {diverged} ({row.get('divergence_reason')}). The policy "
+                "is the one that collected this buffer; training continues."
+            )
+        deficit = row.get("legal_logit_deficit_max")
+        if deficit is not None and deficit > LEGAL_LOGIT_DEFICIT_WARNING:
+            self.status(
+                f"  [numerical] iteration {iteration}: legal logit deficit "
+                f"{deficit:.1f} nats exceeds the float32 limit "
+                f"{LEGAL_LOGIT_DEFICIT_WARNING:.1f}. The policy is sharp, not "
+                "diverged; sampling is unaffected while the rollout policy "
+                "publishes its logits cache."
+            )
 
     def complete(self, elapsed, weights_path):
         if not self.quiet:
@@ -906,6 +1031,9 @@ def _reward_signal_summary(samples, xp=None):
         xp = np
     rewards = xp.asarray([sample.policy_reward for sample in samples], dtype=float)
     local_rewards = xp.asarray([sample.local_reward for sample in samples], dtype=float)
+    terminal_rewards = xp.asarray(
+        [sample.terminal_reward for sample in samples], dtype=float
+    )
     total = rewards.size
 
     good = xp.sum(rewards > REWARD_ZERO_EPSILON)
@@ -918,6 +1046,15 @@ def _reward_signal_summary(samples, xp=None):
         "reward_min": float(xp.min(rewards)),
         "reward_max": float(xp.max(rewards)),
         "local_mean": float(xp.mean(local_rewards)),
+        "terminal_mean": float(xp.mean(terminal_rewards)),
+        # Absolute magnitudes, because a nominal reward_eta of 0.5 does not
+        # imply the two subsystems carry equal influence: G_I accumulates
+        # several events per decision while G_T carries one outcome. These are
+        # the ``E|(1-eta)G_T|`` and ``E|eta*G_I|`` the reward-redesign plan
+        # asks every run to log, so the empirical mixture can be compared with
+        # the nominal one instead of assumed equal to it.
+        "terminal_abs_mean": float(xp.mean(xp.abs(terminal_rewards))),
+        "local_abs_mean": float(xp.mean(xp.abs(local_rewards))),
         "good_pct": float(100.0 * good / total),
         "neutral_pct": float(100.0 * neutral / total),
         "bad_pct": float(100.0 * bad / total),
@@ -986,6 +1123,69 @@ def _merge_parallel_summary(summary, run_info, *, phase, iteration):
     summary[key] = summary.get(key, 0) + 1
 
 
+# A legal action sitting this far below the global logit maximum contributes
+# ``exp(-deficit)`` to a full-support softmax, which is exactly the smallest
+# normal float32. Past it the contribution is denormal and heading for zero, so
+# this is the point where the full-support sampling path stops being able to
+# represent the action at all. It is a property of float32, not a tuning knob.
+LEGAL_LOGIT_DEFICIT_WARNING = -math.log(float(np.finfo(np.float32).tiny))
+
+
+def _print_ppo_numerical_health(count, rows):
+    """Print the divergence observables, and warn only when one has fired.
+
+    ``legal_logit_deficit_max`` is the precursor of an unusable *rollout
+    sampler*, which is a different failure from a diverged learner and has a
+    different tell: it rises while the weights stay flat, because unbounded
+    ReLU activations, not weight growth, drive the logit spread.
+
+    ``policy_weight_max_abs`` is the precursor of a non-finite rollout policy:
+    the float32 forward pass overflows as a function of the largest weight
+    times the largest activation, and the gradient norm does not show it -- a
+    run can drift for millions of games with clipping never firing once. The
+    per-checkpoint history of the same quantity is what
+    ``analysis/rl_weight_health.py`` reconstructs from disk, including for runs
+    that predate this reporting.
+
+    A rejected minibatch or a rolled-back epoch is an event, not a trend, so
+    those two lines stay silent on a healthy run.
+    """
+    weights = [
+        row["policy_weight_max_abs"]
+        for row in rows
+        if row.get("policy_weight_max_abs") is not None
+    ]
+    if weights:
+        print(
+            f"  PPO/{count}: policy weight max|W| "
+            f"{np.mean(weights):.4f} avg/{max(weights):.4f} max"
+        )
+    deficits = [
+        row["legal_logit_deficit_max"]
+        for row in rows
+        if row.get("legal_logit_deficit_max") is not None
+    ]
+    if deficits:
+        print(
+            f"  PPO/{count}: legal logit deficit "
+            f"{np.mean(deficits):.2f} avg/{max(deficits):.2f} max nats "
+            f"(float32 limit {LEGAL_LOGIT_DEFICIT_WARNING:.2f})"
+        )
+    rejected = sum(int(row.get("rejected_minibatches") or 0) for row in rows)
+    if rejected:
+        print(
+            f"  PPO/{count}: WARNING {rejected} minibatch(es) had a non-finite "
+            "gradient and were skipped; the weights were left untouched."
+        )
+    diverged = [row for row in rows if row.get("diverged_epoch")]
+    if diverged:
+        print(
+            f"  PPO/{count}: WARNING {len(diverged)} iteration(s) rolled back a "
+            f"diverged epoch (first at epoch {diverged[0]['diverged_epoch']}): "
+            f"{diverged[0].get('divergence_reason')}"
+        )
+
+
 def _print_ppo_window(rows):
     """Print the requested ten-iteration PPO aggregate without minibatch chatter."""
     rows = list(rows)
@@ -1027,6 +1227,7 @@ def _print_ppo_window(rows):
         f"{np.mean([row['gradient_norm_mean'] for row in rows]):.3f} avg/"
         f"{max(row['gradient_norm_max'] for row in rows):.3f} max"
     )
+    _print_ppo_numerical_health(count, rows)
     value_rows = [row for row in rows if row.get("final_value_loss") is not None]
     if value_rows:
         explained = [
@@ -1113,11 +1314,17 @@ def _metric_values(row):
         "restart_event_stats": row.get("restart_event_stats", [0, 0, 0, 0]),
         "wins_in_batch": row["wins_in_batch"],
         "batch_win_rate": row["batch_win_rate"],
+        "terminal_outcomes": row.get(
+            "terminal_outcomes", list(EMPTY_TERMINAL_OUTCOMES)
+        ),
         "moving_average_win_rate": row["moving_average_win_rate"],
         "reward_mean": row["reward_mean"],
         "reward_std": row["reward_std"],
         "reward_min": row["reward_min"],
         "reward_max": row["reward_max"],
+        "terminal_mean": row.get("terminal_mean"),
+        "terminal_abs_mean": row.get("terminal_abs_mean"),
+        "local_abs_mean": row.get("local_abs_mean"),
         "good_pct": row["good_pct"],
         "neutral_pct": row["neutral_pct"],
         "bad_pct": row["bad_pct"],

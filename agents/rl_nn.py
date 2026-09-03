@@ -1,5 +1,6 @@
 """Masked policy network with an optional training-only value head."""
 
+import math
 import os
 import time
 
@@ -16,6 +17,15 @@ from agents.nn import (
 _VALUE_WEIGHTS = ("Wv", "bv")
 _OPTIMIZER_STEP_KEY = "optimizer_step_count"
 _ALGORITHM_KEY = "rl_training_algorithm"
+
+
+class NonFinitePolicyError(FloatingPointError):
+    """The policy produced a NaN or infinite value where one cannot be used.
+
+    It subclasses ``FloatingPointError`` so every existing handler keeps
+    catching it, while callers that can act on a diverged policy -- the
+    rollout runner and the PPO epoch loop -- can name the condition exactly.
+    """
 
 
 # Gradient names carrying this prefix belong to the separate critic network of
@@ -173,6 +183,24 @@ class PolicyNetwork(SupervisedNeuralNetwork):
     def parameter_array(self, name):
         """Return the array one policy or critic parameter name addresses."""
         return getattr(*self._gradient_target(name))
+
+    def snapshot_parameters(self):
+        """Return one detached copy of every trainable array, by name.
+
+        The exact inverse of ``restore_parameters``. It exists so a caller can
+        undo a whole block of optimizer steps -- a diverged PPO epoch -- without
+        knowing how the critic is wired or how many hidden layers there are.
+        """
+        return {
+            name: self.parameter_array(name).copy()
+            for name in (*self.weight_names, *self.critic_parameter_names)
+        }
+
+    def restore_parameters(self, arrays):
+        """Write back one snapshot taken with ``snapshot_parameters``."""
+        for name, value in arrays.items():
+            target, attribute = self._gradient_target(name)
+            setattr(target, attribute, value)
 
     def _gradient_target(self, name):
         """Return the object and attribute one gradient name addresses.
@@ -643,8 +671,23 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         Weight decay is decoupled: it shrinks the weight matrices after
         clipping instead of entering the gradient, so the reported gradient
         norms keep describing the policy/value gradient alone.
+
+        A non-finite gradient norm is rejected before anything is written.
+        Norm clipping cannot repair such a gradient: ``nan > clip`` is False,
+        so a NaN would bypass clipping entirely, and ``inf * (clip / inf)`` is
+        NaN, so an infinite gradient would be scaled into NaN. Either way the
+        weights would be poisoned permanently and silently. Skipping the step
+        loses one minibatch; applying it loses the run.
         """
         xp = self.xp
+        if not math.isfinite(grad_norm):
+            return {
+                "grad_norm": grad_norm,
+                "grad_clipped": False,
+                "applied_grad_norm": 0.0,
+                "optimizer_steps": 0,
+                "grad_rejected": True,
+            }
         grad_clipped = False
         applied_grad_norm = grad_norm
         if clip_grad_norm is not None and grad_norm > clip_grad_norm:
@@ -684,6 +727,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             "grad_clipped": grad_clipped,
             "applied_grad_norm": applied_grad_norm,
             "optimizer_steps": 1,
+            "grad_rejected": False,
         }
 
     def backward_ppo(
@@ -700,6 +744,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         clip_epsilon=0.2,
         entropy_coef=0.01,
         clip_grad_norm=5.0,
+        log_ratio_limit=20.0,
     ):
         """Apply one masked PPO clipped-surrogate SGD step.
 
@@ -741,7 +786,19 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         finish_phase("batch_conversion_and_shape_validation", phase_started)
 
         phase_started = time.perf_counter()
-        log_ratio = new_log_probs - old_log_probs
+        # The rollout floors the behavior probability at the smallest float32,
+        # so an unbounded log ratio reaches +/-87 and ``exp`` of that times an
+        # advantage overflows float32. ``active_weights`` would then be
+        # infinite, and every illegal action has ``masked_policy - sampled``
+        # exactly zero, so the gradient below would be 0 * inf = NaN. The
+        # bound is four orders of magnitude above any ratio a converging run
+        # produces and far below the overflow, so only the pathological tail
+        # is affected. Reporting paths deliberately keep the true ratio.
+        log_ratio = xp.clip(
+            new_log_probs - old_log_probs,
+            -float(log_ratio_limit),
+            float(log_ratio_limit),
+        )
         ratio = xp.exp(log_ratio)
         lower = 1.0 - float(clip_epsilon)
         upper = 1.0 + float(clip_epsilon)

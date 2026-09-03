@@ -23,7 +23,12 @@ from training.rl.cli import (
 )
 from training.rl.config import RLTrainingOptions
 from training.rl.resume import RLTrainingConfiguration
-from training.rl.rollout import DEFAULT_GAMMA_F, GAMMA_I, REWARD_ETA, REWARD_SCHEMAS
+from training.rl.reward_model import (
+    DEFAULT_GAMMA_F,
+    DEFAULT_GAMMA_I,
+    DEFAULT_REWARD_ETA,
+)
+from training.rl.rollout import DEFAULT_REWARD_SCHEMA
 from training.rl.reward_distance import (
     DEFAULT_REWARD_DISTANCE_MODE,
     HISTORICAL_REWARD_DISTANCE_MODE,
@@ -53,6 +58,10 @@ _BASE_RL_CONFIG = {
     "worker_memory_reserve_mb": 512,
     "worker_estimated_mb": 256,
     "worker_max_rss_mb": 1024,
+    "terminal_empty_hand_weight": 1.0,
+    "terminal_blocked_weight": 1.0,
+    "immediate_draw_weight": 1.0,
+    "immediate_pass_weight": 1.0,
 }
 _LEGACY_VALUES = {"gamma": 1.0, "alpha": 0.5, "event_reward_decay": 0.90}
 _CURRENT_VALUES = {"gamma_f": 1.0, "reward_eta": 0.5, "gamma_i": 0.90}
@@ -94,6 +103,27 @@ def test_identity_spelling_normalizes_only_the_renamed_keys():
     # Already-legacy mappings pass through untouched, so normalizing twice is
     # the same as normalizing once.
     assert identity_spelling(normalized) == normalized
+
+
+def test_run_identity_is_pinned_against_every_future_change():
+    """One fixed configuration must keep hashing to one fixed value, forever.
+
+    ``rl_config`` is both hashed and immutable, so a key added to it renames
+    every existing run and makes them unresumable. The numerical-stability
+    guards were deliberately kept out of it for this reason: they are module
+    constants, reported in the informational manifest only. This pin is what
+    makes a regression of that decision fail here rather than on a machine
+    twenty million games into a run.
+
+    The pin moved once, when the four reward-component weights joined
+    ``rl_config``. That was the intent rather than an accident: the reward
+    redesign replaced the objective itself, so a run trained on the old
+    terminal reward must not be resumable under the new one. Any other change
+    to this value is a bug.
+    """
+    assert configuration_sha256(_run_config(_CURRENT_VALUES)) == (
+        "16da36a4915f74bce4a9b6d1785e920ebb47856cc568c39779cb4fad30aacacb"
+    )
 
 
 def test_run_identity_survives_the_rename():
@@ -210,14 +240,14 @@ def test_defaults_and_schema_keys_follow_the_new_names():
     training = RLTrainingOptions()
 
     assert training.gamma_f == DEFAULT_GAMMA_F
-    assert training.reward_eta == REWARD_ETA
-    assert training.gamma_i == GAMMA_I
+    assert training.reward_eta == DEFAULT_REWARD_ETA
+    assert training.gamma_i == DEFAULT_GAMMA_I
     assert training.reward_distance_mode == DEFAULT_REWARD_DISTANCE_MODE
     assert DEFAULT_GAMMA_F == 0.95
-    assert REWARD_SCHEMAS["reward_eta"] == REWARD_ETA
-    assert REWARD_SCHEMAS["gamma_i"] == GAMMA_I
-    assert REWARD_SCHEMAS["reward_distance_mode"] == (
+    assert DEFAULT_REWARD_SCHEMA["reward_eta"] == DEFAULT_REWARD_ETA
+    assert DEFAULT_REWARD_SCHEMA["gamma_i"] == DEFAULT_GAMMA_I
+    assert DEFAULT_REWARD_SCHEMA["reward_distance_mode"] == (
         DEFAULT_REWARD_DISTANCE_MODE
     )
-    assert "alpha" not in REWARD_SCHEMAS
-    assert "event_decay" not in REWARD_SCHEMAS
+    assert "alpha" not in DEFAULT_REWARD_SCHEMA
+    assert "event_decay" not in DEFAULT_REWARD_SCHEMA

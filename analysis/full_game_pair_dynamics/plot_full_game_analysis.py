@@ -720,13 +720,13 @@ def _reward_agents(matchup):
 
 
 def plot_raw_reward_components(data, output_dir, dpi):
-    """Compare mean raw local, terminal, and pip components by matchup/agent."""
+    """Compare mean raw event and terminal components by matchup/agent."""
     rows = ordered_matchups(data)
     fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
     components = (
         ("event_sum", "Local draw/pass"),
-        ("terminal_outcome", "Terminal outcome"),
-        ("final_pip_penalty", "Final pip penalty"),
+        ("empty_hand_component", "Empty-hand terminal"),
+        ("blocked_component", "Blocked terminal"),
     )
     widths = 0.22
     for axis, (key, matchup) in zip(axes.flat, rows):

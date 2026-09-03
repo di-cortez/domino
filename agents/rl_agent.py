@@ -2,11 +2,12 @@
 
 from dataclasses import dataclass
 import time
+import warnings
 
 import numpy as np
 
 from agents.encoder import DominoEncoder
-from agents.rl_nn import PolicyNetwork
+from agents.rl_nn import NonFinitePolicyError, PolicyNetwork
 from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
@@ -37,6 +38,99 @@ class FinishedTrajectoryStep:
     local_reward: float
     terminal_reward: float
     old_log_prob: float = 0.0
+
+
+UNDERFLOW_FALLBACK_WARNING = (
+    "RL rollout policy left no usable probability mass on the legal actions "
+    "of a decision: the full-support softmax underflowed on every one of "
+    "them. Sampling uniformly over the legal actions for this decision. The "
+    "policy is not diverged -- this is a float32 limit of the full-support "
+    "path, which a network publishing its logits cache never takes."
+)
+
+# Count of decisions that fell back to a uniform draw, per process. It is a
+# module-level counter because the rollout workers that reach this path build
+# their agents without a runtime profile, so there is no per-agent channel back
+# to the parent. The warning is emitted once per process; the counter keeps the
+# full tally for tests and for direct inspection.
+underflow_fallback_count = 0
+_underflow_fallback_warned = False
+
+
+def _uniform_over_legal_actions(legal_probabilities):
+    """Return a uniform draw over one decision's legal actions.
+
+    Reached only when every legal action underflowed to exactly zero, which
+    leaves the full-support array carrying no recoverable ordering over the
+    legal subset. A uniform draw is the honest reading of that state, and it
+    keeps a run alive that would otherwise die on a single decision.
+    """
+    global underflow_fallback_count, _underflow_fallback_warned
+    underflow_fallback_count += 1
+    if not _underflow_fallback_warned:
+        _underflow_fallback_warned = True
+        warnings.warn(UNDERFLOW_FALLBACK_WARNING, RuntimeWarning, stacklevel=3)
+    return np.full(
+        legal_probabilities.shape,
+        1.0 / legal_probabilities.size,
+        dtype=np.float32,
+    )
+
+
+def _masked_rollout_probabilities(probabilities, logits, host_legal_mask):
+    """Return the sampling distribution over one decision's legal actions.
+
+    Two numerically different paths reach this, and they fail in different
+    ways, so neither may borrow the other's diagnosis.
+
+    With the output logits cached, the softmax is rebuilt over the legal subset
+    alone. After the max-subtraction the maximizing entry contributes exactly
+    ``exp(0) = 1``, so the total is at least 1.0 for every finite input: a
+    non-finite total cannot come from the mask or from the renormalization, it
+    can only mean the network returned NaN or infinity. The logits are
+    therefore tested directly, before the subtraction, while it is still
+    visible which entries were bad -- ``inf - inf`` would erase that.
+
+    Without the logits only the full-support probabilities survive, and there
+    the legal mass genuinely can underflow to zero with nothing being
+    non-finite. Underflow is a float32 limit rather than a diverged policy, so
+    it degrades to a uniform draw; only a non-finite total still raises.
+    """
+    if logits is None:
+        legal_probabilities = np.asarray(
+            probabilities[host_legal_mask, 0],
+            dtype=np.float32,
+        ).copy()
+        legal_total = float(legal_probabilities.sum())
+        if not np.isfinite(legal_total):
+            raise NonFinitePolicyError(
+                "RL rollout policy produced a non-finite total over the "
+                f"{int(host_legal_mask.sum())} legal actions of this decision "
+                f"(total {legal_total!r}). The policy weights have diverged; "
+                "the legal mask and the masked softmax are not at fault."
+            )
+        if legal_total <= 0.0:
+            return _uniform_over_legal_actions(legal_probabilities)
+    else:
+        if hasattr(logits, "get"):
+            logits = logits.get()
+        legal_logits = np.asarray(
+            logits[host_legal_mask, 0],
+            dtype=np.float32,
+        )
+        non_finite = int(np.count_nonzero(~np.isfinite(legal_logits)))
+        if non_finite:
+            raise NonFinitePolicyError(
+                f"RL rollout policy produced non-finite logits: {non_finite} of "
+                f"{legal_logits.size} legal logits are NaN or infinite. The "
+                "policy weights have diverged; the legal mask and the masked "
+                "softmax are not at fault."
+            )
+        legal_logits = legal_logits - np.max(legal_logits)
+        legal_probabilities = np.exp(legal_logits)
+        legal_total = float(legal_probabilities.sum())
+    legal_probabilities /= legal_total
+    return legal_probabilities
 
 
 class RLAgent(Agent):
@@ -192,26 +286,11 @@ class RLAgent(Agent):
             logits = getattr(self.network, "cache", {}).get(
                 getattr(self.network, "logits_key", "Z3")
             )
-            if logits is None:
-                legal_probabilities = np.asarray(
-                    probabilities[host_legal_mask, 0],
-                    dtype=np.float32,
-                ).copy()
-            else:
-                if hasattr(logits, "get"):
-                    logits = logits.get()
-                legal_logits = np.asarray(
-                    logits[host_legal_mask, 0],
-                    dtype=np.float32,
-                )
-                legal_logits = legal_logits - np.max(legal_logits)
-                legal_probabilities = np.exp(legal_logits)
-            legal_total = float(legal_probabilities.sum())
-            if not np.isfinite(legal_total) or legal_total <= 0.0:
-                raise FloatingPointError(
-                    "Masked RL rollout policy produced invalid probabilities."
-                )
-            legal_probabilities /= legal_total
+            legal_probabilities = _masked_rollout_probabilities(
+                probabilities,
+                logits,
+                host_legal_mask,
+            )
             sampling_probabilities = np.zeros_like(
                 probabilities,
                 dtype=np.float32,
@@ -318,26 +397,11 @@ class RLAgent(Agent):
                 logits = getattr(self.network, "cache", {}).get(
                     getattr(self.network, "logits_key", "Z3")
                 )
-                if logits is None:
-                    legal_probabilities = np.asarray(
-                        probabilities[host_legal_mask, 0],
-                        dtype=np.float32,
-                    ).copy()
-                else:
-                    if hasattr(logits, "get"):
-                        logits = logits.get()
-                    legal_logits = np.asarray(
-                        logits[host_legal_mask, 0],
-                        dtype=np.float32,
-                    )
-                    legal_logits = legal_logits - np.max(legal_logits)
-                    legal_probabilities = np.exp(legal_logits)
-                legal_total = float(legal_probabilities.sum())
-                if not np.isfinite(legal_total) or legal_total <= 0.0:
-                    raise FloatingPointError(
-                        "Masked RL rollout policy produced invalid probabilities."
-                    )
-                legal_probabilities /= legal_total
+                legal_probabilities = _masked_rollout_probabilities(
+                    probabilities,
+                    logits,
+                    host_legal_mask,
+                )
                 sampling_probabilities = np.zeros_like(
                     probabilities,
                     dtype=np.float32,

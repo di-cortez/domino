@@ -260,6 +260,12 @@ def _resume_configuration(
         "reward_eta": float(training.reward_eta),
         "gamma_i": float(training.gamma_i),
         "reward_distance_mode": training.reward_distance_mode,
+        "terminal_empty_hand_weight": float(
+            training.terminal_empty_hand_weight
+        ),
+        "terminal_blocked_weight": float(training.terminal_blocked_weight),
+        "immediate_draw_weight": float(training.immediate_draw_weight),
+        "immediate_pass_weight": float(training.immediate_pass_weight),
         "normalize_advantages": bool(training.normalize_advantages),
         "use_opponent_bucket_features": bool(
             training.use_opponent_bucket_features
@@ -454,6 +460,10 @@ def prepare_training_session(training=None, resources=None, execution=None):
         gamma_f=training.gamma_f,
         reward_eta=training.reward_eta,
         reward_distance_mode=training.reward_distance_mode,
+        terminal_empty_hand_weight=training.terminal_empty_hand_weight,
+        terminal_blocked_weight=training.terminal_blocked_weight,
+        immediate_draw_weight=training.immediate_draw_weight,
+        immediate_pass_weight=training.immediate_pass_weight,
     )
     resume_configuration = _resume_configuration(
         inputs,

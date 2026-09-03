@@ -66,6 +66,86 @@ except Exception as exc:
     GPU_ENABLED = False
 
 
+class GPUContextLostError(RuntimeError):
+    """The CUDA context died; no in-process recovery is possible.
+
+    Distinct from ``OutOfMemoryError``, which a smaller batch survives. A lost
+    context invalidates every device allocation the process holds -- policy
+    weights and optimizer moments included -- so nothing about the interrupted
+    work can be saved and no retry can succeed. The only correct response is to
+    exit and let the run resume from its last checkpoint.
+    """
+
+
+# CUDA status names that mean the context is gone rather than merely full.
+# ``cudaErrorUnknown`` is included because the driver reports a context killed
+# from outside the process -- a module reload, a GPU reset, a display-server
+# restart -- under that name on some driver versions.
+CONTEXT_LOSS_STATUS_NAMES = frozenset({
+    "cudaErrorLaunchFailure",
+    "cudaErrorLaunchTimeout",
+    "cudaErrorIllegalAddress",
+    "cudaErrorHardwareStackError",
+    "cudaErrorIllegalInstruction",
+    "cudaErrorMisalignedAddress",
+    "cudaErrorECCUncorrectable",
+    "cudaErrorContextIsDestroyed",
+    "cudaErrorDeviceUninitialized",
+    "cudaErrorUnknown",
+    "CUDA_ERROR_LAUNCH_FAILED",
+    "CUDA_ERROR_LAUNCH_TIMEOUT",
+    "CUDA_ERROR_ILLEGAL_ADDRESS",
+    "CUDA_ERROR_CONTEXT_IS_DESTROYED",
+    "CUDA_ERROR_DEINITIALIZED",
+    "CUDA_ERROR_ECC_UNCORRECTABLE",
+})
+
+
+def _cuda_error_types():
+    """Return the CuPy exception classes that can carry a CUDA status name.
+
+    Resolved once, defensively: this feeds an ``isinstance`` check that runs
+    only while another exception is already being handled, where an
+    ``AttributeError`` from a renamed CuPy internal would replace a legible
+    diagnosis with a confusing one.
+    """
+    if _cupy is None:
+        return ()
+    types = []
+    for module_name, class_name in (
+        ("runtime", "CUDARuntimeError"),
+        ("driver", "CUDADriverError"),
+    ):
+        module = getattr(_cupy.cuda, module_name, None)
+        error_type = getattr(module, class_name, None)
+        if isinstance(error_type, type):
+            types.append(error_type)
+    return tuple(types)
+
+
+_CUDA_ERROR_TYPES = _cuda_error_types()
+
+
+def is_gpu_context_loss(exc):
+    """Return whether ``exc`` reports a CUDA context that can no longer run.
+
+    CuPy raises the same two exception types for a full device and for a dead
+    one, so the status name in the message is what separates them. Getting this
+    wrong in either direction is expensive: treating a dead context as
+    exhausted memory sends the operator after a VRAM problem that does not
+    exist, and treating exhausted memory as a dead context throws away a
+    recoverable batch-size fallback.
+    """
+    if not _CUDA_ERROR_TYPES:
+        return False
+    if _cupy is not None and isinstance(exc, _cupy.cuda.memory.OutOfMemoryError):
+        return False
+    if not isinstance(exc, _CUDA_ERROR_TYPES):
+        return False
+    message = str(exc)
+    return any(name in message for name in CONTEXT_LOSS_STATUS_NAMES)
+
+
 def validated_hidden_sizes(hidden_sizes):
     """Return one tuple of hidden-layer widths of any depth from one upwards."""
     sizes = tuple(int(size) for size in hidden_sizes)
@@ -409,6 +489,12 @@ class SupervisedNeuralNetwork:
         if isinstance(exc, MemoryError):
             return True
         if self.device != "gpu":
+            return False
+        # A lost context surfaces as CUDARuntimeError too, but no smaller batch
+        # survives it. Reporting it as exhausted memory would send the operator
+        # after a VRAM problem that does not exist, and would retry into a
+        # device that can no longer run a kernel.
+        if is_gpu_context_loss(exc):
             return False
         return isinstance(
             exc,

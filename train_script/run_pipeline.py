@@ -516,7 +516,8 @@ SCALE_FACTORS = _canonical_pipeline.SCALE_FACTORS
 _build_config = _canonical_pipeline._build_config
 parse_args = _canonical_pipeline.parse_args
 main = _canonical_pipeline.main
+run_cli = _canonical_pipeline.run_cli
 
 
 if __name__ == "__main__":
-    main()
+    run_cli()

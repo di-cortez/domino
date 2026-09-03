@@ -40,8 +40,8 @@ DECISION_CLASSES = (
 )
 RAW_REWARD_COMPONENTS = (
     "event_sum",
-    "terminal_outcome",
-    "final_pip_penalty",
+    "empty_hand_component",
+    "blocked_component",
     "total",
 )
 RELATIVE_PROGRESS_BINS = 20
@@ -579,8 +579,8 @@ def _new_reward_turn_accumulator():
         "actions": 0,
         "ending_games": 0,
         "event_sum_by_seat": [0.0, 0.0],
-        "terminal_sum_by_seat": [0.0, 0.0],
-        "pip_penalty_sum_by_seat": [0.0, 0.0],
+        "empty_hand_sum_by_seat": [0.0, 0.0],
+        "blocked_sum_by_seat": [0.0, 0.0],
         "total_increment_sum_by_seat": [0.0, 0.0],
         "cumulative_sum_by_seat": [0.0, 0.0],
         "acting_event_sum": 0.0,
@@ -642,8 +642,10 @@ def analyze_reward_metrics(input_path, pair):
                 )
             components_by_seat = {
                 "event_sum": raw.get("event_sum_by_seat"),
-                "terminal_outcome": raw.get("terminal_outcome_by_seat"),
-                "final_pip_penalty": raw.get("final_pip_penalty_by_seat"),
+                "empty_hand_component": raw.get(
+                    "empty_hand_component_by_seat"
+                ),
+                "blocked_component": raw.get("blocked_component_by_seat"),
                 "total": raw.get("total_by_seat"),
             }
             for component, values in components_by_seat.items():
@@ -695,12 +697,14 @@ def analyze_reward_metrics(input_path, pair):
                 if ending:
                     row["ending_games"] += 1
                     for seat in range(2):
-                        terminal = components_by_seat["terminal_outcome"][seat]
-                        pip_penalty = components_by_seat["final_pip_penalty"][seat]
-                        row["terminal_sum_by_seat"][seat] += terminal
-                        row["pip_penalty_sum_by_seat"][seat] += pip_penalty
-                        increment[seat] += terminal + pip_penalty
-                        cumulative[seat] += terminal + pip_penalty
+                        empty_hand = components_by_seat[
+                            "empty_hand_component"
+                        ][seat]
+                        blocked = components_by_seat["blocked_component"][seat]
+                        row["empty_hand_sum_by_seat"][seat] += empty_hand
+                        row["blocked_sum_by_seat"][seat] += blocked
+                        increment[seat] += empty_hand + blocked
+                        cumulative[seat] += empty_hand + blocked
 
                 row["actions"] += 1
                 row["acting_event_sum"] += event[acting]
@@ -746,13 +750,13 @@ def analyze_reward_metrics(input_path, pair):
             ],
             "mean_acting_player_event_reward": rounded(row["acting_event_sum"] / actions),
             "mean_opponent_event_reward": rounded(row["opponent_event_sum"] / actions),
-            "mean_terminal_outcome_by_seat": [
+            "mean_empty_hand_component_by_seat": [
                 rounded(value / row["ending_games"]) if row["ending_games"] else 0.0
-                for value in row["terminal_sum_by_seat"]
+                for value in row["empty_hand_sum_by_seat"]
             ],
-            "mean_final_pip_penalty_by_seat": [
+            "mean_blocked_component_by_seat": [
                 rounded(value / row["ending_games"]) if row["ending_games"] else 0.0
-                for value in row["pip_penalty_sum_by_seat"]
+                for value in row["blocked_sum_by_seat"]
             ],
             "mean_total_reward_increment_by_seat": [
                 rounded(value / actions) for value in row["total_increment_sum_by_seat"]

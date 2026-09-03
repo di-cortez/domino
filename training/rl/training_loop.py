@@ -10,6 +10,7 @@ live in :mod:`training.rl.session`; one iteration lives in
 from pathlib import Path
 import time
 
+from agents.nn import GPUContextLostError, is_gpu_context_loss
 from training.rl.iteration import _reinforce_policy_update, run_iteration
 from training.rl.reporting import build_training_summary
 from training.rl.resume import (
@@ -65,6 +66,30 @@ def _ensure_final_checkpoint(session, actual_final_iteration):
     state.last_saved_iteration = actual_final_iteration
 
 
+def _context_loss_message(state, iteration):
+    """Return the operator-facing diagnosis of one lost CUDA context.
+
+    Names the recovery point explicitly because the traceback alone reads like
+    a training fault: CUDA reports an asynchronous failure at the next
+    synchronization, so the line that raises is whichever one happened to copy
+    a scalar to the host, not the one at fault. Nothing about ``iteration`` can
+    be salvaged -- the weights and the optimizer moments live on the dead
+    device -- so the last written checkpoint is the whole recovery.
+    """
+    return (
+        f"The CUDA context died during RL iteration {iteration} "
+        f"({state.completed_training_games:,} games completed, "
+        f"{state.completed_this_invocation:,} of them in this process). This "
+        "is not a training fault: the policy weights were healthy and the "
+        "checkpoint at "
+        f"iteration {state.last_saved_iteration} is intact. The GPU was reset "
+        "underneath the process. Check `sudo dmesg -T | grep -i xid`, a driver "
+        "upgrade in /var/log/apt/history.log, and `nvidia-smi -q -d "
+        "TEMPERATURE,POWER`. Resume with the same command; the run loses only "
+        "the iterations since that checkpoint."
+    )
+
+
 def train(training=None, resources=None, execution=None):
     """Train an exact game budget using three typed option groups."""
     session = prepare_training_session(training, resources, execution)
@@ -75,9 +100,16 @@ def train(training=None, resources=None, execution=None):
     try:
         for local_iteration in range(1, session.iterations_to_run + 1):
             iteration = session.start_iteration + local_iteration
-            if run_iteration(context, state, iteration):
-                stopped_by_shutdown = True
-                break
+            try:
+                if run_iteration(context, state, iteration):
+                    stopped_by_shutdown = True
+                    break
+            except Exception as exc:
+                if not is_gpu_context_loss(exc):
+                    raise
+                raise GPUContextLostError(
+                    _context_loss_message(state, iteration)
+                ) from exc
 
         finalization_started = time.perf_counter()
         if (

@@ -6,6 +6,8 @@ import csv
 from dataclasses import fields
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -35,6 +37,7 @@ from diagnostics.rl_progress import (
     read_periodic_history,
     rebuild_progress_reports,
 )
+import training.pipeline as pipeline_module
 from training.rl import training_loop
 from training.rl.config import (
     RLExecutionOptions,
@@ -174,6 +177,10 @@ def _rl_config_from_summary(summary):
         "reward_eta": summary["reward_eta"],
         "gamma_i": summary["gamma_i"],
         "reward_distance_mode": summary["reward_distance_mode"],
+        "terminal_empty_hand_weight": summary["terminal_empty_hand_weight"],
+        "terminal_blocked_weight": summary["terminal_blocked_weight"],
+        "immediate_draw_weight": summary["immediate_draw_weight"],
+        "immediate_pass_weight": summary["immediate_pass_weight"],
         "clip_grad_norm": summary["clip_grad_norm"],
         "normalize_advantages": summary["normalize_advantages"],
         "worker_memory_reserve_mb": 0,
@@ -200,6 +207,10 @@ def _test_resume_configuration(**overrides):
         "gamma_f": 1.0,
         "reward_eta": 0.5,
         "gamma_i": 0.90,
+        "terminal_empty_hand_weight": 1.0,
+        "terminal_blocked_weight": 1.0,
+        "immediate_draw_weight": 1.0,
+        "immediate_pass_weight": 1.0,
         "clip_grad_norm": 5.0,
         "normalize_advantages": True,
         "weight_decay": 0.0,
@@ -1626,3 +1637,65 @@ def test_numbered_checkpoint_callback_advances_by_committed_games(tmp_path):
     assert [event[0]["rl_iterations_completed"] for event in events] == [2, 4]
     assert [event[1] for event in events] == [2, 4]
     assert summary["completed_training_games"] == 5
+
+
+def test_lost_context_exits_with_the_code_the_supervisor_keys_on(tmp_path):
+    """The process entry point must turn a dead context into exit code 70.
+
+    ``run_forever_supervised.sh`` distinguishes a GPU that was reset underneath
+    the process -- worth restarting -- from a configuration error it must not
+    retry, and the exit code is the only signal it has. The hard exit is
+    verified in a subprocess because ``os._exit`` ends the interpreter: that is
+    the behaviour under test, since unwinding runs CuPy's module destructors
+    against the dead context and turns one diagnosis into dozens of tracebacks.
+    """
+    script = tmp_path / "entry.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "from agents.nn import GPUContextLostError\n"
+        "import training.pipeline as pipeline\n"
+        "def boom(argv=None):\n"
+        "    raise GPUContextLostError('the CUDA context died during RL "
+        "iteration 3')\n"
+        "pipeline.main = boom\n"
+        "pipeline.run_cli()\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+    )
+    assert completed.returncode == pipeline_module.GPU_CONTEXT_LOST_EXIT_CODE
+    assert completed.returncode == 70
+    assert "[gpu]" in completed.stderr
+    assert "the CUDA context died during RL iteration 3" in completed.stderr
+
+
+def test_an_ordinary_failure_does_not_borrow_the_context_loss_exit_code(tmp_path):
+    """Only a lost context gets code 70; everything else exits the normal way.
+
+    A supervisor that restarts on any nonzero exit would spin forever on a bad
+    configuration, so the narrowness of the handler is part of its contract.
+    """
+    script = tmp_path / "entry.py"
+    script.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "import training.pipeline as pipeline\n"
+        "def boom(argv=None):\n"
+        "    raise ValueError('unsupported ruleset')\n"
+        "pipeline.main = boom\n"
+        "pipeline.run_cli()\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+    )
+    assert completed.returncode != pipeline_module.GPU_CONTEXT_LOST_EXIT_CODE
+    assert "unsupported ruleset" in completed.stderr

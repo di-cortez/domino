@@ -37,7 +37,7 @@ from training.rl.reward_distance import (
     HISTORICAL_REWARD_DISTANCE_MODE,
     resolve_reward_distance_mode,
 )
-from training.rl.rollout import GAMMA_I, REWARD_ETA
+from training.rl.reward_model import DEFAULT_GAMMA_I, DEFAULT_REWARD_ETA
 from utils.repository import current_git_commit
 
 
@@ -76,9 +76,31 @@ RENAMED_PARAMETER_KEYS = {
 }
 HISTORICAL_REWARD_PARAMETER_DEFAULTS = {
     "gamma_f": HISTORICAL_GAMMA_F,
-    "reward_eta": REWARD_ETA,
-    "gamma_i": GAMMA_I,
+    "reward_eta": DEFAULT_REWARD_ETA,
+    "gamma_i": DEFAULT_GAMMA_I,
 }
+
+# The four reward-component weights introduced with the terminal
+# empty-hand/blocked decomposition. Unlike the renamed parameters above these
+# get no historical default on purpose: a run recorded before the redesign was
+# optimizing a different objective (binary outcome minus a own-pip penalty, and
+# draw/pass events with baked-in 0.2/0.1 magnitudes), so filling the missing
+# keys with today's defaults would let it silently resume under an objective it
+# never trained on. Such a run has to be restarted instead.
+REWARD_WEIGHT_KEYS = (
+    "terminal_empty_hand_weight",
+    "terminal_blocked_weight",
+    "immediate_draw_weight",
+    "immediate_pass_weight",
+)
+PRE_REWARD_REDESIGN_MESSAGE = (
+    "This run was created before the reward redesign and records none of "
+    + ", ".join(REWARD_WEIGHT_KEYS)
+    + ". Its terminal reward was the binary outcome minus a 0.05-per-pip "
+    "penalty on the learner's own hand, which the empty-hand/blocked "
+    "decomposition replaces, so it cannot be resumed under the current "
+    "objective. Start a new RL run."
+)
 
 
 def run_config_uses_opponent_bucket_features(run_config):
@@ -128,6 +150,13 @@ class RLTrainingConfiguration:
     reward_eta: float
     gamma_i: float
     reward_distance_mode: str
+    # Recorded raw rather than as the normalized scales so a resumed run keeps
+    # the exact weights the experiment asked for; the scales are derived from
+    # them on every invocation by ``training.rl.config``.
+    terminal_empty_hand_weight: float
+    terminal_blocked_weight: float
+    immediate_draw_weight: float
+    immediate_pass_weight: float
     normalize_advantages: bool
     # Recorded even though the encoder ablations are usually caught by the
     # checkpoint's own input width, because these two are not independent: the
@@ -196,6 +225,8 @@ class RLTrainingConfiguration:
         for current_name, original_name in RENAMED_PARAMETER_KEYS.items():
             if current_name not in data and original_name in data:
                 data[current_name] = data[original_name]
+        if any(name not in data for name in REWARD_WEIGHT_KEYS):
+            raise ValueError(PRE_REWARD_REDESIGN_MESSAGE)
         data["opponent_buckets"] = tuple(data["opponent_buckets"])
         configuration = cls(**{
             field.name: data[field.name]
@@ -250,6 +281,11 @@ class RLTrainingConfiguration:
                 "reward_distance_mode",
                 HISTORICAL_REWARD_DISTANCE_MODE,
             ),
+            **{
+                name: float(rl[name])
+                for name in REWARD_WEIGHT_KEYS
+                if name in rl
+            },
             "normalize_advantages": bool(rl["normalize_advantages"]),
             # From locked_arguments, not rl_config, for the same reason the
             # baseline is; see ``training.canonical_run``.

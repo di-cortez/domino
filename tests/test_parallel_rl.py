@@ -15,13 +15,27 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import contextlib
+
+import agents.nn as nn_module
+from agents.nn import GPUContextLostError
 from agents.rl_nn import PolicyNetwork
+import training.rl.iteration as iteration_module
 from diagnostics.parallel_runner import (
     MAX_PARALLEL_WORKERS,
     DiagnosticMemoryPressure,
     ParallelSafetyConfig,
 )
-from training.rl.parallel import RLRolloutRunner, worker_count
+import random
+
+import agents.rl_agent as rl_agent_module
+import training.rl.rollout as rollout_module
+from agents.rl_agent import _masked_rollout_probabilities
+from training.rl.parallel import (
+    RLRolloutRunner,
+    _CPUInferencePolicy,
+    worker_count,
+)
 from training.rl.matchmaking import UniformRotationState, build_match_plan
 from training.rl.config import (
     RLExecutionOptions,
@@ -48,13 +62,34 @@ from training.rl.pool import (
 HEURISTIC_CHAMPION = CHAMPION_VS_HEURISTIC_BUCKET
 
 
+class FakeCUDAError(Exception):
+    """Stands in for a CuPy CUDA error so a lost context is testable on CPU."""
+
+
+@contextlib.contextmanager
+def _cuda_error_types(*types):
+    """Install fake CUDA exception types for the duration of one test.
+
+    ``is_gpu_context_loss`` resolves the real CuPy classes once at import, so
+    the classifier is inert on a CPU-only machine. Swapping the resolved tuple
+    is what lets the training loop's translation be tested without a GPU and
+    without provoking a real fault.
+    """
+    original = nn_module._CUDA_ERROR_TYPES
+    nn_module._CUDA_ERROR_TYPES = tuple(types)
+    try:
+        yield
+    finally:
+        nn_module._CUDA_ERROR_TYPES = original
+
+
 def _champion_state(metadata):
     """Return the heuristic champion's durable block of exported pool state."""
     return metadata["opponent_pool_state"]["champion_state_by_bucket"][
         HEURISTIC_CHAMPION
     ]
 from training.rl.reporting import read_training_metrics
-from training.rl.rollout import REWARD_SCHEMAS
+from training.rl.rollout import DEFAULT_REWARD_SCHEMA
 from training.rl.cli import parse_args as parse_rl_args
 from training.rl.training_loop import train
 from train_script.run_pipeline import parse_args as parse_pipeline_args
@@ -188,7 +223,7 @@ class ParallelRLTests(unittest.TestCase):
         runner = RLRolloutRunner(
             network,
             opponent_buckets=opponent_buckets,
-            schema=dict(REWARD_SCHEMAS),
+            schema=dict(DEFAULT_REWARD_SCHEMA),
             gamma_f=1.0,
             safety=self.safety,
         )
@@ -236,7 +271,7 @@ class ParallelRLTests(unittest.TestCase):
         runner = RLRolloutRunner(
             network,
             opponent_buckets=buckets,
-            schema=dict(REWARD_SCHEMAS),
+            schema=dict(DEFAULT_REWARD_SCHEMA),
             gamma_f=1.0,
             safety=self.safety,
         )
@@ -1284,7 +1319,7 @@ class ParallelRLTests(unittest.TestCase):
         source = RLRolloutRunner(
             network,
             opponent_buckets=buckets,
-            schema=dict(REWARD_SCHEMAS),
+            schema=dict(DEFAULT_REWARD_SCHEMA),
             gamma_f=1.0,
             safety=self.safety,
         )
@@ -1349,7 +1384,7 @@ class ParallelRLTests(unittest.TestCase):
                 base_seed=99,
                 opponent_buckets=buckets,
                 difficulty_weight=0.5,
-                schema=dict(REWARD_SCHEMAS),
+                schema=dict(DEFAULT_REWARD_SCHEMA),
                 gamma_f=1.0,
                 safety=self.safety,
                 pool_state=pool_state,
@@ -2328,7 +2363,7 @@ class ParallelRLTests(unittest.TestCase):
         runner = RLRolloutRunner(
             network,
             opponent_buckets=("heuristic", "recent"),
-            schema=dict(REWARD_SCHEMAS),
+            schema=dict(DEFAULT_REWARD_SCHEMA),
             gamma_f=1.0,
             safety=safety,
         )
@@ -2441,6 +2476,265 @@ class ParallelRLTests(unittest.TestCase):
                         quiet=True,
                     )
             self.assertFalse(rejected_path.exists())
+
+    def _fail_with_context_loss_on_iteration(self, target_iteration):
+        """Make the first GPU touch of ``target_iteration`` report a dead context.
+
+        ``_reward_signal_summary`` is the real crash site of the
+        ``d6_maxwr_lradaptativev4`` run: it is the first call of an iteration
+        that copies a scalar off the device, so an asynchronous fault surfaces
+        there. Injecting at the same place reproduces the failure the operator
+        actually sees, rather than a tidier one.
+        """
+        calls = {"count": 0}
+        original = iteration_module._reward_signal_summary
+
+        def failing(batch, xp=None):
+            calls["count"] += 1
+            if calls["count"] == target_iteration:
+                raise FakeCUDAError(
+                    "cudaErrorLaunchFailure: unspecified launch failure"
+                )
+            return original(batch, xp)
+
+        return mock.patch.object(
+            iteration_module,
+            "_reward_signal_summary",
+            failing,
+        )
+
+    def test_context_loss_names_the_iteration_and_the_recovery_point(self):
+        """A dead context must be reported as one, not as a training fault.
+
+        The raw traceback blames whichever line happened to synchronize, so
+        without this translation the operator reads a reward-statistics error
+        and goes looking for a bug in the reward code that is not there.
+        """
+        common = {
+            "iterations": 4,
+            "gpi": 6,
+            "opponent_buckets": ("random",),
+            "difficulty_weight": 0.0,
+            "checkpoint_interval": 2,
+            "seed": 4242,
+            "device": "cpu",
+            "workers": 1,
+            "safety_config": self.safety,
+            "numbered_checkpoints": True,
+            "fresh_from_sl": True,
+            "quiet": True,
+            "ppo_max_epochs": 1,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir) / "context-loss.npz"
+            with _cuda_error_types(FakeCUDAError):
+                with self._fail_with_context_loss_on_iteration(3):
+                    with self.assertRaises(GPUContextLostError) as caught:
+                        self._train(rl_weights_path=str(base), **common)
+
+        message = str(caught.exception)
+        self.assertIn("iteration 3", message)
+        # The checkpoint at iteration 2 is the recovery point, and naming it is
+        # the whole point of the message.
+        self.assertIn("checkpoint at iteration 2", message)
+        self.assertIn("not a training fault", message)
+        self.assertIn("dmesg", message)
+        # The original CUDA error stays reachable for anyone reading the chain.
+        self.assertIsInstance(caught.exception.__cause__, FakeCUDAError)
+
+    def test_context_loss_leaves_the_last_checkpoint_resumable(self):
+        """The run must survive the fault by resuming, since nothing can be salvaged.
+
+        The weights and the optimizer moments live on the dead device, so the
+        supervisor's restart is the entire recovery. That is only true if the
+        checkpoint written before the fault still loads and still carries the
+        same run identity.
+        """
+        common = {
+            "iterations": 4,
+            "gpi": 6,
+            "opponent_buckets": ("random",),
+            "difficulty_weight": 0.0,
+            "checkpoint_interval": 2,
+            "seed": 4242,
+            "device": "cpu",
+            "workers": 1,
+            "safety_config": self.safety,
+            "numbered_checkpoints": True,
+            "quiet": True,
+            "ppo_max_epochs": 1,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir) / "context-loss-resume.npz"
+            with _cuda_error_types(FakeCUDAError):
+                with self._fail_with_context_loss_on_iteration(3):
+                    with self.assertRaises(GPUContextLostError):
+                        self._train(
+                            rl_weights_path=str(base),
+                            fresh_from_sl=True,
+                            **common,
+                        )
+
+            checkpoint = numbered_checkpoint_path(base, 2)
+            state_path = resume_state_path(checkpoint)
+            self.assertTrue(checkpoint.is_file())
+            self.assertTrue(state_path.is_file())
+            saved, _pool = load_resume_state(str(checkpoint), str(state_path))
+            self.assertEqual(saved["completed_iteration"], 2)
+
+            # The restart the supervisor performs, with no injected fault.
+            resumed = self._train(
+                rl_weights_path=str(base),
+                resume_weights_path=str(checkpoint),
+                resume_state_file=str(state_path),
+                fresh_from_sl=False,
+                **common,
+            )
+
+        self.assertEqual(resumed["completed_training_games"], 24)
+
+
+class CPUInferencePolicyLogitsTests(unittest.TestCase):
+    """The worker-side policy must honour the cache contract ``RLAgent`` reads.
+
+    Every other test in the repository pairs ``RLAgent`` with ``PolicyNetwork``
+    or with a fake that already defines ``cache``, so all of them exercise the
+    precise masked path. Production rollouts do not run either class: they run
+    ``_CPUInferencePolicy``, and while that class published no cache the agent's
+    ``getattr(network, "cache", {})`` silently routed every worker decision into
+    the underflow-prone full-support fallback.
+    """
+
+    def _policy(self, output_bias=None):
+        rng = np.random.default_rng(7)
+        weights = {
+            "W1": rng.normal(size=(8, 5)).astype(np.float32),
+            "b1": np.zeros((8, 1), dtype=np.float32),
+            "W2": rng.normal(size=(4, 8)).astype(np.float32),
+            "b2": (
+                np.zeros((4, 1), dtype=np.float32)
+                if output_bias is None
+                else np.asarray(output_bias, dtype=np.float32).reshape(4, 1)
+            ),
+        }
+        return _CPUInferencePolicy(weights)
+
+    def test_forward_publishes_the_logits_cache_rl_agent_reads(self):
+        policy = self._policy()
+        self.assertEqual(policy.logits_key, f"Z{policy.layer_count}")
+        probabilities = policy.forward(np.ones((5, 1), dtype=np.float32))
+        logits = policy.cache.get(policy.logits_key)
+        self.assertIsNotNone(logits)
+        self.assertEqual(logits.shape, probabilities.shape)
+        shifted = np.exp(logits - logits.max(axis=0, keepdims=True))
+        np.testing.assert_allclose(
+            shifted / shifted.sum(axis=0, keepdims=True),
+            probabilities,
+            rtol=1e-6,
+            atol=1e-7,
+        )
+
+    def test_masked_sampling_survives_a_logit_spread_past_float32(self):
+        """A 145-nat spread is what the 28M-game crash actually carried.
+
+        The full-support softmax flushes both legal actions to exactly zero
+        there, which is the state that produced ``total 0.0``. Reading the
+        logits instead keeps the maximizing legal action at ``exp(0) = 1``.
+        """
+        logits = np.array([[145.0], [0.0], [-1.0], [-2.0]], dtype=np.float32)
+        probabilities = np.exp(logits - logits.max())
+        probabilities /= probabilities.sum()
+        legal_mask = np.array([False, True, True, False])
+
+        self.assertEqual(float(probabilities[legal_mask, 0].sum()), 0.0)
+
+        sampled = _masked_rollout_probabilities(
+            probabilities, logits, legal_mask
+        )
+        self.assertTrue(np.all(np.isfinite(sampled)))
+        self.assertAlmostEqual(float(sampled.sum()), 1.0, places=6)
+        self.assertGreater(float(sampled.max()), 0.5)
+
+    def test_real_rollout_games_never_take_the_underflow_fallback(self):
+        """End-to-end over the exact class production runs in a worker.
+
+        A deliberately over-scaled output layer puts the global logit maximum
+        tens of nats above whatever is legal, which is the state the 28M-game
+        run reached on its own. With the logits cache published the agent
+        rebuilds the softmax over the legal subset and never needs the
+        fallback; without it every such decision lands there.
+        """
+        rng = np.random.default_rng(3)
+        weights = {
+            "W1": (rng.normal(size=(32, 69)) * 0.5).astype(np.float32),
+            "b1": np.zeros((32, 1), dtype=np.float32),
+            "W2": (rng.normal(size=(20, 32)) * 12.0).astype(np.float32),
+            "b2": np.zeros((20, 1), dtype=np.float32),
+        }
+        policy = _CPUInferencePolicy(weights)
+
+        before = rl_agent_module.underflow_fallback_count
+        seen_deficit = []
+        original = rl_agent_module._masked_rollout_probabilities
+
+        def recording(probabilities, logits, host_legal_mask):
+            self.assertIsNotNone(
+                logits,
+                "the worker policy must publish its logits cache",
+            )
+            column = np.asarray(logits[:, 0], dtype=np.float32)
+            seen_deficit.append(
+                float(column.max() - column[host_legal_mask].max())
+            )
+            return original(probabilities, logits, host_legal_mask)
+
+        random.seed(5)
+        np.random.seed(5)
+        with mock.patch.object(
+            rl_agent_module, "_masked_rollout_probabilities", recording
+        ):
+            for _ in range(200):
+                rollout_module._collect_steps_vs_heuristic(
+                    policy,
+                    dict(DEFAULT_REWARD_SCHEMA),
+                    0.95,
+                    ruleset_name="double-three",
+                    use_opponent_bucket_features=False,
+                )
+
+        self.assertTrue(seen_deficit, "no learner decision was exercised")
+        self.assertEqual(rl_agent_module.underflow_fallback_count, before)
+        self.assertGreater(
+            max(seen_deficit),
+            float(-np.log(np.finfo(np.float32).tiny)),
+            "the fixture did not reach the float32 underflow regime",
+        )
+
+    def test_the_two_paths_agree_below_the_float32_limit(self):
+        """The fix is a rounding correction, not a change of distribution.
+
+        Renormalizing the full-support softmax over the legal subset and taking
+        the softmax of the legal subset directly are algebraically the same
+        thing; only float32 separates them.
+        """
+        rng = np.random.default_rng(11)
+        for _ in range(200):
+            logits = rng.uniform(-30.0, 30.0, size=(12, 1)).astype(np.float32)
+            legal_mask = np.zeros(12, dtype=bool)
+            legal_mask[rng.choice(12, size=4, replace=False)] = True
+            probabilities = np.exp(logits - logits.max())
+            probabilities /= probabilities.sum()
+
+            from_logits = _masked_rollout_probabilities(
+                probabilities, logits, legal_mask
+            )
+            from_probabilities = _masked_rollout_probabilities(
+                probabilities, None, legal_mask
+            )
+            total_variation = 0.5 * float(
+                np.abs(from_logits - from_probabilities).sum()
+            )
+            self.assertLess(total_variation, 1e-6)
 
 
 if __name__ == "__main__":

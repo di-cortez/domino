@@ -6,11 +6,13 @@ Run from the repository root with:
     python tests/test_core.py
 """
 
+import contextlib
 import csv
 import json
 import os
 import sys
 import tempfile
+import warnings
 from itertools import combinations
 from pathlib import Path
 
@@ -33,9 +35,12 @@ from agents.nn import (
     GPU_ENABLED,
     GPU_UNAVAILABLE_REASON,
     SupervisedNeuralNetwork,
+    is_gpu_context_loss,
 )
+import agents.nn as nn_module
+import agents.rl_agent as rl_agent_module
 from agents.rl_agent import RLAgent, TrajectoryStep
-from agents.rl_nn import PolicyNetwork
+from agents.rl_nn import NonFinitePolicyError, PolicyNetwork
 from diagnostics.pairwise import (
     CANONICAL_AGENTS,
     _atomic_replace_directory,
@@ -63,12 +68,9 @@ from middleware.opponent_model import (
     reconstruct_public_actions,
 )
 from training.rl.config import DEFAULT_GPI, RLResourceOptions
+from training.rl.reward_model import DEFAULT_GAMMA_I, DEFAULT_REWARD_ETA
 from training.rl.rollout import (
-    GAMMA_I,
-    LEARNER_DRAW_PENALTY,
-    LEARNER_PASS_PENALTY,
-    OPPONENT_DRAW_REWARD,
-    OPPONENT_PASS_REWARD,
+    DEFAULT_REWARD_SCHEMA,
     EventStats,
     TrainingSample,
     _event_reward_for_action,
@@ -119,6 +121,49 @@ class UniformPolicyNetwork:
 
     def forward(self, x):
         return host_np.ones((DominoEncoder.ACTION_SIZE, 1), dtype=float) / DominoEncoder.ACTION_SIZE
+
+
+class DivergedPolicyNetwork:
+    """A network whose output layer has stopped being finite.
+
+    It reproduces the state a diverged run reaches: the weights are large
+    enough that ``W . a + b`` overflows float32, so the cached logits carry
+    infinities and the softmax over them is NaN.
+    """
+
+    xp = host_np
+    logits_key = "Z3"
+
+    def __init__(self, value=host_np.inf, cache_logits=True):
+        self.value = value
+        # ``cache_logits=False`` reproduces a diverged policy reached through a
+        # network that publishes no logits, which is the only way the fallback
+        # path can see a non-finite total.
+        self.cache_logits = bool(cache_logits)
+        self.cache = {}
+
+    def forward(self, x):
+        logits = host_np.zeros((DominoEncoder.ACTION_SIZE, 1), dtype=host_np.float32)
+        logits[:] = self.value
+        self.cache = {self.logits_key: logits} if self.cache_logits else {}
+        return host_np.full(
+            (DominoEncoder.ACTION_SIZE, 1),
+            host_np.nan,
+            dtype=host_np.float32,
+        )
+
+
+class UnderflowedPolicyNetwork:
+    """A network with no cached logits whose legal probabilities are all zero.
+
+    Without the logits the masked softmax cannot be rebuilt, so this is the one
+    path where the legal mass really can vanish while every value stays finite.
+    """
+
+    xp = host_np
+
+    def forward(self, x):
+        return host_np.zeros((DominoEncoder.ACTION_SIZE, 1), dtype=host_np.float32)
 
 
 class FixedStrategicOpponentModel:
@@ -1444,6 +1489,186 @@ def test_rl_agent_saves_legal_mask_for_real_decision():
     assert step.local_reward == 0.0
 
 
+def test_diverged_policy_names_the_logits_not_the_legal_mask():
+    """The rollout guard must accuse the real cause.
+
+    After the max-subtraction ``sum(exp(logits - max))`` is at least 1.0 for
+    every finite input, so a non-finite total can only mean the network itself
+    returned NaN or infinity. The message must say so, because the previous
+    wording sent the reader to the mask, which is correct.
+    """
+    state = _base_probability_state()
+    legal_actions = [((0, 0), 0), ((0, 1), 0)]
+
+    for value in (host_np.inf, host_np.nan):
+        agent = RLAgent(DivergedPolicyNetwork(value), mode="training")
+
+        try:
+            agent.choose_move(state=state, legal_actions=legal_actions)
+        except NonFinitePolicyError as error:
+            message = str(error)
+        else:
+            raise AssertionError("A diverged policy must not produce a move.")
+
+        assert "non-finite logits" in message
+        assert "2 of 2" in message
+        assert "not at fault" in message
+        assert agent.trajectory == []
+
+
+def test_underflowed_legal_mass_degrades_to_a_uniform_draw():
+    """Underflow is a float32 limit, not a diverged policy, so it must not kill the run.
+
+    The 28M-game ``d6_maxwr_lr032`` crash died on a single decision whose two
+    legal actions both flushed to zero while every weight stayed finite and the
+    policy stayed healthy. There is no ordering left to recover in that state,
+    but a uniform draw over the legal actions is a sound reading of it and the
+    run survives.
+    """
+    state = _base_probability_state()
+    legal_actions = [((0, 0), 0), ((0, 1), 0)]
+    agent = RLAgent(UnderflowedPolicyNetwork(), mode="training")
+
+    before = rl_agent_module.underflow_fallback_count
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        rl_agent_module._underflow_fallback_warned = False
+        move = agent.choose_move(state=state, legal_actions=legal_actions)
+
+    assert move in legal_actions
+    assert rl_agent_module.underflow_fallback_count == before + 1
+    assert any("underflowed" in str(entry.message) for entry in caught)
+    # The decision is still a real policy decision and must reach the buffer,
+    # otherwise the iteration silently loses a sample.
+    assert len(agent.trajectory) == 1
+
+
+def test_non_finite_legal_total_still_raises_on_the_fallback_path():
+    """Only a genuinely diverged policy keeps the hard failure.
+
+    The two fallback causes are not interchangeable: zero legal mass is a
+    representation limit that a uniform draw handles, while a NaN total means
+    the weights themselves are gone and no draw is meaningful.
+    """
+    state = _base_probability_state()
+    legal_actions = [((0, 0), 0), ((0, 1), 0)]
+    agent = RLAgent(DivergedPolicyNetwork(host_np.nan, cache_logits=False), mode="training")
+
+    before = rl_agent_module.underflow_fallback_count
+    try:
+        agent.choose_move(state=state, legal_actions=legal_actions)
+    except NonFinitePolicyError as error:
+        message = str(error)
+    else:
+        raise AssertionError("A diverged policy must not produce a move.")
+
+    assert "non-finite total" in message
+    assert "not at fault" in message
+    assert rl_agent_module.underflow_fallback_count == before
+
+
+class FakeCUDAError(Exception):
+    """Stands in for a CuPy CUDA error so the classifier is testable on CPU.
+
+    ``is_gpu_context_loss`` separates a dead context from a full one by the
+    status name CuPy puts in the message, and both arrive as the same exception
+    types. Injecting this class into the resolved type tuple exercises exactly
+    that decision without a GPU and without a real fault.
+    """
+
+
+class FakeOutOfMemoryError(Exception):
+    """Stands in for ``cupy.cuda.memory.OutOfMemoryError``."""
+
+
+class FakeGPUBackend:
+    """The two attributes ``_is_backend_memory_error`` reads off ``self.xp``."""
+
+    class cuda:
+        class memory:
+            OutOfMemoryError = FakeOutOfMemoryError
+
+        class runtime:
+            CUDARuntimeError = FakeCUDAError
+
+
+class FakeGPUNetwork:
+    """A network stub on the GPU branch of ``_is_backend_memory_error``."""
+
+    device = "gpu"
+    xp = FakeGPUBackend
+
+    _is_backend_memory_error = SupervisedNeuralNetwork._is_backend_memory_error
+
+
+@contextlib.contextmanager
+def _cuda_error_types(*types):
+    """Install fake CUDA exception types for the duration of one test."""
+    original = nn_module._CUDA_ERROR_TYPES
+    nn_module._CUDA_ERROR_TYPES = tuple(types)
+    try:
+        yield
+    finally:
+        nn_module._CUDA_ERROR_TYPES = original
+
+
+def test_launch_failure_is_classified_as_context_loss():
+    """Every status name that means a dead context must be recognized as one.
+
+    The ``d6_maxwr_lradaptativev4`` run died on ``cudaErrorLaunchFailure`` with
+    no kernel of ours in flight -- the GPU was reset underneath the process.
+    The driver spelling ``CUDA_ERROR_LAUNCH_FAILED`` reaches the same handler
+    from module teardown, so both spellings have to classify alike.
+    """
+    with _cuda_error_types(FakeCUDAError):
+        for name in (
+            "cudaErrorLaunchFailure",
+            "cudaErrorIllegalAddress",
+            "cudaErrorECCUncorrectable",
+            "CUDA_ERROR_LAUNCH_FAILED",
+        ):
+            error = FakeCUDAError(f"{name}: unspecified launch failure")
+            assert is_gpu_context_loss(error), name
+
+
+def test_out_of_memory_is_not_context_loss():
+    """A full device is recoverable and must keep the batch-size fallback.
+
+    Classifying exhausted memory as a dead context would throw away a working
+    retry; the two are told apart only by the status name, so this is the
+    direction the classifier is most at risk of over-reaching in.
+    """
+    with _cuda_error_types(FakeCUDAError):
+        allocation = FakeCUDAError(
+            "cudaErrorMemoryAllocation: out of memory"
+        )
+        assert not is_gpu_context_loss(allocation)
+    # A plain exception is never a CUDA fault, whatever it says.
+    assert not is_gpu_context_loss(RuntimeError("cudaErrorLaunchFailure"))
+
+
+def test_context_loss_is_not_reported_as_exhausted_memory():
+    """A dead context must not be renamed into a VRAM problem that does not exist.
+
+    ``_is_backend_memory_error`` accepted any ``CUDARuntimeError``, so a lost
+    context reached the supervised handler as "exhausted memory at fixed batch
+    N" -- a misdiagnosis that sends the operator hunting spare VRAM and retries
+    into a device that can no longer run a kernel.
+    """
+    network = FakeGPUNetwork()
+    with _cuda_error_types(FakeCUDAError):
+        context_loss = FakeCUDAError(
+            "cudaErrorLaunchFailure: unspecified launch failure"
+        )
+        assert not network._is_backend_memory_error(context_loss)
+        # The recoverable neighbours keep their existing classification.
+        assert network._is_backend_memory_error(FakeOutOfMemoryError("full"))
+        assert network._is_backend_memory_error(
+            FakeCUDAError("cudaErrorMemoryAllocation: out of memory")
+        )
+        assert network._is_backend_memory_error(MemoryError("host RAM"))
+
+
 def test_rl_evaluation_modes_separate_sampling_from_trajectory_storage():
     state = _base_probability_state()
     legal_actions = [((0, 0), 0), ((0, 1), 0)]
@@ -1540,23 +1765,44 @@ def test_decayed_event_reward_exponents():
             TrajectoryStep(None, 0, None, decision_turn=10),
         ]
 
-        agent.add_decayed_event_reward(event_turn, 0.10, GAMMA_I)
+        agent.add_decayed_event_reward(event_turn, 0.10, DEFAULT_GAMMA_I)
 
         assert abs(agent.trajectory[0].local_reward - expected) < 1e-12
 
 
 def test_event_reward_signs_and_counts():
+    """Forcing the opponent into an event is favorable; being forced is not.
+
+    Both event classes are unit events, so at the default weights the four
+    values differ only in sign. The draw/pass ratio lives in the schema
+    scales, which the next test exercises.
+    """
     stats = EventStats()
 
-    assert _event_reward_for_action(1, 0, ("DRAW", None), stats) == OPPONENT_DRAW_REWARD
-    assert _event_reward_for_action(1, 0, None, stats) == OPPONENT_PASS_REWARD
-    assert _event_reward_for_action(0, 0, ("DRAW", None), stats) == LEARNER_DRAW_PENALTY
-    assert _event_reward_for_action(0, 0, None, stats) == LEARNER_PASS_PENALTY
+    assert _event_reward_for_action(1, 0, ("DRAW", None), stats) == 1.0
+    assert _event_reward_for_action(1, 0, None, stats) == 1.0
+    assert _event_reward_for_action(0, 0, ("DRAW", None), stats) == -1.0
+    assert _event_reward_for_action(0, 0, None, stats) == -1.0
 
     assert stats.opponent_draws == 1
     assert stats.opponent_passes == 1
     assert stats.learner_draws == 1
     assert stats.learner_passes == 1
+
+
+def test_event_reward_applies_the_normalized_pair_scales():
+    """The draw/pass ratio reaches the event through the resolved scales."""
+    schema = {**DEFAULT_REWARD_SCHEMA, "draw_scale": 1.0, "pass_scale": 0.5}
+    stats = EventStats()
+
+    assert _event_reward_for_action(
+        1, 0, ("DRAW", None), stats, schema
+    ) == 1.0
+    assert _event_reward_for_action(1, 0, None, stats, schema) == 0.5
+    assert _event_reward_for_action(
+        0, 0, ("DRAW", None), stats, schema
+    ) == -1.0
+    assert _event_reward_for_action(0, 0, None, stats, schema) == -0.5
 
 
 def test_multiple_events_and_all_previous_decisions_receive_rewards():
@@ -1566,8 +1812,8 @@ def test_multiple_events_and_all_previous_decisions_receive_rewards():
         TrajectoryStep(None, 0, None, decision_turn=12),
     ]
 
-    agent.add_decayed_event_reward(13, 0.10, GAMMA_I)
-    agent.add_decayed_event_reward(14, -0.02, GAMMA_I)
+    agent.add_decayed_event_reward(13, 0.10, DEFAULT_GAMMA_I)
+    agent.add_decayed_event_reward(14, -0.02, DEFAULT_GAMMA_I)
 
     assert abs(agent.trajectory[0].local_reward - (0.081 - 0.01458)) < 1e-12
     assert abs(agent.trajectory[1].local_reward - (0.10 - 0.018)) < 1e-12
@@ -1576,7 +1822,7 @@ def test_multiple_events_and_all_previous_decisions_receive_rewards():
 def test_event_reward_without_decisions_is_noop():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
 
-    agent.add_decayed_event_reward(3, 0.10, GAMMA_I)
+    agent.add_decayed_event_reward(3, 0.10, DEFAULT_GAMMA_I)
 
     assert agent.trajectory == []
 
@@ -1611,7 +1857,7 @@ def test_choice_count_does_not_weight_terminal_or_local_rewards():
         reward_distance_mode="turn-decision",
     )
 
-    # (1 - REWARD_ETA) * 0.50 + REWARD_ETA * 0.10 at the default REWARD_ETA of 0.5.
+    # (1 - eta) * 0.50 + eta * 0.10 at the default reward_eta of 0.5.
     assert [sample.policy_reward for sample in samples] == [0.30, 0.30]
     assert all(not hasattr(sample, "multiplier") for sample in samples)
     assert all(not hasattr(sample, "option_count") for sample in samples)
@@ -2209,6 +2455,30 @@ def main():
         ("RL forced actions skip network", test_rl_agent_skips_network_for_forced_actions),
         ("RL trajectory legal mask", test_rl_agent_saves_legal_mask_for_real_decision),
         (
+            "diverged policy names the logits",
+            test_diverged_policy_names_the_logits_not_the_legal_mask,
+        ),
+        (
+            "underflowed legal mass degrades to a uniform draw",
+            test_underflowed_legal_mass_degrades_to_a_uniform_draw,
+        ),
+        (
+            "non-finite legal total still raises",
+            test_non_finite_legal_total_still_raises_on_the_fallback_path,
+        ),
+        (
+            "launch failure is a lost context",
+            test_launch_failure_is_classified_as_context_loss,
+        ),
+        (
+            "out of memory is not a lost context",
+            test_out_of_memory_is_not_context_loss,
+        ),
+        (
+            "lost context is not exhausted memory",
+            test_context_loss_is_not_reported_as_exhausted_memory,
+        ),
+        (
             "RL stochastic and deterministic evaluation",
             test_rl_evaluation_modes_separate_sampling_from_trajectory_storage,
         ),
@@ -2216,6 +2486,10 @@ def main():
         ("invalid policy mask", test_policy_gradient_rejects_single_action_mask),
         ("decayed event reward exponents", test_decayed_event_reward_exponents),
         ("event reward signs", test_event_reward_signs_and_counts),
+        (
+            "event reward pair scales",
+            test_event_reward_applies_the_normalized_pair_scales,
+        ),
         (
             "multiple decayed events",
             test_multiple_events_and_all_previous_decisions_receive_rewards,

@@ -50,9 +50,12 @@ Important RL options are:
 | `--rl-total-training-games` | Exact real-game budget | `500000` |
 | `--rl-iterations` | Legacy fixed iteration budget using the default GPI | unset |
 | `--rl-learning-rate` | Learning rate | `0.001` |
-| `--rl-gamma` | Terminal-reward discount | `1.0` |
-| `--rl-alpha` | Convex mix of local vs terminal reward (`0` = terminal only, `1` = local only) | `0.5` |
-| `--rl-event-reward-decay` | Per-turn decay crediting a draw/pass event to earlier decisions | `0.90` |
+| `--gamma-f` | Terminal discount per selected terminal-distance unit | `0.95` |
+| `--reward-eta` | Convex mix of the terminal and immediate returns (`0` = terminal only, `1` = draw/pass shaping only) | `0.5` |
+| `--gamma-i` | Immediate-event discount crediting a draw/pass event to earlier decisions | `0.90` |
+| `--reward-distance-mode` | Distance units in `gamma_i`/`gamma_f` order | `turn-turn` |
+| `--terminal-empty-hand-weight` / `--terminal-blocked-weight` | Relative value of an empty-hand versus a blocked result; only the ratio matters | `1.0` / `1.0` |
+| `--immediate-draw-weight` / `--immediate-pass-weight` | Relative value of a draw versus a pass event; only the ratio matters | `1.0` / `1.0` |
 | `--rl-workers` | CPU rollout workers or `auto` | `auto` |
 | `--rl-value-head` | Enable the value head with PPO or REINFORCE | off |
 | `--weight-decay` | L2 decay forwarded to both the SL and the RL stage | off |
@@ -76,6 +79,43 @@ counters are restored before training.
 Each diagnostics run is written below
 `diagnostics/results/<rl-weights-basename>/`. Existing directories are
 validated against the requested model and configuration before reuse.
+
+## Unattended runs
+
+`run_forever_supervised.sh` wraps `python -m training.pipeline` in a restart
+loop and forwards every argument verbatim:
+
+```bash
+train_script/run_forever_supervised.sh --scale forever --ruleset double-six
+```
+
+It exists because a lost CUDA context cannot be recovered inside the process.
+When the GPU is reset underneath a healthy run -- an NVIDIA module reload from
+an unattended driver upgrade, an Xid fault, a display-server restart, a power
+or thermal event -- the policy weights and the optimizer moments die with the
+device, so no handler can save the interrupted iteration. Resuming from the
+last checkpoint is the entire recovery, and it costs at most
+`--checkpoint-interval` iterations.
+
+The pipeline reports that fault as exit code 70 with a single `[gpu]` line
+naming the iteration and the checkpoint to resume from, instead of the
+seventy-odd identical `CUDA_ERROR_LAUNCH_FAILED` tracebacks CuPy's module
+destructors produce against a dead context. The supervisor restarts on it,
+declines to restart on `SIGINT`/`SIGTERM`, and stops when two consecutive
+attempts complete the same number of games -- a permanent failure wearing a
+transient's clothes.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAX_RESTARTS` | `100` | restart budget before giving up |
+| `BACKOFF_S` | `60` | seconds to wait before each restart |
+| `LOG_DIR` | `logs` | directory for one log per attempt |
+| `PYTHON` | `python` | interpreter to run |
+
+A GPU reset is a machine problem, not a training one. Diagnose it with
+`sudo dmesg -T | grep -i xid`, `/var/log/apt/history.log`, and
+`nvidia-smi -q -d TEMPERATURE,POWER`; the supervisor only keeps the run alive
+while that is happening.
 
 ## Reward-distance grid search
 

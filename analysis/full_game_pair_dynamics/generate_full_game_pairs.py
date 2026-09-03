@@ -25,14 +25,14 @@ from agents.rl_agent import RLAgent
 from agents.rl_nn import PolicyNetwork
 from agents.heuristic_agent import StrategicAgent
 from middleware.domino_engine import DominoEngine
-from training.rl.rollout import (
-    FINAL_PIP_PENALTY,
-    LEARNER_DRAW_PENALTY,
-    LEARNER_PASS_PENALTY,
-    OPPONENT_DRAW_REWARD,
-    OPPONENT_PASS_REWARD,
-    TERMINAL_LOSS_REWARD,
-    TERMINAL_WIN_REWARD,
+from middleware.rulesets import resolve_ruleset
+from training.rl.reward_model import (
+    BLOCKED_REWARD_CEILING,
+    BLOCKED_REWARD_FLOOR,
+    DRAW_EVENT,
+    PASS_EVENT,
+    terminal_reward_components,
+    unit_event_reward,
 )
 
 
@@ -185,48 +185,62 @@ def decision_class(action, tile_option_count):
 
 
 def raw_event_reward_by_seat(action, acting_player):
-    """Return undiscounted draw/pass shaping from each seat's perspective."""
+    """Return the unit draw/pass event value from each seat's perspective.
+
+    Draw and pass events share the same unit scale, so this column alone no
+    longer says which class an event belonged to. That is deliberate: their
+    relative importance is a weight applied downstream, and the class itself
+    stays recoverable from the same turn's ``decision_class``.
+    """
     rewards = [0.0, 0.0]
     other_player = 1 - int(acting_player)
     kind = action_kind(action)
     if kind == "draw":
-        rewards[acting_player] = float(LEARNER_DRAW_PENALTY)
-        rewards[other_player] = float(OPPONENT_DRAW_REWARD)
+        event_kind = DRAW_EVENT
     elif kind == "pass":
-        rewards[acting_player] = float(LEARNER_PASS_PENALTY)
-        rewards[other_player] = float(OPPONENT_PASS_REWARD)
+        event_kind = PASS_EVENT
+    else:
+        return rewards
+    rewards[acting_player] = unit_event_reward(event_kind, by_learner=True)
+    rewards[other_player] = unit_event_reward(event_kind, by_learner=False)
     return rewards
 
 
-def raw_terminal_components(final_state):
-    """Return terminal outcome and final-pip terms separately for both seats."""
-    winner = int(final_state["winner"])
-    if winner not in (0, 1):
-        raise ValueError(f"Unexpected terminal winner {winner!r}")
-    outcome = [
-        float(TERMINAL_WIN_REWARD if seat == winner else TERMINAL_LOSS_REWARD)
-        for seat in range(2)
-    ]
-    pip_penalty = [
-        -float(FINAL_PIP_PENALTY)
-        * float(sum(int(tile[0]) + int(tile[1]) for tile in hand))
-        for hand in final_state["hands"]
-    ]
-    return outcome, pip_penalty
+def raw_terminal_components(engine):
+    """Return the empty-hand and blocked terminal terms for both seats.
+
+    Exactly one of the two is non-zero per game, and the pair is symmetric
+    between the seats, so a matchup summary can read either component without
+    knowing how the game ended.
+    """
+    empty_hand = []
+    blocked = []
+    for seat in range(2):
+        components = terminal_reward_components(engine, seat)
+        empty_hand.append(float(components["empty_hand_component"]))
+        blocked.append(float(components["blocked_component"]))
+    return empty_hand, blocked
 
 
 def raw_reward_schema():
-    """Describe the fixed training reward constants captured by this analysis."""
+    """Describe the unweighted reward semantics this corpus records.
+
+    No experiment weights are baked in: the component weights, both discount
+    factors, and the terminal/immediate mixture are all applied downstream, so
+    one generated corpus stays reusable across every reward ablation.
+    """
+    ruleset = resolve_ruleset()
     return {
-        "terminal_win": float(TERMINAL_WIN_REWARD),
-        "terminal_loss": float(TERMINAL_LOSS_REWARD),
-        "final_pip_penalty_per_pip": -float(FINAL_PIP_PENALTY),
-        "self_draw": float(LEARNER_DRAW_PENALTY),
-        "opponent_draw": float(OPPONENT_DRAW_REWARD),
-        "self_pass": float(LEARNER_PASS_PENALTY),
-        "opponent_pass": float(OPPONENT_PASS_REWARD),
+        "empty_hand_win": 1.0,
+        "empty_hand_loss": -1.0,
+        "blocked_reward_floor": float(BLOCKED_REWARD_FLOOR),
+        "blocked_reward_ceiling": float(BLOCKED_REWARD_CEILING),
+        "blocked_saturation_margin": 2 * int(ruleset.max_pip),
+        "unit_draw_event": 1.0,
+        "unit_pass_event": 1.0,
+        "component_weights_applied": False,
         "temporal_discount_applied": False,
-        "alpha_mixing_applied": False,
+        "reward_eta_mixing_applied": False,
     }
 
 
@@ -309,13 +323,13 @@ def play_timed_game(game_index, seed, pair, factory):
 
     simulation_wall_us = elapsed_us(simulation_started)
     final_state = engine.to_dict()
-    terminal_outcome, final_pip_penalty = raw_terminal_components(final_state)
+    empty_hand_component, blocked_component = raw_terminal_components(engine)
     event_sum = [
         float(sum(item["raw_event_reward_by_seat"][seat] for item in history))
         for seat in range(2)
     ]
     total_raw = [
-        event_sum[seat] + terminal_outcome[seat] + final_pip_penalty[seat]
+        event_sum[seat] + empty_hand_component[seat] + blocked_component[seat]
         for seat in range(2)
     ]
     return {
@@ -328,8 +342,8 @@ def play_timed_game(game_index, seed, pair, factory):
         "final_state": final_state,
         "raw_rewards": {
             "event_sum_by_seat": event_sum,
-            "terminal_outcome_by_seat": terminal_outcome,
-            "final_pip_penalty_by_seat": final_pip_penalty,
+            "empty_hand_component_by_seat": empty_hand_component,
+            "blocked_component_by_seat": blocked_component,
             "total_by_seat": total_raw,
         },
         "timing_us": {

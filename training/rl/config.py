@@ -26,12 +26,17 @@ from training.rl.reward_distance import (
     DEFAULT_REWARD_DISTANCE_MODE,
     resolve_reward_distance_mode,
 )
-from training.rl.rollout import (
-    REWARD_ETA,
+from training.rl.reward_model import (
     DEFAULT_GAMMA_F,
-    GAMMA_I,
-    REWARD_SCHEMAS,
+    DEFAULT_GAMMA_I,
+    DEFAULT_IMMEDIATE_DRAW_WEIGHT,
+    DEFAULT_IMMEDIATE_PASS_WEIGHT,
+    DEFAULT_REWARD_ETA,
+    DEFAULT_TERMINAL_BLOCKED_WEIGHT,
+    DEFAULT_TERMINAL_EMPTY_HAND_WEIGHT,
+    resolved_reward_scales,
 )
+from training.rl.rollout import DEFAULT_REWARD_SCHEMA
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
 from utils.ruleset_paths import default_rl_weights_path, default_sl_weights_path
 
@@ -85,9 +90,16 @@ class RLTrainingOptions:
     # interchangeable across it.
     use_opponent_bucket_features: bool = False
     gamma_f: float = DEFAULT_GAMMA_F
-    reward_eta: float = REWARD_ETA
-    gamma_i: float = GAMMA_I
+    reward_eta: float = DEFAULT_REWARD_ETA
+    gamma_i: float = DEFAULT_GAMMA_I
     reward_distance_mode: str = DEFAULT_REWARD_DISTANCE_MODE
+    # The four reward-component weights. Only the ratio inside each pair
+    # matters, because each pair is normalized by its own larger member, so
+    # these are non-negative ratios rather than probabilities.
+    terminal_empty_hand_weight: float = DEFAULT_TERMINAL_EMPTY_HAND_WEIGHT
+    terminal_blocked_weight: float = DEFAULT_TERMINAL_BLOCKED_WEIGHT
+    immediate_draw_weight: float = DEFAULT_IMMEDIATE_DRAW_WEIGHT
+    immediate_pass_weight: float = DEFAULT_IMMEDIATE_PASS_WEIGHT
     normalize_advantages: bool | None = DEFAULT_NORMALIZE_ADVANTAGES
     # The term subtracted from every return. ``None`` resolves to the choice
     # the run already implied before ``--baseline`` existed; see
@@ -247,6 +259,16 @@ def resolve_training_options(training, resources, execution):
         raise ValueError("gamma_i must be between 0 and 1")
     reward_distance_mode = str(training.reward_distance_mode)
     resolve_reward_distance_mode(reward_distance_mode)
+    # Validated and normalized once here so every rollout worker receives the
+    # derived scales instead of redividing by ``max(a, b)`` per event. The
+    # raw weights are kept alongside them so a run records exactly what the
+    # experiment asked for.
+    reward_scales = resolved_reward_scales(
+        terminal_empty_hand_weight=training.terminal_empty_hand_weight,
+        terminal_blocked_weight=training.terminal_blocked_weight,
+        immediate_draw_weight=training.immediate_draw_weight,
+        immediate_pass_weight=training.immediate_pass_weight,
+    )
     if float(training.value_coef) < 0:
         raise ValueError("value_coef must be non-negative")
     if float(training.weight_decay) < 0:
@@ -289,6 +311,12 @@ def resolve_training_options(training, resources, execution):
         reward_eta=reward_eta,
         gamma_i=gamma_i,
         reward_distance_mode=reward_distance_mode,
+        terminal_empty_hand_weight=reward_scales[
+            "terminal_empty_hand_weight"
+        ],
+        terminal_blocked_weight=reward_scales["terminal_blocked_weight"],
+        immediate_draw_weight=reward_scales["immediate_draw_weight"],
+        immediate_pass_weight=reward_scales["immediate_pass_weight"],
         normalize_advantages=normalize_advantages,
         baseline=baseline,
         ppo_max_epochs=ppo_max_epochs,
@@ -311,7 +339,8 @@ def resolve_training_options(training, resources, execution):
         tuning_training_games=tuning_training_games,
         algorithm=algorithm,
         schema={
-            **REWARD_SCHEMAS,
+            **DEFAULT_REWARD_SCHEMA,
+            **reward_scales,
             "gamma_i": gamma_i,
             "reward_eta": reward_eta,
             "reward_distance_mode": reward_distance_mode,

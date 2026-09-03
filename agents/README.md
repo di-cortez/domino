@@ -69,6 +69,55 @@ still uses the GPU, or vice versa.
 `NeuralAgent.load(..., device=...)` preserves that backend choice. CPU-only
 workers set `DOMINO_FORCE_CPU=1`, so they never initialize a CUDA context.
 
+`PolicyNetwork.snapshot_parameters()` and `restore_parameters()` are inverses
+that copy and write back every trainable array by name, whatever the depth and
+however the critic is wired. `training/rl/ppo.py` uses them to undo a whole
+diverged epoch; nothing else should need them, because a checkpoint is the
+right unit for any longer-lived copy.
+
+`_apply_gradient_step` rejects a non-finite gradient norm before writing
+anything. Norm clipping cannot repair such a gradient -- `nan > clip` is False,
+so a NaN bypasses clipping entirely, and `inf * (clip / inf)` is NaN -- so both
+branches would otherwise poison every weight permanently and silently. The
+returned metrics carry `grad_rejected`, and `optimizer_steps` is `0` for a
+rejected step, so callers can tell a skipped minibatch from an applied one.
+
+`_masked_rollout_probabilities` builds the sampling distribution over one
+decision's legal actions, and which of its two paths it takes is decided by
+whether the network published `cache[logits_key]`. With the logits it rebuilds
+the softmax over the legal subset alone, where the maximizing legal action
+contributes exactly `exp(0) = 1` and the total is therefore always at least
+1.0. Without them it can only renormalize the full-support softmax, which
+flushes a legal action to zero once that action sits more than `-log(tiny)`
+(about 87.3 nats) below the *global* maximum -- a maximum the illegal actions
+are free to hold.
+
+Every network that reaches this must publish the cache, `PolicyNetwork` and
+`training/rl/parallel.py`'s `_CPUInferencePolicy` alike. The second one is what
+actually runs inside a rollout worker; while it published no cache, every
+worker decision took the fallback silently, and the run
+`d6_maxwr_lr032` died after 28,000,000 games on one decision whose two legal
+actions had both underflowed.
+
+`NonFinitePolicyError` (a `FloatingPointError`, so existing handlers keep
+catching it) is reserved for a genuinely diverged policy: non-finite logits, or
+a non-finite total on the fallback path. Underflow is a float32 limit rather
+than a diverged policy, so it degrades to a uniform draw over the legal actions
+and increments `agents.rl_agent.underflow_fallback_count`, warning once per
+process. A run is never worth losing over one unrepresentable decision.
+
+`GPUContextLostError` in `agents/nn.py` is unrelated to both and is not a
+policy fault at all: the CUDA context has been destroyed underneath the
+process, so no allocation on the device -- weights, optimizer moments, or
+buffers -- still exists. `is_gpu_context_loss` tells it apart from a merely
+full device by the CUDA status name, which is the only thing that separates
+them, because CuPy raises the same exception types for both. Getting that
+wrong in either direction is expensive: a dead context reported as exhausted
+memory sends the operator hunting VRAM that is not the problem and retries
+into a device that can no longer run a kernel, while exhausted memory reported
+as a dead context throws away a working batch-size fallback. See
+[`training/rl/README.md`](../training/rl/README.md) for the recovery path.
+
 ## State Encoding
 
 For `T` ruleset tiles and `S` pip values, `DominoEncoder` produces

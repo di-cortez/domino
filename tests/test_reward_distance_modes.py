@@ -117,7 +117,7 @@ def test_each_mode_controls_both_reward_components(mode):
 
     samples = _finish_episode_with_rewards(
         agent,
-        terminal_reward=0.8,
+        terminal_utility=0.8,
         gamma_f=0.95,
         reward_eta=0.5,
         terminal_turn=8,
@@ -151,7 +151,7 @@ def test_each_mode_controls_both_reward_components(mode):
 def test_terminal_reward_distances_for_all_modes(mode, terminal_distances):
     samples = _finish_episode_with_rewards(
         _agent(2, 5, 8),
-        terminal_reward=0.8,
+        terminal_utility=0.8,
         gamma_f=0.95,
         reward_eta=0.25,
         terminal_turn=11,
@@ -171,7 +171,7 @@ def test_terminal_reward_distances_for_all_modes(mode, terminal_distances):
 def test_turn_terminal_distance_uses_absolute_restart_timeline():
     samples = _finish_episode_with_rewards(
         _agent(23),
-        terminal_reward=1.0,
+        terminal_utility=1.0,
         gamma_f=0.95,
         reward_eta=0.0,
         terminal_turn=31,

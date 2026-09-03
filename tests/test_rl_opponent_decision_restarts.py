@@ -22,7 +22,7 @@ from training.rl.ppo import PPO_TRAINING_ALGORITHM
 from training.rl.resume import _load_initial_network, resume_state_path
 from training.rl.restarts import OpponentDecisionRestart
 from training.rl.rollout import (
-    REWARD_SCHEMAS,
+    DEFAULT_REWARD_SCHEMA,
     _collect_steps_vs_random,
     _tile_play_actions,
     collect_steps_from_restart,
@@ -186,12 +186,14 @@ def test_capture_records_only_pre_action_genuine_opponent_tile_choices():
     np.random.seed(0)
     result = _collect_steps_vs_random(
         network,
-        dict(REWARD_SCHEMAS),
+        dict(DEFAULT_REWARD_SCHEMA),
         1.0,
         ruleset_name=RULESET,
         capture_opponent_decision_restarts=True,
     )
-    _samples, _events, _winner, learner_position, captures = result
+    (
+        _samples, _events, _winner, learner_position, _terminal, captures
+    ) = result
     assert captures
     assert [item.snapshot_ordinal for item in captures] == list(
         range(len(captures))
@@ -211,20 +213,22 @@ def test_restart_learner_immediately_acts_from_the_original_opponent_seat():
     np.random.seed(0)
     captured = _collect_steps_vs_random(
         network,
-        dict(REWARD_SCHEMAS),
+        dict(DEFAULT_REWARD_SCHEMA),
         1.0,
         ruleset_name=RULESET,
         capture_opponent_decision_restarts=True,
-    )[4][0]
+    )[5][0]
     restart = _restart_from_capture(captured)
     random.seed(123)
     np.random.seed(123)
-    samples, _events, _winner, learner_position = collect_steps_from_restart(
+    (
+        samples, _events, _winner, learner_position, _terminal
+    ) = collect_steps_from_restart(
         network,
         "random",
         None,
         restart,
-        dict(REWARD_SCHEMAS),
+        dict(DEFAULT_REWARD_SCHEMA),
         1.0,
         ruleset_name=RULESET,
     )
@@ -242,7 +246,7 @@ def test_parallel_restart_results_are_invariant_to_worker_count():
 
     def collect(workers):
         network = _network()
-        schema = dict(REWARD_SCHEMAS)
+        schema = dict(DEFAULT_REWARD_SCHEMA)
         schema["reward_distance_mode"] = "decision-turn"
         runner = RLRolloutRunner(
             network,
@@ -302,7 +306,7 @@ def test_neural_restarts_reuse_the_source_opponent_identity_and_bank_slot():
     runner = RLRolloutRunner(
         network,
         opponent_buckets=("recent",),
-        schema=dict(REWARD_SCHEMAS),
+        schema=dict(DEFAULT_REWARD_SCHEMA),
         gamma_f=1.0,
         ruleset_name=RULESET,
         safety=ParallelSafetyConfig(

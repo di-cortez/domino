@@ -8,9 +8,12 @@ from unittest import mock
 import numpy as np
 
 from agents.network_architecture import policy_layer_names
-from agents.rl_nn import PolicyNetwork
+from agents.rl_nn import NonFinitePolicyError, PolicyNetwork
 from training.rl.ppo import (
+    PPO_LOG_RATIO_LIMIT,
     PPOBuffer,
+    _legal_logit_deficit_max,
+    _max_or_none,
     PPOBufferStorage,
     clipped_surrogate,
     effective_minibatches,
@@ -83,6 +86,10 @@ class _FakePPONetwork:
         return f"A{len(self.hidden_sizes)}"
 
     @property
+    def logits_key(self):
+        return f"Z{self.layer_count}"
+
+    @property
     def critic_parameter_names(self):
         """No critic: this double never enables a value head."""
         return ()
@@ -90,6 +97,17 @@ class _FakePPONetwork:
     def parameter_array(self, name):
         """Resolve one parameter name the way ``PolicyNetwork`` does."""
         return getattr(self, name)
+
+    def snapshot_parameters(self):
+        """Mirror ``PolicyNetwork``: one detached copy per trainable array."""
+        return {
+            name: self.parameter_array(name).copy()
+            for name in (*self.weight_names, *self.critic_parameter_names)
+        }
+
+    def restore_parameters(self, arrays):
+        for name, value in arrays.items():
+            setattr(self, name, value)
 
     def evaluate_actions(self, states, legal_masks, actions):
         self.eval_calls += 1
@@ -542,3 +560,229 @@ def test_buffer_rejects_forced_single_option_and_illegal_observed_actions():
     illegal.action_index = 3
     with np.testing.assert_raises_regex(ValueError, "outside its legal mask"):
         PPOBuffer.from_samples([illegal])
+
+
+def _stable_network(learning_rate=0.2, seed=11):
+    """Return a small zeroed policy, the shape the numerical guards act on."""
+    network = PolicyNetwork(
+        input_size=3,
+        hidden1_size=4,
+        hidden2_size=3,
+        output_size=4,
+        learning_rate=learning_rate,
+        random_seed=seed,
+        device="cpu",
+    )
+    for name in network.weight_names:
+        getattr(network, name)[:] = 0.0
+    return network
+
+
+def test_non_finite_gradient_norm_is_rejected_without_touching_the_weights():
+    """A NaN norm must not reach the weights: ``nan > clip`` is False."""
+    network = _stable_network()
+    network.W1[:] = 0.25
+    before = network.snapshot_parameters()
+    gradients = {name: np.ones_like(getattr(network, name)) for name in network.weight_names}
+
+    metrics = network._apply_gradient_step(
+        gradients,
+        float("nan"),
+        5.0,
+        np.float32,
+    )
+
+    assert metrics["grad_rejected"] is True
+    assert metrics["optimizer_steps"] == 0
+    assert network.optimizer_step_count == 0
+    for name, value in before.items():
+        np.testing.assert_array_equal(network.parameter_array(name), value)
+
+
+def test_infinite_gradient_norm_is_rejected_instead_of_scaled_into_nan():
+    """Clipping an infinite norm would compute ``inf * 0.0`` and write NaN."""
+    network = _stable_network()
+    before = network.snapshot_parameters()
+    gradients = {
+        name: np.full_like(getattr(network, name), np.inf)
+        for name in network.weight_names
+    }
+
+    metrics = network._apply_gradient_step(
+        gradients,
+        float("inf"),
+        5.0,
+        np.float32,
+    )
+
+    assert metrics["grad_rejected"] is True
+    assert metrics["grad_clipped"] is False
+    for name, value in before.items():
+        np.testing.assert_array_equal(network.parameter_array(name), value)
+        assert np.all(np.isfinite(network.parameter_array(name)))
+
+
+def test_finite_gradient_step_reports_no_rejection_and_still_clips():
+    """The guard is inert on a healthy step, including a clipped one."""
+    network = _stable_network()
+    gradients = {
+        name: np.full_like(getattr(network, name), 10.0)
+        for name in network.weight_names
+    }
+    norm = float(np.sqrt(sum(float(np.sum(g ** 2)) for g in gradients.values())))
+
+    metrics = network._apply_gradient_step(gradients, norm, 5.0, np.float32)
+
+    assert metrics["grad_rejected"] is False
+    assert metrics["grad_clipped"] is True
+    assert metrics["applied_grad_norm"] == 5.0
+    assert network.optimizer_step_count == 1
+
+
+def test_floored_behavior_probability_cannot_overflow_the_ratio_into_nan():
+    """The rollout floors ``old_log_prob`` at ``log(tiny)``; -87 must be safe.
+
+    With a negative advantage the PPO minimum selects the *unclipped* branch,
+    so the raw ratio reaches the gradient. Unbounded, the ratio here is
+    ``exp(86.64) = 4.25e37``; the advantage is chosen well past the float32
+    limit of ``3.40e38 / 4.25e37 = 8.0`` so the overflow is decisive rather
+    than marginal. Every illegal action would then compute ``0 * inf``.
+    """
+    network = _stable_network(learning_rate=0.05)
+    states = np.ones((3, 1), dtype=np.float32)
+    mask = np.asarray([[True], [True], [False], [False]])
+    floored = np.asarray(
+        [np.log(np.finfo(np.float32).tiny)],
+        dtype=np.float32,
+    )
+
+    metrics = network.backward_ppo(
+        states,
+        [0],
+        mask,
+        floored,
+        [-32.0],
+        entropy_coef=0.01,
+        clip_grad_norm=5.0,
+    )
+
+    assert np.isfinite(metrics["ratio_max"])
+    assert metrics["grad_rejected"] is False
+    for name in network.weight_names:
+        assert np.all(np.isfinite(network.parameter_array(name))), name
+
+
+def test_log_ratio_limit_bounds_the_gradient_ratio_but_not_the_reported_one():
+    """The bound belongs to the gradient path; reporting stays honest."""
+    network = _stable_network(learning_rate=0.0)
+    states = np.ones((3, 1), dtype=np.float32)
+    mask = np.asarray([[True], [True], [False], [False]])
+    floored = np.asarray(
+        [np.log(np.finfo(np.float32).tiny)],
+        dtype=np.float32,
+    )
+
+    metrics = network.backward_ppo(
+        states,
+        [0],
+        mask,
+        floored,
+        [1.0],
+        entropy_coef=0.0,
+        clip_grad_norm=None,
+    )
+
+    assert metrics["ratio_max"] <= np.exp(PPO_LOG_RATIO_LIMIT) * (1.0 + 1e-6)
+    # log_ratio_statistics is a reporting path and must not be clamped.
+    honest = log_ratio_statistics(np.asarray([-0.7]), floored)
+    assert honest["ratio_max"] > np.exp(PPO_LOG_RATIO_LIMIT)
+
+
+def test_diverged_epoch_is_rolled_back_and_is_not_reported_as_a_kl_stop():
+    """A policy that cannot be evaluated must never reach the next rollout."""
+    network = _FakePPONetwork()
+    network.W1[:] = 0.5
+    before = network.snapshot_parameters()
+    buffer = _buffer(512)
+
+    def explode(*_args, **_kwargs):
+        raise NonFinitePolicyError("PPO full-buffer metrics produced NaN/Inf.")
+
+    with mock.patch("training.rl.ppo.evaluate_full_buffer", side_effect=explode):
+        metrics = ppo_update(
+            network,
+            buffer,
+            base_seed=5,
+            iteration=1,
+            entropy_coef=0.01,
+            max_epochs=16,
+        )
+
+    assert metrics["diverged_epoch"] == 1
+    assert "NaN/Inf" in metrics["divergence_reason"]
+    assert metrics["stopped_by_kl"] is False
+    assert metrics["epochs_completed"] == 0
+    assert metrics["optimizer_steps"] == 0
+    assert metrics["insufficient_decisions"] is False
+    # The network must be indistinguishable from its pre-epoch self, including
+    # the checkpointed step counter.
+    assert network.optimizer_step_count == 0
+    for name, value in before.items():
+        np.testing.assert_array_equal(network.parameter_array(name), value)
+
+
+def test_a_healthy_update_reports_no_divergence_and_records_weight_magnitude():
+    """The divergence fields stay inert, and the drift observable is present."""
+    network = _FakePPONetwork()
+    network.W1[:] = 0.75
+    buffer = _buffer(512)
+
+    metrics = ppo_update(
+        network,
+        buffer,
+        base_seed=5,
+        iteration=1,
+        entropy_coef=0.01,
+        max_epochs=2,
+    )
+
+    assert metrics["diverged_epoch"] is None
+    assert metrics["divergence_reason"] is None
+    assert metrics["rejected_minibatches"] == 0
+    assert metrics["policy_weight_max_abs"] == 0.75
+    assert metrics["log_ratio_limit"] == PPO_LOG_RATIO_LIMIT
+
+
+def test_legal_logit_deficit_measures_the_gap_the_rollout_sampler_dies_on():
+    """The metric must be the crash condition itself, not a proxy for it.
+
+    A legal action underflows out of a full-support softmax exactly when its
+    logit sits more than ``-log(tiny)`` below the *global* maximum, which the
+    illegal actions are free to hold. Measuring the legal spread alone, or the
+    global spread alone, would both miss it.
+    """
+    network = _FakePPONetwork()
+    logits = np.array(
+        [[200.0, 1.0], [10.0, 2.0], [8.0, 3.0], [0.0, 4.0]],
+        dtype=np.float32,
+    )
+    legal_masks = np.array(
+        [[False, True], [True, True], [True, False], [False, False]],
+    )
+    network.cache = {network.logits_key: logits}
+
+    # Column 0: global max 200 on an illegal action, best legal 10 -> 190.
+    # Column 1: the global max is itself legal -> 0.
+    assert _legal_logit_deficit_max(network, legal_masks) == 190.0
+
+    # A network that publishes no logits yields no measurement rather than an
+    # exception, so no caller has to know which network class it holds.
+    network.cache = {}
+    assert _legal_logit_deficit_max(network, legal_masks) is None
+
+
+def test_legal_logit_deficit_reduces_with_max_across_epochs():
+    """One bad decision anywhere in the iteration is what matters."""
+    assert _max_or_none([1.0, None, 7.0, 3.0]) == 7.0
+    assert _max_or_none([None, None]) is None
+    assert _max_or_none([]) is None

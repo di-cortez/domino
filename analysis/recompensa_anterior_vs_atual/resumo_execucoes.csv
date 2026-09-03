@@ -1,0 +1,9 @@
+execucao,arquitetura,lr,baseline,buckets,iteracoes,partidas,vitoria_inicial_pct,vitoria_melhor_pct,partidas_ate_melhor,vitoria_final_pct,vitoria_em_partidas_comuns_pct,ganho_sobre_sl_pct,recompensa_media_mediana,decisoes_positivas_mediana_pct,vitoria_em_lote_mediana_pct,corr_recompensa_vitoria,completa
+bucket_heuristic,anterior,0.001,nenhum,heuristic,12694,25300000,62.631,66.375,21600000,66.086,65.973,3.744,0.0077,55.476,52.95,0.9,sim
+bucket_heuristic_recent,anterior,0.001,nenhum,"heuristic,recent",9141,18200000,62.631,66.067,13100000,65.771,65.939,3.436,-0.00387,54.07,51.25,0.8656,sim
+baseline_zero,anterior,0.001,zero,"heuristic,recent",9032,18000000,62.631,66.238,16600000,65.855,65.683,3.607,-0.004,54.062,51.25,0.8643,sim
+bucket_all,anterior,0.001,nenhum,"heuristic,recent,medium_term,historical_uniform,champion_vs_heuristic,champion_vs_learner",6400,12700000,62.631,65.861,9300000,65.793,65.793,3.23,-0.00806,53.553,50.7,0.8537,sim
+d6_maxwr_lr032,atual,0.032,nenhum,heuristic,14226,28400000,62.631,65.203,27800000,64.689,64.443,2.572,0.28102,64.754,51.85,0.7714,sim
+d6_maxwr_lr016,atual,0.016,nenhum,heuristic,396,700000,62.631,63.603,500000,63.595,,0.972,0.25338,63.207,50.5,0.7444,nao
+default_lr032,atual,0.032,nenhum,"heuristic,recent",10300,20600000,62.631,64.939,12000000,64.567,64.47,2.308,0.26957,63.934,50.8,0.7059,sim
+default_lr016_lookup,atual,0.016,lookup-table,"heuristic,recent",7709,15400000,62.631,65.103,15400000,65.103,64.483,2.472,0.27168,63.943,50.8,0.7115,sim

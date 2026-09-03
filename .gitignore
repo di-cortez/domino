@@ -60,6 +60,11 @@ temporary/*
 domino_opponent_pool_cache_benchmark/*
 train_script/grid_search_results/
 
+# Fixed runtime inputs for the state-conditioned RL baseline are deliberately
+# versioned even though similarly named analysis outputs are generated data.
+!training/rl/reward_lookup_tables/*.json.gz
+!training/rl/reward_lookup_tables/*_manifest.json
+
 analysis/exact_vs_random-double-three/double_three_cheater_player0.jsonl
 analysis/exact_vs_random-double-three/double_three_cheater_player1.jsonl
 analysis/exact_vs_random-double-three/double_three_player0.jsonl
@@ -71,11 +76,5 @@ analysis/exact_vs_random-double-four/double_four_player0.jsonl
 analysis/exact_vs_random-double-four/double_four_player1.jsonl
 analysis/analise_lr_KL/*
 
-train_script/_sequential_rl_experiment_runner.bash
-train_script/run_baseline_tests_diego_notebook.sh
-train_script/run_bucket_tests_diego_notebook.sh
+# Local-only experiment driver that has no upstream counterpart yet.
 train_script/run_ppo_lr_ext_tests_diego_notebook.sh
-train_script/run_ppo_lr_tests_diego_notebook.sh
-
-d6_maxwr_lr016.log
-d6_maxwr_lr032.log

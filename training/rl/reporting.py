@@ -162,6 +162,9 @@ def build_training_metrics_header(
             "log_ratio_limit": PPO_LOG_RATIO_LIMIT,
             "normalize_advantages": bool(training.normalize_advantages),
             "baseline": training.baseline.as_mapping(),
+            "baseline_artifact_sha256": (
+                context.resume_configuration.baseline_artifact_sha256
+            ),
             "weight_decay": float(training.weight_decay),
             "dropout_rate": float(training.dropout_rate),
             "moving_average_window": int(execution.moving_average_window),
@@ -412,6 +415,9 @@ def build_training_summary(
         "log_ratio_limit": PPO_LOG_RATIO_LIMIT,
         "normalize_advantages": training.normalize_advantages,
         "baseline": training.baseline.as_mapping(),
+        "baseline_artifact_sha256": (
+            context.resume_configuration.baseline_artifact_sha256
+        ),
         "weight_decay": training.weight_decay,
         "dropout_rate": training.dropout_rate,
         "moving_average_window": execution.moving_average_window,

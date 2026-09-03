@@ -341,6 +341,7 @@ def resolve_training_options(training, resources, execution):
         schema={
             **DEFAULT_REWARD_SCHEMA,
             **reward_scales,
+            "gamma_f": gamma_f,
             "gamma_i": gamma_i,
             "reward_eta": reward_eta,
             "reward_distance_mode": reward_distance_mode,

@@ -225,6 +225,7 @@ what is subtracted:
 | `--baseline zero` | `0` | `R` |
 | `--baseline 2` | `2` | `R - 2` |
 | `--baseline batch-mean` | `mean(R)` over the iteration buffer | `R - mean(R)` |
+| `--baseline lookup-table` | Fixed `E[R | learner tiles, opponent tiles]` | `R - lookup(state)` |
 | `--baseline value-head` | `V(s)`, shared trunk, critic trains it | `R - V(s)` |
 | `--baseline value-head-no-up` | `V(s)`, shared trunk, critic does not train it | `R - V(s)` |
 | `--baseline value-head-own-nn` | `V(s)` from a separate network | `R - V(s)` |
@@ -232,6 +233,8 @@ what is subtracted:
 ```bash
 python -m training.pipeline forever --baseline zero --run-name no_baseline
 python -m training.pipeline forever --baseline 2 --run-name const2
+python -m training.pipeline forever --baseline lookup-table \
+  --run-name fixed_lookup
 python -m training.pipeline forever --value-head --baseline batch-mean \
   --run-name critic_trained_not_used
 ```
@@ -240,6 +243,26 @@ Leaving the flag unset keeps the behavior that predates it, so the default is
 numerically unchanged: the critic when `--value-head` is on, otherwise the batch
 mean whenever advantage normalization is on and no baseline at all when it is
 off.
+
+#### Fixed hand-size lookup
+
+`lookup-table` reads one source-controlled artifact for the active ruleset and
+conditions only on `(learner_hand_size, opponent_hand_size)` before the sampled
+action. It evaluates the `empty_hand` and `blocked` terminal histograms with
+`gamma_f`, the pass/draw histograms with `gamma_i`, and selects the two clocks
+through `--reward-distance-mode`. The run's normalized terminal and immediate
+scales are then applied before the terminal and local halves are combined with
+`reward_eta`. The artifacts therefore contain unit semantic components rather
+than one experiment's reward hyperparameters.
+
+The four packaged artifacts are still the superseded version 2 tables, so this
+baseline currently fails at startup with a message naming the rebuild. See
+`training/rl/reward_lookup_tables/README.md`.
+
+Unsupported cells use the documented deterministic boundary/diagonal rules in
+`training/rl/reward_lookup_tables/README.md`. The artifact SHA-256 is persisted
+with exact resume state. The table is a state baseline only: it never replaces
+the sampled trajectory return and does not alter reward generation.
 
 #### The constant is a bare number
 
@@ -326,11 +349,11 @@ after:   advantage = (R - b)    / (sigma   + eps)     # b chosen, then scaled
 ```
 
 `--baseline batch-mean` with normalization on is therefore bit-for-bit the
-previous default. The denominator does not move for three of the four kinds
-either: `zero`, `constant` and `batch-mean` subtract the same value from every
+previous default. The denominator does not move for the three state-independent
+kinds: `zero`, `constant` and `batch-mean` subtract the same value from every
 decision, and a standard deviation is invariant under a constant shift, so
-`sigma(R - b)` equals `sigma(R)` exactly. Only `value-head` changes the scale
-too, because `V(s)` differs per decision.
+`sigma(R - b)` equals `sigma(R)` exactly. `lookup-table` and the critic kinds
+can change the scale because their baselines differ per decision.
 
 Two combinations that were previously unreachable now are:
 

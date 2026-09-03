@@ -43,6 +43,7 @@ LEARNER_OPPONENT_BUCKET = "recent"
 # and overrides it with the values resolved from the CLI.
 DEFAULT_REWARD_SCHEMA = {
     **resolved_reward_scales(),
+    "gamma_f": DEFAULT_GAMMA_F,
     "gamma_i": DEFAULT_GAMMA_I,
     "reward_eta": DEFAULT_REWARD_ETA,
     "reward_distance_mode": DEFAULT_REWARD_DISTANCE_MODE,
@@ -107,6 +108,8 @@ class TrainingSample:
     local_reward: float
     terminal_reward: float
     old_log_prob: float = 0.0
+    agent_hand_size: int | None = None
+    opponent_hand_size: int | None = None
 
 
 def _tile_play_actions(legal_actions):
@@ -257,6 +260,8 @@ def _finish_episode_with_rewards(
                 raw_reward=raw_reward,
                 local_reward=scaled_local,
                 terminal_reward=discounted_terminal,
+                agent_hand_size=step.agent_hand_size,
+                opponent_hand_size=step.opponent_hand_size,
             )
         )
     return samples

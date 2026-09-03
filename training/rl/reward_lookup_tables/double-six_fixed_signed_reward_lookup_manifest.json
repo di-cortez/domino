@@ -1,0 +1,43 @@
+{
+  "ad_hoc_modifications": {
+    "runtime_cells": 33,
+    "zero_tail_trimming": {
+      "decimal_places": 3,
+      "removed_coefficients": {
+        "decision": 247,
+        "total": 803,
+        "turn": 556
+      }
+    }
+  },
+  "direct_return_validation_cells": [
+    "2,1",
+    "3,5",
+    "5,2",
+    "6,4",
+    "8,5"
+  ],
+  "direct_return_validation_gammas": [
+    0.0,
+    0.5,
+    0.9,
+    0.95,
+    1.0
+  ],
+  "eligibility_fraction": 0.005,
+  "eligibility_threshold": 2111,
+  "eligible_cells": 33,
+  "format": "domino_fixed_signed_reward_lookup",
+  "format_version": 3,
+  "maximum_decision_exponent": 12,
+  "maximum_turn_exponent": 57,
+  "output_bytes": 53438,
+  "output_file": "double-six_fixed_signed_reward_lookup.json.gz",
+  "output_sha256": "b7b978ac3397a4e5f719797885651b5a12bd4537ccfe82e8088b26efd5d0cb40",
+  "ruleset_decisions": 422055,
+  "ruleset_name": "double-six",
+  "source_file": "double-six_reward_lookup_samples.json.gz",
+  "source_file_sha256": "513cda1bf8dac8cebea98f3c22f45af9c007f28912c2c59adc254135fbba2bfa",
+  "source_manifest": "double-six_reward_lookup_manifest.json",
+  "source_manifest_sha256": "3fc1da2a024229975d98aa4d1f851375fbe14ae25f16b7393d7d0342cf9edcaa"
+}

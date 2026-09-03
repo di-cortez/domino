@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from reward_lookup_artifact_state import stale_artifact_reason, stale_rulesets
 from training.pipeline import _rl_config, parse_args
 from training.rl.cli import parse_args as rl_parse_args
 from training.rl.cli import training_options_from_args
@@ -44,6 +45,8 @@ def _sample(index, reward, *, state_size=3, action_size=4):
         policy_reward=float(reward),
         local_reward=0.0,
         terminal_reward=float(reward),
+        agent_hand_size=2,
+        opponent_hand_size=3,
     )
 
 
@@ -90,7 +93,13 @@ class _SignalCapturingNetwork:
         return {"grad_clipped": False}
 
 
-def _reinforce_signal(spec, *, normalize, use_value_head=False):
+def _reinforce_signal(
+    spec,
+    *,
+    normalize,
+    use_value_head=False,
+    lookup_values=None,
+):
     network = _SignalCapturingNetwork(use_value_head=use_value_head)
     _reinforce_policy_update(
         network,
@@ -100,6 +109,7 @@ def _reinforce_signal(spec, *, normalize, use_value_head=False):
         baseline=spec,
         use_value_head=use_value_head,
         value_coef=0.5,
+        lookup_values=lookup_values,
     )
     return network, network.policy_signal.reshape(-1)
 
@@ -242,6 +252,16 @@ def test_reinforce_normalization_only_rescales():
     assert np.allclose(signal, rewards / rewards.std(), atol=1e-5)
 
 
+def test_reinforce_subtracts_one_lookup_value_per_decision():
+    _network, signal = _reinforce_signal(
+        BaselineSpec(kind="lookup-table"),
+        normalize=False,
+        lookup_values=np.asarray([0.5, -0.5, 1.0, 0.25], dtype=np.float32),
+    )
+
+    assert np.allclose(signal, [0.5, -0.5, 2.0, -0.25])
+
+
 def test_a_non_critic_baseline_still_trains_the_critic():
     """--value-head with another baseline isolates training V from using it."""
     network, signal = _reinforce_signal(
@@ -267,6 +287,7 @@ def test_a_non_critic_baseline_still_trains_the_critic():
         (["constant", "-1.5"], "constant", -1.5),
         (["batch_mean"], "batch-mean", 0.0),
         (["batch-mean"], "batch-mean", 0.0),
+        (["lookup_table"], "lookup-table", 0.0),
         (["value_head"], "value-head", 0.0),
     ],
 )
@@ -375,6 +396,7 @@ ENTRY_POINTS = pytest.mark.parametrize(
         (["--baseline", "zero"], ["zero"]),
         (["--baseline", "constant", "2"], ["constant", "2"]),
         (["--baseline", "batch-mean"], ["batch-mean"]),
+        (["--baseline", "lookup-table"], ["lookup-table"]),
         (["--baseline", "value-head", "--value-head"], ["value-head"]),
     ],
 )
@@ -406,6 +428,7 @@ def test_the_flag_rejects_bad_input_at_parse_time(parse, argv):
         ([], "batch-mean"),
         (["--baseline", "zero"], "zero"),
         (["--baseline", "constant", "2"], "constant(2)"),
+        (["--baseline", "lookup-table"], "lookup-table"),
         (["--baseline", "value-head", "--value-head"], "value-head"),
         (["--value-head"], "value-head"),
         (["--value-head", "--baseline", "zero"], "zero"),
@@ -431,6 +454,15 @@ def test_the_flag_reaches_the_resolved_training_options(parse, argv, expected):
 # ---------------------------------------------------------------------------
 # Resume identity
 # ---------------------------------------------------------------------------
+
+
+# Both lookup-baseline resume tests load the packaged artifact of the ruleset
+# these fixtures use, so they wait only on that one ruleset's rebuild.
+_FIXTURE_RULESET = "double-six"
+_requires_rebuilt_lookup_artifacts = pytest.mark.skipif(
+    _FIXTURE_RULESET in stale_rulesets(),
+    reason=stale_artifact_reason() if stale_rulesets() else "",
+)
 
 
 _RL_CONFIG = {
@@ -504,14 +536,36 @@ def test_a_saved_run_restores_the_baseline_it_was_created_with():
     assert saved.baseline == {"kind": "constant", "constant": 2.0}
 
 
+@_requires_rebuilt_lookup_artifacts
+def test_a_lookup_run_persists_the_ruleset_artifact_identity():
+    saved = _saved_configuration({"baseline": ["lookup-table"]})
+
+    assert saved.baseline == {"kind": "lookup-table", "constant": 0.0}
+    assert len(saved.baseline_artifact_sha256) == 64
+
+
 def test_a_run_created_before_the_flag_still_resumes():
     saved = _saved_configuration({})
 
     assert saved.baseline is None
-    # A checkpoint written before the flag carries no key at all.
+    # A checkpoint written before either feature carries neither key.
     legacy = dict(saved.to_dict())
     legacy.pop("baseline")
-    assert RLTrainingConfiguration.from_mapping(legacy) == saved
+    legacy.pop("baseline_artifact_sha256")
+    restored = RLTrainingConfiguration.from_mapping(legacy)
+
+    assert restored == saved
+    _validate_resume_configuration({"configuration": legacy}, saved)
+
+
+@_requires_rebuilt_lookup_artifacts
+def test_resuming_with_a_different_lookup_artifact_is_rejected():
+    requested = _saved_configuration({"baseline": ["lookup-table"]})
+    saved = requested.to_dict()
+    saved["baseline_artifact_sha256"] = "f" * 64
+
+    with pytest.raises(ValueError, match="baseline_artifact_sha256"):
+        _validate_resume_configuration({"configuration": saved}, requested)
 
 
 def test_resuming_with_a_different_baseline_is_rejected():

@@ -24,6 +24,8 @@ class TrajectoryStep:
     decision_turn: int
     old_log_prob: float = 0.0
     local_reward: float = 0.0
+    agent_hand_size: int | None = None
+    opponent_hand_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,8 @@ class FinishedTrajectoryStep:
     local_reward: float
     terminal_reward: float
     old_log_prob: float = 0.0
+    agent_hand_size: int | None = None
+    opponent_hand_size: int | None = None
 
 
 UNDERFLOW_FALLBACK_WARNING = (
@@ -255,6 +259,21 @@ class RLAgent(Agent):
             return self._choose_move_unprofiled(state, legal_actions)
         return self._choose_move_profiled(state, legal_actions)
 
+    @staticmethod
+    def _decision_hand_sizes(state):
+        """Return learner/opponent hand sizes for one two-player decision."""
+        hand_sizes = state.get("hand_sizes")
+        current_player = int(state.get("current_player", -1))
+        if (
+            not isinstance(hand_sizes, (list, tuple))
+            or len(hand_sizes) != 2
+            or current_player not in (0, 1)
+        ):
+            raise ValueError(
+                "RL training decisions require two ordered hand sizes."
+            )
+        return int(hand_sizes[current_player]), int(hand_sizes[1 - current_player])
+
     def _choose_move_unprofiled(self, state, legal_actions):
         """Original hot path, kept free of profiler branches and callbacks."""
         if not legal_actions:
@@ -301,6 +320,9 @@ class RLAgent(Agent):
                 policy_actions,
             )
             if self.mode == "training":
+                agent_hand_size, opponent_hand_size = self._decision_hand_sizes(
+                    state
+                )
                 old_probability = float(sampling_probabilities[action_index, 0])
                 old_log_prob = float(
                     np.log(max(old_probability, np.finfo(np.float32).tiny))
@@ -316,6 +338,8 @@ class RLAgent(Agent):
                         legal_mask=legal_mask,
                         old_log_prob=old_log_prob,
                         decision_turn=int(state["turn"]),
+                        agent_hand_size=agent_hand_size,
+                        opponent_hand_size=opponent_hand_size,
                     )
                 )
             return move
@@ -417,6 +441,9 @@ class RLAgent(Agent):
                 )
                 if self.mode == "training":
                     section_started = time.perf_counter() if profiling else None
+                    agent_hand_size, opponent_hand_size = (
+                        self._decision_hand_sizes(state)
+                    )
                     old_probability = float(
                         sampling_probabilities[action_index, 0]
                     )
@@ -434,6 +461,8 @@ class RLAgent(Agent):
                             legal_mask=legal_mask,
                             old_log_prob=old_log_prob,
                             decision_turn=int(state["turn"]),
+                            agent_hand_size=agent_hand_size,
+                            opponent_hand_size=opponent_hand_size,
                         )
                     )
                     self._profile_add(
@@ -495,6 +524,8 @@ class RLAgent(Agent):
                 raw_reward=float(final_reward) + step.local_reward,
                 local_reward=step.local_reward,
                 terminal_reward=float(final_reward),
+                agent_hand_size=step.agent_hand_size,
+                opponent_hand_size=step.opponent_hand_size,
             )
             for step in self.trajectory
         ]

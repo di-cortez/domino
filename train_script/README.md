@@ -159,6 +159,74 @@ Completed points are recorded below
 re-invocation; `--force` re-runs them. Per-point pipeline output is stored next
 to the state file as `<run-name>.log`.
 
+## Opponent-bucket, PPO learning-rate, and baseline sequences
+
+Machine-specific wrappers run three planned ablations with comparable
+machine-adjusted RL wall-clock budgets. The bucket sequence uses `double-six`
+and runs, in order:
+
+1. `heuristic,recent`;
+2. every current bucket except `random`;
+3. `heuristic` only.
+
+The PPO learning-rate sequence uses `double-three` and runs the default
+`0.001`, followed by `0.002`, `0.004`, `0.008`, and `0.016`. No other training
+option is changed. All points use separate stable run names, while the
+seed-42 standard dataset and supervised checkpoint are reused where their
+ruleset matches.
+
+The baseline sequence is currently assigned to the Diego notebook and Rick
+desktop. It uses `double-three`, fixes PPO learning rate at `0.01` (10x the
+default), starts with `--baseline lookup-table`, and then runs the original six
+baseline choices in order:
+
+1. `--baseline zero`;
+2. `--baseline 5`;
+3. `--baseline -5`;
+4. `--value-head --baseline value-head-own-nn`;
+5. `--value-head --baseline value-head`;
+6. `--value-head --baseline value-head-no-up`.
+
+The added lookup point has its own stable machine-specific run name. It does
+not change the identity, order, or resume state of the original six
+experiments.
+
+| Machine | Coefficient | Buckets per point | PPO LR per point | Baseline per point |
+|---|---:|---:|---:|---:|
+| Diego notebook | 1.0 | 5h | 2h | 2h |
+| Rick desktop | 2.4 | 12h | 4h48 | 4h48 |
+| Rick old notebook | 3.4 | 17h | 6h48 | — |
+| Rick new notebook | 1.5 | 7h30 | 3h | — |
+
+Run the available scripts assigned to a machine from the repository root:
+
+```bash
+# Diego notebook
+train_script/run_bucket_tests_diego_notebook.sh
+train_script/run_ppo_lr_tests_diego_notebook.sh
+train_script/run_baseline_tests_diego_notebook.sh
+
+# Rick desktop
+train_script/run_bucket_tests_rick_desktop.sh
+train_script/run_ppo_lr_tests_rick_desktop.sh
+train_script/run_baseline_tests_rick_desktop.sh
+
+# Rick old notebook
+train_script/run_bucket_tests_rick_old_notebook.sh
+train_script/run_ppo_lr_tests_rick_old_notebook.sh
+
+# Rick new notebook
+train_script/run_bucket_tests_rick_new_notebook.sh
+train_script/run_ppo_lr_tests_rick_new_notebook.sh
+```
+
+Each wrapper is idempotent and resume-aware. Its state and attempt logs live
+under `train_script/grid_search_results/<machine>/<experiment>/`. Running the
+same command again skips completed points and resumes the interrupted one with
+only its unused RL budget. `--dry-run` prints every fresh command without
+starting a pipeline, and `--help` documents selection, forced restart, timing,
+and forwarded pipeline options.
+
 ## Validation
 
 For script-only changes, run at least:

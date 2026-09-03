@@ -204,7 +204,13 @@ Direct and finite canonical runs default to at most four epochs; `forever`
 defaults to 16, with a whole-buffer KL guard after every completed epoch.
 
 `training/rl/baseline.py` owns the only term subtracted from a return, selected
-by `--baseline`: `zero`, `constant VALUE`, `batch-mean`, or `value-head`.
+by `--baseline`: `zero`, `constant VALUE`, `batch-mean`, `lookup-table`, or one
+of the three value-head wirings. The lookup kind reads versioned unit-reward
+histograms from `training/rl/reward_lookup_tables/` — one per term of the
+reward model, `empty_hand`, `blocked`, `pass` and `draw` — conditions only on
+learner and opponent hand sizes before the action, and applies the run's gammas,
+normalized reward scales, distance clocks, and eta at evaluation time. Its
+packaged artifacts predate the reward redesign and are refused until rebuilt.
 Advantage normalization only rescales; centering belongs to the baseline alone,
 because a normalizer that also removed the batch mean would silently reimpose
 `batch-mean` and make `zero` and `constant` unobservable. An unset flag keeps

@@ -148,6 +148,7 @@ class PPOBuffer:
         baseline=None,
         normalize=True,
         old_values=None,
+        lookup_values=None,
     ):
         """Build one immutable buffer from the iteration's decisions.
 
@@ -232,6 +233,7 @@ class PPOBuffer:
             baseline,
             returns,
             value_predictions=old_values,
+            lookup_values=lookup_values,
         )
         baseline_mean = float(np.mean(baseline_values, dtype=np.float64))
         raw_advantages = np.ascontiguousarray(
@@ -1278,6 +1280,7 @@ def update_from_samples(
     normalize_advantages,
     max_epochs,
     baseline=None,
+    lookup_values=None,
     collect_value_predictions=False,
 ):
     """Build the immutable PPO buffer and update one on-policy iteration."""
@@ -1307,6 +1310,7 @@ def update_from_samples(
         baseline=baseline,
         normalize=normalize_advantages,
         old_values=old_values,
+        lookup_values=lookup_values,
     )
     buffer_seconds = time.perf_counter() - buffer_started
 

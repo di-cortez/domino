@@ -19,6 +19,7 @@ from training.rl.champion_evaluation import (
     champion_evaluation_policy_manifest,
 )
 from training.rl.rollout import REWARD_ZERO_EPSILON
+from training.rl.statistics import RunningMoments
 from training.rl.constants import (
     RL_WORKER_AUTOTUNE_FRACTION,
     RL_WORKER_AUTOTUNE_MINIMUM_GAIN,
@@ -39,7 +40,7 @@ from utils.runtime_status import format_duration, print_memory_report
 
 
 TRAINING_METRICS_FORMAT = "domino_rl_training_metrics"
-TRAINING_METRICS_VERSION = 8
+TRAINING_METRICS_VERSION = 9
 BUCKET_RESULT_COLUMNS = ("games", "wins", "losses")
 EVENT_RESULT_COLUMNS = (
     "opponent_draws",
@@ -106,6 +107,15 @@ TRAINING_METRIC_COLUMNS = (
     "max_approx_kl",
     "final_clip_fraction",
     "final_policy_loss",
+    # Five scalar populations, each as the five-number transport form of
+    # `training.rl.statistics.RunningMoments`: count, sum, sum of squares,
+    # minimum, maximum. The periodic diagnostic merges these across the
+    # iterations of its window and turns each into mean/max/min/std.
+    "terminal_empty_hand_moments",
+    "terminal_blocked_moments",
+    "draw_return_moments",
+    "pass_return_moments",
+    "baseline_moments",
     "gradient_norm_mean",
     "buffer_location",
     "buffer_bytes",
@@ -266,6 +276,18 @@ def build_iteration_metrics_row(
             for name in TERMINAL_RESULT_COLUMNS
         ],
         "moving_average_win_rate": float(moving_win_rate),
+        "terminal_empty_hand_moments": _moments_column(
+            restart_summary["terminal_outcomes"].get("empty_hand_moments")
+        ),
+        "terminal_blocked_moments": _moments_column(
+            restart_summary["terminal_outcomes"].get("blocked_moments")
+        ),
+        "draw_return_moments": reward.get("draw_return_moments"),
+        "pass_return_moments": reward.get("pass_return_moments"),
+        "baseline_moments": (
+            None if ppo_metrics is None
+            else ppo_metrics.get("baseline_moments")
+        ),
         "reward_mean": reward.get("reward_mean"),
         "reward_std": reward.get("reward_std"),
         "reward_min": reward.get("reward_min"),
@@ -1019,7 +1041,7 @@ class RLRuntimeProfile:
         }
 
 
-def _reward_signal_summary(samples, xp=None):
+def _reward_signal_summary(samples, xp=None, *, draw_scale=1.0, pass_scale=1.0):
     """Return compact diagnostics for finalized decision rewards.
 
     ``reward_std`` disambiguates a falling value loss from a merely
@@ -1064,7 +1086,36 @@ def _reward_signal_summary(samples, xp=None):
         "good_pct": float(100.0 * good / total),
         "neutral_pct": float(100.0 * neutral / total),
         "bad_pct": float(100.0 * bad / total),
+        # ``G_D`` and ``G_P`` as the reward model defines them: the *unit*
+        # event return, before the pair-normalized scale and before the
+        # ``reward_eta`` mixture. The samples carry the scaled value, and the
+        # scale is a per-run constant that factors straight out of a linear
+        # accumulation, so dividing here is exact rather than approximate. A
+        # scale of zero deletes the component outright, and its unit form is
+        # then unmeasurable rather than zero.
+        "draw_return_moments": _event_return_moments(
+            samples, "draw_return", draw_scale
+        ).to_list(),
+        "pass_return_moments": _event_return_moments(
+            samples, "pass_return", pass_scale
+        ).to_list(),
     }
+
+
+def _moments_column(moments):
+    """Return one distribution column, or ``None`` when it was not measured."""
+    return None if moments is None else moments.to_list()
+
+
+def _event_return_moments(samples, attribute, scale):
+    """Return the unit-scale distribution of one immediate-return half."""
+    moments = RunningMoments()
+    scale = float(scale)
+    if scale <= 0.0:
+        return moments
+    for sample in samples:
+        moments.add(float(getattr(sample, attribute)) / scale)
+    return moments
 
 
 def _gradient_log_text(metrics):
@@ -1367,6 +1418,14 @@ def _metric_values(row):
         "max_approx_kl": row["max_approx_kl"],
         "final_clip_fraction": row["final_clip_fraction"],
         "final_policy_loss": row["final_policy_loss"],
+        # Absent on a row built before v9, and on any iteration whose
+        # population was never measured; ``None`` is the honest value,
+        # since zero is one this distribution can legitimately take.
+        "terminal_empty_hand_moments": row.get("terminal_empty_hand_moments"),
+        "terminal_blocked_moments": row.get("terminal_blocked_moments"),
+        "draw_return_moments": row.get("draw_return_moments"),
+        "pass_return_moments": row.get("pass_return_moments"),
+        "baseline_moments": row.get("baseline_moments"),
         "gradient_norm_mean": row["gradient_norm_mean"],
         "buffer_location": row["buffer_location"],
         "buffer_bytes": row["buffer_bytes"],

@@ -538,6 +538,10 @@ def test_double_three_numbered_checkpoint_resumes_exactly(tmp_path):
         gpi=10,
         seed=2468,
         ppo_max_epochs=2,
+        # Pinned: the default `lookup-table` baseline has no packaged artifact
+        # for double-three, and this test is about the ruleset, not the
+        # baseline.
+        baseline=("batch-mean",),
     )
     resources = RLResourceOptions(
         sl_weights_path=supervised,
@@ -597,6 +601,7 @@ def test_double_three_resume_uses_saved_ruleset_instead_of_cli_override(tmp_path
         gpi=10,
         seed=9753,
         ppo_max_epochs=2,
+        baseline=("batch-mean",),
     )
     resources = RLResourceOptions(
         sl_weights_path=supervised,
@@ -627,6 +632,7 @@ def test_double_three_resume_uses_saved_ruleset_instead_of_cli_override(tmp_path
             gpi=10,
             seed=9753,
             ppo_max_epochs=2,
+            baseline=("batch-mean",),
         ),
         resources,
         RLExecutionOptions(

@@ -190,6 +190,12 @@ class ParallelRLTests(unittest.TestCase):
 
     def _train(self, **kwargs):
         kwargs.setdefault("sl_weights_path", str(self.sl_weights_path))
+        # Pinned rather than inherited: these tests exercise the snapshot
+        # pool and the update loop, not the project defaults. `random` is
+        # the default bucket now and holds no snapshots, and the default
+        # `lookup-table` baseline has no packaged artifact for every
+        # ruleset these tests use.
+        kwargs.setdefault("opponent_buckets", ("heuristic", "recent"))
         groups = []
         for option_type in (
             RLTrainingOptions,
@@ -2489,7 +2495,7 @@ class ParallelRLTests(unittest.TestCase):
         calls = {"count": 0}
         original = iteration_module._reward_signal_summary
 
-        def failing(batch, xp=None):
+        def failing(batch, xp=None, **kwargs):
             calls["count"] += 1
             if calls["count"] == target_iteration:
                 raise FakeCUDAError(

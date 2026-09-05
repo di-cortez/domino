@@ -380,6 +380,9 @@ def _train_restart_run(
             total_training_games=total_games,
             gpi=gpi,
             opponent_buckets=("random",),
+            # Pinned: the default `lookup-table` baseline has no packaged
+            # artifact for this ruleset, and this test is not about it.
+            baseline=("batch-mean",),
             difficulty_weight=0.0,
             opponent_decision_restarts=True,
             seed=1234,

@@ -90,7 +90,7 @@ except ImportError:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SEED = 42
+DEFAULT_SEED = 52
 CANONICAL_DATASET_GAMES = 100_000
 CANONICAL_SUPERVISED_MAX_EPOCHS = 5_000
 PERIODIC_DIAGNOSTIC_EVERY_GAMES = 100_000
@@ -1094,10 +1094,13 @@ def _run_periodic_point(
         )
         print(machine_summary(diagnostic_run_config["machine"]))
     print(f"Checkpoint: {games:,} RL games")
-    print(
-        f"Weights: {Path(row['checkpoint_path']).name} | "
-        f"SHA-256: {row['checkpoint_sha256'][:12]}..."
-    )
+    # The hash is present on a v3 record and absent from a v4 one, so the
+    # line reports what the record actually holds rather than assuming.
+    checkpoint_hash = row.get("checkpoint_sha256")
+    weights_line = f"Weights: {Path(row['checkpoint_path']).name}"
+    if checkpoint_hash:
+        weights_line += f" | SHA-256: {checkpoint_hash[:12]}..."
+    print(weights_line)
     print(f"Opponent: random | games: {row['diagnostic_games']:,}")
     print(f"Workers: {row['selected_workers']} ({worker_source})")
     print(f"Wins/losses: {row['wins']:,}/{row['losses']:,}")
@@ -1183,6 +1186,9 @@ def run_rl_pipeline(root, config, args, assets):
         algorithm=algorithm,
         use_opponent_suit_features=_use_opponent_suit_features(args),
         use_opponent_bucket_features=_use_opponent_bucket_features(args),
+        run_ordinal=args.run_ordinal,
+        machine_slug_override=args.machine_slug,
+        bundle_suffix=args.bundle_suffix,
         diagnostic_config={
             "periodic_seed": int(periodic_diagnostic_seed(seed)),
             "periodic_seed_namespace": "periodic_rl_vs_random",
@@ -1723,6 +1729,39 @@ def parse_args(argv=None):
         help=(
             "Optional stable label for a distinct run. Letters, digits, '-' "
             "and '_' are accepted."
+        ),
+    )
+    canonical.add_argument(
+        "--run-ordinal",
+        type=int,
+        default=None,
+        help=(
+            "Experiment number for this run's analysis bundle, from the log "
+            "shared across machines. Omit it and the bundle is created as "
+            "'<date>-XXX_<machine>_'; substitute the number by hand once the "
+            "run has stopped. There is deliberately no automatic fallback: no "
+            "single machine can know the next number, and a guessed one would "
+            "collide silently."
+        ),
+    )
+    canonical.add_argument(
+        "--machine-slug",
+        default=None,
+        help=(
+            "Override the machine name in the bundle directory. Use it on a "
+            "machine that has no entry in utils.machine_identity yet."
+        ),
+    )
+    canonical.add_argument(
+        "--bundle-suffix",
+        default=None,
+        help=(
+            "Name the parameter this run tests at the end of its analysis "
+            "bundle directory, as in "
+            "'20260904-XXX_diego_notebook_lr_0p02'. Letters, digits and '_' "
+            "only; a decimal point is written 'p'. Experiment sequences set "
+            "this per run so a bundle copied out of its run still says which "
+            "point it is."
         ),
     )
     canonical.add_argument("--restart-rl", action="store_true")

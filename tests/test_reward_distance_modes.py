@@ -12,6 +12,7 @@ from training.rl.config import (
     RLTrainingOptions,
     resolve_training_options,
 )
+from training.rl.reward_model import DRAW_EVENT, PASS_EVENT
 from training.rl.reward_distance import (
     DEFAULT_REWARD_DISTANCE_MODE,
     REWARD_DISTANCE_MODES,
@@ -63,8 +64,8 @@ def test_new_run_defaults_are_exposed_by_both_clis(tmp_path):
     for args in (standalone, canonical):
         assert args.gamma_i == 0.90
         assert args.gamma_f == 0.95
-        assert args.reward_eta == 0.50
-        assert args.reward_distance_mode == "turn-turn"
+        assert args.reward_eta == 0.115
+        assert args.reward_distance_mode == "decision-decision"
 
 
 def test_resolved_schema_freezes_the_selected_mode():
@@ -89,6 +90,7 @@ def test_local_reward_distances(metric, distances):
         base_reward=0.2,
         decay_lambda=0.9,
         distance_metric=metric,
+        event_kind=DRAW_EVENT,
     )
 
     assert [step.local_reward for step in agent.trajectory] == pytest.approx([
@@ -98,8 +100,8 @@ def test_local_reward_distances(metric, distances):
 
 def test_decision_local_rewards_accumulate_across_events():
     agent = _agent(2, 5)
-    agent.add_decayed_event_reward(8, 0.2, 0.9, "decision")
-    agent.add_decayed_event_reward(9, -0.1, 0.9, "decision")
+    agent.add_decayed_event_reward(8, 0.2, 0.9, "decision", event_kind=DRAW_EVENT)
+    agent.add_decayed_event_reward(9, -0.1, 0.9, "decision", event_kind=PASS_EVENT)
 
     assert [step.local_reward for step in agent.trajectory] == pytest.approx([
         0.2 * 0.9 - 0.1 * 0.9,
@@ -113,7 +115,9 @@ def test_each_mode_controls_both_reward_components(mode):
     local_distances = (4, 1) if local_metric == "turn" else (1, 0)
     terminal_distances = (5, 2) if terminal_metric == "turn" else (1, 0)
     agent = _agent(2, 5)
-    agent.add_decayed_event_reward(7, 0.2, 0.9, local_metric)
+    agent.add_decayed_event_reward(
+        7, 0.2, 0.9, local_metric, event_kind=DRAW_EVENT
+    )
 
     samples = _finish_episode_with_rewards(
         agent,
@@ -193,7 +197,7 @@ def test_finalization_requires_explicit_terminal_context():
 def test_chronology_validation_covers_local_and_terminal_turn_metrics():
     agent = _agent(5)
     with pytest.raises(ValueError, match="Event reward chronology"):
-        agent.add_decayed_event_reward(5, 0.2, 0.9, "turn")
+        agent.add_decayed_event_reward(5, 0.2, 0.9, "turn", event_kind=DRAW_EVENT)
     with pytest.raises(ValueError, match="Terminal reward chronology"):
         _finish_episode_with_rewards(
             _agent(5),

@@ -3,7 +3,11 @@
 TURN_DISTANCE = "turn"
 DECISION_DISTANCE = "decision"
 
-DEFAULT_REWARD_DISTANCE_MODE = "turn-turn"
+# Both clocks count the learner's own decisions. A turn clock also counts the
+# opponent's actions and every draw, so the same gamma discounts far harder
+# under it; keeping both halves on the decision clock makes the discount mean
+# "how many choices of mine remain" rather than "how much happened".
+DEFAULT_REWARD_DISTANCE_MODE = "decision-decision"
 HISTORICAL_REWARD_DISTANCE_MODE = "turn-decision"
 HISTORICAL_GAMMA_F = 1.0
 

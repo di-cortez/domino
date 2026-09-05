@@ -1,0 +1,684 @@
+<title>Sequência de treinos de um fator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bitter:wght@500;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+  :root {
+    color-scheme: light;
+    /* Neutrals biased toward the teal accent rather than a flat grey. */
+    --ground: #eef2f1;
+    --surface: #ffffff;
+    --sunk: #e3eae8;
+    --ink: #131e1c;
+    --ink-soft: #475855;
+    --ink-faint: #74847f;
+    --rule: #cfdad7;
+    --rule-soft: #e0e8e6;
+    --accent: #0a6b5c;
+    --accent-wash: #e2efec;
+    --was: #9a5b18;
+    --now: #0a6b5c;
+    --shadow: 0 1px 2px rgba(19, 30, 28, .05), 0 10px 28px rgba(19, 30, 28, .055);
+    --serif: "Bitter", Georgia, serif;
+    --sans: "Source Sans 3", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #0d1514;
+      --surface: #15201e;
+      --sunk: #1c2927;
+      --ink: #dfe8e5;
+      --ink-soft: #a3b3af;
+      --ink-faint: #7a8a86;
+      --rule: #2a3835;
+      --rule-soft: #202c2a;
+      --accent: #4fbfa9;
+      --accent-wash: #16302b;
+      --was: #d8944a;
+      --now: #4fbfa9;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 10px 28px rgba(0, 0, 0, .3);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0d1514;
+    --surface: #15201e;
+    --sunk: #1c2927;
+    --ink: #dfe8e5;
+    --ink-soft: #a3b3af;
+    --ink-faint: #7a8a86;
+    --rule: #2a3835;
+    --rule-soft: #202c2a;
+    --accent: #4fbfa9;
+    --accent-wash: #16302b;
+    --was: #d8944a;
+    --now: #4fbfa9;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 10px 28px rgba(0, 0, 0, .3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .shell {
+    max-width: 1020px;
+    margin: 0 auto;
+    padding: 0 clamp(18px, 4vw, 40px) 88px;
+  }
+  code { font-family: var(--mono); font-size: .86em; }
+
+  /* ---- masthead ---- */
+  header {
+    padding: clamp(40px, 7vw, 76px) 0 clamp(24px, 3vw, 34px);
+    border-bottom: 2px solid var(--ink);
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 16px;
+  }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(2.1rem, 5vw, 3.2rem);
+    line-height: 1.08;
+    letter-spacing: -.014em;
+    margin: 0 0 16px;
+    max-width: 18ch;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: clamp(1.02rem, 1.9vw, 1.16rem);
+    color: var(--ink-soft);
+    margin: 0;
+    max-width: 64ch;
+  }
+  .tallies {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    margin: 30px 0 0;
+    border-top: 1px solid var(--rule);
+  }
+  .tally {
+    flex: 1 1 150px;
+    padding: 13px 22px 13px 0;
+    border-right: 1px solid var(--rule-soft);
+  }
+  .tally:last-child { border-right: 0; }
+  .tally dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 4px;
+  }
+  .tally dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 1.12rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- shared configuration ---- */
+  .shared { padding-top: clamp(40px, 5vw, 60px); }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: 1.42rem;
+    line-height: 1.2;
+    letter-spacing: -.008em;
+    margin: 0 0 8px;
+    text-wrap: balance;
+  }
+  .lead { color: var(--ink-soft); margin: 0 0 22px; max-width: 66ch; }
+  .params {
+    display: grid;
+    gap: 1px;
+    margin: 0;
+    background: var(--rule-soft);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  @media (min-width: 700px) {
+    .params { grid-template-columns: 1fr 1fr; }
+    /* An odd parameter count would leave the gap colour showing in the last
+       cell; this fills it so the block keeps a straight edge. */
+    .params::after { content: ""; background: var(--surface); }
+  }
+  .param-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: baseline;
+    column-gap: 12px;
+    background: var(--surface);
+    padding: 10px 16px;
+  }
+  .param-row dt { font-size: .93rem; color: var(--ink-soft); }
+  .param-row .value {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: .9rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .param-row .key {
+    grid-column: 1 / -1;
+    margin: 1px 0 0;
+    font-size: .74rem;
+    color: var(--ink-faint);
+  }
+  .param-row .key code { font-size: 1em; }
+
+  /* ---- run groups ---- */
+  .group { padding-top: clamp(34px, 4.5vw, 52px); }
+  .group-head { margin-bottom: 14px; }
+  .group-kicker {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 5px;
+  }
+  .group-note { margin: 6px 0 0; color: var(--ink-soft); max-width: 68ch; font-size: .95rem; }
+
+  .runs { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px;
+           background: var(--rule-soft); border: 1px solid var(--rule);
+           border-radius: 4px; overflow: hidden; }
+  .run {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 14px;
+    background: var(--surface);
+    padding: 13px 16px;
+  }
+  .run.is-control { background: var(--accent-wash); }
+  .order {
+    font-family: var(--mono);
+    font-size: .76rem;
+    font-weight: 700;
+    color: var(--ink-faint);
+    padding-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .run-body { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+  .run-name {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: .92rem;
+    font-weight: 500;
+    word-break: break-word;
+  }
+  .change { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
+             font-family: var(--mono); font-size: .82rem; }
+  .param { color: var(--ink-faint); }
+  .was { color: var(--was); text-decoration: line-through;
+          text-decoration-thickness: 1px; }
+  .arrow { color: var(--ink-faint); }
+  .now { color: var(--now); font-weight: 700; }
+  .control-note { font-family: var(--sans); font-size: .88rem; color: var(--ink-soft); }
+  .flags { margin: 0; overflow-x: auto; }
+  .flags code {
+    display: block;
+    white-space: pre;
+    font-size: .77rem;
+    color: var(--ink-faint);
+    padding-bottom: 2px;
+  }
+
+  /* ---- closing notes ---- */
+  .notes { padding-top: clamp(40px, 5vw, 60px); }
+  .note {
+    background: var(--surface);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+    padding: 18px 22px;
+    margin: 0 0 14px;
+    box-shadow: var(--shadow);
+  }
+  .note h3 { font-family: var(--sans); font-size: 1rem; font-weight: 600; margin: 0 0 6px; }
+  .note p { margin: 0; color: var(--ink-soft); font-size: .95rem; max-width: 70ch; }
+  .note p + p { margin-top: 8px; }
+
+  details { margin-top: 22px; border: 1px solid var(--rule); border-radius: 4px;
+             background: var(--surface); }
+  summary { cursor: pointer; padding: 12px 16px; font-weight: 600; font-size: .95rem; }
+  summary::marker { color: var(--accent); }
+  details ul { margin: 0; padding: 0 16px 14px 34px; }
+  details li { font-size: .8rem; margin-bottom: 3px; }
+  details li code { font-size: 1em; color: var(--ink-soft); word-break: break-all; }
+  details li .bundle {
+    display: block;
+    font-family: var(--mono);
+    font-size: .95em;
+    color: var(--accent);
+    padding-left: 12px;
+  }
+
+  footer {
+    margin-top: clamp(44px, 6vw, 66px);
+    padding-top: 22px;
+    border-top: 2px solid var(--ink);
+    font-size: .86rem;
+    color: var(--ink-faint);
+    max-width: 74ch;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+</style>
+
+<div class="shell">
+  <header>
+    <p class="eyebrow">Domino RL · para revisão · 4 de setembro de 2026</p>
+    <h1>23 treinos, um parâmetro por vez</h1>
+    <p class="standfirst">
+      Cada execução usa a configuração padrão do projeto e altera
+      <strong>exatamente um</strong> parâmetro, então qualquer diferença medida
+      contra o controle pertence àquele parâmetro. Esta página existe para ser
+      conferida antes de 115 horas de máquina serem gastas.
+    </p>
+    <dl class="tallies">
+      <div class="tally"><dt>Execuções</dt><dd>23</dd></div>
+      <div class="tally"><dt>Horas cada</dt><dd>5 h</dd></div>
+      <div class="tally"><dt>Total</dt><dd>115 h</dd></div>
+      <div class="tally"><dt>Semente</dt><dd>52</dd></div>
+      <div class="tally"><dt>Ruleset</dt><dd>double-six</dd></div>
+    </dl>
+  </header>
+
+  <section class="shared">
+    <h2>A configuração comum</h2>
+    <p class="lead">
+      Vale para todas as 23 execuções. Uma variante troca apenas a linha
+      que ela testa; tudo o mais nesta lista permanece.
+    </p>
+    <dl class="params">
+          <div class="param-row"><dt>Semente</dt><dd class="value">52</dd><dd class="key"><code>seed</code></dd></div>
+          <div class="param-row"><dt>Ruleset</dt><dd class="value">double-six</dd><dd class="key"><code>ruleset</code></dd></div>
+          <div class="param-row"><dt>Nível do pipeline</dt><dd class="value">forever</dd><dd class="key"><code>—</code></dd></div>
+          <div class="param-row"><dt>Épocas do PPO</dt><dd class="value">16</dd><dd class="key"><code>ppo_max_epochs</code></dd></div>
+          <div class="param-row"><dt>Oponente de treino</dt><dd class="value">random</dd><dd class="key"><code>opponent_buckets</code></dd></div>
+          <div class="param-row"><dt>Baseline</dt><dd class="value">lookup-table</dd><dd class="key"><code>baseline</code></dd></div>
+          <div class="param-row"><dt>Taxa de aprendizado</dt><dd class="value">0,01</dd><dd class="key"><code>learning_rate</code></dd></div>
+          <div class="param-row"><dt>Partidas por iteração</dt><dd class="value">2000</dd><dd class="key"><code>gpi</code></dd></div>
+          <div class="param-row"><dt>Coef. de entropia</dt><dd class="value">0</dd><dd class="key"><code>entropy_coef</code></dd></div>
+          <div class="param-row"><dt>Mistura terminal/local</dt><dd class="value">0,115</dd><dd class="key"><code>reward_eta</code></dd></div>
+          <div class="param-row"><dt>Desconto terminal</dt><dd class="value">0,95</dd><dd class="key"><code>gamma_f</code></dd></div>
+          <div class="param-row"><dt>Desconto de evento</dt><dd class="value">0,9</dd><dd class="key"><code>gamma_i</code></dd></div>
+          <div class="param-row"><dt>Relógio do desconto</dt><dd class="value">decision-decision</dd><dd class="key"><code>reward_distance_mode</code></dd></div>
+          <div class="param-row"><dt>Peso a_E / a_B</dt><dd class="value">1 / 1</dd><dd class="key"><code>terminal_*_weight</code></dd></div>
+          <div class="param-row"><dt>Peso a_P / a_D</dt><dd class="value">1 / 1</dd><dd class="key"><code>immediate_*_weight</code></dd></div>
+          <div class="param-row"><dt>Peso de dificuldade</dt><dd class="value">0,5</dd><dd class="key"><code>difficulty_weight</code></dd></div>
+          <div class="param-row"><dt>Cabeça de valor</dt><dd class="value">desligada</dd><dd class="key"><code>value_head</code></dd></div>
+    </dl>
+  </section>
+
+  <section class="group" id="controle">
+    <div class="group-head">
+      <p class="group-kicker">Ponto de comparação</p>
+      <h2>Controle</h2>
+      <p class="group-note">Tudo no padrão. Toda diferença medida nas outras
+        vinte e duas execuções é lida contra esta.</p>
+    </div>
+    <ol class="runs">
+      <li class="run is-control">
+        <span class="order">01</span>
+        <div class="run-body">
+          <p class="run-name">control</p>
+          <div class="change"><span class="control-note">nada muda — este é o ponto de comparação</span></div>
+          <p class="flags"><code>—</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+  <section class="group">
+    <div class="group-head">
+      <p class="group-kicker">1 execução</p>
+      <h2>Oponente de treino</h2>
+      <p class="group-note">Contra quem as partidas de self-play são jogadas.</p>
+    </div>
+    <ol class="runs">
+      <li class="run">
+        <span class="order">02</span>
+        <div class="run-body">
+          <p class="run-name">bucket_heuristic</p>
+          <div class="change"><span class="param">--opponent-buckets</span><span class="was">random</span><span class="arrow" aria-hidden="true">→</span><span class="now">heuristic</span></div>
+          <p class="flags"><code>--opponent-buckets heuristic</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+  <section class="group">
+    <div class="group-head">
+      <p class="group-kicker">2 execuções</p>
+      <h2>Baseline de vantagem</h2>
+      <p class="group-note">O termo <code>b</code> subtraído do retorno em <code>vantagem = retorno − b</code>.</p>
+    </div>
+    <ol class="runs">
+      <li class="run">
+        <span class="order">03</span>
+        <div class="run-body">
+          <p class="run-name">baseline_zero</p>
+          <div class="change"><span class="param">--baseline</span><span class="was">lookup-table</span><span class="arrow" aria-hidden="true">→</span><span class="now">zero</span></div>
+          <p class="flags"><code>--baseline zero</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">04</span>
+        <div class="run-body">
+          <p class="run-name">baseline_batch_mean</p>
+          <div class="change"><span class="param">--baseline</span><span class="was">lookup-table</span><span class="arrow" aria-hidden="true">→</span><span class="now">batch-mean</span></div>
+          <p class="flags"><code>--baseline batch-mean</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+  <section class="group">
+    <div class="group-head">
+      <p class="group-kicker">3 execuções</p>
+      <h2>Relógio do desconto</h2>
+      <p class="group-note">O que <code>gamma</code> conta ao descontar: turnos da mesa ou decisões do agente. A primeira metade é o relógio local, a segunda o terminal.</p>
+    </div>
+    <ol class="runs">
+      <li class="run">
+        <span class="order">05</span>
+        <div class="run-body">
+          <p class="run-name">distance_turn_turn</p>
+          <div class="change"><span class="param">--reward-distance-mode</span><span class="was">decision-decision</span><span class="arrow" aria-hidden="true">→</span><span class="now">turn-turn</span></div>
+          <p class="flags"><code>--reward-distance-mode turn-turn</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">06</span>
+        <div class="run-body">
+          <p class="run-name">distance_turn_decision</p>
+          <div class="change"><span class="param">--reward-distance-mode</span><span class="was">decision-decision</span><span class="arrow" aria-hidden="true">→</span><span class="now">turn-decision</span></div>
+          <p class="flags"><code>--reward-distance-mode turn-decision</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">07</span>
+        <div class="run-body">
+          <p class="run-name">distance_decision_turn</p>
+          <div class="change"><span class="param">--reward-distance-mode</span><span class="was">decision-decision</span><span class="arrow" aria-hidden="true">→</span><span class="now">decision-turn</span></div>
+          <p class="flags"><code>--reward-distance-mode decision-turn</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+  <section class="group">
+    <div class="group-head">
+      <p class="group-kicker">2 execuções</p>
+      <h2>Coeficiente de entropia</h2>
+      <p class="group-note">O bônus de exploração somado à perda da política.</p>
+    </div>
+    <ol class="runs">
+      <li class="run">
+        <span class="order">08</span>
+        <div class="run-body">
+          <p class="run-name">entropy_0p01</p>
+          <div class="change"><span class="param">--entropy-coef</span><span class="was">0</span><span class="arrow" aria-hidden="true">→</span><span class="now">0,01</span></div>
+          <p class="flags"><code>--entropy-coef 0.01</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">09</span>
+        <div class="run-body">
+          <p class="run-name">entropy_0p1</p>
+          <div class="change"><span class="param">--entropy-coef</span><span class="was">0</span><span class="arrow" aria-hidden="true">→</span><span class="now">0,1</span></div>
+          <p class="flags"><code>--entropy-coef 0.1</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+  <section class="group">
+    <div class="group-head">
+      <p class="group-kicker">4 execuções</p>
+      <h2>Taxa de aprendizado</h2>
+      <p class="group-note">O passo do otimizador.</p>
+    </div>
+    <ol class="runs">
+      <li class="run">
+        <span class="order">10</span>
+        <div class="run-body">
+          <p class="run-name">lr_0p005</p>
+          <div class="change"><span class="param">--learning-rate</span><span class="was">0,01</span><span class="arrow" aria-hidden="true">→</span><span class="now">0,005</span></div>
+          <p class="flags"><code>--learning-rate 0.005</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">11</span>
+        <div class="run-body">
+          <p class="run-name">lr_0p02</p>
+          <div class="change"><span class="param">--learning-rate</span><span class="was">0,01</span><span class="arrow" aria-hidden="true">→</span><span class="now">0,02</span></div>
+          <p class="flags"><code>--learning-rate 0.02</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">12</span>
+        <div class="run-body">
+          <p class="run-name">lr_0p03</p>
+          <div class="change"><span class="param">--learning-rate</span><span class="was">0,01</span><span class="arrow" aria-hidden="true">→</span><span class="now">0,03</span></div>
+          <p class="flags"><code>--learning-rate 0.03</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">13</span>
+        <div class="run-body">
+          <p class="run-name">lr_0p04</p>
+          <div class="change"><span class="param">--learning-rate</span><span class="was">0,01</span><span class="arrow" aria-hidden="true">→</span><span class="now">0,04</span></div>
+          <p class="flags"><code>--learning-rate 0.04</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+  <section class="group">
+    <div class="group-head">
+      <p class="group-kicker">2 execuções</p>
+      <h2>Partidas por iteração (GPI)</h2>
+      <p class="group-note">Quantas partidas entram em cada atualização da política.</p>
+    </div>
+    <ol class="runs">
+      <li class="run">
+        <span class="order">14</span>
+        <div class="run-body">
+          <p class="run-name">gpi_1000</p>
+          <div class="change"><span class="param">--gpi</span><span class="was">2000</span><span class="arrow" aria-hidden="true">→</span><span class="now">1000</span></div>
+          <p class="flags"><code>--gpi 1000</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">15</span>
+        <div class="run-body">
+          <p class="run-name">gpi_4000</p>
+          <div class="change"><span class="param">--gpi</span><span class="was">2000</span><span class="arrow" aria-hidden="true">→</span><span class="now">4000</span></div>
+          <p class="flags"><code>--gpi 4000</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+  <section class="group">
+    <div class="group-head">
+      <p class="group-kicker">4 execuções</p>
+      <h2>Pesos terminais (a_E, a_B)</h2>
+      <p class="group-note">Mão vazia contra jogo fechado. O par é normalizado pelo maior membro, então só a razão dentro do par tem significado.</p>
+    </div>
+    <ol class="runs">
+      <li class="run">
+        <span class="order">16</span>
+        <div class="run-body">
+          <p class="run-name">terminal_aE1_aB0</p>
+          <div class="change"><span class="param">a_E, a_B</span><span class="was">(1, 1)</span><span class="arrow" aria-hidden="true">→</span><span class="now">(1, 0)</span></div>
+          <p class="flags"><code>--terminal-empty-hand-weight 1 --terminal-blocked-weight 0</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">17</span>
+        <div class="run-body">
+          <p class="run-name">terminal_aE0_aB1</p>
+          <div class="change"><span class="param">a_E, a_B</span><span class="was">(1, 1)</span><span class="arrow" aria-hidden="true">→</span><span class="now">(0, 1)</span></div>
+          <p class="flags"><code>--terminal-empty-hand-weight 0 --terminal-blocked-weight 1</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">18</span>
+        <div class="run-body">
+          <p class="run-name">terminal_aE1_aB2</p>
+          <div class="change"><span class="param">a_E, a_B</span><span class="was">(1, 1)</span><span class="arrow" aria-hidden="true">→</span><span class="now">(1, 2)</span></div>
+          <p class="flags"><code>--terminal-empty-hand-weight 1 --terminal-blocked-weight 2</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">19</span>
+        <div class="run-body">
+          <p class="run-name">terminal_aE2_aB1</p>
+          <div class="change"><span class="param">a_E, a_B</span><span class="was">(1, 1)</span><span class="arrow" aria-hidden="true">→</span><span class="now">(2, 1)</span></div>
+          <p class="flags"><code>--terminal-empty-hand-weight 2 --terminal-blocked-weight 1</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+  <section class="group">
+    <div class="group-head">
+      <p class="group-kicker">4 execuções</p>
+      <h2>Pesos imediatos (a_P, a_D)</h2>
+      <p class="group-note">Passe contra compra. Mesma normalização, mesmo par.</p>
+    </div>
+    <ol class="runs">
+      <li class="run">
+        <span class="order">20</span>
+        <div class="run-body">
+          <p class="run-name">immediate_aP1_aD0</p>
+          <div class="change"><span class="param">a_P, a_D</span><span class="was">(1, 1)</span><span class="arrow" aria-hidden="true">→</span><span class="now">(1, 0)</span></div>
+          <p class="flags"><code>--immediate-pass-weight 1 --immediate-draw-weight 0</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">21</span>
+        <div class="run-body">
+          <p class="run-name">immediate_aP0_aD1</p>
+          <div class="change"><span class="param">a_P, a_D</span><span class="was">(1, 1)</span><span class="arrow" aria-hidden="true">→</span><span class="now">(0, 1)</span></div>
+          <p class="flags"><code>--immediate-pass-weight 0 --immediate-draw-weight 1</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">22</span>
+        <div class="run-body">
+          <p class="run-name">immediate_aP1_aD2</p>
+          <div class="change"><span class="param">a_P, a_D</span><span class="was">(1, 1)</span><span class="arrow" aria-hidden="true">→</span><span class="now">(1, 2)</span></div>
+          <p class="flags"><code>--immediate-pass-weight 1 --immediate-draw-weight 2</code></p>
+        </div>
+      </li>
+      <li class="run">
+        <span class="order">23</span>
+        <div class="run-body">
+          <p class="run-name">immediate_aP2_aD1</p>
+          <div class="change"><span class="param">a_P, a_D</span><span class="was">(1, 1)</span><span class="arrow" aria-hidden="true">→</span><span class="now">(2, 1)</span></div>
+          <p class="flags"><code>--immediate-pass-weight 2 --immediate-draw-weight 1</code></p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section class="notes">
+    <h2>Três pontos que pedem atenção</h2>
+
+    <div class="note">
+      <h3>O ruleset é <code>double-six</code>, não <code>double-three</code></h3>
+      <p>
+        Os experimentos de baseline anteriores foram todos em
+        <code>double-three</code>, então estes resultados <strong>não são
+        comparáveis</strong> com aqueles. O motivo é o baseline
+        <code>lookup-table</code>: ele precisa de uma tabela de recompensa
+        empacotada no formato 3, e <code>double-six</code> é o único ruleset
+        que tem uma. Mudar para <code>double-three</code> exige reconstruir
+        esse artefato antes.
+      </p>
+    </div>
+
+    <div class="note">
+      <h3>Seis dos valores pedidos já eram o padrão</h3>
+      <p>
+        Bucket <code>random</code>, baseline <code>lookup-table</code>,
+        distância <code>decision-decision</code>, entropia 0, taxa 0,01 e GPI
+        2000 são a configuração padrão. Sob uma única semente, executá-los
+        separadamente seria a mesma execução repetida seis vezes, a cinco horas
+        cada. Eles estão representados pelo <strong>controle</strong>, que
+        também é o ponto (1, 1) dos dois grupos de peso de recompensa.
+      </p>
+    </div>
+
+    <div class="note">
+      <h3>Uma semente só</h3>
+      <p>
+        Todas as execuções usam <code>seed = 52</code>. Isso torna as
+        comparações limpas — mesma inicialização supervisionada, mesmas mãos —
+        mas <strong>nenhuma diferença observada pode ser separada de variação
+        de semente</strong>, porque não há réplica. Repetir o controle com uma
+        segunda semente daria essa régua.
+      </p>
+      <p>
+        Vale lembrar também que <code>--gpi 4000</code> dobra o tamanho da
+        iteração: em cinco horas ela faz metade das atualizações do controle.
+        A comparação por tempo e a comparação por número de atualizações dizem
+        coisas diferentes nesse ponto.
+      </p>
+    </div>
+
+    <details>
+      <summary>Diretórios que serão criados em <code>models/rl/</code>, com o pacote de análise de cada um</summary>
+      <ul>
+      <li><code>domino_rl_forever_seed52_runone_factor_control_diego_notebook</code><span class="bundle">└ control</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_bucket_heuristic_diego_notebook</code><span class="bundle">└ bucket_heuristic</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_baseline_zero_diego_notebook</code><span class="bundle">└ baseline_zero</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_baseline_batch_mean_diego_notebook</code><span class="bundle">└ baseline_batch_mean</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_distance_turn_turn_diego_notebook</code><span class="bundle">└ distance_turn_turn</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_distance_turn_decision_diego_notebook</code><span class="bundle">└ distance_turn_decision</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_distance_decision_turn_diego_notebook</code><span class="bundle">└ distance_decision_turn</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_entropy_0p01_diego_notebook</code><span class="bundle">└ entropy_0p01</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_entropy_0p1_diego_notebook</code><span class="bundle">└ entropy_0p1</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_lr_0p005_diego_notebook</code><span class="bundle">└ lr_0p005</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_lr_0p02_diego_notebook</code><span class="bundle">└ lr_0p02</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_lr_0p03_diego_notebook</code><span class="bundle">└ lr_0p03</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_lr_0p04_diego_notebook</code><span class="bundle">└ lr_0p04</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_gpi_1000_diego_notebook</code><span class="bundle">└ gpi_1000</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_gpi_4000_diego_notebook</code><span class="bundle">└ gpi_4000</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_terminal_aE1_aB0_diego_notebook</code><span class="bundle">└ aE1_aB0</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_terminal_aE0_aB1_diego_notebook</code><span class="bundle">└ aE0_aB1</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_terminal_aE1_aB2_diego_notebook</code><span class="bundle">└ aE1_aB2</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_terminal_aE2_aB1_diego_notebook</code><span class="bundle">└ aE2_aB1</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_immediate_aP1_aD0_diego_notebook</code><span class="bundle">└ aP1_aD0</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_immediate_aP0_aD1_diego_notebook</code><span class="bundle">└ aP0_aD1</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_immediate_aP1_aD2_diego_notebook</code><span class="bundle">└ aP1_aD2</span></li>
+      <li><code>domino_rl_forever_seed52_runone_factor_immediate_aP2_aD1_diego_notebook</code><span class="bundle">└ aP2_aD1</span></li>
+      </ul>
+    </details>
+  </section>
+
+  <footer>
+    <p>
+      Gerado a partir do próprio script da sequência
+      (<code>train_script/run_one_factor_tests_diego_notebook.sh --dry-run</code>)
+      e dos valores padrão do projeto, por
+      <code>train_script/build_one_factor_manifest.py</code>. Os números desta
+      página não são transcritos à mão: se o script mudar, ela muda junto.
+      A sequência é retomável — cada ponto grava o tempo de RL consumido, e
+      reexecutar o script continua de onde parou.
+    </p>
+  </footer>
+</div>

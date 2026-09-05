@@ -259,6 +259,7 @@ def test_histogram_evaluation_matches_direct_trajectory_return(gamma):
 
 def test_distances_match_the_production_rl_return_code():
     from agents.rl_agent import RLAgent, TrajectoryStep
+    from training.rl.reward_model import DRAW_EVENT
     from training.rl.rollout import _finish_episode_with_rewards
 
     agent = object.__new__(RLAgent)
@@ -266,12 +267,12 @@ def test_distances_match_the_production_rl_return_code():
         TrajectoryStep(np.zeros((1, 1)), 0, np.ones((1, 1)), decision_turn=2),
         TrajectoryStep(np.zeros((1, 1)), 0, np.ones((1, 1)), decision_turn=5),
     ]
-    agent.add_decayed_event_reward(7, 1.0, 0.5, "turn")
+    agent.add_decayed_event_reward(7, 1.0, 0.5, "turn", event_kind=DRAW_EVENT)
     assert [step.local_reward for step in agent.trajectory] == pytest.approx([
         0.5 ** 4,
         0.5 ** 1,
     ])
-    agent.add_decayed_event_reward(7, 1.0, 0.5, "decision")
+    agent.add_decayed_event_reward(7, 1.0, 0.5, "decision", event_kind=DRAW_EVENT)
     assert [step.local_reward for step in agent.trajectory] == pytest.approx([
         0.5 ** 4 + 0.5 ** 1,
         0.5 ** 1 + 0.5 ** 0,

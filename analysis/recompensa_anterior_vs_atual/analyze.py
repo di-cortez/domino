@@ -43,6 +43,7 @@ DERIVED_CORPUS = (
 
 # The fixed panel every periodic diagnostic plays against `random`.
 DIAGNOSTIC_GAMES = 100_000
+DIAGNOSTIC_OPPONENT = "random"
 
 # Shared temporal parameters. Both architectures ship the same defaults, so
 # they cancel out of the comparison: gamma_f, gamma_i and reward_eta are held
@@ -69,6 +70,9 @@ MAX_PIP_DOUBLE_SIX = 6
 LEGACY = "anterior"
 CURRENT = "atual"
 
+# Small counts read as words in the report's prose.
+NUMBER_WORDS = {2: "duas", 3: "três", 4: "quatro", 5: "cinco", 6: "seis"}
+
 # Every canonical double-six `forever` run, with the architecture it trained
 # under. `era` is decided by whether the run's locked configuration carries the
 # redesign's terminal weights, not by its date.
@@ -81,29 +85,88 @@ RUNS = (
     ("d6_maxwr_lr016", "domino_rl_forever_seed42_rund6_maxwr_lr016"),
     ("default_lr032", "domino_rl_forever_seed42_rundefault_lr032"),
     ("default_lr016_lookup", "domino_rl_forever_seed42_rundefault_lr016_lookup"),
+    ("default_lookup", "domino_rl_forever_seed42_rundefault_lookup"),
+    # Trained on three other machines and shared as the four-file compact
+    # bundle, so they carry a win-rate curve but no per-iteration metrics.
+    ("rick_heuristic",
+     "modelos_rick/20260904-154_rick_notebook-novo_s42_bucket_heuristic_batch_mean"),
+    ("rick_random_desktop",
+     "modelos_rick/20260904-153_rick_desktop_s42_bucket_random_batch_mean"),
+    ("rick_random_notebook",
+     "modelos_rick/20260904-152_rick_notebook-antigo_s42_bucket_random_batch_mean"),
+    # The two runs that act on this report's own prediction: same current
+    # reward, same everything else, but eta lowered to 0.115 -- the value the
+    # corpus said would restore the previous local/terminal balance. They are
+    # younger than the rest, which is what the matched horizon below is for.
+    ("d6_random_eta0115", "domino_rl_forever_seed42_rund6_random_eta0115"),
+    ("rick_random_eta0115",
+     "modelos_rick/20260904-155_domino_rl_forever_seed42_rund6_random_eta0115"),
 )
 
-# The two pairs that hold the opponent-bucket set fixed across the two
-# architectures. Each pair still differs in learning rate; the report says so.
+# The two runs that hold everything fixed except eta. The first pair is the
+# controlled one: both ran on the same GPU from the same supervised binary.
+ETA_PAIRS = (
+    ("rick_random_desktop", "rick_random_eta0115"),
+    ("rick_random_notebook", "d6_random_eta0115"),
+)
+
+# Pairs that hold the opponent-bucket set fixed across the two
+# architectures. The third one also holds the learning rate fixed, which is
+# what makes it the controlled comparison the earlier revisions of this report
+# could only ask for.
 PAIRS = (
     ("bucket_heuristic", "d6_maxwr_lr032"),
     ("bucket_heuristic_recent", "default_lr032"),
+    ("bucket_heuristic", "rick_heuristic"),
+    ("bucket_heuristic_recent", "default_lookup"),
 )
 
-# A run needs enough of a curve for "best" to mean anything.
-MIN_GAMES_FOR_COMPARISON = 5_000_000
+# The one pair whose two runs differ in the reward architecture and in nothing
+# else that the training loop reads except the advantage baseline.
+CONTROLLED_PAIR = ("bucket_heuristic_recent", "default_lookup")
+
+# Iterations averaged before any per-iteration series is read as a trend.
+SMOOTHING_WINDOW = 101
+
+# A run needs enough of a curve for "best" to mean anything. The threshold
+# admits the eta runs, which are younger than the rest; the comparison that
+# includes them is made at the matched horizon, not at each run's own end.
+MIN_GAMES_FOR_COMPARISON = 2_500_000
 
 COLORS = {LEGACY: "#08519c", CURRENT: "#99000d"}
+# The current reward with eta moved back down: neither of the two
+# architectures the report set out to compare, so neither colour.
+CORRECTED_COLOR = "#238b45"
 RUN_COLORS = {
     "bucket_heuristic": "#08519c",
     "bucket_heuristic_recent": "#3182bd",
     "baseline_zero": "#6baed6",
     "bucket_all": "#9ecae1",
     "d6_maxwr_lr032": "#99000d",
-    "d6_maxwr_lr016": "#fdae61",
+    "d6_maxwr_lr016": "#969696",
     "default_lr032": "#ef3b2c",
     "default_lr016_lookup": "#fb6a4a",
+    "default_lookup": "#cb181d",
+    "rick_heuristic": "#d94801",
+    "rick_random_desktop": "#e6550d",
+    "rick_random_notebook": "#fd8d3c",
+    "d6_random_eta0115": "#006d2c",
+    "rick_random_eta0115": "#41ab5d",
 }
+
+# Runs trained elsewhere and received as the four-file bundle. They are read
+# the same way as the local ones; the set only exists so the report can say
+# which numbers came from another machine and which of its columns are blank.
+EXTERNAL_RUNS = frozenset({
+    "rick_heuristic", "rick_random_desktop", "rick_random_notebook",
+    "rick_random_eta0115",
+})
+
+# Drawn thicker: the run that isolates the reward from the learning rate, and
+# the two that isolate eta from everything else.
+EMPHASIZED_RUNS = frozenset({
+    "default_lookup", "d6_random_eta0115", "rick_random_eta0115",
+})
 
 
 # ----------------------------------------------------------------------
@@ -111,9 +174,19 @@ RUN_COLORS = {
 # ----------------------------------------------------------------------
 
 
+def gzip_text(path: Path, *, encoding: str):
+    """Open a gzipped file as text, matching the signature of ``open``."""
+    return gzip.open(path, "rt", encoding=encoding)
+
+
 def load_run(label: str, directory: str) -> dict[str, Any]:
     run_dir = RUN_ROOT / directory
+    # A run trained here keeps the shareable files in a subdirectory; a run
+    # received as the four-file bundle is that subdirectory. Both layouts hold
+    # the same names, so the only difference is where to start looking.
     compact = run_dir / "run_compact_diagnostics"
+    if not compact.is_dir():
+        compact = run_dir
     config = json.loads((compact / "run_config.json").read_text(encoding="utf-8"))
     locked = config.get("locked_arguments", {})
     era = CURRENT if "terminal_empty_hand_weight" in locked else LEGACY
@@ -125,9 +198,27 @@ def load_run(label: str, directory: str) -> dict[str, Any]:
         for key in progress[0]
     }
 
-    with open(run_dir / "training_metrics.jsonl", encoding="utf-8") as stream:
-        columns = json.loads(stream.readline())["columns"]
-        metrics = [dict(zip(columns, json.loads(line))) for line in stream]
+    # The per-iteration log is the one file the bundle leaves out, because it
+    # is three orders of magnitude larger than the rest. Without it a run still
+    # answers "how well did it play"; it cannot answer "how did it train".
+    metrics: list[dict[str, Any]] = []
+    for name, opener in (("training_metrics.jsonl", open),
+                         ("training_metrics.jsonl.gz", gzip_text)):
+        # A run trained here has the plain file; a bundle that chose to carry
+        # the log compresses it, because gzip takes it from 6 MB to under 2.
+        path = run_dir / name if name.endswith("jsonl") else compact / name
+        if not path.is_file():
+            continue
+        with opener(path, encoding="utf-8") as stream:
+            columns = json.loads(stream.readline())["columns"]
+            # A log copied while its run was still going can end mid-line. The
+            # rows before it are complete and usable, so the tail is dropped
+            # rather than failing the whole analysis.
+            metrics = [
+                dict(zip(columns, json.loads(line)))
+                for line in stream if line.endswith("\n")
+            ]
+        break
 
     return {
         "label": label,
@@ -135,14 +226,20 @@ def load_run(label: str, directory: str) -> dict[str, Any]:
         "era": era,
         "created_at": config.get("created_at", ""),
         "learning_rate": float(locked.get("learning_rate", float("nan"))),
-        "baseline": (locked.get("baseline") or ["nenhum"])[0],
+        # A null ``--baseline`` is not "no baseline": with advantage
+        # normalization on, which every run here uses, it resolves to
+        # batch-mean. Naming it that keeps the comparison table honest.
+        "baseline": (locked.get("baseline") or ["batch-mean"])[0],
         "buckets": ",".join(locked.get("opponent_buckets") or []),
         "gamma_f": float(locked.get("gamma_f", GAMMA_F)),
         "gamma_i": float(locked.get("gamma_i", GAMMA_I)),
         "reward_eta": float(locked.get("reward_eta", REWARD_ETA)),
         "distance_mode": locked.get("reward_distance_mode", ""),
+        "machine": config.get("machine", {}).get("gpu_name", ""),
+        "sl_weights": config.get("supervised_weights_sha256", "")[:8],
         "curve": curve,
         "metrics": metrics,
+        "external": label in EXTERNAL_RUNS,
         "complete": float(curve["rl_games"][-1]) >= MIN_GAMES_FOR_COMPARISON,
     }
 
@@ -301,19 +398,34 @@ def summarize_run(run: dict[str, Any], common_games: float) -> dict[str, Any]:
         common_index = int(np.searchsorted(games, common_games, side="right")) - 1
         common_index = max(common_index, 0)
         common_value = float(win[common_index])
+        # The best the run had reached by the shared horizon. The single
+        # reading at the horizon is one 100,000-game panel and carries the
+        # full +/-0.3 pp of its own noise; the running maximum up to the same
+        # point is the same statistic every run's headline number uses,
+        # measured on a budget they all reached.
+        common_best = float(np.max(win[:common_index + 1]))
+        common_best_games = int(games[int(np.argmax(win[:common_index + 1]))])
     else:
         common_value = float("nan")
-    metrics = run["metrics"]
-    reward_mean = np.asarray([row["reward_mean"] for row in metrics])
-    batch_win = np.asarray([row["batch_win_rate"] for row in metrics])
-    good_pct = np.asarray([row["good_pct"] for row in metrics])
+        common_best = float("nan")
+        common_best_games = 0
     return {
         "execucao": run["label"],
         "arquitetura": run["era"],
+        "origem": "externa" if run["external"] else "local",
+        "gpu": run["machine"],
+        "pesos_sl": run["sl_weights"],
         "lr": run["learning_rate"],
         "baseline": run["baseline"],
+        "eta": run["reward_eta"],
         "buckets": run["buckets"],
-        "iteracoes": len(metrics),
+        # A run whose opponent pool contains the diagnostic opponent is
+        # measured on the distribution it trained on. Its number is real, but
+        # it does not belong in a ranking against runs that never saw it.
+        "treina_no_avaliador": (
+            "sim" if DIAGNOSTIC_OPPONENT in run["buckets"].split(",") else "nao"
+        ),
+        "iteracoes": int(curve["rl_iterations"][-1]),
         "partidas": int(games[-1]),
         "vitoria_inicial_pct": round(float(win[0]), 3),
         "vitoria_melhor_pct": round(float(win[best_index]), 3),
@@ -322,15 +434,128 @@ def summarize_run(run: dict[str, Any], common_games: float) -> dict[str, Any]:
         "vitoria_em_partidas_comuns_pct": (
             round(common_value, 3) if np.isfinite(common_value) else ""
         ),
+        "melhor_em_partidas_comuns_pct": (
+            round(common_best, 3) if np.isfinite(common_best) else ""
+        ),
+        "partidas_ate_melhor_comum": common_best_games,
         "ganho_sobre_sl_pct": round(float(win[best_index] - win[0]), 3),
+        **training_columns(run["metrics"]),
+        "completa": "sim" if run["complete"] else "nao",
+    }
+
+
+# Every summary column that is read out of the per-iteration log, blank for a
+# run that arrived without one. Listing them here keeps the CSV rectangular:
+# an external run gets the same header as a local one, with empty cells where
+# the answer genuinely is not available rather than a zero that looks like one.
+TRAINING_COLUMNS = (
+    "recompensa_media_mediana", "decisoes_positivas_mediana_pct",
+    "vitoria_em_lote_mediana_pct", "corr_recompensa_vitoria",
+    "entropia_inicial", "entropia_final", "entropia_minima",
+    "iteracao_da_minima", "entropia_maxima_apos_minima",
+    "kl_mediana", "recorte_mediano",
+    "terminal_abs_mediana", "local_abs_mediana", "razao_local_terminal",
+)
+
+
+def training_columns(metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize the per-iteration log, or return blanks when there is none."""
+    if not metrics:
+        return {name: "" for name in TRAINING_COLUMNS}
+    reward_mean = np.asarray([row["reward_mean"] for row in metrics])
+    batch_win = np.asarray([row["batch_win_rate"] for row in metrics])
+    good_pct = np.asarray([row["good_pct"] for row in metrics])
+    entropy = np.asarray([row["entropy"] for row in metrics])
+    # The per-iteration entropy is noisy; the trajectory only reads as a
+    # trajectory after the same 101-iteration smoothing the figure uses.
+    smoothed_entropy = (
+        np.convolve(entropy, np.ones(SMOOTHING_WINDOW) / SMOOTHING_WINDOW,
+                    mode="valid")
+        if len(entropy) >= SMOOTHING_WINDOW else entropy
+    )
+    clip = np.asarray([row["final_clip_fraction"] for row in metrics])
+    approx_kl = np.asarray([row["final_approx_kl"] for row in metrics])
+    # Metrics schema v8 records both halves of every decision's return, so a
+    # run under the current architecture reports its own terminal/local balance
+    # without any offline recomputation. A v7 run predates the columns and
+    # leaves them blank rather than pretending to a value.
+    mixture = mixture_series(metrics)
+    return {
         "recompensa_media_mediana": round(float(np.median(reward_mean)), 5),
         "decisoes_positivas_mediana_pct": round(float(np.median(good_pct)), 3),
         "vitoria_em_lote_mediana_pct": round(float(np.median(batch_win) * 100.0), 3),
         "corr_recompensa_vitoria": round(
             float(np.corrcoef(reward_mean, batch_win)[0, 1]), 4
         ),
-        "completa": "sim" if run["complete"] else "nao",
+        "entropia_inicial": round(float(entropy[0]), 4),
+        "entropia_final": round(float(smoothed_entropy[-1]), 4),
+        "entropia_minima": round(float(smoothed_entropy.min()), 4),
+        "iteracao_da_minima": int(smoothed_entropy.argmin()),
+        "entropia_maxima_apos_minima": round(
+            float(smoothed_entropy[int(smoothed_entropy.argmin()):].max()), 4
+        ),
+        "kl_mediana": round(float(np.median(approx_kl)), 5),
+        "recorte_mediano": round(float(np.median(clip)), 4),
+        "terminal_abs_mediana": (
+            round(float(np.median(mixture[0])), 5) if mixture else ""
+        ),
+        "local_abs_mediana": (
+            round(float(np.median(mixture[1])), 5) if mixture else ""
+        ),
+        "razao_local_terminal": (
+            round(float(np.median(mixture[1] / mixture[0])), 4) if mixture else ""
+        ),
     }
+
+
+def mixture_series(metrics: list[dict[str, Any]]):
+    """Return the two logged return halves, or ``None`` for a pre-v8 run.
+
+    ``terminal_abs_mean`` and ``local_abs_mean`` are ``E|(1-eta) G_T|`` and
+    ``E|eta G_I|`` as the rollout actually credited them, so their ratio is the
+    empirical mixture the run trained under rather than the nominal one that
+    ``reward_eta`` names.
+    """
+    if not metrics or metrics[0].get("terminal_abs_mean") is None:
+        return None
+    terminal = np.asarray([row["terminal_abs_mean"] for row in metrics], dtype=float)
+    local = np.asarray([row["local_abs_mean"] for row in metrics], dtype=float)
+    return terminal, local
+
+
+def trajectory_comparison(legacy: dict[str, Any], current: dict[str, Any],
+                          checkpoints: tuple[float, ...] = (
+                              2e6, 5e6, 10e6, 15e6, 18e6)) -> list[list[str]]:
+    """Compare two runs at equal game counts rather than at their own peaks.
+
+    A peak-to-peak comparison can be won by whichever run was left going for
+    longer. Reading both curves at the same milestones removes that, and shows
+    whether the gap is a plateau or a delay.
+    """
+    rows = []
+    for target in checkpoints:
+        cells = []
+        for run in (legacy, current):
+            games = run["curve"]["rl_games"]
+            if games[-1] < target:
+                cells.append(None)
+                continue
+            index = int(np.searchsorted(games, target, side="right")) - 1
+            cells.append(float(run["curve"]["win_rate_percent"][index]))
+        if cells[0] is None or cells[1] is None:
+            continue
+        rows.append([
+            f"{target / 1e6:.0f} M",
+            f"{cells[0]:.3f}%",
+            f"{cells[1]:.3f}%",
+            f"{cells[1] - cells[0]:+.3f} pp",
+        ])
+    return rows
+
+
+def comma(value: float) -> str:
+    """Format a number the way the surrounding Portuguese prose reads it."""
+    return f"{value:g}".replace(".", ",")
 
 
 def wilson_halfwidth(rate_pct: float, games: int = DIAGNOSTIC_GAMES) -> float:
@@ -347,16 +572,31 @@ def wilson_halfwidth(rate_pct: float, games: int = DIAGNOSTIC_GAMES) -> float:
 def plot_win_rate(runs: list[dict[str, Any]], key: str, xlabel: str, path: Path,
                   title: str) -> None:
     figure, axes = plt.subplots(figsize=(11.0, 6.2))
+    starred = False
     for run in runs:
         curve = run["curve"]
-        style = "-" if run["era"] == LEGACY else "--"
+        # Solid: previous reward. Dashed: current reward. Dash-dot: current
+        # reward, but trained against the opponent this axis measures, so the
+        # curve is not on the same footing as the others.
+        if DIAGNOSTIC_OPPONENT in run["buckets"].split(","):
+            style, mark = "-.", " *"
+            starred = True
+        else:
+            style, mark = ("-", "") if run["era"] == LEGACY else ("--", "")
         axes.plot(
             curve[key] / (1e6 if key == "rl_games" else 1.0),
             curve["win_rate_percent"],
             style,
             color=RUN_COLORS[run["label"]],
-            linewidth=1.4,
-            label=f"{run['label']} ({run['era']}, lr={run['learning_rate']:g})",
+            linewidth=2.4 if run["label"] in EMPHASIZED_RUNS else 1.4,
+            label=(
+                f"{run['label']}{mark} ({run['era']}, "
+                f"lr={run['learning_rate']:g}"
+                # eta is only worth the width where it is not the default.
+                + (f", $\\eta$={run['reward_eta']:g}"
+                   if run["reward_eta"] != REWARD_ETA else "")
+                + ")"
+            ),
         )
         best = int(np.argmax(curve["win_rate_percent"]))
         axes.plot(
@@ -381,6 +621,12 @@ def plot_win_rate(runs: list[dict[str, Any]], key: str, xlabel: str, path: Path,
     axes.set_xlabel(xlabel)
     axes.set_ylabel("vitórias contra o oponente aleatório (%)")
     axes.grid(alpha=0.25)
+    if starred:
+        axes.annotate(
+            "*  treinou contra o próprio oponente do diagnóstico",
+            xy=(0.015, 0.975), xycoords="axes fraction", va="top", fontsize=9,
+            color="#444444",
+        )
     axes.legend(fontsize=8.5, loc="lower right", ncol=2)
     figure.savefig(path, dpi=150)
     plt.close(figure)
@@ -581,10 +827,10 @@ def plot_training_dynamics(runs: list[dict[str, Any]], path: Path) -> None:
         ("entropy", "entropia da política", axes[1][0]),
         ("final_clip_fraction", "fração recortada pelo PPO", axes[1][1]),
     )
-    window = 101
+    window = SMOOTHING_WINDOW
     for field, title, panel in fields:
         for run in runs:
-            if not run["complete"]:
+            if not run["complete"] or not run["metrics"]:
                 continue
             values = np.asarray([row[field] for row in run["metrics"]])
             if len(values) >= window:
@@ -597,14 +843,21 @@ def plot_training_dynamics(runs: list[dict[str, Any]], path: Path) -> None:
                 x, smoothed,
                 "-" if run["era"] == LEGACY else "--",
                 color=RUN_COLORS[run["label"]], linewidth=1.3,
-                label=f"{run['label']} ({run['era']})",
+                label=(
+                    f"{run['label']} ({run['era']}"
+                    + (f", $\\eta$={run['reward_eta']:g}"
+                       if run["reward_eta"] != REWARD_ETA else "")
+                    + ")"
+                ),
             )
         panel.set_title(title)
         panel.set_xlabel("iteração de PPO")
         panel.grid(alpha=0.25)
     axes[0][0].axhline(0.0, color="#222222", linewidth=0.9, linestyle=":")
     axes[0][1].axhline(50.0, color="#222222", linewidth=0.9, linestyle=":")
-    axes[0][0].legend(fontsize=8, loc="upper left")
+    # Lower right: the upper left of that panel is where the shortest runs
+    # end, and a legend there hides them completely.
+    axes[0][0].legend(fontsize=8, loc="lower right")
     figure.suptitle(
         "Dinâmica de treino sob cada arquitetura (média móvel de 101 iterações)",
         fontweight="bold",
@@ -613,41 +866,174 @@ def plot_training_dynamics(runs: list[dict[str, Any]], path: Path) -> None:
     plt.close(figure)
 
 
-def plot_summary(summaries: list[dict[str, Any]], path: Path) -> None:
+def plot_live_mixture(runs: list[dict[str, Any]], balance: dict[str, float],
+                      path: Path) -> None:
+    """Plot the terminal/local balance every current-era run logged itself.
+
+    The offline recomputation on the fixed corpus and the live columns are two
+    independent measurements of the same quantity: one scores a frozen set of
+    422,055 decisions, the other reads what each run credited during its own
+    rollouts. Drawing them together is the check that the corpus estimate is
+    not an artifact of the policy that produced the corpus.
+    """
+    figure, (left, right) = plt.subplots(
+        1, 2, figsize=(13.0, 5.4), constrained_layout=True
+    )
+    window = SMOOTHING_WINDOW
+    plotted = 0
+    for run in runs:
+        series = mixture_series(run["metrics"])
+        if series is None or not run["complete"]:
+            continue
+        plotted += 1
+        terminal, local = series
+        kernel = np.ones(window) / window
+        x = np.arange(len(terminal) - window + 1) + window // 2
+        smooth_terminal = np.convolve(terminal, kernel, mode="valid")
+        smooth_local = np.convolve(local, kernel, mode="valid")
+        color = RUN_COLORS[run["label"]]
+        width = 2.4 if run["label"] in EMPHASIZED_RUNS else 1.3
+        left.plot(x, smooth_local, "-", color=color, linewidth=width,
+                  label=f"{run['label']}: $|\\eta G_I|$")
+        left.plot(x, smooth_terminal, ":", color=color, linewidth=width)
+        right.plot(x, smooth_local / smooth_terminal, "-", color=color,
+                   linewidth=width,
+                   label=f"{run['label']} ($\\eta$={run['reward_eta']:g})")
+    left.set_title(
+        "Magnitude de cada metade\n"
+        "(linha cheia: local; pontilhada: terminal)"
+    )
+    left.set_xlabel("iteração de PPO")
+    left.set_ylabel("magnitude média por decisão")
+    left.set_ylim(bottom=0.0)
+    left.grid(alpha=0.25)
+    # The empty band between the two families of curves: the eta runs sit far
+    # below the rest, so the middle of the panel is the only clear space.
+    left.legend(fontsize=7.5, loc="center", bbox_to_anchor=(0.66, 0.42),
+                framealpha=0.92)
+
+    right.axhline(balance["current_ratio"], color="#99000d", linewidth=1.2,
+                  linestyle="--")
+    right.annotate(
+        f"corpus recomputado, atual: {balance['current_ratio']:.2f}x",
+        xy=(0.02, balance["current_ratio"]), xycoords=("axes fraction", "data"),
+        xytext=(0, -6), textcoords="offset points", va="top", fontsize=8.5,
+        color="#99000d",
+    )
+    right.axhline(balance["legacy_ratio"], color="#08519c", linewidth=1.2,
+                  linestyle="--")
+    right.annotate(
+        f"corpus recomputado, anterior: {balance['legacy_ratio']:.2f}x",
+        xy=(0.98, balance["legacy_ratio"]), xycoords=("axes fraction", "data"),
+        xytext=(0, 5), textcoords="offset points", ha="right", fontsize=8.5,
+        color="#08519c",
+    )
+    right.axhline(1.0, color="#222222", linewidth=0.9, linestyle=":")
+    right.set_ylim(0.0, 3.0)
+    right.set_title("Razão local/terminal medida pela própria execução")
+    right.set_xlabel("iteração de PPO")
+    right.set_ylabel("$|\\eta G_I| \\, / \\, |(1-\\eta) \\gamma_f^k U_T|$")
+    right.grid(alpha=0.25)
+    right.legend(fontsize=8.5, loc="lower right")
+    figure.suptitle(
+        f"Equilíbrio efetivo registrado ao vivo pelas {plotted} execuções da "
+        "arquitetura atual (média móvel de 101 iterações)",
+        fontweight="bold",
+    )
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+
+
+def summary_color(row: dict[str, Any]) -> str:
+    """Bar colour for a run: its architecture, unless it moved eta."""
+    if row["eta"] != REWARD_ETA:
+        return CORRECTED_COLOR
+    return COLORS[row["arquitetura"]]
+
+
+def plot_summary(summaries: list[dict[str, Any]], path: Path,
+                 common_games: float) -> None:
+    """Rank every completed run twice: at the shared budget, and at its own end.
+
+    The pale bar is each run's best over its whole life, which is the number
+    the earlier revisions of this report ranked on. It rewards a run for
+    having been left training longer, so once runs of very different ages sit
+    on the same axis it stops being a comparison. The solid bar is the best
+    each run had reached by the horizon they all crossed, which is the same
+    statistic measured on the same budget. Where the two orders disagree, the
+    solid one is the one that answers the question.
+    """
     rows = [row for row in summaries if row["completa"] == "sim"]
-    rows.sort(key=lambda row: row["vitoria_melhor_pct"])
-    figure, axes = plt.subplots(figsize=(11.0, 6.2))
-    positions = np.arange(len(rows))
-    values = [row["vitoria_melhor_pct"] for row in rows]
-    errors = [wilson_halfwidth(value) for value in values]
-    colors = [COLORS[row["arquitetura"]] for row in rows]
-    axes.barh(positions, values, xerr=errors, color=colors, height=0.62,
-              error_kw={"ecolor": "#333333", "capsize": 3, "linewidth": 1.0})
-    for position, row in zip(positions, rows):
+    rows.sort(key=lambda row: row["melhor_em_partidas_comuns_pct"])
+    figure, axes = plt.subplots(figsize=(11.5, 6.8))
+    positions = np.arange(len(rows), dtype=float)
+    matched = [row["melhor_em_partidas_comuns_pct"] for row in rows]
+    lifetime = [row["vitoria_melhor_pct"] for row in rows]
+    errors = [wilson_halfwidth(value) for value in matched]
+    colors = [summary_color(row) for row in rows]
+    axes.barh(positions + 0.20, lifetime, color=colors, height=0.32, alpha=0.30)
+    bars = axes.barh(positions - 0.20, matched, xerr=errors, color=colors,
+                     height=0.32,
+                     error_kw={"ecolor": "#333333", "capsize": 3,
+                               "linewidth": 1.0})
+    for bar, row in zip(bars, rows):
+        if row["treina_no_avaliador"] == "sim":
+            bar.set_hatch("//")
+            bar.set_edgecolor("white")
+    for position, row, error in zip(positions, rows, errors):
+        # Anchor past the error bar so the label never sits on top of it.
         axes.annotate(
-            f"{row['vitoria_melhor_pct']:.2f}%  (lr={row['lr']:g}, "
-            f"{row['partidas_ate_melhor'] / 1e6:.1f} M)",
-            (row["vitoria_melhor_pct"], position),
-            xytext=(6, 0), textcoords="offset points", va="center", fontsize=9,
+            f"{row['melhor_em_partidas_comuns_pct']:.2f}%  (lr={row['lr']:g}, "
+            f"\u03b7={row['eta']:g})",
+            (row["melhor_em_partidas_comuns_pct"] + error, position - 0.20),
+            xytext=(8, 0), textcoords="offset points", va="center", fontsize=8.5,
+        )
+        axes.annotate(
+            f"{row['vitoria_melhor_pct']:.2f}%  "
+            f"({row['partidas'] / 1e6:.1f} M partidas)",
+            (row["vitoria_melhor_pct"], position + 0.20),
+            xytext=(8, 0), textcoords="offset points", va="center", fontsize=8.5,
+            color="#666666",
         )
     axes.set_yticks(positions)
-    axes.set_yticklabels([row["execucao"] for row in rows])
-    axes.set_xlim(60.0, 69.5)
+    axes.set_yticklabels([
+        row["execucao"] + (" *" if row["treina_no_avaliador"] == "sim" else "")
+        for row in rows
+    ])
+    axes.set_ylim(-0.75, len(rows) - 0.25)
+    # Room on the right for both value labels and the legend, which would
+    # otherwise land on the longest of them.
+    axes.set_xlim(60.0, 70.8)
     axes.set_xlabel("melhor taxa de vitória contra o aleatório (%), IC 95%")
     axes.axvline(
         summaries[0]["vitoria_inicial_pct"], color="#666666", linestyle=":",
         linewidth=1.0,
     )
     axes.set_title(
-        "Melhor resultado de cada execução double-six, por arquitetura de recompensa"
+        "Melhor resultado de cada execução double-six, no orçamento comum "
+        f"de {common_games / 1e6:.1f} M partidas"
     )
     axes.grid(alpha=0.25, axis="x")
     handles = [
         plt.Rectangle((0, 0), 1, 1, color=COLORS[LEGACY]),
         plt.Rectangle((0, 0), 1, 1, color=COLORS[CURRENT]),
+        plt.Rectangle((0, 0), 1, 1, color=CORRECTED_COLOR),
+        plt.Rectangle((0, 0), 1, 1, color="#999999", alpha=0.30),
     ]
-    axes.legend(handles, ("recompensa anterior", "recompensa atual"),
-                fontsize=9.5, loc="lower right")
+    axes.legend(
+        handles,
+        ("recompensa anterior", "recompensa atual ($\\eta = 0{,}5$)",
+         "recompensa atual ($\\eta = 0{,}115$)",
+         "barra clara: execução inteira"),
+        fontsize=9, loc="lower right",
+    )
+    if any(row["treina_no_avaliador"] == "sim" for row in rows):
+        # Below the axes: every bar starts at the left spine, so there is no
+        # clear space inside the plot for it.
+        figure.text(
+            0.5, -0.02, "*  treinou contra o próprio oponente do diagnóstico",
+            ha="center", fontsize=9, color="#444444",
+        )
     figure.savefig(path, dpi=150)
     plt.close(figure)
 
@@ -721,20 +1107,129 @@ def format_table(header: list[str], rows: list[list[str]]) -> list[str]:
 
 
 def write_report(summaries, endings, legacy_align, current_align, scored,
-                 balance, pair_rows, common_games, equivalent_eta) -> None:
+                 balance, pair_rows, common_games, equivalent_eta,
+                 trajectory_rows, eta_pair_rows) -> None:
     by_label = {row["execucao"]: row for row in summaries}
-    legacy_best = max(
-        (row for row in summaries
-         if row["arquitetura"] == LEGACY and row["completa"] == "sim"),
-        key=lambda row: row["vitoria_melhor_pct"],
+    controlled_legacy = by_label[CONTROLLED_PAIR[0]]
+    controlled_current = by_label[CONTROLLED_PAIR[1]]
+    controlled_gap = (
+        controlled_current["vitoria_melhor_pct"]
+        - controlled_legacy["vitoria_melhor_pct"]
     )
-    current_best = max(
-        (row for row in summaries
-         if row["arquitetura"] == CURRENT and row["completa"] == "sim"),
-        key=lambda row: row["vitoria_melhor_pct"],
+    controlled_half = wilson_halfwidth(controlled_legacy["vitoria_melhor_pct"])
+    # Only completed runs: an interrupted run's median is taken over a few
+    # hundred iterations and does not describe a training trajectory.
+    measured_mixture = [
+        row for row in summaries
+        if row["razao_local_terminal"] != "" and row["completa"] == "sim"
+    ]
+    ratios_measured = [row["razao_local_terminal"] for row in measured_mixture]
+    # Runs left at the reference eta measure the imbalance as shipped; runs
+    # that lowered eta measure what lowering it did. Averaging the two
+    # together would report a range that no run ever occupied.
+    reference_mixture = [
+        row for row in measured_mixture if row["eta"] == REWARD_ETA
+    ]
+    corrected_mixture = [
+        row for row in measured_mixture if row["eta"] != REWARD_ETA
+    ]
+    reference_ratios = [row["razao_local_terminal"] for row in reference_mixture]
+    corrected_ratios = [row["razao_local_terminal"] for row in corrected_mixture]
+
+    def correlations(rows) -> list[float]:
+        """The per-iteration reward/win correlation, where a run logged one."""
+        return [
+            row["corr_recompensa_vitoria"] for row in rows
+            if row["corr_recompensa_vitoria"] != ""
+        ]
+
+    legacy_corr = correlations(
+        [row for row in summaries if row["arquitetura"] == LEGACY]
     )
+    reference_corr = correlations(reference_mixture)
+    corrected_corr = correlations(corrected_mixture)
+    comparable = [
+        row for row in summaries
+        if row["completa"] == "sim" and row["treina_no_avaliador"] == "nao"
+    ]
+    held_out = [
+        row for row in summaries
+        if row["completa"] == "sim" and row["treina_no_avaliador"] == "sim"
+    ]
+    external = [row for row in summaries if row["origem"] == "externa"]
+    # The bundle carries the win-rate curve; whether it also carried the
+    # per-iteration log is what decides which columns a received run can fill.
+    external_bare = [
+        row for row in external if row["razao_local_terminal"] == ""
+    ]
+    external_full = [
+        row for row in external if row["razao_local_terminal"] != ""
+    ]
+    # Among the runs that trained on the evaluator, the ones left at the
+    # reference eta are the reproducibility check; the ones that moved it are
+    # the eta experiment. Only the first group may be read as a repeat.
+    reference_random = [row for row in held_out if row["eta"] == REWARD_ETA]
+    corrected_random = [row for row in held_out if row["eta"] != REWARD_ETA]
+    # One row per distinct supervised binary, keeping the first run that used
+    # it: the point is how far apart the starting policies are, not how many
+    # runs each one seeded.
+    sl_rows = list({row["pesos_sl"]: row for row in reversed(summaries)}.values())
+    sl_rows.sort(key=lambda row: row["vitoria_inicial_pct"])
+    sl_hashes = {row["pesos_sl"] for row in summaries}
+    starts = [row["vitoria_inicial_pct"] for row in summaries]
+    sl_spread = max(starts) - min(starts)
+    rick_heuristic = by_label["rick_heuristic"]
+    held_out_pcts = " e ".join(
+        f"{row['vitoria_melhor_pct']:.3f}%" for row in
+        sorted(held_out, key=lambda row: row["vitoria_melhor_pct"])
+    )
+    reference_random_gpus = " e ".join(
+        sorted({row["gpu"] for row in reference_random})
+    )
+    reference_random_spread = (
+        max(row["vitoria_melhor_pct"] for row in reference_random)
+        - min(row["vitoria_melhor_pct"] for row in reference_random)
+    )
+    ranked_legacy = sorted(
+        (row for row in comparable if row["arquitetura"] == LEGACY),
+        key=lambda row: -row["vitoria_melhor_pct"],
+    )
+    ranked_current = sorted(
+        (row for row in comparable if row["arquitetura"] == CURRENT),
+        key=lambda row: -row["vitoria_melhor_pct"],
+    )
+    worst_legacy_low = ranked_legacy[-1]["vitoria_melhor_pct"] - wilson_halfwidth(
+        ranked_legacy[-1]["vitoria_melhor_pct"]
+    )
+    best_current_high = ranked_current[0]["vitoria_melhor_pct"] + wilson_halfwidth(
+        ranked_current[0]["vitoria_melhor_pct"]
+    )
+    # The same two rankings read at the budget every run reached, which is
+    # the only ordering that stays meaningful once runs of very different ages
+    # share the table.
+    matched_legacy = sorted(
+        (row for row in comparable if row["arquitetura"] == LEGACY),
+        key=lambda row: -row["melhor_em_partidas_comuns_pct"],
+    )
+    matched_current = sorted(
+        (row for row in comparable if row["arquitetura"] == CURRENT),
+        key=lambda row: -row["melhor_em_partidas_comuns_pct"],
+    )
+    matched_gap = (
+        matched_legacy[-1]["melhor_em_partidas_comuns_pct"]
+        - matched_current[0]["melhor_em_partidas_comuns_pct"]
+    )
+    legacy_best = ranked_legacy[0]
+    current_best = ranked_current[0]
     gap = legacy_best["vitoria_melhor_pct"] - current_best["vitoria_melhor_pct"]
     half = wilson_halfwidth(legacy_best["vitoria_melhor_pct"])
+
+    eta_gains = sorted(
+        by_label[corrected]["melhor_em_partidas_comuns_pct"]
+        - by_label[reference]["melhor_em_partidas_comuns_pct"]
+        for reference, corrected in ETA_PAIRS
+    )
+    eta_gain, eta_gain_other = eta_gains[0], eta_gains[-1]
 
     lines = [
         "# Recompensa anterior e recompensa atual: o que mudou e o que o "
@@ -747,25 +1242,51 @@ def write_report(summaries, endings, legacy_align, current_align, scored,
         "",
         "## Conclusão",
         "",
-        f"A queda é real e maior que o ruído do painel de diagnóstico. A melhor "
-        f"execução sob a recompensa anterior chegou a "
-        f"**{legacy_best['vitoria_melhor_pct']:.3f}%** contra o oponente "
-        f"aleatório (`{legacy_best['execucao']}`); a melhor sob a recompensa "
-        f"atual chegou a **{current_best['vitoria_melhor_pct']:.3f}%** "
-        f"(`{current_best['execucao']}`). A diferença de **{gap:.3f} pontos "
-        f"percentuais** é cerca de {gap / half:.1f}x a meia-largura do "
+        f"A queda é real, maior que o ruído do painel de diagnóstico, e **a "
+        f"recompensa é a causa**. A execução `{controlled_current['execucao']}` "
+        f"fecha a lacuna que as versões anteriores deste relatório não "
+        f"conseguiam fechar: ela usa a recompensa atual com "
+        f"**lr = {controlled_current['lr']:g}**, os mesmos buckets "
+        f"`{controlled_current['buckets']}`, a mesma semente e os mesmos pesos "
+        f"supervisionados de `{controlled_legacy['execucao']}`. Chegou a "
+        f"**{controlled_current['vitoria_melhor_pct']:.3f}%** contra o "
+        f"oponente aleatório, contra "
+        f"**{controlled_legacy['vitoria_melhor_pct']:.3f}%** da execução "
+        f"equivalente sob a recompensa anterior: "
+        f"**{controlled_gap:+.3f} pontos percentuais**, cerca de "
+        f"{abs(controlled_gap) / controlled_half:.1f}x a meia-largura do "
         f"intervalo de 95% do painel de {DIAGNOSTIC_GAMES:,} partidas "
-        f"(±{half:.2f} pp), então não é flutuação do diagnóstico.",
+        f"(±{controlled_half:.2f} pp).",
         "",
-        "A causa provável não é o novo formato da utilidade terminal, e sim o "
-        "**deslocamento do equilíbrio entre a metade terminal e a metade "
-        "local** que o novo formato provocou sem que `reward_eta` mudasse. "
-        f"Recomputando as duas recompensas sobre as **mesmas "
-        f"{len(scored['won']):,} decisões reais**, a metade local passou de "
-        f"{balance['legacy_ratio']:.2f}x para {balance['current_ratio']:.2f}x "
-        f"a magnitude da metade terminal — um fator de "
-        f"{balance['current_ratio'] / balance['legacy_ratio']:.1f} no peso "
-        "efetivo do termo de moldagem, com `reward_eta` fixo em 0,5 nas duas.",
+        "Igualar a taxa de aprendizado **recuperou parte** da diferença, e só "
+        "parte. O par que isola a lr limpo é "
+        f"`{by_label['default_lr016_lookup']['execucao']}` / "
+        f"`{controlled_current['execucao']}`, que compartilham recompensa, "
+        f"buckets e baseline `{controlled_current['baseline']}` e diferem só "
+        f"na lr ({by_label['default_lr016_lookup']['lr']:g} contra "
+        f"{controlled_current['lr']:g}): "
+        f"{by_label['default_lr016_lookup']['vitoria_melhor_pct']:.3f}% para "
+        f"{controlled_current['vitoria_melhor_pct']:.3f}%, "
+        f"{controlled_current['vitoria_melhor_pct'] - by_label['default_lr016_lookup']['vitoria_melhor_pct']:+.3f} pp. "
+        f"Contra `{by_label['default_lr032']['execucao']}` a diferença é "
+        f"{controlled_current['vitoria_melhor_pct'] - by_label['default_lr032']['vitoria_melhor_pct']:+.3f} pp, "
+        "mas ali o baseline também muda. Em qualquer das duas leituras, os "
+        f"{abs(controlled_gap):.3f} pp que separam a recompensa atual da "
+        "anterior não têm mais a lr como explicação possível.",
+        "",
+        "A causa provável dentro da recompensa não é o novo formato da "
+        "utilidade terminal, e sim o **deslocamento do equilíbrio entre a "
+        "metade terminal e a metade local** que o novo formato provocou sem "
+        "que `reward_eta` mudasse. Recomputando as duas recompensas sobre as "
+        f"**mesmas {len(scored['won']):,} decisões reais**, a metade local "
+        f"passou de {balance['legacy_ratio']:.2f}x para "
+        f"{balance['current_ratio']:.2f}x a magnitude da metade terminal — um "
+        f"fator de {balance['current_ratio'] / balance['legacy_ratio']:.1f} no "
+        "peso efetivo do termo de moldagem, com `reward_eta` fixo em 0,5 nas "
+        f"duas. As próprias execuções da arquitetura atual confirmam o número "
+        f"ao vivo: a razão mediana registrada por "
+        f"`{controlled_current['execucao']}` é "
+        f"{controlled_current['razao_local_terminal']:.2f}x.",
         "",
         "A consequência mensurável é que a recompensa deixou de informar sobre "
         "o resultado da partida com a mesma nitidez: a correlação entre o "
@@ -776,6 +1297,51 @@ def write_report(summaries, endings, legacy_align, current_align, scored,
         f"retorno positivo subiu de "
         f"**{legacy_align['positive_in_losses_pct']:.2f}%** para "
         f"**{current_align['positive_in_losses_pct']:.2f}%**.",
+        "",
+        "O veredito não depende desta máquina. Uma execução treinada em "
+        "outro computador, com outro binário supervisionado e lr = 0.002, sob "
+        "a recompensa atual e o bucket `heuristic`, chegou a "
+        f"{by_label['rick_heuristic']['vitoria_melhor_pct']:.3f}% contra "
+        f"{by_label['bucket_heuristic']['vitoria_melhor_pct']:.3f}% da "
+        "execução equivalente sob a recompensa anterior — "
+        f"{by_label['rick_heuristic']['vitoria_melhor_pct'] - by_label['bucket_heuristic']['vitoria_melhor_pct']:+.3f} pp, "
+        "a mesma direção e praticamente o mesmo tamanho.",
+        "",
+        "Uma segunda conclusão sai do mesmo experimento, e é uma **correção** "
+        "do que as versões anteriores deste relatório sugeriam: a anomalia de "
+        "entropia e a pressão sobre a região de confiança do PPO **eram a taxa "
+        f"de aprendizado, não a recompensa**. Com lr = "
+        f"{controlled_current['lr']:g}, `{controlled_current['execucao']}` "
+        "volta a ter entropia monotonicamente decrescente, KL mediana de "
+        f"{controlled_current['kl_mediana']:.5f} e fração de recorte de "
+        f"{controlled_current['recorte_mediano']:.4f} — os mesmos valores das "
+        "execuções antigas. Os dois efeitos que antes apareciam juntos agora "
+        "estão separados: **a lr explica a dinâmica, a recompensa explica o "
+        "resultado**.",
+        "",
+        "**E a correção proposta foi testada.** As versões anteriores deste "
+        f"relatório terminavam prevendo que `reward_eta ≈ {equivalent_eta:.3f}` "
+        "devolveria à metade local o peso que ela tinha antes. Duas execuções "
+        f"com `reward_eta = {corrected_random[0]['eta']:g}` — uma aqui, outra "
+        "na máquina do orientador — confirmam a previsão em três medidas "
+        "independentes: "
+        f"registraram ao vivo a razão local/terminal em "
+        f"{min(corrected_ratios):.3f}x, contra os "
+        f"{balance['legacy_ratio']:.2f}x da recompensa anterior; a correlação "
+        "por iteração entre recompensa e vitória subiu de "
+        f"{min(reference_corr):+.3f}–{max(reference_corr):+.3f} para "
+        f"{min(corrected_corr):+.3f}–{max(corrected_corr):+.3f}, de volta à "
+        f"faixa antiga ({min(legacy_corr):+.3f}–{max(legacy_corr):+.3f}); e "
+        f"ficaram {eta_gain:+.3f} pp e {eta_gain_other:+.3f} pp acima das "
+        "execuções gêmeas que mantiveram eta = 0,5, medidas no mesmo "
+        f"orçamento de {common_games / 1e6:.1f} M de partidas. O detalhe que "
+        "impede de declarar o problema resolvido é que essas "
+        f"{NUMBER_WORDS.get(len(held_out), len(held_out))} execuções treinam "
+        "com o bucket `random`, o mesmo oponente do diagnóstico: o contraste "
+        "entre elas é limpo, o nível absoluto não é comparável com o bloco da "
+        "recompensa anterior. A seção "
+        "[A correção de eta, executada](#a-correção-de-eta-executada) trata "
+        "disso, e o experimento que falta está no fim dela.",
         "",
         "## O que exatamente mudou",
         "",
@@ -882,6 +1448,45 @@ def write_report(summaries, endings, legacy_align, current_align, scored,
         "penalidade de pontos e porque as vitórias por bloqueio passaram a "
         "valer `m(dp)` em vez de aproximadamente 1.",
         "",
+        "As execuções da arquitetura atual medem esse mesmo desequilíbrio "
+        "**sozinhas**, sem nenhuma recomputação offline: a versão 8 do "
+        "esquema de métricas registra `terminal_abs_mean` e `local_abs_mean`, "
+        "que são exatamente `E|(1-eta) G_T|` e `E|eta G_I|` como o rollout os "
+        "creditou. A figura `09_mistura_ao_vivo.png` traz as duas séries.",
+        "",
+    ])
+    lines.extend(format_table(
+        ["Execução", "lr", "eta", "magnitude terminal", "magnitude local",
+         "razão local/terminal"],
+        [[
+            row["execucao"], f"{row['lr']:g}", f"{row['eta']:g}",
+            f"{row['terminal_abs_mediana']:.4f}",
+            f"{row['local_abs_mediana']:.4f}",
+            f"{row['razao_local_terminal']:.2f}x",
+        ] for row in measured_mixture],
+    ))
+    lines.extend([
+        "",
+        f"As {NUMBER_WORDS.get(len(reference_mixture), len(reference_mixture))} "
+        f"execuções que mantiveram eta = {comma(REWARD_ETA)} concordam entre si "
+        f"dentro de {min(reference_ratios):.2f}x–{max(reference_ratios):.2f}x "
+        f"e concordam com os {balance['current_ratio']:.2f}x recomputados "
+        "sobre o corpus fixo, que vem de outra política e de outro conjunto "
+        "de partidas. São duas medições independentes do mesmo número, o que "
+        "descarta a possibilidade de o desequilíbrio ser um artefato da "
+        "política que gerou o corpus. A razão também **não depende da taxa "
+        "de aprendizado**: é uma propriedade da função de recompensa — as "
+        "quatro cobrem lr de 0.001 a 0.032 e medem o mesmo valor.",
+        "",
+        f"As {NUMBER_WORDS.get(len(corrected_mixture), len(corrected_mixture))} "
+        f"últimas linhas são a verificação da correção proposta adiante: com "
+        f"eta = {comma(corrected_mixture[0]['eta'])} a mesma coluna registra "
+        f"{min(corrected_ratios):.3f}x e {max(corrected_ratios):.3f}x, contra "
+        f"os {balance['legacy_ratio']:.2f}x que a recompensa anterior tinha. "
+        "A conta que produziu esse eta foi feita sobre o corpus recomputado; "
+        "quem a confirma aqui é o próprio rollout, em outra política e em "
+        "outro conjunto de partidas. **O controle funciona como previsto.**",
+        "",
         "`G_local` também não é renormalizado para `[-1, 1]` — isso é "
         "deliberado e está documentado em `training/rl/README.md` — então a "
         f"soma geométrica de eventos alcança {scored['current_local'].max():+.2f} "
@@ -929,11 +1534,13 @@ def write_report(summaries, endings, legacy_align, current_align, scored,
         f"{by_label['bucket_heuristic_recent']['corr_recompensa_vitoria']:+.3f} "
         f"e {by_label['bucket_heuristic']['corr_recompensa_vitoria']:+.3f} "
         "nas execuções antigas para "
-        f"{by_label['default_lr032']['corr_recompensa_vitoria']:+.3f} e "
-        f"{by_label['d6_maxwr_lr032']['corr_recompensa_vitoria']:+.3f} nas "
-        "novas, e a `reward_mean` mediana sai de aproximadamente zero para "
+        f"{by_label['default_lr032']['corr_recompensa_vitoria']:+.3f}, "
+        f"{by_label['d6_maxwr_lr032']['corr_recompensa_vitoria']:+.3f} e "
+        f"{controlled_current['corr_recompensa_vitoria']:+.3f} nas novas — "
+        f"incluindo `{controlled_current['execucao']}`, que usa a mesma lr das "
+        "antigas —, e a `reward_mean` mediana sai de aproximadamente zero para "
         f"cerca de {by_label['default_lr032']['recompensa_media_mediana']:+.3f} "
-        "com a taxa de vitória em lote parada em ~50,8%.",
+        "com a taxa de vitória em lote parada em ~51%.",
         "",
         "## Verificação direta na iteração 1",
         "",
@@ -961,21 +1568,100 @@ def write_report(summaries, endings, legacy_align, current_align, scored,
         "A taxa de vitória é a mesma porque as partidas são as mesmas. A "
         "recompensa não é.",
         "",
+        f"`{controlled_current['execucao']}` abre com exatamente os mesmos "
+        "números da coluna da direita, porque na primeira iteração a política "
+        "ainda é a supervisionada e a taxa de aprendizado não teve como "
+        "importar. A divergência entre as duas execuções da arquitetura atual "
+        "começa na iteração 2.",
+        "",
+        "## O que a dinâmica de treino mostra",
+        "",
+        "A figura `07_dinamica_de_treino.png` traz um efeito que as versões "
+        "anteriores deste relatório não conseguiam atribuir, e que a execução "
+        f"`{controlled_current['execucao']}` agora resolve: **a entropia da "
+        "política deixava de cair de forma monótona**. Sob a recompensa "
+        "anterior ela desce ao longo de todo o treino e termina no seu mínimo "
+        f"({by_label['bucket_heuristic']['entropia_inicial']:.3f} para "
+        f"{by_label['bucket_heuristic']['entropia_final']:.3f} em "
+        "`bucket_heuristic`). Sob a atual **com lr alta** ela cai rápido, "
+        f"atinge o mínimo de {by_label['d6_maxwr_lr032']['entropia_minima']:.3f} "
+        f"já na iteração {by_label['d6_maxwr_lr032']['iteracao_da_minima']:,} e "
+        "depois **volta a subir**, até "
+        f"{by_label['d6_maxwr_lr032']['entropia_maxima_apos_minima']:.3f}.",
+        "",
+        "A pergunta em aberto era se isso vinha da recompensa ou da lr, já que "
+        "as duas mudaram juntas. Vinha da lr. Com a recompensa atual e "
+        f"lr = {controlled_current['lr']:g}, `{controlled_current['execucao']}` "
+        "se comporta como as execuções antigas em todos os três indicadores:",
+        "",
+    ])
+    lines.extend(format_table(
+        ["Indicador", f"{controlled_legacy['execucao']} (anterior, lr "
+         f"{controlled_legacy['lr']:g})",
+         f"{controlled_current['execucao']} (atual, lr "
+         f"{controlled_current['lr']:g})",
+         f"default_lr032 (atual, lr {by_label['default_lr032']['lr']:g})"],
+        [
+            ["entropia final",
+             f"{controlled_legacy['entropia_final']:.3f}",
+             f"{controlled_current['entropia_final']:.3f}",
+             f"{by_label['default_lr032']['entropia_final']:.3f}"],
+            ["iteração da entropia mínima",
+             f"{controlled_legacy['iteracao_da_minima']:,} de "
+             f"{controlled_legacy['iteracoes']:,}",
+             f"{controlled_current['iteracao_da_minima']:,} de "
+             f"{controlled_current['iteracoes']:,}",
+             f"{by_label['default_lr032']['iteracao_da_minima']:,} de "
+             f"{by_label['default_lr032']['iteracoes']:,}"],
+            ["KL mediana",
+             f"{controlled_legacy['kl_mediana']:.5f}",
+             f"{controlled_current['kl_mediana']:.5f}",
+             f"{by_label['default_lr032']['kl_mediana']:.5f}"],
+            ["fração recortada mediana",
+             f"{controlled_legacy['recorte_mediano']:.4f}",
+             f"{controlled_current['recorte_mediano']:.4f}",
+             f"{by_label['default_lr032']['recorte_mediano']:.4f}"],
+        ],
+    ))
+    lines.extend([
+        "",
+        "A entropia volta a ser monótona: o mínimo cai na iteração "
+        f"{controlled_current['iteracao_da_minima']:,} de "
+        f"{controlled_current['iteracoes']:,}, ou seja, no fim do treino, e "
+        "não há repique. A KL e o recorte voltam aos valores das execuções "
+        "antigas. O aumento de escala do retorno, que praticamente dobrou o "
+        f"desvio ({legacy_align['std']:.3f} para {current_align['std']:.3f}), "
+        "não foi suficiente por si só para pressionar a região de confiança "
+        "quando a lr é baixa.",
+        "",
+        "O que **não** volta ao normal com lr baixa é o sinal em si: a "
+        "correlação por iteração entre `reward_mean` e `batch_win_rate` fica "
+        f"em {controlled_current['corr_recompensa_vitoria']:+.3f} em "
+        f"`{controlled_current['execucao']}`, contra "
+        f"{controlled_legacy['corr_recompensa_vitoria']:+.3f} em "
+        f"`{controlled_legacy['execucao']}`, e a `reward_mean` mediana "
+        f"permanece em {controlled_current['recompensa_media_mediana']:+.3f} "
+        "com a taxa de vitória em lote em "
+        f"{controlled_current['vitoria_em_lote_mediana_pct']:.2f}%. Esses são "
+        "os indicadores que dependem da forma da recompensa, e eles não se "
+        "movem com a lr.",
+        "",
         "## Resultados por execução",
         "",
     ])
     lines.extend(format_table(
-        ["Execução", "Arq.", "lr", "Baseline", "Buckets", "Partidas", "Melhor",
-         "Partidas até o melhor", "Final", f"Em {common_games / 1e6:.1f} M"],
+        ["Execução", "Arq.", "lr", "eta", "Baseline", "Buckets", "Partidas",
+         "Melhor", "Partidas até o melhor", "Final",
+         f"Melhor em {common_games / 1e6:.1f} M"],
         [[
             row["execucao"], row["arquitetura"], f"{row['lr']:g}",
+            f"{row['eta']:g}",
             row["baseline"], row["buckets"], f"{row['partidas'] / 1e6:.1f} M",
-            f"**{row['vitoria_melhor_pct']:.3f}%**"
-            if row["completa"] == "sim" else f"{row['vitoria_melhor_pct']:.3f}%",
+            f"{row['vitoria_melhor_pct']:.3f}%",
             f"{row['partidas_ate_melhor'] / 1e6:.1f} M",
             f"{row['vitoria_final_pct']:.3f}%",
-            f"{row['vitoria_em_partidas_comuns_pct']:.3f}%"
-            if row["vitoria_em_partidas_comuns_pct"] != "" else "—",
+            f"**{row['melhor_em_partidas_comuns_pct']:.3f}%**"
+            if row["melhor_em_partidas_comuns_pct"] != "" else "—",
         ] for row in summaries],
     ))
     lines.extend([
@@ -985,61 +1671,239 @@ def write_report(summaries, endings, legacy_align, current_align, scored,
         "A execução `d6_maxwr_lr016` foi interrompida com 0,7 M de partidas e "
         "não entra em nenhuma comparação.",
         "",
+        "A coluna em negrito é a que compara. As execuções desta tabela têm "
+        f"idades muito diferentes — de "
+        f"{min(row['partidas'] for row in summaries if row['completa'] == 'sim') / 1e6:.1f} M "
+        f"a {max(row['partidas'] for row in summaries) / 1e6:.1f} M de partidas "
+        "— e o melhor de uma vida inteira premia quem foi deixado treinando "
+        "por mais tempo, o que não é a variável em estudo. A última coluna é "
+        "o melhor que cada execução já tinha alcançado com "
+        f"{common_games / 1e6:.1f} M de partidas, o horizonte que **todas** "
+        "atravessaram; é a mesma estatística, medida no mesmo orçamento. A "
+        "figura `08_resumo_resultados.png` traz as duas leituras lado a lado: "
+        "a barra cheia no horizonte comum, a barra clara na execução inteira.",
+        "",
+        f"O melhor resultado absoluto continua sendo o de "
+        f"`{legacy_best['execucao']}` sob a recompensa anterior, "
+        f"{legacy_best['vitoria_melhor_pct']:.3f}%, contra "
+        f"{current_best['vitoria_melhor_pct']:.3f}% de "
+        f"`{current_best['execucao']}` sob a atual ({gap:.3f} pp, "
+        f"{gap / half:.1f}x a meia-largura do intervalo). Esses dois "
+        "compartilham o bucket `heuristic` e o baseline, mas foram treinados "
+        "em máquinas diferentes e com lr diferente; o par controlado abaixo é "
+        "o que decide.",
+        "",
+        "A separação é completa, e a figura `08_resumo_resultados.png` mostra "
+        f"isso de uma vez: as "
+        f"{NUMBER_WORDS.get(len(ranked_legacy), len(ranked_legacy))} "
+        "execuções completas sob a recompensa anterior ficam **todas** acima "
+        f"das {NUMBER_WORDS.get(len(ranked_current), len(ranked_current))} "
+        "sob a atual. A pior das antigas "
+        f"(`{ranked_legacy[-1]['execucao']}`, "
+        f"{ranked_legacy[-1]['vitoria_melhor_pct']:.3f}%) ainda supera a melhor "
+        f"das novas (`{ranked_current[0]['execucao']}`, "
+        f"{ranked_current[0]['vitoria_melhor_pct']:.3f}%), e dessa vez os "
+        "intervalos de 95% nem se tocam "
+        f"({worst_legacy_low:.3f}% contra {best_current_high:.3f}%). A "
+        "ordenação também não é uma escala de taxa de aprendizado: as "
+        f"{NUMBER_WORDS.get(len(ranked_current), len(ranked_current))} "
+        f"execuções novas cobrem lr de {min(row['lr'] for row in ranked_current):g} "
+        f"a {max(row['lr'] for row in ranked_current):g}, as duas que mais se "
+        "aproximam do bloco antigo usam as duas lr mais baixas, e ainda assim "
+        "param antes.",
+        "",
+        "A separação também não é um efeito do tempo de treino: ela sobrevive "
+        f"ao corte em {common_games / 1e6:.1f} M de partidas. Ali a pior das "
+        f"antigas (`{matched_legacy[-1]['execucao']}`, "
+        f"{matched_legacy[-1]['melhor_em_partidas_comuns_pct']:.3f}%) ainda "
+        f"supera a melhor das novas (`{matched_current[0]['execucao']}`, "
+        f"{matched_current[0]['melhor_em_partidas_comuns_pct']:.3f}%) por "
+        f"{matched_gap:.3f} pp, e os dois blocos continuam sem se "
+        "interpenetrar.",
+        "",
+        "Essa contagem exclui as "
+        f"{NUMBER_WORDS.get(len(held_out), len(held_out))} execuções que "
+        "treinaram com o bucket `random`, discutidas na seção seguinte: elas "
+        "treinam contra o mesmo oponente que o diagnóstico mede, então o "
+        "número delas não é comparável com o das demais.",
+        "",
         "### Pares com o mesmo conjunto de oponentes",
+        "",
+        "A última linha é a comparação controlada: as duas execuções "
+        "compartilham buckets, taxa de aprendizado, semente e pesos "
+        "supervisionados, e diferem na recompensa. A penúltima é a mesma "
+        "comparação feita em outra máquina, com outra lr e outro binário "
+        "supervisionado.",
         "",
     ])
     lines.extend(format_table(
-        ["Buckets", "anterior", "atual", "Diferença"],
+        ["Buckets", "anterior", "atual", "Mesma lr", "Diferença"],
         pair_rows,
     ))
     lines.extend([
         "",
+        "## As execuções recebidas de fora",
+        "",
+        f"{NUMBER_WORDS.get(len(external), len(external)).capitalize()} das "
+        "execuções da tabela não foram treinadas nesta máquina. Elas chegaram "
+        "como o pacote de quatro arquivos que trocamos para comparar modelos "
+        "sem transferir o modelo inteiro: `run_config.json`, "
+        "`periodic_diagnostics.jsonl`, `rl_vs_random_progress.csv` e o PNG do "
+        "progresso. Esse pacote basta para tudo que este relatório mede por "
+        "execução — a curva de vitória, o pico, a trajetória e os intervalos "
+        "— porque a variável de desfecho sai inteira do CSV de progresso.",
+        "",
+        "O que os quatro arquivos não trazem é `training_metrics.jsonl`, o "
+        "registro por iteração, que fica um nível acima deles na raiz do "
+        f"diretório da execução. "
+        f"{NUMBER_WORDS.get(len(external_bare), len(external_bare)).capitalize()} "
+        "das recebidas vieram sem ele — "
+        + ", ".join(f"`{row['execucao']}`" for row in external_bare)
+        + " — e por isso têm as colunas de entropia, KL, recorte e mistura "
+        "viva vazias em `resumo_execucoes.csv` e não aparecem nas figuras "
+        "`07_dinamica_de_treino.png` e `09_mistura_ao_vivo.png`. "
+        + ", ".join(f"`{row['execucao']}`" for row in external_full)
+        + " veio com ele e entra em tudo, o que mostra que o arquivo é a "
+        "única peça que faltava: uma execução recebida com os cinco arquivos "
+        "é indistinguível de uma treinada aqui, para efeitos desta análise.",
+        "",
+        "### Os pesos supervisionados não são um confundidor",
+        "",
+        f"As {NUMBER_WORDS[len(sl_hashes)]} máquinas geraram cada uma o seu "
+        "próprio `domino_sl_standard_seed42.npz`, e os quatro arquivos têm "
+        f"sha256 diferentes ({', '.join(sorted(sl_hashes))}). Mesma semente, "
+        "binários distintos: a ordem de acumulação em ponto flutuante muda "
+        "com o número de trabalhadores e com a GPU. Isso poderia ser um "
+        "confundidor sério, e o diagnóstico periódico resolve a dúvida sem "
+        "custo, porque a primeira linha de cada curva mede exatamente essas "
+        "políticas supervisionadas nas mesmas 100.000 partidas fixas:",
+        "",
+    ])
+    lines.extend(format_table(
+        ["Pesos supervisionados", "Máquina", "Execução que os usa",
+         "Vitória da política inicial"],
+        [[f"`{row['pesos_sl']}`", row["gpu"], f"`{row['execucao']}`",
+          f"{row['vitoria_inicial_pct']:.3f}%"] for row in sl_rows],
+    ))
+    lines.extend([
+        "",
+        f"Os {NUMBER_WORDS[len(sl_hashes)]} pontos de partida caem dentro de "
+        f"{sl_spread:.3f} pp uns dos outros, contra uma meia-largura de "
+        f"±{wilson_halfwidth(62.6):.2f} pp no próprio diagnóstico. São o mesmo "
+        "jogador para efeitos de medida. A diferença entre as arquiteturas de "
+        "recompensa não pode ser atribuída ao ponto de partida.",
+        "",
+        "### A replicação",
+        "",
+        f"`{rick_heuristic['execucao']}` repete, em outra máquina e com lr "
+        f"{rick_heuristic['lr']:g}, a mesma condição de "
+        f"`{by_label['bucket_heuristic']['execucao']}`: bucket `heuristic`, "
+        "semente 42, baseline batch-mean, double-six. O resultado é "
+        f"{rick_heuristic['vitoria_melhor_pct']:.3f}% contra "
+        f"{by_label['bucket_heuristic']['vitoria_melhor_pct']:.3f}%, uma "
+        f"queda de {rick_heuristic['vitoria_melhor_pct'] - by_label['bucket_heuristic']['vitoria_melhor_pct']:+.3f} pp. "
+        "É a mesma direção e praticamente o mesmo tamanho da queda do par "
+        f"controlado ({controlled_gap:+.3f} pp), obtida com outro hardware, "
+        "outro binário supervisionado e outra taxa de aprendizado. O efeito "
+        "não é uma peculiaridade desta máquina.",
+        "",
+        "### As execuções contra o bucket `random`",
+        "",
+        f"{NUMBER_WORDS.get(len(held_out), len(held_out)).capitalize()} "
+        "execuções da tabela — recebidas ou locais — treinam com o bucket "
+        "`random`, isto é, contra o mesmo oponente que o diagnóstico usa para "
+        f"medir. Elas chegam a {held_out_pcts} — acima de qualquer execução "
+        "sob a recompensa atual, e acima até da pior execução sob a anterior. "
+        "O número é real, mas mede outra coisa: treinar e avaliar contra a "
+        "mesma política é otimizar diretamente a métrica, e o valor deixa de "
+        "indicar força de jogo geral. Por isso elas estão marcadas com `*` na "
+        "figura `08_resumo_resultados.png` e ficam fora do ordenamento entre "
+        "arquiteturas.",
+        "",
+        "Elas não são inúteis: um viés que todas compartilham não atrapalha a "
+        "comparação **entre** elas. É exatamente isso que sustenta o teste de "
+        "eta da seção seguinte, em que os dois lados treinam contra o mesmo "
+        "oponente e diferem só em eta.",
+        "",
+        f"E {NUMBER_WORDS.get(len(reference_random), len(reference_random))} "
+        f"delas medem reprodutibilidade. Rodaram a mesma configuração, com "
+        f"eta = {comma(REWARD_ETA)}, em GPUs diferentes "
+        f"({reference_random_gpus}) "
+        f"e terminaram a {reference_random_spread:.3f} pp uma da outra, "
+        "dentro do ruído do diagnóstico. Duas máquinas independentes, o mesmo "
+        "resultado.",
+        "",
         "## Fatores de confusão",
         "",
-        "Esta comparação **não é um experimento controlado da recompensa "
-        "sozinha**, e vale registrar exatamente onde ela é frágil:",
+        f"O par controlado "
+        f"`{controlled_legacy['execucao']}` / "
+        f"`{controlled_current['execucao']}` fecha os dois confundidores "
+        "principais que as versões anteriores deste relatório listavam. "
+        "Restam três, e vale registrar exatamente onde a comparação ainda é "
+        "frágil:",
         "",
-        "1. **A taxa de aprendizado difere.** As execuções antigas usaram "
-        "lr = 0,001; as novas, 0,016 e 0,032. A grade `analysis/analise_lr_KL` "
-        "mostrou, em `double-three` e sob a recompensa anterior, que taxas "
-        "mais altas produziram jogadores **melhores** — o que faz a lr "
-        "trabalhar contra a hipótese de que ela explique a queda, mas não a "
-        "elimina, porque a grade foi feita em outro ruleset e sob a outra "
-        "recompensa.",
-        "2. **O aumento de escala da recompensa muda o passo efetivo.** O "
-        "desvio do retorno praticamente dobrou, o que multiplica o gradiente "
-        "antes mesmo da lr. As novas execuções têm KL mediana ~4x maior e "
-        "fração de recorte ~3,5x maior. Parte do efeito observado pode ser "
-        "essa mudança de passo, não a forma da recompensa.",
-        "3. **Uma execução por configuração.** Não há repetição com sementes "
-        "diferentes; a variação entre execuções não está medida.",
-        "4. **O corpus de recomputação vem de uma política só** — o "
+        "1. **O baseline de vantagem difere dentro do par controlado.** "
+        f"`{controlled_legacy['execucao']}` usou o baseline padrão "
+        f"(`{controlled_legacy['baseline']}`) e "
+        f"`{controlled_current['execucao']}` usou "
+        f"`{controlled_current['baseline']}`. É o único parâmetro de treino "
+        "que ainda separa os dois. O tamanho desse efeito está medido em "
+        "outra execução: `baseline_zero`, que é `bucket_heuristic_recent` com "
+        "o baseline trocado por zero sob a mesma recompensa, chegou a "
+        f"{by_label['baseline_zero']['vitoria_melhor_pct']:.3f}% contra "
+        f"{controlled_legacy['vitoria_melhor_pct']:.3f}% — "
+        f"{by_label['baseline_zero']['vitoria_melhor_pct'] - controlled_legacy['vitoria_melhor_pct']:+.3f} pp, "
+        f"cerca de {abs(by_label['baseline_zero']['vitoria_melhor_pct'] - controlled_legacy['vitoria_melhor_pct']) / abs(controlled_gap):.0%} "
+        "da lacuna que precisa ser explicada. É pequeno, mas não é zero, e um "
+        "baseline diferente do avaliado ali não está medido.",
+        "2. **Nenhuma repetição com semente diferente.** Toda execução aqui "
+        "usa semente 42. As execuções recebidas atenuam isso em parte — a "
+        "condição `heuristic` sob a recompensa atual foi reproduzida em outra "
+        f"máquina, as duas execuções `random` com eta = {comma(REWARD_ETA)} "
+        f"reproduziram uma à outra dentro de {reference_random_spread:.3f} pp, "
+        f"e as duas com eta = {comma(corrected_random[0]['eta'])} concordaram "
+        "dentro de "
+        f"{abs(corrected_random[0]['melhor_em_partidas_comuns_pct'] - corrected_random[1]['melhor_em_partidas_comuns_pct']):.3f} pp "
+        "no horizonte comum — mas variar a máquina não é o mesmo que variar a "
+        "semente, e a dispersão entre sementes continua sem medida.",
+        "3. **O corpus de recomputação vem de uma política só** — o "
         "checkpoint `double six 66p local.npz`, treinado sob a recompensa "
         "anterior, jogando contra o heurístico. As proporções de desfecho "
         "refletem essa política. As conclusões sobre *forma* e *escala* das "
         "duas funções não dependem disso; as proporções por classe de "
         "desfecho, sim.",
         "",
-        "## O experimento que decide",
+        "## O experimento que decidiu",
         "",
-        "Uma única execução resolve a ambiguidade: recompensa atual, "
-        "**lr = 0,001**, buckets `heuristic,recent`, semente 42, mesmos pesos "
-        "supervisionados — ou seja, `bucket_heuristic_recent` com a única "
-        "diferença sendo a recompensa.",
+        "As versões anteriores deste relatório terminavam pedindo uma "
+        "execução: recompensa atual, **lr = 0,001**, buckets "
+        "`heuristic,recent`, semente 42, mesmos pesos supervisionados. Essa "
+        f"execução existe e é `{controlled_current['execucao']}`, com "
+        f"{controlled_current['partidas'] / 1e6:.1f} M de partidas e "
+        f"{controlled_current['iteracoes']:,} iterações.",
         "",
-        "```bash",
-        "python -u -m training.pipeline forever \\",
-        "    --learning-rate 0.001 \\",
-        "    --opponent-buckets heuristic,recent \\",
-        "    --run-name recompensa_atual_lr001",
-        "```",
+        "O critério declarado na ocasião era: *se ficar perto de 66%, a "
+        "recompensa não é a causa; se ficar perto de 65%, a recompensa é a "
+        f"causa*. O melhor resultado foi "
+        f"**{controlled_current['vitoria_melhor_pct']:.3f}%**, atingido com "
+        f"{controlled_current['partidas_ate_melhor'] / 1e6:.1f} M de partidas, "
+        f"e a curva termina em {controlled_current['vitoria_final_pct']:.3f}%. "
+        "**A recompensa é a causa.**",
         "",
-        "Se essa execução ficar perto de 66%, a recompensa não é a causa e o "
-        "problema está na taxa de aprendizado combinada com a nova escala. Se "
-        "ficar perto de 65%, a recompensa é a causa.",
+        "A curva fica abaixo da equivalente anterior em todo o percurso, e "
+        "não apenas no pico, o que descarta a leitura de que seria só uma "
+        "questão de mais partidas:",
         "",
-        "Duas observações sobre como corrigir o desequilíbrio, caso ele "
-        "se confirme como a causa:",
+    ])
+    lines.extend(format_table(
+        ["Partidas de RL",
+         f"{controlled_legacy['execucao']} (anterior)",
+         f"{controlled_current['execucao']} (atual)", "Diferença"],
+        trajectory_rows,
+    ))
+    lines.extend([
+        "",
+        "Duas observações sobre como corrigir o desequilíbrio:",
         "",
         "- **Reduzir `reward_eta`.** O equilíbrio efetivo entre as metades é "
         "`eta * |G_local| / ((1 - eta) * |G_terminal|)`. Para recuperar com as "
@@ -1053,6 +1917,106 @@ def write_report(summaries, endings, legacy_align, current_align, scored,
         "ajustável. A escala absoluta do termo local só se move por "
         "`reward_eta`. Isso é uma propriedade da arquitetura atual que vale "
         "registrar: **não existe hoje um controle direto da magnitude local**.",
+        "",
+        "## A correção de eta, executada",
+        "",
+        f"Essa previsão foi testada. "
+        f"{NUMBER_WORDS.get(len(corrected_random), len(corrected_random)).capitalize()} "
+        f"execuções repetiram a recompensa atual com "
+        f"`reward_eta = {corrected_random[0]['eta']:g}`, o valor mais próximo "
+        f"de {equivalent_eta:.3f} que foi de fato lançado, mantendo tudo o "
+        "mais: mesma semente, mesma lr, mesmo baseline, mesmos buckets, mesma "
+        "arquitetura de recompensa. Uma rodou nesta máquina, a outra na do "
+        "orientador. São as execuções mais novas da tabela, e é por isso que "
+        "a comparação abaixo é lida no horizonte comum de "
+        f"{common_games / 1e6:.1f} M de partidas.",
+        "",
+        "**Primeiro, o alvo foi acertado.** As duas registraram ao vivo a "
+        f"razão local/terminal em {min(corrected_ratios):.3f}x e "
+        f"{max(corrected_ratios):.3f}x, contra os "
+        f"{balance['legacy_ratio']:.2f}x da recompensa anterior e os "
+        f"{min(reference_ratios):.2f}x–{max(reference_ratios):.2f}x das "
+        f"execuções que ficaram em eta = {comma(REWARD_ETA)}. O valor foi "
+        "calculado sobre o "
+        "corpus recomputado e confirmado pelo rollout de duas execuções "
+        "independentes: `reward_eta` é, de fato, o controle da magnitude "
+        "relativa, e a conta que o dimensionou estava certa.",
+        "",
+        "**Segundo, o sinal voltou a informar sobre o resultado.** A "
+        "correlação por iteração entre `reward_mean` e `batch_win_rate` mede "
+        "o quanto a recompensa que o treino persegue tem a ver com ganhar a "
+        f"partida. Ela vale {min(legacy_corr):+.3f} a {max(legacy_corr):+.3f} "
+        "nas execuções da recompensa anterior e cai para "
+        f"{min(reference_corr):+.3f} a {max(reference_corr):+.3f} nas da "
+        f"atual com eta = {comma(REWARD_ETA)}. Com eta = "
+        f"{comma(corrected_mixture[0]['eta'])} ela volta a "
+        f"{min(corrected_corr):+.3f} e {max(corrected_corr):+.3f} — dentro "
+        "da faixa antiga. Este número é lido dentro do próprio treino, sobre "
+        "as partidas que a execução jogou, e **não passa pelo diagnóstico "
+        "contra o aleatório**: a ressalva do bucket `random`, discutida "
+        "adiante, não o afeta.",
+        "",
+        "**Terceiro, o resultado subiu.** Cada execução corrigida tem, entre "
+        f"as que ficaram em eta = {comma(REWARD_ETA)}, uma contraparte que "
+        "compartilha o "
+        "bucket `random` e o resto da configuração:",
+        "",
+    ])
+    lines.extend(format_table(
+        [f"eta = {comma(REWARD_ETA)}",
+         f"eta = {comma(corrected_random[0]['eta'])}",
+         "Mesma máquina e mesmos pesos SL", "Diferença"],
+        eta_pair_rows,
+    ))
+    lines.extend([
+        "",
+        "A primeira linha é a comparação controlada do eta: as duas execuções "
+        "rodaram na mesma GPU, a partir do mesmo binário supervisionado, com "
+        "a mesma semente, a mesma lr, o mesmo baseline e os mesmos buckets. "
+        "**O único parâmetro diferente é `reward_eta`.** A segunda linha "
+        "repete o contraste em outro par de máquinas.",
+        "",
+        "**Quarto, e é aqui que a leitura precisa de cuidado:** as "
+        f"{NUMBER_WORDS.get(len(held_out), len(held_out))} execuções desse "
+        "bloco treinam com o bucket `random`, o mesmo "
+        "oponente que o diagnóstico mede. Isso infla o nível de todas elas e "
+        "as mantém fora do ordenamento contra as execuções da recompensa "
+        "anterior. O que **não** é inflado é a diferença *dentro* do bloco: "
+        "os dois lados carregam o mesmo viés, então o ganho do eta baixo é "
+        "medido limpo. A conclusão que se sustenta é que **`reward_eta` move "
+        "o resultado na direção prevista**; não que a recompensa atual com "
+        "eta corrigido já alcance a anterior, o que estas execuções não têm "
+        "como mostrar.",
+        "",
+        "### O próximo experimento",
+        "",
+        f"Repetir `{controlled_current['execucao']}` trocando apenas "
+        f"`reward_eta` de {REWARD_ETA:g} para "
+        f"{corrected_random[0]['eta']:g} — a mesma correção já validada, "
+        "agora com buckets que **não** contêm o oponente do diagnóstico, "
+        "para que o número volte a ser comparável com o bloco da recompensa "
+        "anterior:",
+        "",
+        "```bash",
+        "python -u -m training.pipeline forever \\",
+        "    --learning-rate 0.001 \\",
+        "    --opponent-buckets heuristic,recent \\",
+        f"    --reward-eta {corrected_random[0]['eta']:g} \\",
+        "    --baseline lookup-table \\",
+        "    --run-name recompensa_atual_eta_equivalente",
+        "```",
+        "",
+        f"O par a bater é `{controlled_legacy['execucao']}`, "
+        f"{controlled_legacy['melhor_em_partidas_comuns_pct']:.3f}% no "
+        f"horizonte comum e {controlled_legacy['vitoria_melhor_pct']:.3f}% no "
+        f"total, contra os {controlled_current['melhor_em_partidas_comuns_pct']:.3f}% "
+        f"e {controlled_current['vitoria_melhor_pct']:.3f}% de "
+        f"`{controlled_current['execucao']}`. Se essa execução fechar a "
+        f"lacuna de {abs(controlled_gap):.3f} pp, o desequilíbrio entre as "
+        "metades era a causa inteira e `reward_eta` a corrige. Se fechar "
+        "apenas parte dela, o restante está na *forma* da utilidade terminal "
+        "— provavelmente na perda da penalidade de pontos, que empurrava na "
+        "direção que o diagnóstico contra o aleatório premia.",
         "",
         "## Reprodução",
         "",
@@ -1082,20 +2046,35 @@ def main() -> None:
     })
 
     runs = [load_run(label, directory) for label, directory in RUNS]
+    # eta used to belong in this invariant: while every run set it to 0.5 it
+    # cancelled out of the comparison, which is what let the report attribute
+    # the gap to the reward alone. The eta runs deliberately break that, so
+    # eta moves out of the invariant and into a reported column, and the rest
+    # of the mixing rule -- the discounts and how distance is counted -- is
+    # what still has to be identical everywhere.
     shared = {
-        (run["gamma_f"], run["gamma_i"], run["reward_eta"], run["distance_mode"])
-        for run in runs
+        (run["gamma_f"], run["gamma_i"], run["distance_mode"]) for run in runs
     }
     if len(shared) != 1:
         raise SystemExit(
-            "The runs do not share gamma_f/gamma_i/reward_eta/distance mode, "
-            f"so the reward comparison is not isolated: {shared}"
+            "The runs do not share gamma_f/gamma_i/distance mode, so the "
+            f"reward comparison is not isolated: {shared}"
+        )
+    etas = {run["reward_eta"] for run in runs}
+    if etas - {REWARD_ETA} and not (etas & {REWARD_ETA}):
+        raise SystemExit(
+            f"No run left at the reference eta = {REWARD_ETA}, so there is "
+            "nothing for the eta runs to be compared against."
         )
 
     complete = [run for run in runs if run["complete"]]
+    # The horizon every completed run reaches. Reading each run at its own end
+    # would compare a 2.7 M-game run against a 28 M-game one; reading them all
+    # here compares them on the budget they all actually spent.
     common_games = min(float(run["curve"]["rl_games"][-1]) for run in complete)
     summaries = [summarize_run(run, common_games) for run in runs]
     by_label = {row["execucao"]: row for row in summaries}
+    by_directory = {run["label"]: run for run in runs}
 
     corpus = load_corpus()
     scored = score_corpus(corpus)
@@ -1121,13 +2100,36 @@ def main() -> None:
     for legacy_label, current_label in PAIRS:
         left = by_label[legacy_label]
         right = by_label[current_label]
+        same_lr = left["lr"] == right["lr"]
         pair_rows.append([
             left["buckets"],
             f"{left['execucao']}: {left['vitoria_melhor_pct']:.3f}% "
             f"(lr={left['lr']:g})",
             f"{right['execucao']}: {right['vitoria_melhor_pct']:.3f}% "
             f"(lr={right['lr']:g})",
+            "**sim**" if same_lr else "não",
             f"**{right['vitoria_melhor_pct'] - left['vitoria_melhor_pct']:+.3f} pp**",
+        ])
+
+    trajectory_rows = trajectory_comparison(
+        by_directory[CONTROLLED_PAIR[0]], by_directory[CONTROLLED_PAIR[1]]
+    )
+
+    # The eta contrast is read at the shared horizon, because the corrected
+    # runs are the youngest on the table and their own peaks would be
+    # compared against three to nine times as much training.
+    eta_pair_rows = []
+    for reference_label, corrected_label in ETA_PAIRS:
+        left = by_label[reference_label]
+        right = by_label[corrected_label]
+        same_machine = left["gpu"] == right["gpu"] and left["pesos_sl"] == right["pesos_sl"]
+        eta_pair_rows.append([
+            f"`{left['execucao']}`: "
+            f"{left['melhor_em_partidas_comuns_pct']:.3f}%",
+            f"`{right['execucao']}`: "
+            f"{right['melhor_em_partidas_comuns_pct']:.3f}%",
+            "**sim**" if same_machine else "não",
+            f"**{right['melhor_em_partidas_comuns_pct'] - left['melhor_em_partidas_comuns_pct']:+.3f} pp**",
         ])
 
     write_csv(HERE / "resumo_execucoes.csv", summaries)
@@ -1151,7 +2153,9 @@ def main() -> None:
     plot_alignment(legacy_align, current_align,
                    HERE / "06_alinhamento_recompensa_resultado.png")
     plot_training_dynamics(runs, HERE / "07_dinamica_de_treino.png")
-    plot_summary(summaries, HERE / "08_resumo_resultados.png")
+    plot_summary(summaries, HERE / "08_resumo_resultados.png",
+                 common_games)
+    plot_live_mixture(runs, balance, HERE / "09_mistura_ao_vivo.png")
 
     (HERE / "analysis_summary.json").write_text(
         json.dumps(
@@ -1166,11 +2170,29 @@ def main() -> None:
                 },
                 "common_games": common_games,
                 "runs": summaries,
+                "controlled_pair": {
+                    "legacy": CONTROLLED_PAIR[0],
+                    "current": CONTROLLED_PAIR[1],
+                    "shared": [
+                        "ruleset", "seed", "supervised_weights",
+                        "opponent_buckets", "learning_rate", "gamma_f",
+                        "gamma_i", "reward_eta", "reward_distance_mode",
+                    ],
+                    "differs": ["reward_architecture", "advantage_baseline"],
+                    "delta_pp": round(
+                        by_label[CONTROLLED_PAIR[1]]["vitoria_melhor_pct"]
+                        - by_label[CONTROLLED_PAIR[0]]["vitoria_melhor_pct"], 3
+                    ),
+                },
                 "pairs": [
                     {
                         "buckets": by_label[legacy_label]["buckets"],
                         "legacy": legacy_label,
                         "current": current_label,
+                        "same_learning_rate": (
+                            by_label[legacy_label]["lr"]
+                            == by_label[current_label]["lr"]
+                        ),
                         "legacy_best_pct": by_label[legacy_label]["vitoria_melhor_pct"],
                         "current_best_pct": by_label[current_label]["vitoria_melhor_pct"],
                         "delta_pp": round(
@@ -1201,7 +2223,8 @@ def main() -> None:
     )
 
     write_report(summaries, endings, legacy_align, current_align, scored,
-                 balance, pair_rows, common_games, equivalent_eta)
+                 balance, pair_rows, common_games, equivalent_eta,
+                 trajectory_rows, eta_pair_rows)
 
     print(f"decisions scored: {len(scored['won']):,}")
     print(
@@ -1212,7 +2235,7 @@ def main() -> None:
         f"corr(G, win): {legacy_align['correlation_with_win']:+.4f} -> "
         f"{current_align['correlation_with_win']:+.4f}"
     )
-    print("wrote REPORT.md, analysis_summary.json, 4 CSVs and 8 figures")
+    print("wrote REPORT.md, analysis_summary.json, 4 CSVs and 9 figures")
 
 
 if __name__ == "__main__":

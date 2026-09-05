@@ -16,6 +16,7 @@ from typing import Iterable
 import numpy as np
 
 from training.rl import baseline as baselines
+from training.rl.statistics import RunningMoments
 from training.utils.seeding import stable_seed
 from utils.resource_limits import effective_gpu_available_bytes
 
@@ -139,6 +140,11 @@ class PPOBuffer:
     raw_advantage_std: float
     baseline: baselines.BaselineSpec
     baseline_mean: float
+    # The full spread of what was subtracted, not just its centre. A critic
+    # that explains little of the return's variance is visible here and
+    # nowhere else: `baseline_mean` alone cannot distinguish a flat predictor
+    # from a sharp one.
+    baseline_moments: RunningMoments
 
     @classmethod
     def from_samples(
@@ -235,7 +241,15 @@ class PPOBuffer:
             value_predictions=old_values,
             lookup_values=lookup_values,
         )
-        baseline_mean = float(np.mean(baseline_values, dtype=np.float64))
+        baseline_host = _to_numpy(baseline_values, dtype=np.float64).reshape(-1)
+        baseline_mean = float(np.mean(baseline_host))
+        baseline_moments = RunningMoments(
+            count=int(baseline_host.size),
+            total=float(np.sum(baseline_host)),
+            total_squares=float(np.sum(baseline_host * baseline_host)),
+            minimum=float(np.min(baseline_host)),
+            maximum=float(np.max(baseline_host)),
+        )
         raw_advantages = np.ascontiguousarray(
             returns - baseline_values,
             dtype=np.float32,
@@ -264,6 +278,7 @@ class PPOBuffer:
             raw_advantage_std=raw_std,
             baseline=baseline,
             baseline_mean=baseline_mean,
+            baseline_moments=baseline_moments,
         )
         for array in (
             buffer.states,
@@ -870,6 +885,7 @@ def _no_update_result(
         "raw_advantage_std": float(buffer.raw_advantage_std),
         "baseline": buffer.baseline.label,
         "baseline_mean": float(buffer.baseline_mean),
+        "baseline_moments": buffer.baseline_moments.to_list(),
         "target_kl": PPO_TARGET_KL,
         "stop_kl": PPO_STOP_KL,
         "clip_epsilon": PPO_CLIP_EPSILON,
@@ -1197,6 +1213,7 @@ def ppo_update(
                 "raw_advantage_std": float(buffer.raw_advantage_std),
                 "baseline": buffer.baseline.label,
                 "baseline_mean": float(buffer.baseline_mean),
+                "baseline_moments": buffer.baseline_moments.to_list(),
                 "target_kl": PPO_TARGET_KL,
                 "stop_kl": PPO_STOP_KL,
                 "clip_epsilon": PPO_CLIP_EPSILON,

@@ -43,6 +43,7 @@ from training.rl.resume import (
     _training_state_payload,
 )
 from training.rl.rollout import REWARD_ZERO_EPSILON
+from training.rl.statistics import RunningMoments
 from training.rl import baseline as baselines
 from utils.resource_limits import ensure_ram_available
 
@@ -368,6 +369,15 @@ def _terminal_totals(results):
         float(result["terminal_stats"]["blocked_magnitude_sum"])
         for result in results
     )
+    # Distributions merge rather than sum, so the parallel and serial rollouts
+    # report the same spread for the same games.
+    for name in ("empty_hand_moments", "blocked_moments"):
+        merged = RunningMoments()
+        for result in results:
+            merged.merge(
+                RunningMoments.from_list(result["terminal_stats"][name])
+            )
+        totals[name] = merged
     return totals
 
 
@@ -787,7 +797,12 @@ def run_iteration(context, state, iteration):
     }
     section_started = time.perf_counter()
     reward_summary = (
-        _reward_signal_summary(batch, context.network.xp) if batch else None
+        _reward_signal_summary(
+            batch,
+            context.network.xp,
+            draw_scale=context.schema["draw_scale"],
+            pass_scale=context.schema["pass_scale"],
+        ) if batch else None
     )
     context.runtime_profile.add(
         "reward_statistics",

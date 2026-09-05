@@ -54,14 +54,29 @@ DEFAULT_DIFFICULTY_WEIGHT = 0.5
 VALUE_COEF = 0.5
 DEFAULT_MOVING_AVERAGE_WINDOW = 10
 
+# A learning rate ten times the former default. The paired baseline runs
+# showed 0.01 ahead of 0.001 by +0.40 to +0.79 pp on three of four
+# baselines at an equal game budget; see analysis/analise_baselines_0409.
+DEFAULT_LEARNING_RATE = 0.01
+
+# Entropy regularization off by default. The bonus is a separate lever
+# from the objective, and leaving it on quietly floors the policy's
+# entropy in every experiment that is not about exploration.
+DEFAULT_ENTROPY_COEF = 0.0
+
 # ``None`` resolves to on for PPO and off for the single-update REINFORCE path.
 # Explicit advantage-normalization CLI flags still win.
 DEFAULT_NORMALIZE_ADVANTAGES = None
 
-# ``None`` resolves to the baseline the run implied before ``--baseline``
-# existed: the critic when its head is on, otherwise the batch mean whenever
-# normalization is on and no baseline at all when it is off.
-DEFAULT_BASELINE = None
+# The fixed state-conditioned expected reward. It matched the raw REINFORCE
+# signal on win rate at no measurable throughput cost in the baseline
+# comparison, while every critic wiring cost 21-35% of the rollout and
+# returned nothing. See analysis/analise_baselines_0409.
+#
+# ``None`` still means "the baseline this run implies" -- the critic when its
+# head is on, otherwise the batch mean -- and remains reachable by passing it
+# explicitly through the API.
+DEFAULT_BASELINE = ("lookup-table",)
 
 
 @dataclass(frozen=True)
@@ -75,8 +90,8 @@ class RLTrainingOptions:
     opponent_buckets: tuple[str, ...] = DEFAULT_OPPONENT_BUCKETS
     difficulty_weight: float = DEFAULT_DIFFICULTY_WEIGHT
     opponent_decision_restarts: bool = False
-    learning_rate: float = 0.001
-    entropy_coef: float = 0.01
+    learning_rate: float = DEFAULT_LEARNING_RATE
+    entropy_coef: float = DEFAULT_ENTROPY_COEF
     weight_decay: float = DISABLED_WEIGHT_DECAY
     dropout_rate: float = DISABLED_DROPOUT_RATE
     use_value_head: bool = False

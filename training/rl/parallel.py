@@ -234,7 +234,12 @@ def _event_stats_dict(event_stats):
 
 
 def _terminal_stats_dict(terminal_stats):
-    """Return the compact terminal-outcome counters for the parent process."""
+    """Return the compact terminal-outcome payload for the parent process.
+
+    The two ``RunningMoments`` travel as their five-number transport form, so
+    the parent merges partial distributions instead of receiving one worker's
+    view and silently discarding the rest.
+    """
     return {
         "empty_hand_wins": int(terminal_stats.empty_hand_wins),
         "empty_hand_losses": int(terminal_stats.empty_hand_losses),
@@ -242,6 +247,8 @@ def _terminal_stats_dict(terminal_stats):
         "blocked_losses": int(terminal_stats.blocked_losses),
         "blocked_margin_sum": int(terminal_stats.blocked_margin_sum),
         "blocked_magnitude_sum": float(terminal_stats.blocked_magnitude_sum),
+        "empty_hand_moments": terminal_stats.empty_hand.to_list(),
+        "blocked_moments": terminal_stats.blocked.to_list(),
     }
 
 

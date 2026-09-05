@@ -81,15 +81,17 @@ def replay_checkpoint(weights_path, *, ruleset_name, schema, gamma_f, games, see
                 action = tiles[0]
             else:
                 action = agents[current].choose_move(state, legal)
-            event_reward = _event_reward_for_action(
+            event = _event_reward_for_action(
                 current, learner_position, action, event_stats, schema
             )
-            if event_reward is not None:
+            if event is not None:
+                event_reward, event_kind = event
                 learner.add_decayed_event_reward(
                     event_turn=state["turn"],
                     base_reward=event_reward,
                     decay_lambda=schema["gamma_i"],
                     distance_metric=local_metric,
+                    event_kind=event_kind,
                 )
             engine.step(action, return_state=False, legal_actions=legal)
 

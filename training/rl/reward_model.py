@@ -75,7 +75,12 @@ DEFAULT_GAMMA_F = 0.95
 
 # Convex mixture weight between the terminal and immediate returns of one
 # decision: 0.0 trains on the terminal outcome alone, 1.0 on event shaping.
-DEFAULT_REWARD_ETA = 0.5
+#
+# 0.115 is the value the reward-architecture analysis derived and two runs
+# confirmed: it restores the local half the relative weight it carried under
+# the superseded reward, bringing the live local/terminal ratio back to
+# ~0.29x from 2.45x. See analysis/recompensa_anterior_vs_atual.
+DEFAULT_REWARD_ETA = 0.115
 
 # Neutral defaults: equal maximum scale inside each pair, so neither ratio is
 # silently preferred before an experiment chooses one. The redesign

@@ -15,7 +15,9 @@ from training.rl.ppo import (
 from training.rl.config import (
     DEFAULT_DEVICE,
     DEFAULT_DIFFICULTY_WEIGHT,
+    DEFAULT_ENTROPY_COEF,
     DEFAULT_GPI,
+    DEFAULT_LEARNING_RATE,
     DEFAULT_MOVING_AVERAGE_WINDOW,
     DEFAULT_NORMALIZE_ADVANTAGES,
     DEFAULT_TOTAL_TRAINING_GAMES,
@@ -210,8 +212,12 @@ def add_optional_rl_arguments(
             "GPI games. Restart samples join normal samples before one update."
         ),
     )
-    group.add_argument("--learning-rate", type=float, default=0.001)
-    group.add_argument("--entropy-coef", type=float, default=0.01)
+    group.add_argument(
+        "--learning-rate", type=float, default=DEFAULT_LEARNING_RATE
+    )
+    group.add_argument(
+        "--entropy-coef", type=float, default=DEFAULT_ENTROPY_COEF
+    )
     if include_regularization:
         add_regularization_arguments(group)
     group.add_argument("--log-interval", type=int, default=10)

@@ -132,7 +132,10 @@ BUCKET_REGISTRY = (
     ),
 )
 BUCKET_SPECIFICATIONS = {item.name: item for item in BUCKET_REGISTRY}
-DEFAULT_OPPONENT_BUCKETS = ("heuristic", "recent")
+# The single-bucket default: every training game is played against the fixed
+# uniform-random agent. It is also the periodic diagnostic's opponent, so a
+# default run trains and is measured against the same distribution.
+DEFAULT_OPPONENT_BUCKETS = ("random",)
 # The delayed archive-backed bands are genuinely empty during warm-up, so a
 # selection made only of them could never play its own first iteration.
 BOOTSTRAP_CAPABLE_BUCKETS = ("heuristic", "random", "recent")

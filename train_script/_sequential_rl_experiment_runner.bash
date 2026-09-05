@@ -72,6 +72,10 @@ run_rl_experiment_sequence() {
                     point_description="zero, constants +5/-5, and the three critic layouts at PPO LR 0.01"
                 fi
                 ;;
+            one_factor)
+                point_count=23
+                point_description="the default control plus twenty-two single-parameter variants: opponent bucket, baseline, reward distance, entropy coefficient, learning rate, GPI, and the terminal and immediate reward weight pairs"
+                ;;
             *)
                 echo "Unsupported EXPERIMENT_KIND: $EXPERIMENT_KIND" >&2
                 return 1
@@ -182,6 +186,54 @@ EOF
                 "${all_points[@]}"
             )
         fi
+    elif [[ "$EXPERIMENT_KIND" == "one_factor" ]]; then
+        # One factor moves per run; everything else stays on the project
+        # default. `control` is that default with nothing changed, and it is
+        # the comparison point for all fourteen variants -- which is why it
+        # appears once rather than once per group. Six of the requested points
+        # (bucket `random`, baseline `lookup-table`, distance
+        # `decision-decision`, entropy 0, lr 0.01, gpi 2000) *are* the default,
+        # so running them separately would be six identical runs under one
+        # seed, costing five hours each to reproduce the same weights.
+        all_points=(
+            "control default one_factor_control_${MACHINE_SLUG}"
+
+            "bucket_heuristic buckets=heuristic one_factor_bucket_heuristic_${MACHINE_SLUG}"
+
+            "baseline_zero baseline=zero one_factor_baseline_zero_${MACHINE_SLUG}"
+            "baseline_batch_mean baseline=batch-mean one_factor_baseline_batch_mean_${MACHINE_SLUG}"
+
+            "distance_turn_turn distance=turn-turn one_factor_distance_turn_turn_${MACHINE_SLUG}"
+            "distance_turn_decision distance=turn-decision one_factor_distance_turn_decision_${MACHINE_SLUG}"
+            "distance_decision_turn distance=decision-turn one_factor_distance_decision_turn_${MACHINE_SLUG}"
+
+            "entropy_0p01 entropy=0.01 one_factor_entropy_0p01_${MACHINE_SLUG}"
+            "entropy_0p1 entropy=0.1 one_factor_entropy_0p1_${MACHINE_SLUG}"
+
+            "lr_0p005 lr=0.005 one_factor_lr_0p005_${MACHINE_SLUG}"
+            "lr_0p02 lr=0.02 one_factor_lr_0p02_${MACHINE_SLUG}"
+            "lr_0p03 lr=0.03 one_factor_lr_0p03_${MACHINE_SLUG}"
+            "lr_0p04 lr=0.04 one_factor_lr_0p04_${MACHINE_SLUG}"
+
+            "gpi_1000 gpi=1000 one_factor_gpi_1000_${MACHINE_SLUG}"
+            "gpi_4000 gpi=4000 one_factor_gpi_4000_${MACHINE_SLUG}"
+
+            # Terminal pair (a_E, a_B): empty hand against blocked. The pair is
+            # normalized by its own larger member, so only the ratio matters --
+            # (2,1) and (1,0.5) are the same objective. The default (1,1) is
+            # the `control` point above.
+            "terminal_aE1_aB0 terminal=1,0 one_factor_terminal_aE1_aB0_${MACHINE_SLUG}"
+            "terminal_aE0_aB1 terminal=0,1 one_factor_terminal_aE0_aB1_${MACHINE_SLUG}"
+            "terminal_aE1_aB2 terminal=1,2 one_factor_terminal_aE1_aB2_${MACHINE_SLUG}"
+            "terminal_aE2_aB1 terminal=2,1 one_factor_terminal_aE2_aB1_${MACHINE_SLUG}"
+
+            # Immediate pair (a_P, a_D): pass against draw, in that order.
+            # Same normalization, same (1,1) default.
+            "immediate_aP1_aD0 immediate=1,0 one_factor_immediate_aP1_aD0_${MACHINE_SLUG}"
+            "immediate_aP0_aD1 immediate=0,1 one_factor_immediate_aP0_aD1_${MACHINE_SLUG}"
+            "immediate_aP1_aD2 immediate=1,2 one_factor_immediate_aP1_aD2_${MACHINE_SLUG}"
+            "immediate_aP2_aD1 immediate=2,1 one_factor_immediate_aP2_aD1_${MACHINE_SLUG}"
+        )
     else
         echo "Unsupported EXPERIMENT_KIND: $EXPERIMENT_KIND" >&2
         return 1
@@ -213,6 +265,13 @@ EOF
             --run-name|--run-name=*|--ruleset|--ruleset=*|--seed|--seed=*|\
             --artifact-root|--artifact-root=*|--learning-rate|--learning-rate=*|\
             --opponent-buckets|--opponent-buckets=*|--baseline|--baseline=*|\
+            --entropy-coef|--entropy-coef=*|--gpi|--gpi=*|\
+            --bundle-suffix|--bundle-suffix=*|\
+            --terminal-empty-hand-weight|--terminal-empty-hand-weight=*|\
+            --terminal-blocked-weight|--terminal-blocked-weight=*|\
+            --immediate-draw-weight|--immediate-draw-weight=*|\
+            --immediate-pass-weight|--immediate-pass-weight=*|\
+            --reward-distance-mode|--reward-distance-mode=*|\
             --value-head)
                 echo "The sequence owns identity and tested parameters; remove forwarded argument $extra_arg." >&2
                 return 1
@@ -284,13 +343,21 @@ EOF
         done
     }
 
+    # Read from the pipeline rather than written as a literal: the run
+    # directory carries the seed, so a hardcoded one silently stops matching
+    # the moment the project default moves, and every resume then starts a
+    # fresh run on top of an existing one.
+    local sequence_seed
+    sequence_seed="$("$python_bin" -c \
+        'from training.pipeline import DEFAULT_SEED; print(DEFAULT_SEED)')"
+
     run_directory_for() {
         local name="$1" ruleset_part=""
         if [[ "$RULESET" != "double-six" ]]; then
             ruleset_part="${RULESET}_"
         fi
-        printf '%s/domino_rl_%sforever_seed42_run%s\n' \
-            "$run_root" "$ruleset_part" "$name"
+        printf '%s/domino_rl_%sforever_seed%s_run%s\n' \
+            "$run_root" "$ruleset_part" "$sequence_seed" "$name"
     }
 
     local current_name=""
@@ -478,6 +545,15 @@ EOF
         done
     }
 
+    bundle_tail() {
+        # Delegates to the repository rather than reimplementing the spelling
+        # rules, so a directory name can never disagree with what the code
+        # that reads it expects.
+        "$python_bin" -c \
+            'import sys; from training.run_artifacts import bundle_suffix; print(bundle_suffix(sys.argv[1], sys.argv[2]))' \
+            "$1" "$2"
+    }
+
     append_tested_parameter() {
         local -n command_ref="$1"
         local value="$2"
@@ -485,6 +561,61 @@ EOF
             command_ref+=(--opponent-buckets "$value")
         elif [[ "$EXPERIMENT_KIND" == "ppo_lr" ]]; then
             command_ref+=(--learning-rate "$value")
+        elif [[ "$EXPERIMENT_KIND" == "one_factor" ]]; then
+            # `control` adds nothing at all: the project defaults are the
+            # experiment. Every other point names exactly one flag, so a run's
+            # configuration differs from the control in one place and the
+            # comparison stays one-factor by construction.
+            local factor="${value%%=*}" setting="${value#*=}"
+            case "$value" in
+                default)
+                    command_ref+=(--bundle-suffix control)
+                    ;;
+                buckets=*)
+                    command_ref+=(--opponent-buckets "$setting")
+                    command_ref+=(--bundle-suffix "$(bundle_tail --opponent-buckets "$setting")")
+                    ;;
+                baseline=*)
+                    command_ref+=(--baseline "$setting")
+                    command_ref+=(--bundle-suffix "$(bundle_tail --baseline "$setting")")
+                    ;;
+                distance=*)
+                    command_ref+=(--reward-distance-mode "$setting")
+                    command_ref+=(--bundle-suffix "$(bundle_tail --reward-distance-mode "$setting")")
+                    ;;
+                entropy=*)
+                    command_ref+=(--entropy-coef "$setting")
+                    command_ref+=(--bundle-suffix "$(bundle_tail --entropy-coef "$setting")")
+                    ;;
+                lr=*)
+                    command_ref+=(--learning-rate "$setting")
+                    command_ref+=(--bundle-suffix "$(bundle_tail --learning-rate "$setting")")
+                    ;;
+                gpi=*)
+                    command_ref+=(--gpi "$setting")
+                    command_ref+=(--bundle-suffix "$(bundle_tail --gpi "$setting")")
+                    ;;
+                terminal=*)
+                    # `a_E,a_B`, in the order the terminal pair is written.
+                    command_ref+=(
+                        --terminal-empty-hand-weight "${setting%%,*}"
+                        --terminal-blocked-weight "${setting##*,}"
+                        --bundle-suffix "aE${setting%%,*}_aB${setting##*,}"
+                    )
+                    ;;
+                immediate=*)
+                    # `a_P,a_D`: pass first, then draw.
+                    command_ref+=(
+                        --immediate-pass-weight "${setting%%,*}"
+                        --immediate-draw-weight "${setting##*,}"
+                        --bundle-suffix "aP${setting%%,*}_aD${setting##*,}"
+                    )
+                    ;;
+                *)
+                    echo "Unsupported one-factor value: $value (factor $factor)" >&2
+                    return 1
+                    ;;
+            esac
         elif [[ "$EXPERIMENT_KIND" == "baselines" ]]; then
             command_ref+=(--learning-rate 0.01)
             case "$value" in

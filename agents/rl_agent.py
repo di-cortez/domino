@@ -11,21 +11,34 @@ from agents.rl_nn import NonFinitePolicyError, PolicyNetwork
 from middleware.middleware import Agent
 from middleware.opponent_model import ExactOpponentModel
 from middleware.rulesets import DEFAULT_RULESET_NAME, resolve_ruleset
+from training.rl.reward_model import DRAW_EVENT, EVENT_KINDS
 from utils.ruleset_paths import default_rl_weights_path
 
 
 @dataclass
 class TrajectoryStep:
-    """One real learner decision sampled from the frozen rollout policy."""
+    """One real learner decision sampled from the frozen rollout policy.
+
+    The immediate return is kept as its two separable halves, ``G_D`` and
+    ``G_P`` of ``training.rl.reward_model``, because the periodic diagnostic
+    reports their distributions independently. ``local_reward`` remains the
+    sum, so every consumer of the mixed objective is untouched by the split.
+    """
 
     x: object
     action_index: int
     legal_mask: object
     decision_turn: int
     old_log_prob: float = 0.0
-    local_reward: float = 0.0
+    draw_return: float = 0.0
+    pass_return: float = 0.0
     agent_hand_size: int | None = None
     opponent_hand_size: int | None = None
+
+    @property
+    def local_reward(self):
+        """Return ``G_I`` before the ``reward_eta`` mixture: ``G_D + G_P``."""
+        return self.draw_return + self.pass_return
 
 
 @dataclass(frozen=True)
@@ -37,11 +50,16 @@ class FinishedTrajectoryStep:
     legal_mask: object
     decision_turn: int
     raw_reward: float
-    local_reward: float
     terminal_reward: float
+    draw_return: float = 0.0
+    pass_return: float = 0.0
     old_log_prob: float = 0.0
     agent_hand_size: int | None = None
     opponent_hand_size: int | None = None
+
+    @property
+    def local_reward(self):
+        return self.draw_return + self.pass_return
 
 
 UNDERFLOW_FALLBACK_WARNING = (
@@ -490,8 +508,21 @@ class RLAgent(Agent):
         base_reward,
         decay_lambda,
         distance_metric="turn",
+        *,
+        event_kind,
     ):
-        """Distribute one event reward using turn or real-decision distance."""
+        """Distribute one event reward using turn or real-decision distance.
+
+        ``event_kind`` selects which half of the immediate return the decayed
+        value lands in, so ``G_D`` and ``G_P`` stay separable all the way to
+        the diagnostic record. It is keyword-only and never inferred: the
+        caller detected the event, so only the caller knows its kind.
+        """
+        if event_kind not in EVENT_KINDS:
+            raise ValueError(
+                f"Unknown event kind {event_kind!r}; expected one of "
+                f"{', '.join(EVENT_KINDS)}."
+            )
         decision_count = len(self.trajectory)
         for index, step in enumerate(self.trajectory):
             if distance_metric == "turn":
@@ -508,9 +539,11 @@ class RLAgent(Agent):
                     "Event reward chronology is invalid: "
                     f"event_turn={event_turn}, decision_turn={step.decision_turn}."
                 )
-            step.local_reward += float(base_reward) * (
-                float(decay_lambda) ** distance
-            )
+            decayed = float(base_reward) * (float(decay_lambda) ** distance)
+            if event_kind == DRAW_EVENT:
+                step.draw_return += decayed
+            else:
+                step.pass_return += decayed
 
     def finish_episode(self, final_reward):
         """Attach uniform terminal reward to every sampled tile-play decision."""
@@ -522,7 +555,8 @@ class RLAgent(Agent):
                 decision_turn=step.decision_turn,
                 old_log_prob=step.old_log_prob,
                 raw_reward=float(final_reward) + step.local_reward,
-                local_reward=step.local_reward,
+                draw_return=step.draw_return,
+                pass_return=step.pass_return,
                 terminal_reward=float(final_reward),
                 agent_hand_size=step.agent_hand_size,
                 opponent_hand_size=step.opponent_hand_size,

@@ -27,9 +27,11 @@ from training.rl.resume import (
     _resume_uses_opponent_bucket_features,
 )
 from training.rl.reward_distance import HISTORICAL_REWARD_DISTANCE_MODE
+from utils.machine_identity import machine_slug
 from training.run_artifacts import (
     existing_run_config_path,
     migrate_legacy_compact_diagnostics,
+    bundle_dir_name,
     run_compact_diagnostics_dir,
     run_config_path,
 )
@@ -99,6 +101,18 @@ def canonical_run_dir(
         separator = "_" if run_name is not None else "_run"
         name = f"{name}{separator}{execution_id}"
     return Path(root) / "models" / "rl" / name
+
+
+def _local_date_stamp(timestamp):
+    """Return the ``YYYYMMDD`` calendar day one ISO timestamp falls on.
+
+    Converted to local time on purpose: an operator reads these directory
+    names as calendar days on their own machine, and `created_at` is UTC.
+    """
+    moment = datetime.fromisoformat(str(timestamp))
+    if moment.tzinfo is not None:
+        moment = moment.astimezone()
+    return moment.strftime("%Y%m%d")
 
 
 def _utc_now():
@@ -363,6 +377,9 @@ def create_run_config(
     ruleset=DEFAULT_RULESET_NAME,
     use_opponent_suit_features=True,
     use_opponent_bucket_features=False,
+    run_ordinal=None,
+    machine_slug_override=None,
+    bundle_suffix=None,
 ):
     """Atomically publish the immutable identity and requested target of a run."""
     algorithm = _validated_algorithm(algorithm)
@@ -382,7 +399,21 @@ def create_run_config(
         "diagnostics",
     ):
         (run_dir / child).mkdir(parents=True, exist_ok=True)
-    run_compact_diagnostics_dir(run_dir).mkdir(parents=True, exist_ok=True)
+    # The bundle name needs the run's own creation timestamp, so it is fixed
+    # here and reused below rather than derived twice. A resumed run finds its
+    # existing bundle instead and never renames it.
+    created_at = _utc_now()
+    resolved_machine_slug = machine_slug(
+        machine, override=machine_slug_override
+    )
+    bundle_name = bundle_dir_name(
+        date=_local_date_stamp(created_at),
+        machine_slug=resolved_machine_slug,
+        ordinal=run_ordinal,
+        suffix=bundle_suffix,
+    )
+    bundle_dir = run_compact_diagnostics_dir(run_dir, default_name=bundle_name)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
     migrate_legacy_compact_diagnostics(run_dir)
     value = {
         "format_version": RUN_FORMAT_VERSION,
@@ -408,10 +439,19 @@ def create_run_config(
         "locked_arguments": dict(locked_arguments or {}),
         "machine": dict(machine or {}),
         "git_commit": current_git_commit(root),
-        "created_at": _utc_now(),
+        "created_at": created_at,
+        # The parts, not the assembled name: an operator substitutes the `XXX`
+        # ordinal by hand, and a stored name would go stale the moment they do.
+        # `find_bundle_dir` locates the directory by pattern instead.
+        "bundle_date": _local_date_stamp(created_at),
+        "bundle_ordinal": (
+            None if run_ordinal is None else int(run_ordinal)
+        ),
+        "machine_slug": resolved_machine_slug,
+        "bundle_suffix": bundle_suffix,
     }
     value["configuration_sha256"] = configuration_sha256(value)
-    config_path = run_config_path(run_dir)
+    config_path = run_config_path(run_dir, default_name=bundle_name)
     if existing_run_config_path(run_dir).is_file():
         existing = load_run_config(run_dir)
         immutable_keys = (

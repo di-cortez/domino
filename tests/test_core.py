@@ -68,7 +68,12 @@ from middleware.opponent_model import (
     reconstruct_public_actions,
 )
 from training.rl.config import DEFAULT_GPI, RLResourceOptions
-from training.rl.reward_model import DEFAULT_GAMMA_I, DEFAULT_REWARD_ETA
+from training.rl.reward_model import (
+    DEFAULT_GAMMA_I,
+    DEFAULT_REWARD_ETA,
+    DRAW_EVENT,
+    PASS_EVENT,
+)
 from training.rl.rollout import (
     DEFAULT_REWARD_SCHEMA,
     EventStats,
@@ -1765,7 +1770,9 @@ def test_decayed_event_reward_exponents():
             TrajectoryStep(None, 0, None, decision_turn=10),
         ]
 
-        agent.add_decayed_event_reward(event_turn, 0.10, DEFAULT_GAMMA_I)
+        agent.add_decayed_event_reward(
+            event_turn, 0.10, DEFAULT_GAMMA_I, event_kind=DRAW_EVENT
+        )
 
         assert abs(agent.trajectory[0].local_reward - expected) < 1e-12
 
@@ -1779,10 +1786,14 @@ def test_event_reward_signs_and_counts():
     """
     stats = EventStats()
 
-    assert _event_reward_for_action(1, 0, ("DRAW", None), stats) == 1.0
-    assert _event_reward_for_action(1, 0, None, stats) == 1.0
-    assert _event_reward_for_action(0, 0, ("DRAW", None), stats) == -1.0
-    assert _event_reward_for_action(0, 0, None, stats) == -1.0
+    assert _event_reward_for_action(
+        1, 0, ("DRAW", None), stats
+    ) == (1.0, DRAW_EVENT)
+    assert _event_reward_for_action(1, 0, None, stats) == (1.0, PASS_EVENT)
+    assert _event_reward_for_action(
+        0, 0, ("DRAW", None), stats
+    ) == (-1.0, DRAW_EVENT)
+    assert _event_reward_for_action(0, 0, None, stats) == (-1.0, PASS_EVENT)
 
     assert stats.opponent_draws == 1
     assert stats.opponent_passes == 1
@@ -1797,12 +1808,16 @@ def test_event_reward_applies_the_normalized_pair_scales():
 
     assert _event_reward_for_action(
         1, 0, ("DRAW", None), stats, schema
-    ) == 1.0
-    assert _event_reward_for_action(1, 0, None, stats, schema) == 0.5
+    ) == (1.0, DRAW_EVENT)
+    assert _event_reward_for_action(
+        1, 0, None, stats, schema
+    ) == (0.5, PASS_EVENT)
     assert _event_reward_for_action(
         0, 0, ("DRAW", None), stats, schema
-    ) == -1.0
-    assert _event_reward_for_action(0, 0, None, stats, schema) == -0.5
+    ) == (-1.0, DRAW_EVENT)
+    assert _event_reward_for_action(
+        0, 0, None, stats, schema
+    ) == (-0.5, PASS_EVENT)
 
 
 def test_multiple_events_and_all_previous_decisions_receive_rewards():
@@ -1812,8 +1827,8 @@ def test_multiple_events_and_all_previous_decisions_receive_rewards():
         TrajectoryStep(None, 0, None, decision_turn=12),
     ]
 
-    agent.add_decayed_event_reward(13, 0.10, DEFAULT_GAMMA_I)
-    agent.add_decayed_event_reward(14, -0.02, DEFAULT_GAMMA_I)
+    agent.add_decayed_event_reward(13, 0.10, DEFAULT_GAMMA_I, event_kind=DRAW_EVENT)
+    agent.add_decayed_event_reward(14, -0.02, DEFAULT_GAMMA_I, event_kind=PASS_EVENT)
 
     assert abs(agent.trajectory[0].local_reward - (0.081 - 0.01458)) < 1e-12
     assert abs(agent.trajectory[1].local_reward - (0.10 - 0.018)) < 1e-12
@@ -1822,7 +1837,7 @@ def test_multiple_events_and_all_previous_decisions_receive_rewards():
 def test_event_reward_without_decisions_is_noop():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
 
-    agent.add_decayed_event_reward(3, 0.10, DEFAULT_GAMMA_I)
+    agent.add_decayed_event_reward(3, 0.10, DEFAULT_GAMMA_I, event_kind=DRAW_EVENT)
 
     assert agent.trajectory == []
 
@@ -1830,8 +1845,8 @@ def test_event_reward_without_decisions_is_noop():
 def test_terminal_reward_is_uniform_before_local_shaping():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=3, local_reward=-0.05),
+        TrajectoryStep(None, 0, None, decision_turn=1, draw_return=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=3, draw_return=-0.05),
     ]
 
     steps = agent.finish_episode(0.50)
@@ -1845,8 +1860,8 @@ def test_terminal_reward_is_uniform_before_local_shaping():
 def test_choice_count_does_not_weight_terminal_or_local_rewards():
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
-        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, draw_return=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, draw_return=0.10),
     ]
 
     samples = _finish_episode_with_rewards(
@@ -1857,8 +1872,11 @@ def test_choice_count_does_not_weight_terminal_or_local_rewards():
         reward_distance_mode="turn-decision",
     )
 
-    # (1 - eta) * 0.50 + eta * 0.10 at the default reward_eta of 0.5.
-    assert [sample.policy_reward for sample in samples] == [0.30, 0.30]
+    # (1 - eta) * 0.50 + eta * 0.10 at the default reward_eta.
+    expected = round((1 - DEFAULT_REWARD_ETA) * 0.50 + DEFAULT_REWARD_ETA * 0.10, 10)
+    assert [
+        round(sample.policy_reward, 10) for sample in samples
+    ] == [expected, expected]
     assert all(not hasattr(sample, "multiplier") for sample in samples)
     assert all(not hasattr(sample, "option_count") for sample in samples)
 
@@ -1867,7 +1885,7 @@ def test_alpha_mixes_terminal_and_local_reward_components():
     """R_T scales the terminal half by (1 - reward_eta) and the local half by reward_eta."""
     agent = RLAgent(UniformPolicyNetwork(), mode="training")
     agent.trajectory = [
-        TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
+        TrajectoryStep(None, 0, None, decision_turn=1, draw_return=0.10),
     ]
 
     samples = _finish_episode_with_rewards(
@@ -1892,7 +1910,7 @@ def test_alpha_extremes_select_a_single_reward_component():
     def one_sample(reward_eta):
         agent = RLAgent(UniformPolicyNetwork(), mode="training")
         agent.trajectory = [
-            TrajectoryStep(None, 0, None, decision_turn=1, local_reward=0.10),
+            TrajectoryStep(None, 0, None, decision_turn=1, draw_return=0.10),
         ]
         return _finish_episode_with_rewards(
             agent,

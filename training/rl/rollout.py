@@ -1,6 +1,6 @@
 """Reward finalization and CPU-only game collection for RL rollouts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import random
 import time
 
@@ -26,6 +26,7 @@ from training.rl.reward_model import (
     terminal_reward_components,
 )
 from training.rl.restarts import CapturedOpponentDecision
+from training.rl.statistics import RunningMoments
 
 REWARD_ZERO_EPSILON = 1e-8
 
@@ -78,6 +79,15 @@ class TerminalStats:
     mean margin, and ``blocked_magnitude_sum`` likewise gives mean
     ``m(Delta_p)`` -- the effective blocked/empty-hand ratio before any weight
     is applied.
+
+    ``empty_hand`` and ``blocked`` carry the full distribution of ``R_E`` and
+    ``R_B``, which the counts alone cannot supply: a spread cannot be recovered
+    from a total. Both hold the **raw** component that
+    ``terminal_reward_components`` returns, before ``empty_hand_scale`` and
+    ``blocked_scale`` are applied, so the statistic means the same thing across
+    runs that weight the pair differently. Exactly one of the two records a
+    value per game -- an ending is either an empty hand or a block -- so each
+    population counts the games of its own kind, not every game in the batch.
     """
 
     empty_hand_wins: int = 0
@@ -86,6 +96,8 @@ class TerminalStats:
     blocked_losses: int = 0
     blocked_margin_sum: int = 0
     blocked_magnitude_sum: float = 0.0
+    empty_hand: RunningMoments = field(default_factory=RunningMoments)
+    blocked: RunningMoments = field(default_factory=RunningMoments)
 
     def add(self, other):
         self.empty_hand_wins += other.empty_hand_wins
@@ -94,6 +106,8 @@ class TerminalStats:
         self.blocked_losses += other.blocked_losses
         self.blocked_margin_sum += other.blocked_margin_sum
         self.blocked_magnitude_sum += other.blocked_magnitude_sum
+        self.empty_hand.merge(other.empty_hand)
+        self.blocked.merge(other.blocked)
 
 
 @dataclass(frozen=True)
@@ -108,6 +122,11 @@ class TrainingSample:
     local_reward: float
     terminal_reward: float
     old_log_prob: float = 0.0
+    # ``G_D`` and ``G_P`` as the reward model defines them: decayed and scaled,
+    # but *before* the ``reward_eta`` mixture that ``local_reward`` carries.
+    # The diagnostic reports their distributions; training never reads them.
+    draw_return: float = 0.0
+    pass_return: float = 0.0
     agent_hand_size: int | None = None
     opponent_hand_size: int | None = None
 
@@ -124,13 +143,17 @@ def _tile_play_actions(legal_actions):
 def _event_reward_for_action(
     current_player, learner_position, action, event_stats, schema=None
 ):
-    """Return the weighted unit event reward for a draw/pass and count it.
+    """Return ``(reward, event_kind)`` for a draw/pass, or ``None``.
 
     Detection and ``EventStats`` accounting live here; the value itself is the
     unit ``r_D``/``r_P`` of ``training.rl.reward_model`` multiplied by the
     pair-normalized scale the run resolved. The event is not decayed yet:
     ``gamma_i`` is applied by the caller once the event's distance to each
     earlier decision is known.
+
+    The kind travels with the reward because the caller has to route it to the
+    right half of the immediate return, and this is the only place that knows
+    which half it is.
     """
     if schema is None:
         schema = DEFAULT_REWARD_SCHEMA
@@ -156,7 +179,7 @@ def _event_reward_for_action(
         by_learner=by_learner,
         draw_scale=schema["draw_scale"],
         pass_scale=schema["pass_scale"],
-    )
+    ), event_kind
 
 
 def _terminal_outcome(engine, learner_position, schema):
@@ -189,10 +212,13 @@ def _terminal_outcome(engine, learner_position, schema):
         # are accumulated once whichever seat the learner held.
         stats.blocked_margin_sum += int(components["pip_margin"])
         stats.blocked_magnitude_sum += float(components["blocked_magnitude"])
-    elif won:
-        stats.empty_hand_wins += 1
+        stats.blocked.add(components["blocked_component"])
     else:
-        stats.empty_hand_losses += 1
+        if won:
+            stats.empty_hand_wins += 1
+        else:
+            stats.empty_hand_losses += 1
+        stats.empty_hand.add(components["empty_hand_component"])
     return utility, stats
 
 
@@ -260,6 +286,8 @@ def _finish_episode_with_rewards(
                 raw_reward=raw_reward,
                 local_reward=scaled_local,
                 terminal_reward=discounted_terminal,
+                draw_return=step.draw_return,
+                pass_return=step.pass_return,
                 agent_hand_size=step.agent_hand_size,
                 opponent_hand_size=step.opponent_hand_size,
             )
@@ -338,19 +366,21 @@ def _play_training_game_unprofiled(
             action = tile_actions[0]
         else:
             action = agents[current_player].choose_move(state, legal_actions)
-        event_reward = _event_reward_for_action(
+        event = _event_reward_for_action(
             current_player,
             learner_position,
             action,
             event_stats,
             schema,
         )
-        if event_reward is not None:
+        if event is not None:
+            event_reward, event_kind = event
             learner_agent.add_decayed_event_reward(
                 event_turn=state["turn"],
                 base_reward=event_reward,
                 decay_lambda=schema["gamma_i"],
                 distance_metric=local_distance_metric,
+                event_kind=event_kind,
             )
         engine.step(
             action,
@@ -439,19 +469,21 @@ def _play_training_game(
             )
 
         section_started = _profile_worker_start(runtime_profile)
-        event_reward = _event_reward_for_action(
+        event = _event_reward_for_action(
             current_player,
             learner_position,
             action,
             event_stats,
             schema,
         )
-        if event_reward is not None:
+        if event is not None:
+            event_reward, event_kind = event
             learner_agent.add_decayed_event_reward(
                 event_turn=state["turn"],
                 base_reward=event_reward,
                 decay_lambda=schema["gamma_i"],
                 distance_metric=local_distance_metric,
+                event_kind=event_kind,
             )
         _profile_worker_section(
             runtime_profile,

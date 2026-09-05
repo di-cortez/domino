@@ -24,8 +24,7 @@ from diagnostics.parallel_runner import ParallelSafetyConfig
 from diagnostics.rl_progress import (
     CSV_FIELDS,
     FORMAT_VERSION,
-    HISTORY_DATA_FIELDS,
-    v4_recorded_field_names,
+    V5_FIELD_ORDER,
     HISTORY_RECORD_TYPE,
     PERIODIC_SUMMARY_RETENTION,
     _rl_elapsed_hours,
@@ -244,7 +243,48 @@ def _training_config():
     return canonical_training_config(max_epochs=10, batch_size=32)
 
 
+def _write_legacy_history(path, rows):
+    """Write a pre-v5 history, the only kind that stores `selected_workers`.
+
+    The worker-selection recovery reads that field, so a test exercising it has
+    to produce a file from the era that carried it; `append_periodic_point`
+    writes v5 and drops it by design.
+    """
+    static_names = (
+        "pipeline_level", "ruleset_name", "seed", "opponent",
+        "diagnostic_games", "diagnostic_seed", "diagnostic_seed_namespace",
+        "configuration_sha256",
+    )
+    header = {
+        "record_type": "periodic_rl_vs_random_history",
+        "format_version": 4,
+        "checkpoint_path_base": "checkpoints",
+        "static": {name: rows[0].get(name) for name in static_names},
+    }
+    lines = [json.dumps(header)]
+    for row in rows:
+        lines.append(json.dumps({
+            "cumulative_games": row["rl_games"],
+            "iteration": row["rl_iterations"],
+            "timestamp": row["created_at"],
+            "wins": row["wins"],
+            "rl_elapsed_seconds": row["rl_elapsed_seconds"],
+            "diagnostic_seconds": row["diagnostic_seconds"],
+            "checkpoint_path": Path(row["checkpoint_path"]).name,
+            "selected_workers": row["selected_workers"],
+        }))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _periodic_row(games, checkpoint_hash="a", diagnostic_seed=7, seed=None):
+    """Build one record in the shape a pre-v5 history stored.
+
+    `checkpoint_path` and `selected_workers` left the schema in v5. They stay
+    here because the tests that use this helper exercise the legacy paths that
+    still read them: the worker-selection recovery, and reading an archived
+    run's history.
+    """
     return {
         "format_version": FORMAT_VERSION,
         "pipeline_level": "big",
@@ -559,8 +599,7 @@ def test_forever_periodic_workers_are_recovered_once_and_then_persisted(tmp_path
         diagnostic_games=100,
         selected_workers=8,
     )
-    append_periodic_point(history, first)
-    append_periodic_point(history, latest)
+    _write_legacy_history(history, [first, latest])
 
     workers, source = _resolve_periodic_diagnostic_workers(
         tmp_path,
@@ -603,7 +642,9 @@ def test_new_forever_run_autotunes_periodic_workers_only_once(tmp_path, monkeypa
         row.update(
             pipeline_level="forever",
             diagnostic_games=100,
-            selected_workers=8,
+            # In-memory only, as the real diagnostic returns it: v5 records no
+            # longer store the worker count.
+            diagnostic_selected_workers=8,
             losses=40,
             win_rate=0.60,
             ci95_win_rate_low=0.50,
@@ -1299,16 +1340,20 @@ def test_jsonl_repairs_partial_tail_deduplicates_and_rebuilds_reports(tmp_path):
     header = json.loads(raw_lines[0])
     assert header["record_type"] == HISTORY_RECORD_TYPE
     assert header["format_version"] == FORMAT_VERSION
-    # v4 records describe themselves, so the header declares no columns.
+    # v5 names its columns once, in the header, and writes rows as arrays.
     assert "columns" not in header
+    assert header["fields"] == list(V5_FIELD_ORDER)
     assert header["checkpoint_path_base"] == "checkpoints"
     assert len(raw_lines) == 3
     first_record = json.loads(raw_lines[1])
-    assert isinstance(first_record, dict)
-    assert set(v4_recorded_field_names()).issubset(first_record)
-    assert first_record["checkpoint_path"] == "games_0000000000_weights.npz"
-    # The hash left the schema with v4; nothing writes it any more.
-    assert "checkpoint_sha256" not in first_record
+    assert isinstance(first_record, list)
+    assert len(first_record) == len(V5_FIELD_ORDER)
+    values = dict(zip(V5_FIELD_ORDER, first_record))
+    assert values["cumulative_games"] == 0
+    # Three fields left the schema; nothing writes them any more.
+    for gone in ("checkpoint_path", "checkpoint_sha256", "selected_workers"):
+        assert gone not in V5_FIELD_ORDER
+    # Derived values stay derived rather than being stored twice.
     assert "ci95" not in history.read_text(encoding="utf-8")
     assert "loss_rate" not in history.read_text(encoding="utf-8")
 

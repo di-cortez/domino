@@ -12,8 +12,7 @@ from agents.rl_nn import PolicyNetwork
 from diagnostics.pairwise import run_pairwise
 from diagnostics.rl_progress import (
     CSV_FIELDS,
-    HISTORY_DATA_FIELDS,
-    v4_recorded_field_names,
+    V5_FIELD_ORDER,
     HISTORY_RECORD_TYPE,
     read_periodic_history,
     run_periodic_diagnostic,
@@ -306,15 +305,19 @@ def test_real_periodic_history_is_compact_and_counts_diagnostic_time(tmp_path):
     ]
     assert raw[0]["record_type"] == HISTORY_RECORD_TYPE
     assert len(raw) == 3
-    # v4 records are self-describing objects, not positional arrays.
-    assert all(isinstance(value, dict) for value in raw[1:])
-    assert set(v4_recorded_field_names()).issubset(raw[1])
-    assert raw[1]["checkpoint_path"] == checkpoint.name
+    # v5 names its columns once in the header; the rows are arrays of values.
+    assert raw[0]["fields"] == list(V5_FIELD_ORDER)
+    assert all(isinstance(value, list) for value in raw[1:])
+    assert all(len(value) == len(V5_FIELD_ORDER) for value in raw[1:])
+    # Two points were recorded: the initial one and the one at four games.
+    assert [
+        dict(zip(V5_FIELD_ORDER, row))["cumulative_games"] for row in raw[1:]
+    ] == [0, 4]
     # Derived values stay derived: the record never stores what the reader
     # recomputes from `wins` and the two elapsed clocks.
     assert "ci95" not in history_path.read_text(encoding="utf-8")
-    assert "win_rate" not in raw[1]
-    assert "progress_elapsed_seconds" not in raw[1]
+    assert "win_rate" not in V5_FIELD_ORDER
+    assert "progress_elapsed_seconds" not in V5_FIELD_ORDER
 
     rows = read_periodic_history(history_path)
     expected = 2.0 + sum(row["diagnostic_seconds"] for row in rows)

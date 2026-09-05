@@ -13,6 +13,7 @@ from pathlib import Path
 import random
 import re
 import time
+import zipfile
 
 import numpy as np
 
@@ -31,6 +32,7 @@ from training.canonical_run import (
     run_config_uses_opponent_suit_features,
 )
 from training.run_artifacts import (
+    existing_run_config_path,
     periodic_diagnostics_path,
     rl_progress_csv_path,
     rl_progress_png_path,
@@ -43,12 +45,17 @@ from utils.artifacts import atomic_write_json, atomic_write_text, file_sha256
 from middleware.rulesets import DEFAULT_RULESET_NAME
 
 
-FORMAT_VERSION = 4
-# v3 is read but never written: every existing run's history is in that layout,
-# and `rebuild_best_checkpoint`, the CSV rebuild and resume all go through the
-# same reader.
-LEGACY_HISTORY_VERSION = 3
-SUPPORTED_HISTORY_VERSIONS = (LEGACY_HISTORY_VERSION, FORMAT_VERSION)
+FORMAT_VERSION = 5
+# Older layouts are read but never written. Every existing run's history is in
+# one of them, and the CSV rebuild, the best-checkpoint pointer and resume all
+# go through the same reader.
+#   v3  header with `columns` plus positional arrays, nine outcome fields
+#   v4  one self-describing JSON object per line, 39 fields
+#   v5  header with `fields` plus positional arrays, 37 fields, rounded per
+#       category -- the compact format specified in
+#       references/atualizacoes/atualizacao_0409
+LEGACY_HISTORY_VERSIONS = (3, 4)
+SUPPORTED_HISTORY_VERSIONS = LEGACY_HISTORY_VERSIONS + (FORMAT_VERSION,)
 PERIODIC_NAMESPACE = "periodic_rl_vs_random"
 FINAL_NAMESPACE = "final_all_pairs_holdout"
 PERIODIC_SUMMARY_RETENTION = 10
@@ -91,21 +98,26 @@ LEGACY_V3_DATA_FIELDS = (
     "created_at",
 )
 
-# What a v4 record stores. Every other value a reader sees -- the win rate, the
+# What a v5 record stores. Every other value a reader sees -- the win rate, the
 # losses, the Wilson bounds, the cumulative progress clock -- stays derived by
 # `_derive_history_values`, so there is exactly one source of truth for each.
 #
-# `checkpoint_sha256` is deliberately absent: it played no part in resuming a
-# run, which goes entirely through `training_state.json`. `checkpoint_path`
-# stays, so a record still names the weights it measured.
+# Three fields the older layouts carried are gone, none of them load-bearing:
+#
+#   checkpoint_sha256   played no part in resume, which goes entirely through
+#                       `training_state.json`
+#   checkpoint_path     reconstructible from the game count plus the run
+#                       configuration; see `checkpoint_path_for_record`
+#   selected_workers    the forever worker choice lives in
+#                       `periodic_diagnostic_tuning.json`, which every run
+#                       writes; the history copy was only a recovery path for
+#                       runs predating that file
 HISTORY_DATA_FIELDS = (
     "rl_games",
     "rl_iterations",
     "rl_elapsed_seconds",
     "diagnostic_seconds",
-    "checkpoint_path",
     "wins",
-    "selected_workers",
     "created_at",
 )
 
@@ -128,6 +140,88 @@ V4_INTERNAL_NAMES = {
 # should be readable without knowing the derivation, and they are recomputed on
 # read regardless, so the stored copy can never become the source of truth.
 V4_RESTATED_FIELDS = ("elapsed_hours", "diagnostic_win_rate")
+
+# Decimal places per category, as specified by the compact-format note in
+# `references/atualizacoes/atualizacao_0409`. A field absent here is written
+# unrounded, and an integer field is written as an int.
+#
+# The categories are not uniform on purpose: five places are kept for the
+# trust region and the small reward metrics because rounding 0.00438 to two
+# places would turn it into 0.00 and delete the measurement, while a terminal
+# component's extremes only ever reach +/-1 and need one.
+RECORDED_PLACES = {
+    "rl_elapsed_seconds": 2,
+    "diagnostic_seconds": 2,
+    "elapsed_hours": 4,
+    "diagnostic_win_rate": 3,
+    "max_kl": 5,
+    "clip_fraction": 5,
+    "entropy": 5,
+    "R_E_mean": 5, "R_E_std": 5, "R_E_min": 1, "R_E_max": 1,
+    "R_B_mean": 5, "R_B_std": 5, "R_B_min": 1, "R_B_max": 1,
+    "G_D_mean": 5, "G_D_std": 5, "G_D_min": 5, "G_D_max": 5,
+    "G_P_mean": 5, "G_P_std": 5, "G_P_min": 5, "G_P_max": 5,
+    "baseline_mean": 5, "baseline_min": 5, "baseline_max": 5,
+    "baseline_std": 6,
+}
+
+# Written as integers: counts, games, iterations, wins, and the epoch tally.
+RECORDED_INTEGERS = (
+    "rl_games",
+    "rl_iterations",
+    "wins",
+    "window_first_iteration",
+    "window_iterations",
+    "window_games",
+    "window_decisions",
+    "window_restart_decisions",
+    "epochs_completed",
+)
+
+# The column order of a v5 file, in recorded names: identity, then outcome,
+# then the training window, then the PPO trust region, then the five reward
+# distributions. A field the initial diagnostic never measured is `null`.
+V5_FIELD_ORDER = (
+    "cumulative_games",
+    "iteration",
+    "timestamp",
+    "rl_elapsed_seconds",
+    "diagnostic_seconds",
+    "elapsed_hours",
+    "wins",
+    "diagnostic_win_rate",
+    "window_first_iteration",
+    "window_iterations",
+    "window_games",
+    "window_decisions",
+    "window_restart_decisions",
+    "max_kl",
+    "clip_fraction",
+    "entropy",
+    "epochs_completed",
+    "R_E_mean", "R_E_max", "R_E_min", "R_E_std",
+    "R_B_mean", "R_B_max", "R_B_min", "R_B_std",
+    "G_D_mean", "G_D_max", "G_D_min", "G_D_std",
+    "G_P_mean", "G_P_max", "G_P_min", "G_P_std",
+    "baseline_mean", "baseline_max", "baseline_min", "baseline_std",
+)
+
+
+def _recorded_value(name, value):
+    """Return one value at the precision its category is recorded in."""
+    if value is None:
+        return None
+    if name in RECORDED_INTEGERS:
+        return int(value)
+    places = RECORDED_PLACES.get(name)
+    return value if places is None else round(float(value), places)
+
+
+def _recorded_timestamp(value):
+    """Return an ISO timestamp truncated to whole seconds."""
+    text = str(value)
+    # `2026-09-04T22:41:59.102065+00:00` -> `2026-09-04T22:41:59+00:00`
+    return re.sub(r"\.\d+", "", text, count=1)
 
 
 def v4_recorded_field_names():
@@ -314,8 +408,43 @@ def _history_header(rows):
         "record_type": HISTORY_RECORD_TYPE,
         "format_version": FORMAT_VERSION,
         "checkpoint_path_base": HISTORY_CHECKPOINT_BASE,
+        # Named once here so the rows below carry values only. A reader zips
+        # this against each row; a field the run never measured is `null`.
+        "fields": list(V5_FIELD_ORDER),
         "static": static,
     }
+
+
+def checkpoint_path_for_record(run_dir, row):
+    """Return the weights file one diagnostic point measured.
+
+    v5 no longer stores the path, because it is fully determined by the point
+    itself: every checkpoint is named after the game count that produced it,
+    and the one exception -- the point at zero games, which measures the
+    supervised policy the run started from -- is named by the run
+    configuration. A record read from an older layout still carries the stored
+    path, and that is preferred so an archived run keeps naming exactly what it
+    named before.
+    """
+    stored = row.get("checkpoint_path")
+    if stored:
+        return str(stored)
+    games = int(row["rl_games"])
+    if games > 0:
+        return str(
+            Path(run_dir) / HISTORY_CHECKPOINT_BASE
+            / f"games_{games:010d}_weights.npz"
+        )
+    # Read the one field directly rather than through `load_run_config`: this
+    # is a display pointer, and a configuration that fails full validation for
+    # an unrelated reason should not cost the initial point its name.
+    try:
+        config_path = existing_run_config_path(run_dir)
+        with open(config_path, "r", encoding="utf-8") as stream:
+            supervised = json.load(stream).get("supervised_weights_path")
+    except (OSError, ValueError, AttributeError):
+        supervised = None
+    return str(supervised) if supervised else ""
 
 
 def _checkpoint_path_for_storage(path, history_path):
@@ -435,33 +564,46 @@ def read_periodic_history(path):
             raise ValueError(
                 "Periodic diagnostic history has an unexpected checkpoint base."
             )
-        # v3 lines are positional arrays declared by the header's `columns`;
-        # v4 lines are self-describing objects. Both decode to the same row
-        # shape, so every consumer downstream is version-blind -- which is what
-        # lets a v3 run keep its curve, its best-checkpoint pointer and its
-        # rebuilt CSV after the schema change.
+        # Three layouts decode to one row shape, so every consumer downstream
+        # is version-blind -- which is what lets a run written under any of
+        # them keep its curve, its best-checkpoint pointer and its rebuilt CSV.
+        #   v3  positional arrays named by the header's `columns`
+        #   v4  self-describing objects
+        #   v5  positional arrays named by the header's `fields`
         columns = first.get("columns")
-        if version == LEGACY_HISTORY_VERSION:
+        field_names = first.get("fields")
+        if version == 3:
             if columns != list(LEGACY_V3_DATA_FIELDS):
                 raise ValueError(
                     "Periodic diagnostic history has unexpected columns."
                 )
-        elif columns is not None:
-            raise ValueError(
-                "A version 4 periodic diagnostic history declares no columns."
-            )
+            positional = columns
+        elif version == 4:
+            if columns is not None:
+                raise ValueError(
+                    "A version 4 periodic diagnostic history declares no "
+                    "columns."
+                )
+            positional = None
+        else:
+            if not isinstance(field_names, list) or not field_names:
+                raise ValueError(
+                    "A version 5 periodic diagnostic history must declare its "
+                    "fields."
+                )
+            positional = field_names
         rows = []
         for line_index, value in values[1:]:
             last_line = line_index == len(lines) - 1
-            if version == LEGACY_HISTORY_VERSION:
-                if not isinstance(value, list) or len(value) != len(columns):
+            if positional is not None:
+                if not isinstance(value, list) or len(value) != len(positional):
                     if last_line:
                         break
                     raise ValueError(
                         "Periodic diagnostic history line "
                         f"{line_index + 1} has invalid compact data."
                     )
-                stored = dict(zip(columns, value))
+                stored = dict(zip(positional, value))
             else:
                 if not isinstance(value, dict):
                     if last_line:
@@ -470,22 +612,27 @@ def read_periodic_history(path):
                         "Periodic diagnostic history line "
                         f"{line_index + 1} is not a record object."
                     )
+                stored = dict(value)
+            if version >= 4:
+                # v4 and v5 speak the recorded vocabulary; the internal row
+                # keeps the names every consumer already uses. The restated
+                # values are recomputed below, so the stored copies are dropped
+                # rather than allowed to disagree.
                 stored = {
                     V4_INTERNAL_NAMES.get(name, name): field
-                    for name, field in value.items()
-                    # The restated values are recomputed below, so the stored
-                    # copies are dropped rather than allowed to disagree.
+                    for name, field in stored.items()
                     if name not in V4_RESTATED_FIELDS
                 }
             row = {**static, **stored}
-            # A v3 row carries a checkpoint hash that v4 no longer stores.
-            # Reading it back is harmless and keeps the older records fully
-            # auditable, so it is passed through rather than stripped.
-            row["checkpoint_path"] = _checkpoint_path_from_storage(
-                row["checkpoint_path"],
-                path,
-                checkpoint_base,
-            )
+            # A v3 row carries a checkpoint hash and path that v5 no longer
+            # stores. Reading them back is harmless and keeps the older records
+            # fully auditable, so they pass through rather than being stripped.
+            if row.get("checkpoint_path") is not None:
+                row["checkpoint_path"] = _checkpoint_path_from_storage(
+                    row["checkpoint_path"],
+                    path,
+                    checkpoint_base,
+                )
             if not _required_history_identity(row):
                 if last_line:
                     break
@@ -635,26 +782,22 @@ def _serialize_periodic_history(path, rows):
         record = {
             V4_RECORDED_NAMES.get(name, name): row.get(name)
             for name in HISTORY_DATA_FIELDS + HISTORY_WINDOW_FIELDS
-            # A window statistic the run never measured is omitted rather than
-            # written as null, so a record stays as small as what it knows.
-            if name in HISTORY_DATA_FIELDS or row.get(name) is not None
         }
-        record["checkpoint_path"] = _checkpoint_path_for_storage(
-            row["checkpoint_path"],
-            path,
-        )
         # Restated for readability; `_derive_history_values` recomputes both,
         # so the stored copies are never what a consumer actually reads.
-        record["elapsed_hours"] = round(
-            (float(row["rl_elapsed_seconds"]) + cumulative_diagnostic_seconds)
-            / 3600.0,
-            6,
+        record["elapsed_hours"] = (
+            float(row["rl_elapsed_seconds"]) + cumulative_diagnostic_seconds
+        ) / 3600.0
+        record["diagnostic_win_rate"] = (
+            100.0 * int(row["wins"]) / int(row["diagnostic_games"])
         )
-        record["diagnostic_win_rate"] = round(
-            100.0 * int(row["wins"]) / int(row["diagnostic_games"]),
-            6,
-        )
-        lines.append(json.dumps(record, separators=(",", ":")))
+        record["timestamp"] = _recorded_timestamp(record["timestamp"])
+        values = [
+            record["timestamp"] if name == "timestamp"
+            else _recorded_value(name, record.get(name))
+            for name in V5_FIELD_ORDER
+        ]
+        lines.append(json.dumps(values, separators=(",", ":")))
     return "\n".join(lines) + "\n"
 
 
@@ -760,6 +903,34 @@ def prune_periodic_diagnostic_artifacts(
     }
 
 
+PERIODIC_DIAGNOSTICS_ARCHIVE = "periodic_diagnostics.zip"
+
+
+def archive_periodic_history(run_dir):
+    """Zip the finished history beside itself, returning the archive path.
+
+    The file stays open and uncompressed while the run is alive, because a
+    periodic diagnostic appends to it; compressing is therefore something a run
+    does once, when it stops. The rounded values compress well -- the repeated
+    array structure is most of the file -- and the JSONL is deliberately left
+    in place, so nothing that reads it has to learn about the archive.
+
+    Returns ``None`` when there is no history yet, and refreshes an existing
+    archive rather than leaving a stale one behind.
+    """
+    history_path = periodic_diagnostics_path(run_dir)
+    if not history_path.is_file():
+        return None
+    archive_path = history_path.with_name(PERIODIC_DIAGNOSTICS_ARCHIVE)
+    temporary = archive_path.with_suffix(".zip.tmp")
+    with zipfile.ZipFile(
+        temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as archive:
+        archive.write(history_path, arcname=history_path.name)
+    os.replace(temporary, archive_path)
+    return archive_path
+
+
 def rebuild_progress_csv(run_dir):
     """Rebuild the derived CSV from JSONL, which remains the source of truth."""
     run_dir = Path(run_dir)
@@ -846,7 +1017,9 @@ def rebuild_progress_plot(run_dir, *, log_x=False):
     except (FileNotFoundError, ValueError):
         run_config = {}
     starting_point = zero_rows[-1] if zero_rows else rows[0]
-    start_name = Path(starting_point["checkpoint_path"]).name
+    start_name = Path(
+        checkpoint_path_for_record(run_dir, starting_point)
+    ).name or "supervised policy"
     # v3 rows still carry the hash; v4 does not record it. The footer prints
     # it when it is there and simply says less when it is not.
     start_hash = (starting_point.get("checkpoint_sha256") or "")[:12]
@@ -968,7 +1141,7 @@ def _update_best(run_dir, row):
         "criterion": "win_rate_vs_random",
         "rl_games": int(row["rl_games"]),
         "win_rate": float(row["win_rate"]),
-        "checkpoint_path": row["checkpoint_path"],
+        "checkpoint_path": checkpoint_path_for_record(run_dir, row),
         "checkpoint_sha256": row.get("checkpoint_sha256"),
         "configuration_sha256": row.get("configuration_sha256"),
         "diagnostic_seed": int(row["diagnostic_seed"]),
@@ -995,7 +1168,7 @@ def rebuild_best_checkpoint(run_dir):
         "criterion": "win_rate_vs_random",
         "rl_games": int(best["rl_games"]),
         "win_rate": float(best["win_rate"]),
-        "checkpoint_path": best["checkpoint_path"],
+        "checkpoint_path": checkpoint_path_for_record(run_dir, best),
         "checkpoint_sha256": best.get("checkpoint_sha256"),
         "configuration_sha256": best.get("configuration_sha256"),
         "diagnostic_seed": int(best["diagnostic_seed"]),
@@ -1176,7 +1349,6 @@ def run_periodic_diagnostic(
         "seed": int(seed),
         "rl_games": int(rl_games),
         "rl_iterations": int(rl_iterations),
-        "checkpoint_path": str(checkpoint_path),
         "configuration_sha256": run_config.get("configuration_sha256"),
         "opponent": "random",
         "diagnostic_games": int(diagnostic_games),
@@ -1185,7 +1357,6 @@ def run_periodic_diagnostic(
         "diagnostic_seed_namespace": PERIODIC_NAMESPACE,
         "diagnostic_seconds": float(diagnostic_seconds),
         "rl_elapsed_seconds": float(rl_elapsed_seconds),
-        "selected_workers": selected_workers,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     # The training this record covers: everything since the previous point.
@@ -1236,6 +1407,11 @@ def run_periodic_diagnostic(
         "pairwise_sections_seconds": dict(pairwise_profile["sections_seconds"]),
         "game_worker": dict(pairwise_profile.get("game_worker", {})),
     }
+    # In-memory only, like `runtime_profile_delta` above: the worker count this
+    # diagnostic actually used. The record itself no longer stores it -- the
+    # forever selection lives in `periodic_diagnostic_tuning.json` -- but the
+    # caller still reports and persists it.
+    row["diagnostic_selected_workers"] = selected_workers
     return row, appended
 
 

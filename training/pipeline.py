@@ -18,6 +18,8 @@ from agents.network_architecture import architecture_from_hidden_sizes
 from agents.nn import GPUContextLostError, resolve_device
 from diagnostics import evaluate
 from diagnostics.rl_progress import (
+    archive_periodic_history,
+    checkpoint_path_for_record,
     final_diagnostic_seed,
     periodic_diagnostic_seed,
     read_periodic_history,
@@ -999,6 +1001,11 @@ def _resolve_periodic_diagnostic_workers(run_dir, level, args):
                 return selected, "saved forever selection"
         return "auto", "one-time forever autotune after configuration change"
 
+    # Recovery for runs written before `periodic_diagnostic_tuning.json`
+    # existed, when the worker choice was only ever recorded in the history.
+    # Records from format version 5 onward no longer carry it -- the tuning
+    # file is the one place it lives -- so this finds nothing for them and the
+    # run autotunes once, then persists the result like any other.
     history = read_periodic_history(periodic_diagnostics_path(run_dir))
     for row in reversed(history):
         try:
@@ -1074,7 +1081,7 @@ def _run_periodic_point(
         _write_periodic_worker_tuning(
             run_dir,
             args,
-            row["selected_workers"],
+            row["diagnostic_selected_workers"],
             source="one_time_autotune",
             selected_at_rl_games=int(row["rl_games"]),
         )
@@ -1097,12 +1104,13 @@ def _run_periodic_point(
     # The hash is present on a v3 record and absent from a v4 one, so the
     # line reports what the record actually holds rather than assuming.
     checkpoint_hash = row.get("checkpoint_sha256")
-    weights_line = f"Weights: {Path(row['checkpoint_path']).name}"
+    weights = Path(checkpoint_path_for_record(run_dir, row)).name
+    weights_line = f"Weights: {weights or 'supervised policy'}"
     if checkpoint_hash:
         weights_line += f" | SHA-256: {checkpoint_hash[:12]}..."
     print(weights_line)
     print(f"Opponent: random | games: {row['diagnostic_games']:,}")
-    print(f"Workers: {row['selected_workers']} ({worker_source})")
+    print(f"Workers: {row['diagnostic_selected_workers']} ({worker_source})")
     print(f"Wins/losses: {row['wins']:,}/{row['losses']:,}")
     print(
         f"Win rate: {row['win_rate']:.2%} | "
@@ -1924,11 +1932,16 @@ def main(argv=None):
     diagnostics = None
     if not rl_result["shutdown_requested"]:
         diagnostics = run_final_diagnostics(root, config, args, assets, rl_result)
+    # The run has stopped, so the history will not grow again: archive it.
+    # Point 3 of references/atualizacoes/atualizacao_0409.
+    archive = archive_periodic_history(rl_result["run_dir"])
     print("\nCanonical pipeline finished")
     print(f"Elapsed: {format_duration(time.time() - started)}")
     print(f"Supervised weights: {assets['paths'].weights}")
     print(f"RL run directory: {rl_result['run_dir']}")
     print(f"RL games completed: {rl_result['completed_training_games']:,}")
+    if archive is not None:
+        print(f"Periodic diagnostics archived: {archive}")
     if config.unbounded:
         print("Forever ended without an automatic final all-pairs diagnostic.")
     return {

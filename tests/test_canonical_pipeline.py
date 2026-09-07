@@ -673,6 +673,116 @@ def test_new_forever_run_autotunes_periodic_workers_only_once(tmp_path, monkeypa
     assert worker_requests == ["auto", 8]
 
 
+def test_reused_v5_periodic_point_uses_saved_forever_workers(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    args = parse_args([
+        "forever",
+        "--periodic-diagnostic-games",
+        "100",
+        "--artifact-root",
+        str(tmp_path),
+    ])
+    saved_tuning = {
+        **pipeline_module._periodic_worker_tuning_identity(args),
+        "selected_workers": 8,
+        "source": "one_time_autotune",
+        "selected_at_rl_games": 0,
+    }
+    tuning_path = tmp_path / PERIODIC_DIAGNOSTIC_TUNING_FILE
+    tuning_path.write_text(json.dumps(saved_tuning), encoding="utf-8")
+
+    def fake_reused_diagnostic(**kwargs):
+        row = _periodic_row(
+            kwargs["rl_games"],
+            diagnostic_seed=periodic_diagnostic_seed(args.seed),
+        )
+        row.update(
+            pipeline_level="forever",
+            diagnostic_games=100,
+            losses=40,
+            win_rate=0.60,
+            ci95_win_rate_low=0.50,
+            ci95_win_rate_high=0.69,
+        )
+        # This is precisely a v5-like reused row: no persisted or transient
+        # selected-worker field exists.
+        row.pop("selected_workers")
+        row["runtime_profile_delta"] = {
+            "execution_seconds": 0.0,
+            "sections_seconds": {},
+        }
+        return row, False
+
+    monkeypatch.setattr(
+        "training.pipeline.run_periodic_diagnostic",
+        fake_reused_diagnostic,
+    )
+    _run_periodic_point(
+        args=args,
+        run_dir=tmp_path,
+        level="forever",
+        checkpoint=tmp_path / "weights.npz",
+        games=100_000,
+        iterations=50,
+        elapsed_rl_seconds=10.0,
+    )
+    assert json.loads(tuning_path.read_text(encoding="utf-8")) == saved_tuning
+    assert "Workers: 8 (saved forever selection)" in capsys.readouterr().out
+
+
+def test_reused_v5_periodic_point_without_tuning_does_not_fabricate_workers(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    args = parse_args([
+        "forever",
+        "--periodic-diagnostic-games",
+        "100",
+        "--artifact-root",
+        str(tmp_path),
+    ])
+
+    def fake_reused_diagnostic(**kwargs):
+        row = _periodic_row(
+            kwargs["rl_games"],
+            diagnostic_seed=periodic_diagnostic_seed(args.seed),
+        )
+        row.update(
+            pipeline_level="forever",
+            diagnostic_games=100,
+            losses=40,
+            win_rate=0.60,
+            ci95_win_rate_low=0.50,
+            ci95_win_rate_high=0.69,
+        )
+        row.pop("selected_workers")
+        row["runtime_profile_delta"] = {
+            "execution_seconds": 0.0,
+            "sections_seconds": {},
+        }
+        return row, False
+
+    monkeypatch.setattr(
+        "training.pipeline.run_periodic_diagnostic",
+        fake_reused_diagnostic,
+    )
+    _run_periodic_point(
+        args=args,
+        run_dir=tmp_path,
+        level="forever",
+        checkpoint=tmp_path / "weights.npz",
+        games=100_000,
+        iterations=50,
+        elapsed_rl_seconds=10.0,
+    )
+    assert not (tmp_path / PERIODIC_DIAGNOSTIC_TUNING_FILE).exists()
+    assert "Workers: unavailable from reused history" in capsys.readouterr().out
+
+
 def test_rl_throughput_is_cumulative_across_resume_segments():
     assert _cumulative_rl_games_per_second(6_600_000, 6_500.0, 100.0) == 1_000.0
 

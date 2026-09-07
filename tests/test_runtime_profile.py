@@ -262,8 +262,25 @@ def test_periodic_profile_separates_reports_from_pairwise_work(tmp_path, monkeyp
     assert profile["sections_seconds"]["progress_csv_rebuild"] > 0.0
     assert profile["pairwise_sections_seconds"] == {"new_game_execution": 0.008}
     assert pairwise_options["save_game_records"] is False
+    assert row["diagnostic_selected_workers"] == 1
     persisted = read_periodic_history(periodic_diagnostics_path(tmp_path))
     assert "runtime_profile_delta" not in persisted[-1]
+    assert "diagnostic_selected_workers" not in persisted[-1]
+
+    reused, appended = run_periodic_diagnostic(
+        run_dir=tmp_path,
+        pipeline_level="forever",
+        seed=42,
+        rl_games=100,
+        rl_iterations=1,
+        checkpoint_path=checkpoint,
+        diagnostic_games=4,
+        rl_elapsed_seconds=1.0,
+        workers=1,
+        safety_config=ParallelSafetyConfig(memory_reserve_mb=0),
+    )
+    assert not appended
+    assert "diagnostic_selected_workers" not in reused
 
 
 def test_real_periodic_history_is_compact_and_counts_diagnostic_time(tmp_path):

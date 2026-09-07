@@ -1073,15 +1073,26 @@ def _run_periodic_point(
         autotune_minimum_gain=args.diagnostic_autotune_min_gain,
         status_callback=_status,
     )
+    # A v5 history deliberately does not carry the worker count.  A reused
+    # point therefore cannot prove which workers produced it, and must not
+    # manufacture a new saved forever selection.  Only an appended point that
+    # really autotuned exposes its transient actual worker count.
+    executed_workers = row.get("diagnostic_selected_workers")
     if (
-        level == "forever"
+        appended
+        and level == "forever"
         and args.diagnostic_workers == "auto"
         and diagnostic_workers == "auto"
     ):
+        if not isinstance(executed_workers, int):
+            raise RuntimeError(
+                "A newly executed periodic diagnostic did not report its "
+                "selected worker count"
+            )
         _write_periodic_worker_tuning(
             run_dir,
             args,
-            row["diagnostic_selected_workers"],
+            executed_workers,
             source="one_time_autotune",
             selected_at_rl_games=int(row["rl_games"]),
         )
@@ -1110,7 +1121,17 @@ def _run_periodic_point(
         weights_line += f" | SHA-256: {checkpoint_hash[:12]}..."
     print(weights_line)
     print(f"Opponent: random | games: {row['diagnostic_games']:,}")
-    print(f"Workers: {row['diagnostic_selected_workers']} ({worker_source})")
+    # An executed diagnostic reports its actual, potentially resource-capped
+    # count. For a reused v5 point, instead use the already resolved durable
+    # forever selection. Without either, the historical count is unknown and
+    # must not be invented.
+    if isinstance(executed_workers, int):
+        worker_display = str(executed_workers)
+    elif isinstance(diagnostic_workers, int):
+        worker_display = str(diagnostic_workers)
+    else:
+        worker_display = "unavailable from reused history"
+    print(f"Workers: {worker_display} ({worker_source})")
     print(f"Wins/losses: {row['wins']:,}/{row['losses']:,}")
     print(
         f"Win rate: {row['win_rate']:.2%} | "

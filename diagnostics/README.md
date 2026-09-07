@@ -147,6 +147,13 @@ uses cumulative RL training time plus every completed periodic diagnostic. It
 therefore remains monotonic across resume sessions without counting time while
 the process was stopped.
 
+The compact v5 history intentionally does not repeat the selected worker
+count: `periodic_diagnostic_tuning.json` is its persistent source of truth.
+When resume reuses a v5 diagnostic point and that tuning file is unavailable,
+the pipeline reports the historical worker count as unavailable and waits to
+persist a selection until a genuinely new diagnostic performs its one-time
+autotune. It never rewrites history or invents a worker count.
+
 Periodic monitoring does not persist per-game CSV records. The complete,
 compact JSONL learning history is retained, while only the 10 newest
 per-checkpoint `summary.json` directories are kept. This bounds recurring

@@ -277,7 +277,7 @@ Allocation fixes counts only. The complete assignment list is still shuffled
 once with a stable seed after every count is final.
 
 GPI is never autotuned. Canonical pipelines and direct RL training accept
-`--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000`, defaulting to
+`--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000, 4000`, defaulting to
 `2000`.
 
 Worker tuning tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1%

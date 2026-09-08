@@ -390,7 +390,7 @@ persisted in `periodic_diagnostic_tuning.json`, and reused at subsequent
 iteration, lets an in-flight iteration finish, atomically publishes state, and
 exits without an automatic all-pairs evaluation. GPI is never autotuned. The
 canonical pipeline and direct self-play expose `--gpi` with choices
-`100, 200, 400, 600, 800, 1000, 2000`; the default is 2,000. Worker autotuning
+`100, 200, 400, 600, 800, 1000, 2000, 4000`; the default is 2,000. Worker autotuning
 is unchanged. A boundary iteration is shortened so a periodic or final target
 is never exceeded.
 

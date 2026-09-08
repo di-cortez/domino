@@ -113,7 +113,7 @@ Pipeline levels differ primarily in exact cumulative RL games:
 
 GPI is never autotuned. Canonical pipelines and direct
 `training.rl.cli` runs accept `--gpi` from
-`100, 200, 400, 600, 800, 1000, 2000`, defaulting to 2,000. Before real games begin, an
+`100, 200, 400, 600, 800, 1000, 2000, 4000`, defaulting to 2,000. Before real games begin, an
 isolated benchmark selects the rollout-worker count and discards its games.
 Training uses masked PPO with decision-sized minibatches (512 target, 256
 minimum, 256 batches maximum per epoch). Direct self-play and the finite canonical profiles retain the

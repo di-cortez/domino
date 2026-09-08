@@ -44,7 +44,7 @@ from utils.ruleset_paths import default_rl_weights_path, default_sl_weights_path
 # The array backend is resolved once inside train() and always matches the
 # PolicyNetwork backend selected for that run.
 DEFAULT_DEVICE = "auto"
-COMMON_GPI_VALUES = (100, 200, 400, 600, 800, 1000, 2000)
+COMMON_GPI_VALUES = (100, 200, 400, 600, 800, 1000, 2000, 4000)
 DEFAULT_GPI = 2000
 DEFAULT_TOTAL_TRAINING_GAMES = 100_000
 

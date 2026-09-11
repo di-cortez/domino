@@ -227,6 +227,50 @@ only its unused RL budget. `--dry-run` prints every fresh command without
 starting a pipeline, and `--help` documents selection, forced restart, timing,
 and forwarded pipeline options.
 
+## Learning rates below the default
+
+`run_lr_low_tests_diego_notebook.sh` runs two `forever` points of five hours
+each on `double-six`, both on the project defaults except for the learning
+rate: `0.0001` and `0.0025`. The budget, ruleset and seed match the one-factor
+sweep, so the two points are directly comparable to its `control` (lr `0.01`)
+and extend its ladder downwards -- `0.0001`, `0.0025`, `0.005`, `0.01`,
+`0.02`, `0.03`, `0.04` under one seed.
+
+`double-six` is not incidental: these runs keep the default `lookup-table`
+baseline, which needs a packaged format-version-3 reward table, and double-six
+is the only ruleset that ships one.
+
+```bash
+train_script/run_lr_low_tests_diego_notebook.sh
+train_script/run_lr_low_tests_diego_notebook.sh --only '*0p0025*'
+```
+
+### Declaring points in the wrapper
+
+A wrapper normally selects one of the point tables built into
+`_sequential_rl_experiment_runner.bash` through `EXPERIMENT_KIND`. A wrapper
+that tests something those tables do not cover declares its own points
+instead:
+
+```bash
+EXPERIMENT_KIND="lr_low"                    # names the results directory
+EXPERIMENT_PARAMETER_FLAG="--learning-rate" # the flag each value is spent on
+EXPERIMENT_POINTS=(
+    #  label      value   run name
+    "lr_0p0001  0.0001  lr_low_0p0001_${MACHINE_SLUG}"
+    "lr_0p0025  0.0025  lr_low_0p0025_${MACHINE_SLUG}"
+)
+EXPERIMENT_POINTS_DESCRIPTION="learning rates 0.0001 and 0.0025"
+```
+
+`EXPERIMENT_POINTS` replaces the built-in table entirely rather than extending
+it. `EXPERIMENT_PARAMETER_FLAG` is what lets a brand-new `EXPERIMENT_KIND`
+work without editing the runner: the value becomes that flag's argument and
+the bundle tail is spelled by `training.run_artifacts.bundle_suffix`, the same
+way every built-in experiment spells it. A wrapper whose `EXPERIMENT_KIND` is
+already one the runner decodes -- `buckets`, `ppo_lr`, `baselines`,
+`one_factor` -- can declare points without it.
+
 ## Validation
 
 For script-only changes, run at least:

@@ -67,7 +67,7 @@
 #   ./run_one_factor_tests_diego_notebook.sh                 # run the sequence
 #   ./run_one_factor_tests_diego_notebook.sh --help          # options
 #   ./run_one_factor_tests_diego_notebook.sh --only 'one_factor_lr_*'
-#   ./run_one_factor_tests_diego_notebook.sh --rl-time-limit 3h
+#   ./run_one_factor_tests_diego_notebook.sh --time-limit 3h
 #
 # The sequence is resumable: each point records its consumed RL time, and
 # re-running continues an interrupted point instead of restarting it.

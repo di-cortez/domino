@@ -10,6 +10,11 @@ run_rl_experiment_sequence() {
     : "${MACHINE_LABEL:?MACHINE_LABEL must be set by the wrapper}"
     : "${TIME_COEFFICIENT:?TIME_COEFFICIENT must be set by the wrapper}"
     : "${EXPERIMENT_KIND:?EXPERIMENT_KIND must be set by the wrapper}"
+    # Resolved here rather than inside the help text: at this depth the call
+    # stack still names the wrapper that sourced this file, and one more
+    # function frame between it and the heredoc would silently print this
+    # runner's own path instead.
+    local wrapper_source="${BASH_SOURCE[1]}"
     : "${RULESET:?RULESET must be set by the wrapper}"
     : "${RL_TIME_LIMIT:?RL_TIME_LIMIT must be set by the wrapper}"
 
@@ -54,6 +59,12 @@ run_rl_experiment_sequence() {
 
     usage() {
         local point_count point_description
+        if declare -p EXPERIMENT_POINTS >/dev/null 2>&1; then
+            point_count="${#EXPERIMENT_POINTS[@]}"
+            point_description="${EXPERIMENT_POINTS_DESCRIPTION:-the points this wrapper declares}"
+            usage_body "$point_count" "$point_description"
+            return 0
+        fi
         case "$EXPERIMENT_KIND" in
             buckets)
                 point_count=3
@@ -81,8 +92,13 @@ run_rl_experiment_sequence() {
                 return 1
                 ;;
         esac
+        usage_body "$point_count" "$point_description"
+    }
+
+    usage_body() {
+        local point_count="$1" point_description="$2"
         cat <<EOF
-Usage: ${BASH_SOURCE[1]#"$repo_root/"} [options] [-- extra pipeline args]
+Usage: ${wrapper_source#"$repo_root/"} [options] [-- extra pipeline args]
 
 Run the $point_count $EXPERIMENT_KIND experiments for $MACHINE_LABEL
 sequentially: $point_description.  Each point receives
@@ -157,7 +173,13 @@ EOF
     fi
 
     local -a all_points=()
-    if [[ "$EXPERIMENT_KIND" == "buckets" ]]; then
+    if declare -p EXPERIMENT_POINTS >/dev/null 2>&1; then
+        # A wrapper that declares its own points owns them completely; the
+        # tables below are the shared experiments, not a base to extend. Such
+        # a wrapper also sets EXPERIMENT_PARAMETER_FLAG unless its
+        # EXPERIMENT_KIND is one the tables below already know how to spend.
+        all_points=("${EXPERIMENT_POINTS[@]}")
+    elif [[ "$EXPERIMENT_KIND" == "buckets" ]]; then
         all_points=(
             "heuristic_recent heuristic,recent bucket_heuristic_recent_${MACHINE_SLUG}"
             "all_except_random heuristic,recent,medium_term,historical_uniform,champion_vs_heuristic,champion_vs_learner bucket_all_except_random_${MACHINE_SLUG}"
@@ -557,7 +579,15 @@ EOF
     append_tested_parameter() {
         local -n command_ref="$1"
         local value="$2"
-        if [[ "$EXPERIMENT_KIND" == "buckets" ]]; then
+        if [[ -n "${EXPERIMENT_PARAMETER_FLAG:-}" ]]; then
+            # One flag, one value: the wrapper named the parameter, so there is
+            # nothing to decode. The bundle tail is spelled by the repository,
+            # exactly as every branch below spells it.
+            command_ref+=("$EXPERIMENT_PARAMETER_FLAG" "$value")
+            command_ref+=(
+                --bundle-suffix "$(bundle_tail "$EXPERIMENT_PARAMETER_FLAG" "$value")"
+            )
+        elif [[ "$EXPERIMENT_KIND" == "buckets" ]]; then
             command_ref+=(--opponent-buckets "$value")
         elif [[ "$EXPERIMENT_KIND" == "ppo_lr" ]]; then
             command_ref+=(--learning-rate "$value")
@@ -616,6 +646,63 @@ EOF
                     return 1
                     ;;
             esac
+        elif [[ "$EXPERIMENT_KIND" == "combined" ]]; then
+            # A deliberate multi-flag point. Every other kind moves one flag so
+            # a run stays one-factor by construction; this one exists for the
+            # opposite purpose -- checking whether adjustments that each won
+            # their own one-factor contrast still win when applied together.
+            #
+            # `value` is a `+`-separated list of the same `factor=setting`
+            # pairs the one_factor branch understands, so a combination is
+            # spelled the same way as its parts and the two can be compared by
+            # reading the command line.
+            local -a combined_parts=()
+            local combined_suffix="" part setting
+            local saved_ifs="$IFS"
+            IFS='+' read -r -a combined_parts <<< "$value"
+            IFS="$saved_ifs"
+            if [[ ${#combined_parts[@]} -lt 1 ]]; then
+                echo "A combined point needs at least one component: $value" >&2
+                return 1
+            fi
+            for part in "${combined_parts[@]}"; do
+                setting="${part#*=}"
+                case "$part" in
+                    lr=*)
+                        command_ref+=(--learning-rate "$setting")
+                        combined_suffix+="_lr${setting}"
+                        ;;
+                    distance=*)
+                        command_ref+=(--reward-distance-mode "$setting")
+                        combined_suffix+="_${setting}"
+                        ;;
+                    gpi=*)
+                        command_ref+=(--gpi "$setting")
+                        combined_suffix+="_gpi${setting}"
+                        ;;
+                    buckets=*)
+                        command_ref+=(--opponent-buckets "$setting")
+                        combined_suffix+="_${setting}"
+                        ;;
+                    baseline=*)
+                        command_ref+=(--baseline "$setting")
+                        combined_suffix+="_${setting}"
+                        ;;
+                    entropy=*)
+                        command_ref+=(--entropy-coef "$setting")
+                        combined_suffix+="_ent${setting}"
+                        ;;
+                    *)
+                        echo "Unsupported combined component: $part" >&2
+                        return 1
+                        ;;
+                esac
+            done
+            # A decimal point is written `p`, the same convention every other
+            # wrapper uses, so `lr0p001` and `lr0p01` stay distinct.
+            combined_suffix="${combined_suffix#_}"
+            combined_suffix="${combined_suffix//./p}"
+            command_ref+=(--bundle-suffix "$combined_suffix")
         elif [[ "$EXPERIMENT_KIND" == "baselines" ]]; then
             command_ref+=(--learning-rate 0.01)
             case "$value" in

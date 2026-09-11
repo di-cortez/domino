@@ -31,7 +31,7 @@ from diagnostics.parallel_runner import MAX_DIAGNOSTIC_WORKERS, ParallelSafetyCo
 from training.datagen import generator as dataset_generator
 from training.rl import baseline as rl_baseline
 from training.rl import cli as rl_cli
-from training.rl.config import DEFAULT_GPI
+from training.rl.config import DEFAULT_BASELINE, DEFAULT_GPI
 from training.rl import training_loop as rl_training_loop
 from training.supervised import cli as supervised_cli
 from training.supervised import training_loop
@@ -55,6 +55,8 @@ from training.canonical_run import (
     update_diagnostic_markers,
 )
 from training.run_artifacts import (
+    FLAG_SHORT_NAMES,
+    combined_bundle_suffix,
     periodic_diagnostics_path,
     rl_progress_png_path,
     run_compact_diagnostics_dir,
@@ -302,6 +304,68 @@ def _json_safe_argument(value):
     if isinstance(value, (list, tuple)):
         return [_json_safe_argument(item) for item in value]
     return value
+
+
+# The RL parameters an automatically derived bundle tail names, in the order
+# they appear in it. `FLAG_SHORT_NAMES` fixes both the set and the order: every
+# flag in it already has a spelling an operator recognizes in a listing, and a
+# fixed order means two runs that vary the same parameters land on the same
+# directory name.
+_AUTO_BUNDLE_SUFFIX_FLAGS = tuple(FLAG_SHORT_NAMES)
+
+# `--baseline` stays unset on the command line and is resolved much later, so
+# the parser default (None) is not what a default run actually trains with.
+# Compared against the resolved project default instead, so spelling out
+# `--baseline lookup-table` -- exactly what leaving it off does -- adds nothing
+# to the name.
+_AUTO_BUNDLE_SUFFIX_DEFAULTS = {"baseline": DEFAULT_BASELINE}
+
+
+def _bundle_suffix_value(value):
+    """Render one parsed CLI value the way a bundle tail spells it."""
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, float):
+        # `repr` keeps 0.115 exact where '%g' rounds it, and a whole weight
+        # reads better as `aB_2` than as `aB_2p0`.
+        text = repr(value)
+        return text[:-2] if text.endswith(".0") else text
+    if isinstance(value, (list, tuple)):
+        return ",".join(_bundle_suffix_value(item) for item in value)
+    return "" if value is None else str(value)
+
+
+def _auto_bundle_suffix(parser, args):
+    """Return the tail naming every RL parameter this run moves off default.
+
+    A run's analysis bundle is meant to stay readable once copied away from
+    the run that made it, which only works when its name says what the run
+    tested. Experiment sequences pass `--bundle-suffix` for that. Every other
+    run derives the same tail from its own configuration here, rather than
+    falling back to a name carrying only the date and the machine.
+
+    Returns ``None`` for a run that is entirely on the defaults: there is no
+    parameter to name, and the tail-less name is the honest one.
+    """
+    varied = []
+    for flag in _AUTO_BUNDLE_SUFFIX_FLAGS:
+        destination = flag.lstrip("-").replace("-", "_")
+        if not hasattr(args, destination):
+            continue
+        default = _AUTO_BUNDLE_SUFFIX_DEFAULTS.get(
+            destination, parser.get_default(destination)
+        )
+        value = getattr(args, destination)
+        # An unset flag is the project default by definition, whatever the
+        # parser stores for it: `--baseline` parks a None on the namespace and
+        # is resolved to `lookup-table` only once training starts.
+        if value is None:
+            value = default
+        rendered = _bundle_suffix_value(value)
+        if rendered == _bundle_suffix_value(default):
+            continue
+        varied.append((flag, rendered))
+    return combined_bundle_suffix(varied)
 
 
 def _locked_run_arguments(args):
@@ -1788,9 +1852,11 @@ def parse_args(argv=None):
             "Name the parameter this run tests at the end of its analysis "
             "bundle directory, as in "
             "'20260904-XXX_diego_notebook_lr_0p02'. Letters, digits and '_' "
-            "only; a decimal point is written 'p'. Experiment sequences set "
-            "this per run so a bundle copied out of its run still says which "
-            "point it is."
+            "only; a decimal point is written 'p'. Left unset, the tail is "
+            "derived from whichever RL parameters this run moves off the "
+            "project defaults, so a bundle copied out of its run always says "
+            "which point it is; pass '' for a run that should carry no tail, "
+            "and pass a name to override the derived one."
         ),
     )
     canonical.add_argument("--restart-rl", action="store_true")
@@ -1856,6 +1922,12 @@ def parse_args(argv=None):
         parser.error(str(exc))
     # Checked once --value-head and any resumed baseline are both settled.
     rl_baseline.validate_arguments(parser, args)
+    if args.bundle_suffix is None:
+        # Derived last, so it reads the same settings the run is created with:
+        # a resumed run has already had its locked arguments assigned back
+        # onto the namespace. An explicit `--bundle-suffix` always wins, and
+        # `--bundle-suffix ''` opts out of the tail entirely.
+        args.bundle_suffix = _auto_bundle_suffix(parser, args)
     return _resolve_execution_identity(args)
 
 

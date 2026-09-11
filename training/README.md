@@ -106,8 +106,8 @@ earlier.
 
 RL output lives at `models/rl/domino_rl_<level>_seed<seed>/`. Its compact
 analysis bundle (`run_config.json`, periodic JSONL, progress CSV and progress
-PNG) lives together under `run_compact_diagnostics/`. `big`, `huge`,
-and `forever` publish immutable exact resume generations plus the convenience
+PNG) lives together in one directory named after the run that made it. `big`,
+`huge`, and `forever` publish immutable exact resume generations plus the convenience
 aliases `latest_weights.npz`, `optimizer_state.npz`, `rng_state.json`, and
 `opponent_pool/pool_manifest.json`. `training_state.json` is the commit marker;
 resume restores policy, optimizer, RNG state, opponent identities/bucket order,
@@ -115,14 +115,24 @@ difficulty evidence, adaptive selection, algorithm-specific update history,
 and cumulative counters. The independent `checkpoint_archive/` keeps a bounded,
 progressively thinned policy history. The optional `medium_term` opponent
 bucket references 200 of its ten-iteration milestones without duplicating
-weights and pins those active records against thinning. Examples:
+weights and pins those active records against thinning.
+
+The bundle directory is `<start date>-<ordinal>_<machine>_<tail>`, as in
+`20260910-XXX_diego_notebook_lr_0p001`. The tail names whichever RL parameters
+the run moves off the project defaults, so a bundle copied away from its run
+still says which point it is; every canonical run derives it, `--bundle-suffix`
+overrides it, and `--bundle-suffix ''` drops it. The ordinal stays the literal
+`XXX` until an operator substitutes the number from the shared experiment log,
+so nothing keys on the name -- lookups match the pattern instead. Runs
+predating this convention keep the fixed `run_compact_diagnostics/` and are
+found either way.
 
 The marker advances at the normal numbered-checkpoint interval, not only at a
 100,000-game diagnostic boundary. Superseded non-milestone latest payloads are
 pruned only after the replacement marker is durable. Numbered policy
 checkpoints and full milestone resume states each retain a rolling window of
 the five newest generations; milestone policy weights remain available for
-the complete diagnostic history and best-checkpoint pointer.
+the complete diagnostic history and best-checkpoint pointer. Examples:
 
 ```bash
 python -m training.pipeline big --resume

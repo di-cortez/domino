@@ -13,12 +13,16 @@ import json
 
 import pytest
 
+from training.pipeline import parse_args
 from training.run_artifacts import (
     BUNDLE_DIR_PATTERN,
+    COMBINED_SUFFIX_OVERFLOW,
+    MAX_COMBINED_SUFFIX_LENGTH,
     ORDINAL_PLACEHOLDER,
     RUN_COMPACT_DIAGNOSTICS_DIRNAME,
     bundle_dir_name,
     bundle_suffix,
+    combined_bundle_suffix,
     find_bundle_dir,
     is_bundle_dir_name,
     migrate_bundle_to_named_dir,
@@ -284,3 +288,112 @@ def test_a_value_that_looks_like_a_path_cannot_escape_the_run_directory():
     assert BUNDLE_DIR_PATTERN.match(
         bundle_dir_name(date="20260904", machine_slug="diego_notebook", suffix=tail)
     )
+
+
+# ----------------------------------------------------------------------
+# The tail every run derives for itself
+# ----------------------------------------------------------------------
+
+
+def test_several_varied_parameters_join_into_one_tail():
+    assert combined_bundle_suffix(
+        [("--learning-rate", "0.001"), ("--gpi", "4000")]
+    ) == "lr_0p001_gpi_4000"
+
+
+def test_a_run_that_varies_nothing_has_no_tail():
+    assert combined_bundle_suffix([]) is None
+
+
+def test_a_long_tail_drops_whole_parts_rather_than_truncating_one():
+    """Half a parameter name reads as a different parameter."""
+    pairs = [("--reward-eta", f"0.{index:03d}") for index in range(20)]
+    tail = combined_bundle_suffix(pairs)
+    assert tail.endswith(f"_{COMBINED_SUFFIX_OVERFLOW}")
+    assert len(tail) <= MAX_COMBINED_SUFFIX_LENGTH + len(COMBINED_SUFFIX_OVERFLOW) + 1
+    # Every part that survived is whole.
+    kept = tail[: -len(COMBINED_SUFFIX_OVERFLOW) - 1]
+    assert all(part in kept for part in kept.split("_eta_")[1:])
+    assert BUNDLE_DIR_PATTERN.match(
+        bundle_dir_name(date="20260910", machine_slug="diego_notebook", suffix=tail)
+    )
+
+
+def _derived_suffix(*flags):
+    return parse_args(["forever", "--run-name", "probe", *flags]).bundle_suffix
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ((), None),
+        (("--learning-rate", "0.001"), "lr_0p001"),
+        (("--gpi", "4000"), "gpi_4000"),
+        (("--entropy-coef", "0.01"), "entropy_0p01"),
+        (("--opponent-buckets", "heuristic"), "bucket_heuristic"),
+        (("--reward-distance-mode", "turn-turn"), "distance_turn_turn"),
+        (("--baseline", "zero"), "baseline_zero"),
+        (("--terminal-blocked-weight", "2"), "aB_2"),
+        (("--learning-rate", "0.001", "--gpi", "4000"), "lr_0p001_gpi_4000"),
+    ],
+)
+def test_a_plain_pipeline_run_names_the_parameters_it_varies(flags, expected):
+    """The one-factor sequence is no longer the only run with a named bundle."""
+    assert _derived_suffix(*flags) == expected
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        # Spelled-out defaults are still defaults; they name nothing.
+        ("--learning-rate", "0.01"),
+        ("--gpi", "2000"),
+        ("--opponent-buckets", "random"),
+        ("--reward-distance-mode", "decision-decision"),
+        # `--baseline` parks a None on the namespace and resolves to
+        # `lookup-table` only later, so both spellings must read as default.
+        ("--baseline", "lookup-table"),
+    ],
+)
+def test_restating_a_default_adds_nothing_to_the_tail(flags):
+    assert _derived_suffix(*flags) is None
+
+
+def test_an_explicit_suffix_wins_over_the_derived_one():
+    """`control` is the sequence's name for a run that varies nothing."""
+    assert _derived_suffix(
+        "--learning-rate", "0.001", "--bundle-suffix", "control"
+    ) == "control"
+
+
+def test_an_empty_suffix_opts_out_of_the_tail():
+    assert _derived_suffix("--learning-rate", "0.001", "--bundle-suffix", "") == ""
+    assert bundle_dir_name(
+        date="20260910", machine_slug="diego_notebook", suffix=""
+    ) == "20260910-XXX_diego_notebook_"
+
+
+def test_a_derived_tail_is_a_usable_bundle_directory(tmp_path):
+    run_dir = _run_root(tmp_path)
+    name = bundle_dir_name(
+        date="20260910",
+        machine_slug="diego_notebook",
+        suffix=_derived_suffix("--learning-rate", "0.001"),
+    )
+    assert name == "20260910-XXX_diego_notebook_lr_0p001"
+    created = run_dir / name
+    created.mkdir()
+    assert find_bundle_dir(run_dir) == created
+    assert run_dir_from_compact_diagnostic_path(
+        created / "periodic_diagnostics.jsonl"
+    ) == run_dir
+
+
+def test_an_existing_bundle_is_never_renamed_by_a_derived_tail(tmp_path):
+    """A run created before this convention keeps resuming into its bundle."""
+    run_dir = _run_root(tmp_path)
+    legacy = run_dir / RUN_COMPACT_DIAGNOSTICS_DIRNAME
+    legacy.mkdir()
+    assert run_compact_diagnostics_dir(
+        run_dir, default_name="20260910-XXX_diego_notebook_lr_0p001"
+    ) == legacy

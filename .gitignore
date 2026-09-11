@@ -62,8 +62,8 @@ train_script/grid_search_results/
 
 # Fixed runtime inputs for the state-conditioned RL baseline are deliberately
 # versioned even though similarly named analysis outputs are generated data.
-!training/rl/reward_lookup_tables/*.json.gz
-!training/rl/reward_lookup_tables/*_manifest.json
+training/rl/reward_lookup_tables/*.json.gz
+training/rl/reward_lookup_tables/*_manifest.json
 
 analysis/exact_vs_random-double-three/double_three_cheater_player0.jsonl
 analysis/exact_vs_random-double-three/double_three_cheater_player1.jsonl
@@ -78,5 +78,28 @@ analysis/analise_lr_KL/*
 
 # Local-only experiment driver that has no upstream counterpart yet.
 train_script/run_ppo_lr_ext_tests_diego_notebook.sh
+train_script/run_baseline_tests_diego_notebook.sh
+train_script/run_baseline_tests_rick_desktop.sh
+train_script/run_best_combo_diego_notebook.sh
+train_script/run_bucket_tests_diego_notebook.sh
+train_script/run_bucket_tests_rick_desktop.sh
+train_script/run_bucket_tests_rick_new_notebook.sh
+train_script/run_bucket_tests_rick_old_notebook.sh
+train_script/run_forever_supervised.sh
+train_script/run_lr_low_tests_diego_notebook.sh
+train_script/run_one_factor_tests_diego_notebook.sh
+train_script/run_ppo_lr_tests_diego_notebook.sh
+train_script/run_ppo_lr_tests_rick_desktop.sh
+train_script/run_ppo_lr_tests_rick_new_notebook.sh
+train_script/run_ppo_lr_tests_rick_old_notebook.sh
+train_script/run_training_pipeline.sh
+
 analysis/analise_baselines_0409/*
 analysis/recompensa_anterior_vs_atual/*
+# LaTeX build artifacts for the expanded-abstract report
+references/resumo_expandido/*.aux
+references/resumo_expandido/*.fdb_latexmk
+references/resumo_expandido/*.fls
+references/resumo_expandido/*.log
+references/resumo_expandido/*.out
+references/resumo_expandido/*.toc

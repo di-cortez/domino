@@ -122,7 +122,10 @@ evaluation uses a separate holdout namespace.
 Each monitor point is saved before evaluation. Diagnostics use separate RNG state
 and cannot change policy weights, optimizer, opponent pool, counters, GPI, or
 rollout workers. The compact run-analysis bundle lives at
-`<RL run>/run_compact_diagnostics/` and contains:
+`<RL run>/<start date>-<ordinal>_<machine>_<tail>/`, as in
+`20260910-XXX_diego_notebook_lr_0p001`, where the tail names the RL parameters
+the run moves off the project defaults (older runs keep the fixed
+`run_compact_diagnostics/`). It contains:
 
 | File | Contents |
 |---|---|

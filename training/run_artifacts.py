@@ -9,8 +9,10 @@ checkpoints. The bundle is named after the run that made it:
 so a directory copied away from its run still says when it was trained, on
 which machine, and which experiment it was. The parts are the training *start*
 date, the experiment ordinal from the shared log, the machine slug from
-``utils.machine_identity``, and an optional tail naming the one parameter the
-run tests.
+``utils.machine_identity``, and a tail naming the parameters the run moves
+off the project defaults. Experiment sequences set that tail explicitly with
+``--bundle-suffix``; every other run derives it from its own configuration, so
+a bundle is self-describing whether or not it came from a sequence.
 
 The ordinal is written as the literal ``XXX`` and filled in by hand: it comes
 from a log shared across machines, and no single machine can compute the next
@@ -105,6 +107,42 @@ def bundle_suffix(flag, value):
     if not re.fullmatch(r"[A-Za-z0-9_]+", tail):
         raise ValueError(f"Unsafe bundle suffix {tail!r} from {flag}={value!r}.")
     return tail
+
+
+# Longest tail :func:`combined_bundle_suffix` assembles before abridging it.
+# A bundle lives inside its own run directory, so an abridged tail can never
+# collide with another run's, and `run_config.json` holds the full
+# configuration either way -- the name only has to stay readable in a listing.
+MAX_COMBINED_SUFFIX_LENGTH = 96
+
+# Written in place of the parts that did not fit.
+COMBINED_SUFFIX_OVERFLOW = "etc"
+
+
+def combined_bundle_suffix(pairs):
+    """Return one tail naming every ``(flag, value)`` a run varies.
+
+    ``[("--learning-rate", "0.001")]`` becomes ``lr_0p001``, and two pairs
+    join with ``_``. Parts keep the order they are given in, so two runs that
+    vary the same parameters agree on a directory name. Returns ``None`` for
+    an empty sequence, which is the tail-less name a run varying nothing has
+    always had.
+
+    Only whole parts are dropped when the tail grows too long: half a
+    parameter name reads as a different parameter.
+    """
+    parts = [bundle_suffix(flag, value) for flag, value in pairs]
+    if not parts:
+        return None
+    kept = []
+    for part in parts:
+        proposed = "_".join([*kept, part])
+        # The first part is kept whatever its length: a name that says one
+        # parameter beats a name that says only that it was abridged.
+        if kept and len(proposed) > MAX_COMBINED_SUFFIX_LENGTH:
+            return "_".join([*kept, COMBINED_SUFFIX_OVERFLOW])
+        kept.append(part)
+    return "_".join(kept)
 
 
 def bundle_dir_name(*, date, machine_slug, ordinal=None, suffix=None):

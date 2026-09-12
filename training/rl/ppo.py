@@ -39,6 +39,13 @@ PPO_STOP_KL = 0.015
 PPO_TARGET_DECISIONS_PER_MINIBATCH = 512
 PPO_MIN_DECISIONS_PER_MINIBATCH = 256
 PPO_MAX_MINIBATCHES = 256
+# Decisions per forward pass of the post-epoch whole-buffer evaluation. It is
+# inference only, so its partitioning is independent of the optimizer's
+# 512-decision minibatches and changes no step, epoch, or KL definition: every
+# statistic is a global sum over the buffer divided by its decision count. A
+# GPU that cannot hold one partition retries that frozen evaluation at the
+# optimizer's size, which the workspace probe has already proven to fit.
+PPO_FULL_BUFFER_EVAL_BATCH_SIZE = 4096
 PPO_PREFER_GPU_BUFFER = True
 PPO_GPU_BUFFER_SAFETY_FRACTION = 0.70
 POLICY_GRADIENT_CLIP_NORM = 5.0
@@ -397,18 +404,27 @@ def minibatch_indices(decision_count, seed):
     return tuple(partitions), omitted
 
 
-def full_buffer_indices(decision_count):
-    """Return bounded sequential slices that cover every decision exactly once."""
+def full_buffer_indices(decision_count, batch_size=None):
+    """Return bounded sequential slices that cover every decision exactly once.
+
+    ``batch_size`` defaults to ``PPO_FULL_BUFFER_EVAL_BATCH_SIZE``, read at
+    call time.
+    """
     decision_count = int(decision_count)
     if decision_count < 1:
         raise ValueError("decision_count must be positive.")
+    batch_size = int(
+        PPO_FULL_BUFFER_EVAL_BATCH_SIZE if batch_size is None else batch_size
+    )
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive.")
     return tuple(
         np.arange(
             offset,
-            min(decision_count, offset + PPO_TARGET_DECISIONS_PER_MINIBATCH),
+            min(decision_count, offset + batch_size),
             dtype=np.int64,
         )
-        for offset in range(0, decision_count, PPO_TARGET_DECISIONS_PER_MINIBATCH)
+        for offset in range(0, decision_count, batch_size)
     )
 
 
@@ -787,6 +803,52 @@ def evaluate_full_buffer(
     return result
 
 
+def _evaluate_full_buffer_within_memory(
+    network,
+    storage,
+    partitions,
+    runtime_profile,
+):
+    """Evaluate the whole buffer, retrying at optimizer size if VRAM runs out.
+
+    Returns the metrics and the partitions that produced them, so a caller
+    keeps the size that fit for the rest of its update instead of failing
+    again every epoch. The evaluation is frozen inference -- no weight, step
+    counter, or random draw changes -- so a retry starts again from clean
+    accumulators and yields exactly what an uninterrupted evaluation at that
+    size would. Only a backend memory error is retried; a non-finite result
+    still propagates to the epoch rollback.
+    """
+    try:
+        return evaluate_full_buffer(
+            network,
+            storage,
+            partitions,
+            PPO_CLIP_EPSILON,
+            runtime_profile=runtime_profile,
+        ), partitions
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        if not network._is_backend_memory_error(exc):
+            raise
+        fallback = full_buffer_indices(
+            storage.buffer.size,
+            PPO_TARGET_DECISIONS_PER_MINIBATCH,
+        )
+        if len(fallback) <= len(partitions):
+            raise
+        network.release_disposable_cache()
+        runtime_profile["batch_size_memory_fallbacks"] = (
+            runtime_profile.get("batch_size_memory_fallbacks", 0) + 1
+        )
+        return evaluate_full_buffer(
+            network,
+            storage,
+            fallback,
+            PPO_CLIP_EPSILON,
+            runtime_profile=runtime_profile,
+        ), fallback
+
+
 def _max_or_none(values):
     """Return the largest non-``None`` value, or ``None`` when there is none."""
     present = [value for value in values if value is not None]
@@ -1075,12 +1137,13 @@ def ppo_update(
             rejected_minibatches += batch_rejected
             evaluation_started = time.perf_counter()
             try:
-                whole = evaluate_full_buffer(
-                    network,
-                    storage,
-                    evaluation_partitions,
-                    PPO_CLIP_EPSILON,
-                    runtime_profile=full_buffer_detail,
+                whole, evaluation_partitions = (
+                    _evaluate_full_buffer_within_memory(
+                        network,
+                        storage,
+                        evaluation_partitions,
+                        full_buffer_detail,
+                    )
                 )
             except FloatingPointError as exc:
                 # The epoch produced a policy that cannot be evaluated on the

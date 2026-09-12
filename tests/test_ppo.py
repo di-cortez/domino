@@ -372,9 +372,11 @@ def test_full_buffer_kl_still_evaluates_the_optimizer_omitted_tail():
     assert metrics["decisions_used_per_epoch"] == 512
     assert metrics["decisions_omitted_per_epoch"] == 188
     assert metrics["optimizer_steps"] == 2
-    # One workspace probe is followed by a complete 512+188 evaluation after
-    # each epoch. The omitted optimizer tail still participates in KL control.
-    assert network.eval_batch_sizes[-4:] == [512, 188, 512, 188]
+    # One workspace probe is followed by a complete evaluation after each
+    # epoch. Its partitions are independent of the optimizer's, so all 700
+    # decisions fit one forward pass, and the omitted optimizer tail still
+    # participates in KL control.
+    assert network.eval_batch_sizes == [512, 700, 700]
 
 
 def test_fewer_than_minimum_decisions_produces_an_explicit_noop():

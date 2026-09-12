@@ -11,12 +11,21 @@ it stood before any fast path existed.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from agents.nn import GPU_ENABLED
 from agents.rl_nn import PolicyNetwork, _shared_gradient_hook
-from training.rl.ppo import ppo_update
+from training.rl import ppo
+from training.rl.ppo import (
+    PPOBuffer,
+    PPOBufferStorage,
+    evaluate_full_buffer,
+    full_buffer_indices,
+    ppo_update,
+)
 
 from tests.test_ppo import _FakePPONetwork, _buffer
 
@@ -552,3 +561,142 @@ def test_a_separate_critic_still_caches_its_value_as_the_output_activation():
     last = critic.layer_count
     assert values.tobytes() == expected_cache[f"Z{last}"].tobytes()
     assert critic.cache[f"A{last}"] is values
+
+
+@pytest.mark.parametrize("batch_size", [512, 2048, 4096, 8192])
+@pytest.mark.parametrize("decisions", [1, 511, 512, 513, 4095, 4096, 4097, 8327])
+def test_evaluation_partitions_cover_every_decision_once_in_order(
+    batch_size, decisions
+):
+    partitions = full_buffer_indices(decisions, batch_size)
+
+    assert np.array_equal(np.concatenate(partitions), np.arange(decisions))
+    assert all(part.size == batch_size for part in partitions[:-1])
+    assert 1 <= partitions[-1].size <= batch_size
+
+
+def test_evaluation_partitions_default_to_the_evaluation_constant(monkeypatch):
+    monkeypatch.setattr(ppo, "PPO_FULL_BUFFER_EVAL_BATCH_SIZE", 300)
+    assert [part.size for part in full_buffer_indices(700)] == [300, 300, 100]
+    assert ppo.PPO_TARGET_DECISIONS_PER_MINIBATCH == 512
+
+
+def _real_buffer(network, decisions, *, seed, with_values):
+    rng = np.random.default_rng(seed)
+    samples = []
+    for index in range(decisions):
+        mask = rng.random((5, 1)) < 0.5
+        mask[:2] = True
+        legal = np.flatnonzero(mask[:, 0])
+        samples.append(SimpleNamespace(
+            x=rng.normal(size=(7, 1)).astype(np.float32),
+            legal_mask=mask,
+            action_index=int(rng.choice(legal)),
+            old_log_prob=float(np.log(rng.uniform(0.1, 0.9))),
+            policy_reward=float(rng.normal()),
+            local_reward=0.0,
+            terminal_reward=float(index % 3),
+        ))
+    old_values = None
+    if with_values:
+        old_values = rng.normal(size=decisions).astype(np.float32) * 0.1
+    return PPOBuffer.from_samples(samples, old_values=old_values)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("wiring", ["no_critic", "shared_critic", "own_critic"])
+def test_evaluation_statistics_do_not_depend_on_the_partition_size(device, wiring):
+    network = _network(wiring, device=device)
+    buffer = _real_buffer(
+        network, 1337, seed=9, with_values=network.use_value_head
+    )
+    storage = PPOBufferStorage(network, buffer)
+    try:
+        results = {
+            size: evaluate_full_buffer(
+                network,
+                storage,
+                full_buffer_indices(buffer.size, size),
+                ppo.PPO_CLIP_EPSILON,
+            )
+            for size in (97, 512, 1337, 4096)
+        }
+    finally:
+        storage.close()
+
+    reference = results[512]
+    for size, result in results.items():
+        assert result.keys() == reference.keys()
+        for key, expected in reference.items():
+            if expected is None:
+                assert result[key] is None, (size, key)
+            else:
+                # Partition sums are float32; the global sum is float64.
+                assert result[key] == pytest.approx(
+                    expected, rel=1e-5, abs=1e-6
+                ), (size, key)
+
+
+class _EvaluationOOMNetwork(_FakePPONetwork):
+    """Fails any evaluation forward pass wider than the optimizer's batch."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.memory_failures = 0
+        self.released = 0
+
+    def evaluate_actions(self, states, legal_masks, actions):
+        if np.asarray(actions).size > ppo.PPO_TARGET_DECISIONS_PER_MINIBATCH:
+            self.memory_failures += 1
+            raise MemoryError("simulated evaluation OOM")
+        return super().evaluate_actions(states, legal_masks, actions)
+
+    def release_disposable_cache(self):
+        self.released += 1
+        super().release_disposable_cache()
+
+
+def test_an_evaluation_that_runs_out_of_memory_retries_at_optimizer_size():
+    buffer = _buffer(1300)
+    healthy = _FakePPONetwork(ratio_after_update=1.001)
+    starved = _EvaluationOOMNetwork(ratio_after_update=1.001)
+
+    expected = ppo_update(
+        healthy, buffer, base_seed=2, iteration=5, entropy_coef=0.0, max_epochs=3
+    )
+    actual = ppo_update(
+        starved, buffer, base_seed=2, iteration=5, entropy_coef=0.0, max_epochs=3
+    )
+
+    # Only the first epoch's evaluation fails; later epochs keep the size that
+    # fit instead of failing again.
+    assert starved.memory_failures == 1
+    assert actual["runtime_profile_detail"]["full_buffer_evaluation"][
+        "batch_size_memory_fallbacks"
+    ] == 1
+    assert starved.eval_batch_sizes[1:] == [512, 512, 276] * 3
+    assert actual["optimizer_steps"] == expected["optimizer_steps"]
+    assert starved.optimizer_step_count == healthy.optimizer_step_count
+    for key in ("epochs_completed", "final_approx_kl", "stopped_by_kl"):
+        assert actual[key] == expected[key], key
+
+
+def test_an_evaluation_failure_other_than_memory_is_not_retried(monkeypatch):
+    network = _FakePPONetwork()
+    storage = PPOBufferStorage(network, _buffer(600))
+    calls = []
+
+    def explode(*_args, **_kwargs):
+        calls.append(1)
+        raise FloatingPointError("PPO full-buffer metrics produced NaN/Inf.")
+
+    monkeypatch.setattr(ppo, "evaluate_full_buffer", explode)
+    try:
+        with pytest.raises(FloatingPointError):
+            ppo._evaluate_full_buffer_within_memory(  # pylint: disable=protected-access
+                network, storage, full_buffer_indices(600), {}
+            )
+    finally:
+        storage.close()
+    # A diverged epoch goes straight to the rollback, never to a retry.
+    assert calls == [1]

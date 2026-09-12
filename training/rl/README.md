@@ -474,6 +474,26 @@ evaluation still reports entropy for every run. PPO action evaluation also
 skips the network's full-support softmax, which the masked normalization never
 read; see [`../../agents/README.md`](../../agents/README.md).
 
+The whole-buffer evaluation is inference only, so it partitions the buffer
+independently of the optimizer: `PPO_FULL_BUFFER_EVAL_BATCH_SIZE = 4096`
+decisions per forward pass, with every statistic still a global sum divided by
+the buffer's decision count and extrema taken over the whole buffer. A GPU that
+cannot hold one partition retries that frozen evaluation from clean
+accumulators at the optimizer's 512 decisions, which the workspace probe has
+already proven to fit, and keeps that size for the rest of the update; the
+retry is counted as `batch_size_memory_fallbacks` in the runtime profile. No
+weight, step counter, or random draw is involved, and a non-finite result still
+rolls the epoch back instead of retrying.
+
+The partition size is not bit-neutral. A float32 matrix product may round a
+column differently when the batch around it changes shape, and each partition
+sum is float32. Against 512-decision partitions the measured differences are
+below `1e-7` absolute in approximate KL, `1e-4` relative in ratio extrema and
+explained variance, and one decision in the clip fraction, while weights,
+KL stops, and learning-rate warmup promotions matched in every comparison. A
+run whose KL lands within about `1e-7` of the `0.015` stop, or whose warmup EMA
+lands that close to its threshold, could still take the other branch.
+
 Enable the optional PPO actor-critic with:
 
 ```bash

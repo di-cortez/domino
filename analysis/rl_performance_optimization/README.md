@@ -70,5 +70,30 @@ is the steadier signal for stages B and C. From stage C on, `--cpu-affinity
 | B: discard unused minibatch metrics | Byte-identical in all harness cases and smokes, warmup trace included | 1.213 s -> 0.920 s (0.76x); optimizer step 2.24 ms -> 1.43 ms | Removes 7 policy and 2 critic host transfers per optimizer step |
 | C: exact-zero entropy fast path | Byte-identical in all harness cases and smokes, warmup trace included | Unpinned 0.995 s -> 0.977 s, step 1.53 -> 1.32 ms; pinned 0.811 s -> 0.760 s, step 1.49 -> 1.44 ms (q1 1.40 -> 1.35) | About eight fewer kernel launches per step; the total is within the evaluation's noise |
 | D: skip the redundant unmasked softmax | Byte-identical in all harness cases and smokes, warmup trace included | Pinned median 0.757 s -> 0.788 s (noise), q1 0.744 -> 0.725 s, min 0.736 -> 0.703 s; step 1.41 -> 1.29 ms; evaluation min 20.1 -> 19.2 ms | Five fewer kernel launches per forward in every optimizer step and evaluation partition |
+| E: 4,096-decision whole-buffer evaluation | Weights, optimizer counters, KL stops, metrics rows, and warmup promotions identical; metrics within the tolerances below | 0.897 s -> 0.567 s (0.63x); evaluation 24.6 -> 6.9 ms per call; peak CuPy pool 11 -> 40 MiB | Sweep: 2,048 gives 0.632 s, 8,192 gives 0.534 s at 49 MiB; 4,096 captures 91% of the 8,192 gain |
 
 Per-stage evidence lives in `results/<stage>/`.
+
+### Stage E numerical tolerances
+
+The same code at 512 decisions per partition is byte-identical to stage D, so
+every difference below comes from partitioning alone: a GPU (or BLAS) float32
+matrix product may round a column differently when the batch shape around it
+changes, and each partition sum is float32 before the float64 total. Largest
+differences observed against stage D across all harness cases:
+
+| Statistic | Largest absolute | Largest relative |
+|---|---:|---:|
+| `approx_kl` | 7.0e-8 (`hot_lr`, KL 0.092) | 1.2e-4 (at KL 2.4e-6) |
+| `clip_fraction` | 1.2e-4 (one decision of 8,327) | 4.0e-3 |
+| `ratio_max` / `ratio_min` | 1.4e-4 / 9.8e-6 | 2.2e-5 / 1.9e-5 |
+| `explained_variance` | 1.8e-7 | 9.5e-5 (at values near 0.002) |
+| `policy_loss` | 8.4e-8 | 1.9e-5 |
+| `legal_logit_deficit_max` | 2.5e-5 | 5.4e-6 |
+| `value_std` | 1.9e-7 | 7.2e-6 |
+| `entropy`, `ratio_mean`, `value_loss`, `value_mean` | below 1.3e-7 | below 2.4e-7 |
+
+No KL stop epoch changed. In the warmup smoke, per-iteration `max_approx_kl`
+moved by at most 8e-11 and every promotion landed on the same iteration
+(`warmup_trace_difference.json`). A stop or promotion decided within about
+1e-7 of its threshold could still flip; none was observed.

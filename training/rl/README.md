@@ -494,6 +494,14 @@ KL stops, and learning-rate warmup promotions matched in every comparison. A
 run whose KL lands within about `1e-7` of the `0.015` stop, or whose warmup EMA
 lands that close to its threshold, could still take the other branch.
 
+Within an evaluation every sum, count, extremum, and the finite check stay on
+the learner's backend and reach the host after the last partition in two
+transfers, instead of about nine scalar transfers per partition. Partition
+float32 sums still enter float64 accumulators in partition order, so the
+statistics are bit-identical to reading each one back as it was produced. A
+non-finite partition is detected at that same point and raises before any
+statistic exists, so the epoch rollback is unchanged.
+
 Enable the optional PPO actor-critic with:
 
 ```bash

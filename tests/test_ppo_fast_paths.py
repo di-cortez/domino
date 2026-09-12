@@ -328,14 +328,15 @@ def test_minimal_metrics_still_reject_a_non_finite_gradient(collect_metrics):
     advantages = batch["advantages"].copy()
     advantages[3] = np.inf
 
-    result = network.backward_ppo(
-        batch["x"],
-        batch["actions"],
-        batch["masks"],
-        batch["old_log_probs"],
-        advantages,
-        collect_metrics=collect_metrics,
-    )
+    with np.errstate(invalid="ignore", over="ignore"):
+        result = network.backward_ppo(
+            batch["x"],
+            batch["actions"],
+            batch["masks"],
+            batch["old_log_probs"],
+            advantages,
+            collect_metrics=collect_metrics,
+        )
 
     assert result["grad_rejected"] is True
     assert network.optimizer_step_count == 0
@@ -700,3 +701,244 @@ def test_an_evaluation_failure_other_than_memory_is_not_retried(monkeypatch):
         storage.close()
     # A diverged epoch goes straight to the rollback, never to a retry.
     assert calls == [1]
+
+
+def _reference_evaluate_full_buffer(network, storage, partitions, clip_epsilon):
+    """``evaluate_full_buffer`` as it was before its reductions left the host.
+
+    Every partition reads each reduction back at once and accumulates Python
+    floats; only the metrics are kept, not the profile.
+    """
+    xp = network.xp
+    total = 0
+    surrogate_sum = entropy_sum = kl_sum = ratio_sum = 0.0
+    clipped_count = 0
+    ratio_min = float("inf")
+    ratio_max = float("-inf")
+    deficit_max = float("-inf")
+    value_loss_sum = value_sum = value_square_sum = 0.0
+    return_sum = return_square_sum = 0.0
+    value_error_sum = value_error_square_sum = 0.0
+    value_clipped_count = 0
+    lower = 1.0 - float(clip_epsilon)
+    upper = 1.0 + float(clip_epsilon)
+    use_value_head = getattr(network, "use_value_head", False)
+    for indices in partitions:
+        batch = storage.batch(indices)
+        new_log_probs, entropy, _policy = network.evaluate_actions(
+            batch["states"], batch["legal_masks"], batch["actions"]
+        )
+        batch_deficit = ppo._legal_logit_deficit_max(  # pylint: disable=protected-access
+            network, batch["legal_masks"]
+        )
+        if batch_deficit is not None:
+            deficit_max = max(deficit_max, batch_deficit)
+        values = value_losses = value_delta = None
+        if use_value_head:
+            values = network.critic_values(batch["states"])
+            value_losses, _gradient, value_delta = network.clipped_value_loss_terms(
+                values,
+                batch["returns"].reshape(1, -1),
+                batch["old_values"].reshape(1, -1),
+                clip_epsilon,
+            )
+        log_ratio = new_log_probs - batch["old_log_probs"]
+        ratio = xp.exp(log_ratio)
+        finite = xp.all(xp.isfinite(ratio)) & xp.all(xp.isfinite(entropy))
+        if values is not None:
+            finite = finite & xp.all(xp.isfinite(values)) & xp.all(
+                xp.isfinite(value_losses)
+            )
+        if not bool(network._as_float(finite)):  # pylint: disable=protected-access
+            raise FloatingPointError("PPO full-buffer metrics produced NaN/Inf.")
+        as_float = network._as_float  # pylint: disable=protected-access
+        clipped_ratio = xp.clip(ratio, lower, upper)
+        surrogate = xp.minimum(
+            ratio * batch["advantages"], clipped_ratio * batch["advantages"]
+        )
+        total += int(len(indices))
+        surrogate_sum += as_float(xp.sum(surrogate))
+        entropy_sum += as_float(xp.sum(entropy))
+        kl_sum += as_float(xp.sum((ratio - 1.0) - log_ratio))
+        clipped_count += int(as_float(xp.sum((ratio < lower) | (ratio > upper))))
+        ratio_sum += as_float(xp.sum(ratio))
+        ratio_min = min(ratio_min, as_float(xp.min(ratio)))
+        ratio_max = max(ratio_max, as_float(xp.max(ratio)))
+        if values is not None:
+            flat_values = values.reshape(-1)
+            returns = batch["returns"].reshape(-1)
+            errors = returns - flat_values
+            value_loss_sum += as_float(xp.sum(value_losses))
+            value_sum += as_float(xp.sum(flat_values))
+            value_square_sum += as_float(xp.sum(flat_values ** 2))
+            return_sum += as_float(xp.sum(returns))
+            return_square_sum += as_float(xp.sum(returns ** 2))
+            value_error_sum += as_float(xp.sum(errors))
+            value_error_square_sum += as_float(xp.sum(errors ** 2))
+            value_clipped_count += int(as_float(
+                xp.sum(xp.abs(value_delta) > float(clip_epsilon))
+            ))
+    result = {
+        "policy_loss": float(-surrogate_sum / total),
+        "entropy": float(entropy_sum / total),
+        "approx_kl": max(0.0, float(kl_sum / total)),
+        "clip_fraction": float(clipped_count / total),
+        "ratio_mean": float(ratio_sum / total),
+        "ratio_min": ratio_min,
+        "ratio_max": ratio_max,
+        "legal_logit_deficit_max": (
+            None if deficit_max == float("-inf") else deficit_max
+        ),
+        "value_loss": None,
+        "value_clip_fraction": None,
+        "value_mean": None,
+        "value_std": None,
+        "explained_variance": None,
+    }
+    if use_value_head:
+        value_mean = value_sum / total
+        value_variance = max(0.0, value_square_sum / total - value_mean ** 2)
+        return_mean = return_sum / total
+        return_variance = max(0.0, return_square_sum / total - return_mean ** 2)
+        error_mean = value_error_sum / total
+        error_variance = max(0.0, value_error_square_sum / total - error_mean ** 2)
+        result.update({
+            "value_loss": float(value_loss_sum / total),
+            "value_clip_fraction": float(value_clipped_count / total),
+            "value_mean": float(value_mean),
+            "value_std": float(np.sqrt(value_variance)),
+            "explained_variance": (
+                None
+                if return_variance <= ppo.ADVANTAGE_EPSILON
+                else float(1.0 - error_variance / return_variance)
+            ),
+        })
+    return result
+
+
+def _assert_identical_metrics(left, right):
+    assert left.keys() == right.keys()
+    for key, value in left.items():
+        other = right[key]
+        assert type(value) is type(other), key
+        if isinstance(value, float):
+            assert np.float64(value).tobytes() == np.float64(other).tobytes(), key
+        else:
+            assert value == other, key
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("wiring", ["no_critic", "shared_critic", "own_critic"])
+@pytest.mark.parametrize("partition_size", [97, 512, 4096])
+def test_device_accumulated_metrics_equal_host_accumulated_metrics_bit_for_bit(
+    device, wiring, partition_size
+):
+    network = _network(wiring, device=device)
+    buffer = _real_buffer(
+        network, 1337, seed=11, with_values=network.use_value_head
+    )
+    # Extreme ratios on both sides: floored behavior probabilities send the
+    # ratio towards exp(87), near-certain ones towards zero.
+    old_log_probs = np.array(buffer.old_log_probs)
+    old_log_probs[::101] = np.log(np.finfo(np.float32).tiny)
+    old_log_probs[50::101] = 0.0
+    buffer = PPOBuffer(**{
+        **{field: getattr(buffer, field) for field in buffer.__dataclass_fields__},
+        "old_log_probs": old_log_probs,
+    })
+    storage = PPOBufferStorage(network, buffer)
+    partitions = full_buffer_indices(buffer.size, partition_size)
+    try:
+        expected = _reference_evaluate_full_buffer(
+            network, storage, partitions, ppo.PPO_CLIP_EPSILON
+        )
+        actual = evaluate_full_buffer(
+            network, storage, partitions, ppo.PPO_CLIP_EPSILON
+        )
+    finally:
+        storage.close()
+
+    assert expected["ratio_max"] > 1e30
+    _assert_identical_metrics(expected, actual)
+
+
+def test_every_statistic_reaches_the_host_in_one_transfer(monkeypatch):
+    network = _network("shared_critic")
+    buffer = _real_buffer(network, 1337, seed=12, with_values=True)
+    storage = PPOBufferStorage(network, buffer)
+    transfers = []
+    original = ppo._to_numpy  # pylint: disable=protected-access
+
+    def counting(value, **kwargs):
+        transfers.append(1)
+        return original(value, **kwargs)
+
+    scalar_reads = []
+    as_float = network._as_float  # pylint: disable=protected-access
+
+    def counting_scalar(value):
+        scalar_reads.append(1)
+        return as_float(value)
+
+    monkeypatch.setattr(ppo, "_to_numpy", counting)
+    monkeypatch.setattr(network, "_as_float", counting_scalar)
+    partitions = full_buffer_indices(buffer.size, 97)
+    try:
+        evaluate_full_buffer(network, storage, partitions, ppo.PPO_CLIP_EPSILON)
+    finally:
+        storage.close()
+
+    # The floating statistics and the integer counts: two, for 14 partitions.
+    assert len(transfers) == 2
+    # Only the public action evaluation's two mask checks still read back.
+    assert len(scalar_reads) == 2 * len(partitions)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("poisoned_partition", [0, 2])
+def test_a_non_finite_partition_still_fails_the_whole_evaluation(
+    device, poisoned_partition
+):
+    network = _network("shared_critic", device=device)
+    buffer = _real_buffer(network, 1300, seed=13, with_values=True)
+    storage = PPOBufferStorage(network, buffer)
+    partitions = full_buffer_indices(buffer.size, 512)
+    states = np.array(buffer.states)
+    states[0, partitions[poisoned_partition][7]] = np.nan
+    buffer = PPOBuffer(**{
+        **{field: getattr(buffer, field) for field in buffer.__dataclass_fields__},
+        "states": states,
+    })
+    storage.close()
+    storage = PPOBufferStorage(network, buffer)
+    try:
+        with pytest.raises(FloatingPointError, match="full-buffer metrics"):
+            evaluate_full_buffer(network, storage, partitions, ppo.PPO_CLIP_EPSILON)
+    finally:
+        storage.close()
+
+
+def test_a_poisoned_epoch_is_rolled_back_through_the_real_evaluation():
+    network = _network("no_critic", learning_rate=0.01)
+    buffer = _real_buffer(network, 1100, seed=14, with_values=False)
+    before = _parameters(network)
+    original_step = network.backward_ppo
+    calls = []
+
+    def poisoning_step(*args, **kwargs):
+        result = original_step(*args, **kwargs)
+        calls.append(1)
+        if len(calls) == 2:
+            network.parameter_array("W3")[0, 0] = np.nan
+        return result
+
+    network.backward_ppo = poisoning_step
+    metrics = ppo_update(
+        network, buffer, base_seed=1, iteration=1, entropy_coef=0.0, max_epochs=4
+    )
+
+    assert metrics["diverged_epoch"] == 1
+    assert metrics["epochs_completed"] == 0
+    assert metrics["stopped_by_kl"] is False
+    assert network.optimizer_step_count == 0
+    _assert_same_parameters(before, _parameters(network))

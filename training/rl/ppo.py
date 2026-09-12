@@ -634,6 +634,21 @@ def _merge_numeric_profile(target, source):
             target[key] = target.get(key, 0) + value
 
 
+# Order of the per-partition float32 sums accumulated by
+# ``evaluate_full_buffer``; the policy block always exists, the critic block
+# only with a value head.
+_POLICY_SUMS = ("surrogate", "entropy", "kl", "ratio")
+_CRITIC_SUMS = (
+    "value_loss",
+    "value",
+    "value_square",
+    "return",
+    "return_square",
+    "value_error",
+    "value_error_square",
+)
+
+
 def evaluate_full_buffer(
     network,
     storage,
@@ -641,7 +656,17 @@ def evaluate_full_buffer(
     clip_epsilon,
     runtime_profile=None,
 ):
-    """Compute exact whole-buffer PPO metrics, streaming when necessary."""
+    """Compute exact whole-buffer PPO metrics, streaming when necessary.
+
+    Every statistic accumulates on the network's backend and reaches the host
+    after the last partition in two transfers, one floating and one integer. Each partition's float32 sums
+    are added to float64 accumulators in partition order, which is exactly
+    the arithmetic of adding their Python floats one at a time; counts stay
+    integers and extrema are exact, so the result is bit-identical to reading
+    every reduction back as it is produced. The finite check is delayed to
+    that same point and still raises before any result exists, which is what
+    the caller's epoch rollback needs from it.
+    """
     profile_started = time.perf_counter()
     timing = {}
 
@@ -650,26 +675,19 @@ def evaluate_full_buffer(
             time.perf_counter() - started
         )
 
+    xp = network.xp
+    use_value_head = bool(getattr(network, "use_value_head", False))
+    sum_count = len(_POLICY_SUMS) + (len(_CRITIC_SUMS) if use_value_head else 0)
+    sums = xp.zeros(sum_count, dtype=xp.float64)
+    counts = xp.zeros(2, dtype=xp.int64)  # clipped ratios, clipped values
+    no_clipped_values = xp.zeros((), dtype=xp.int64)
+    ratio_min = xp.asarray(np.inf, dtype=xp.float32)
+    ratio_max = xp.asarray(-np.inf, dtype=xp.float32)
+    legal_logit_deficit_max = None
+    finite = xp.asarray(True)
     total = 0
-    surrogate_sum = 0.0
-    entropy_sum = 0.0
-    kl_sum = 0.0
-    clipped_count = 0
-    ratio_sum = 0.0
-    ratio_min = float("inf")
-    ratio_max = float("-inf")
-    legal_logit_deficit_max = float("-inf")
-    value_loss_sum = 0.0
-    value_sum = 0.0
-    value_square_sum = 0.0
-    return_sum = 0.0
-    return_square_sum = 0.0
-    value_error_sum = 0.0
-    value_error_square_sum = 0.0
-    value_clipped_count = 0
     lower = 1.0 - float(clip_epsilon)
     upper = 1.0 + float(clip_epsilon)
-    xp = network.xp
     for indices in partitions:
         phase_started = time.perf_counter()
         batch = storage.batch(indices)
@@ -680,15 +698,17 @@ def evaluate_full_buffer(
         )
         # Read before the critic forward, which shares the cache on the
         # value-head baselines and would overwrite the policy logits.
-        batch_deficit = _legal_logit_deficit_max(network, batch["legal_masks"])
+        batch_deficit = _legal_logit_deficit(network, batch["legal_masks"])
         if batch_deficit is not None:
-            legal_logit_deficit_max = max(
-                legal_logit_deficit_max, batch_deficit
+            legal_logit_deficit_max = (
+                batch_deficit
+                if legal_logit_deficit_max is None
+                else xp.maximum(legal_logit_deficit_max, batch_deficit)
             )
         values = None
         value_losses = None
         value_delta = None
-        if getattr(network, "use_value_head", False):
+        if use_value_head:
             values = network.critic_values(batch["states"])
             value_losses, _value_gradient, value_delta = (
                 network.clipped_value_loss_terms(
@@ -702,13 +722,11 @@ def evaluate_full_buffer(
         phase_started = time.perf_counter()
         log_ratio = new_log_probs - batch["old_log_probs"]
         ratio = xp.exp(log_ratio)
-        finite = xp.all(xp.isfinite(ratio)) & xp.all(xp.isfinite(entropy))
+        finite = finite & xp.all(xp.isfinite(ratio)) & xp.all(xp.isfinite(entropy))
         if values is not None:
             finite = finite & xp.all(xp.isfinite(values)) & xp.all(
                 xp.isfinite(value_losses)
             )
-        if not bool(network._as_float(finite)):
-            raise FloatingPointError("PPO full-buffer metrics produced NaN/Inf.")
         finish_phase("ratio_construction_and_finite_validation", phase_started)
         phase_started = time.perf_counter()
         clipped_ratio = xp.clip(ratio, lower, upper)
@@ -716,46 +734,76 @@ def evaluate_full_buffer(
             ratio * batch["advantages"],
             clipped_ratio * batch["advantages"],
         )
-        count = int(len(indices))
-        total += count
-        surrogate_sum += network._as_float(xp.sum(surrogate))
-        entropy_sum += network._as_float(xp.sum(entropy))
-        kl_sum += network._as_float(xp.sum((ratio - 1.0) - log_ratio))
-        clipped_count += int(network._as_float(xp.sum((ratio < lower) | (ratio > upper))))
-        ratio_sum += network._as_float(xp.sum(ratio))
-        ratio_min = min(ratio_min, network._as_float(xp.min(ratio)))
-        ratio_max = max(ratio_max, network._as_float(xp.max(ratio)))
+        total += int(len(indices))
+        partition_sums = [
+            xp.sum(surrogate),
+            xp.sum(entropy),
+            xp.sum((ratio - 1.0) - log_ratio),
+            xp.sum(ratio),
+        ]
+        partition_counts = [
+            xp.sum((ratio < lower) | (ratio > upper)),
+            no_clipped_values,
+        ]
+        ratio_min = xp.minimum(ratio_min, xp.min(ratio))
+        ratio_max = xp.maximum(ratio_max, xp.max(ratio))
         if values is not None:
             flat_values = values.reshape(-1)
             returns = batch["returns"].reshape(-1)
             errors = returns - flat_values
-            value_loss_sum += network._as_float(xp.sum(value_losses))
-            value_sum += network._as_float(xp.sum(flat_values))
-            value_square_sum += network._as_float(xp.sum(flat_values ** 2))
-            return_sum += network._as_float(xp.sum(returns))
-            return_square_sum += network._as_float(xp.sum(returns ** 2))
-            value_error_sum += network._as_float(xp.sum(errors))
-            value_error_square_sum += network._as_float(xp.sum(errors ** 2))
-            value_clipped_count += int(network._as_float(
-                xp.sum(xp.abs(value_delta) > float(clip_epsilon))
+            partition_sums.extend((
+                xp.sum(value_losses),
+                xp.sum(flat_values),
+                xp.sum(flat_values ** 2),
+                xp.sum(returns),
+                xp.sum(returns ** 2),
+                xp.sum(errors),
+                xp.sum(errors ** 2),
             ))
+            partition_counts[1] = xp.sum(
+                xp.abs(value_delta) > float(clip_epsilon)
+            )
+        sums = sums + xp.stack(partition_sums).astype(xp.float64)
+        counts = counts + xp.stack(partition_counts).astype(xp.int64)
         finish_phase("surrogate_metric_reductions_and_host_transfers", phase_started)
     phase_started = time.perf_counter()
-    network.synchronize()
     if total != storage.buffer.size:
         raise AssertionError("Whole-buffer PPO metrics did not visit every decision.")
+    # float64 holds the float32 extrema and the finite flag exactly; the
+    # counts travel separately so they stay integers.
+    floats = [
+        sums,
+        xp.stack((
+            ratio_min.astype(xp.float64),
+            ratio_max.astype(xp.float64),
+            finite.astype(xp.float64),
+            (
+                xp.asarray(-np.inf, dtype=xp.float64)
+                if legal_logit_deficit_max is None
+                else legal_logit_deficit_max.astype(xp.float64)
+            ),
+        )),
+    ]
+    host_floats = _to_numpy(xp.concatenate(floats))
+    host_counts = _to_numpy(counts)
+    network.synchronize()
+    if not host_floats[sum_count + 2]:
+        raise FloatingPointError("PPO full-buffer metrics produced NaN/Inf.")
+    named = dict(zip(
+        _POLICY_SUMS + (_CRITIC_SUMS if use_value_head else ()),
+        (float(value) for value in host_floats[:sum_count]),
+    ))
+    deficit = float(host_floats[sum_count + 3])
     result = {
-        "policy_loss": float(-surrogate_sum / total),
-        "entropy": float(entropy_sum / total),
-        "approx_kl": max(0.0, float(kl_sum / total)),
-        "clip_fraction": float(clipped_count / total),
-        "ratio_mean": float(ratio_sum / total),
-        "ratio_min": ratio_min,
-        "ratio_max": ratio_max,
+        "policy_loss": float(-named["surrogate"] / total),
+        "entropy": float(named["entropy"] / total),
+        "approx_kl": max(0.0, float(named["kl"] / total)),
+        "clip_fraction": float(int(host_counts[0]) / total),
+        "ratio_mean": float(named["ratio"] / total),
+        "ratio_min": float(host_floats[sum_count]),
+        "ratio_max": float(host_floats[sum_count + 1]),
         "legal_logit_deficit_max": (
-            None
-            if legal_logit_deficit_max == float("-inf")
-            else legal_logit_deficit_max
+            None if legal_logit_deficit_max is None else deficit
         ),
         "value_loss": None,
         "value_clip_fraction": None,
@@ -763,22 +811,22 @@ def evaluate_full_buffer(
         "value_std": None,
         "explained_variance": None,
     }
-    if getattr(network, "use_value_head", False):
-        value_mean = value_sum / total
-        value_variance = max(0.0, value_square_sum / total - value_mean ** 2)
-        return_mean = return_sum / total
+    if use_value_head:
+        value_mean = named["value"] / total
+        value_variance = max(0.0, named["value_square"] / total - value_mean ** 2)
+        return_mean = named["return"] / total
         return_variance = max(
             0.0,
-            return_square_sum / total - return_mean ** 2,
+            named["return_square"] / total - return_mean ** 2,
         )
-        error_mean = value_error_sum / total
+        error_mean = named["value_error"] / total
         error_variance = max(
             0.0,
-            value_error_square_sum / total - error_mean ** 2,
+            named["value_error_square"] / total - error_mean ** 2,
         )
         result.update({
-            "value_loss": float(value_loss_sum / total),
-            "value_clip_fraction": float(value_clipped_count / total),
+            "value_loss": float(named["value_loss"] / total),
+            "value_clip_fraction": float(int(host_counts[1]) / total),
             "value_mean": float(value_mean),
             "value_std": float(math.sqrt(value_variance)),
             "explained_variance": (
@@ -871,6 +919,12 @@ def _legal_logit_deficit_max(network, legal_masks):
     Returns ``None`` for any network that does not publish a logits cache, so
     no caller has to know which network class it holds.
     """
+    deficit = _legal_logit_deficit(network, legal_masks)
+    return None if deficit is None else float(network._as_float(deficit))
+
+
+def _legal_logit_deficit(network, legal_masks):
+    """Backend scalar form of ``_legal_logit_deficit_max``, left on device."""
     cache = getattr(network, "cache", None)
     logits_key = getattr(network, "logits_key", None)
     if not cache or logits_key is None:
@@ -881,7 +935,7 @@ def _legal_logit_deficit_max(network, legal_masks):
     xp = network.xp
     masked = xp.where(legal_masks, logits, -xp.inf)
     deficit = xp.max(logits, axis=0) - xp.max(masked, axis=0)
-    return float(network._as_float(xp.max(deficit)))
+    return xp.max(deficit)
 
 
 def _policy_weight_max_abs(network):

@@ -1,0 +1,443 @@
+{
+ "kind": "ppo_harness_timing",
+ "variant": "production",
+ "device": "gpu",
+ "repetitions": 6,
+ "iterations_per_repetition": 3,
+ "cpu_affinity": "0-11",
+ "label_overrides": {
+  "f512": [
+   "training.rl.ppo.PPO_FULL_BUFFER_EVAL_BATCH_SIZE=512"
+  ]
+ },
+ "checkouts": {
+  "stage_d": "<scratch>/stage_d",
+  "f512": "/home/diego/CCO/ic/dom",
+  "stage_e": "<scratch>/stage_e",
+  "stage_f": "/home/diego/CCO/ic/dom"
+ },
+ "runs": {
+  "stage_d": [
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_d_rep00.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 531616
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_d_rep01.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 531644
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_d_rep02.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 531660
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_d_rep03.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 531600
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_d_rep04.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 535560
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_d_rep05.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 531812
+   }
+  ],
+  "f512": [
+   {
+    "file": "<scratch>/perf/timing_stage_f/f512_rep00.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 536612
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/f512_rep01.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 536056
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/f512_rep02.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 536484
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/f512_rep03.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 536712
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/f512_rep04.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 536424
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/f512_rep05.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 536332
+   }
+  ],
+  "stage_e": [
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_e_rep00.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 540648
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_e_rep01.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 540724
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_e_rep02.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 545056
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_e_rep03.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 545132
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_e_rep04.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 545256
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_e_rep05.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 540848
+   }
+  ],
+  "stage_f": [
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_f_rep00.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 545132
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_f_rep01.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 545244
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_f_rep02.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 545100
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_f_rep03.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 545380
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_f_rep04.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 544972
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_f/stage_f_rep05.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 545228
+   }
+  ]
+ },
+ "epochs_completed": {
+  "stage_d": [
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16
+  ],
+  "f512": [
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16
+  ],
+  "stage_e": [
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16
+  ],
+  "stage_f": [
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16
+  ]
+ },
+ "per_update": {
+  "stage_d": {
+   "update_seconds": {
+    "count": 18,
+    "median": 0.902831365000111,
+    "q1": 0.7543459549999625,
+    "q3": 0.9632516665000139,
+    "min": 0.682465559999855,
+    "max": 1.2469790200002535
+   },
+   "optimizer_steps_seconds": {
+    "count": 18,
+    "median": 0.33547504849957477,
+    "q1": 0.32541267399869866,
+    "q3": 0.369407461997298,
+    "min": 0.3193473930014079,
+    "max": 0.6122847889987497
+   },
+   "minibatch_materialization_seconds": {
+    "count": 18,
+    "median": 0.033563685002491184,
+    "q1": 0.029644190750786947,
+    "q3": 0.03990482199969847,
+    "min": 0.02896870300264709,
+    "max": 0.06585569199842212
+   },
+   "full_buffer_evaluation_seconds": {
+    "count": 18,
+    "median": 0.47603143049946084,
+    "q1": 0.32666063300041515,
+    "q3": 0.5781051574999765,
+    "min": 0.29678296800011594,
+    "max": 0.5921426080003585
+   }
+  },
+  "f512": {
+   "update_seconds": {
+    "count": 18,
+    "median": 0.6809339990002172,
+    "q1": 0.6720595632499453,
+    "q3": 0.7311302164999915,
+    "min": 0.6635823819997313,
+    "max": 0.7572833499998524
+   },
+   "optimizer_steps_seconds": {
+    "count": 18,
+    "median": 0.3294653155001015,
+    "q1": 0.3247657879990129,
+    "q3": 0.35430142750124105,
+    "min": 0.32210555799974827,
+    "max": 0.36695283199924233
+   },
+   "minibatch_materialization_seconds": {
+    "count": 18,
+    "median": 0.031745870499435114,
+    "q1": 0.029364318000716594,
+    "q3": 0.03844612550039983,
+    "min": 0.028872078996300843,
+    "max": 0.03975871999955416
+   },
+   "full_buffer_evaluation_seconds": {
+    "count": 18,
+    "median": 0.29666862199974275,
+    "q1": 0.2904652335001856,
+    "q3": 0.3209998807510601,
+    "min": 0.286534040999868,
+    "max": 0.33518356700005825
+   }
+  },
+  "stage_e": {
+   "update_seconds": {
+    "count": 18,
+    "median": 0.49128981399985605,
+    "q1": 0.4743953322500829,
+    "q3": 0.4959260357501307,
+    "min": 0.4405147410002428,
+    "max": 0.7883696670000973
+   },
+   "optimizer_steps_seconds": {
+    "count": 18,
+    "median": 0.32826867550056704,
+    "q1": 0.3251368867505562,
+    "q3": 0.35367187750057383,
+    "min": 0.32126224100102263,
+    "max": 0.5945383309990575
+   },
+   "minibatch_materialization_seconds": {
+    "count": 18,
+    "median": 0.03223613199747888,
+    "q1": 0.02950287299984211,
+    "q3": 0.038771610998878714,
+    "min": 0.028872201000012865,
+    "max": 0.06337082199615907
+   },
+   "full_buffer_evaluation_seconds": {
+    "count": 18,
+    "median": 0.10521538849980061,
+    "q1": 0.06804281074994378,
+    "q3": 0.10963937650069511,
+    "min": 0.06305799399933676,
+    "max": 0.11000441299984232
+   }
+  },
+  "stage_f": {
+   "update_seconds": {
+    "count": 18,
+    "median": 0.4769065944999511,
+    "q1": 0.44409824950002985,
+    "q3": 0.48418590650010174,
+    "min": 0.4403126610000072,
+    "max": 0.5175176130001091
+   },
+   "optimizer_steps_seconds": {
+    "count": 18,
+    "median": 0.3505348049982331,
+    "q1": 0.3206055357445621,
+    "q3": 0.35591263375067683,
+    "min": 0.3183879330003947,
+    "max": 0.38327673899993897
+   },
+   "minibatch_materialization_seconds": {
+    "count": 18,
+    "median": 0.03745025250304934,
+    "q1": 0.02915753050206149,
+    "q3": 0.03837318949842938,
+    "min": 0.028483406002578704,
+    "max": 0.0415779840018331
+   },
+   "full_buffer_evaluation_seconds": {
+    "count": 18,
+    "median": 0.0695621134996145,
+    "q1": 0.06761135375154481,
+    "q3": 0.06997328474938058,
+    "min": 0.0661777550003535,
+    "max": 0.07246150799937823
+   }
+  }
+ },
+ "optimizer_seconds_per_step": {
+  "stage_d": {
+   "count": 18,
+   "median": 0.001310449408201464,
+   "q1": 0.0012711432578074167,
+   "q3": 0.0014429978984269454,
+   "min": 0.0012474507539117496,
+   "max": 0.002391737457026366
+  },
+  "f512": {
+   "count": 18,
+   "median": 0.0012869738886722715,
+   "q1": 0.0012686163593711441,
+   "q3": 0.0013839899511767229,
+   "min": 0.0012582248359365167,
+   "max": 0.0014334094999970404
+  },
+  "stage_e": {
+   "count": 18,
+   "median": 0.00128229951367409,
+   "q1": 0.00127006596386936,
+   "q3": 0.0013815307714866165,
+   "min": 0.0012549306289102446,
+   "max": 0.0023224153554650684
+  },
+  "stage_f": {
+   "count": 18,
+   "median": 0.001369276582024348,
+   "q1": 0.0012523653740021956,
+   "q3": 0.0013902837255885814,
+   "min": 0.0012437028632827918,
+   "max": 0.0014971747617185116
+  }
+ },
+ "full_buffer_seconds_per_call": {
+  "stage_d": {
+   "count": 18,
+   "median": 0.029751964406216302,
+   "q1": 0.020416289562525947,
+   "q3": 0.03613157234374853,
+   "min": 0.018548935500007246,
+   "max": 0.0370089130000224
+  },
+  "f512": {
+   "count": 18,
+   "median": 0.018541788874983922,
+   "q1": 0.0181540770937616,
+   "q3": 0.020062492546941257,
+   "min": 0.01790837756249175,
+   "max": 0.02094897293750364
+  },
+  "stage_e": {
+   "count": 18,
+   "median": 0.006575961781237538,
+   "q1": 0.004252675671871486,
+   "q3": 0.006852461031293444,
+   "min": 0.003941124624958547,
+   "max": 0.006875275812490145
+  },
+  "stage_f": {
+   "count": 18,
+   "median": 0.004347632093725906,
+   "q1": 0.004225709609471551,
+   "q3": 0.004373330296836286,
+   "min": 0.004136109687522094,
+   "max": 0.004528844249961139
+  }
+ },
+ "median_update_ratio_vs_first": {
+  "stage_d": 1.0,
+  "f512": 0.7542205835971744,
+  "stage_e": 0.5441656471469571,
+  "stage_f": 0.5282344111958189
+ }
+}

@@ -433,10 +433,12 @@ def minibatch_indices(decision_count, seed):
 
 
 def full_buffer_indices(decision_count, batch_size=None):
-    """Return bounded sequential slices that cover every decision exactly once.
+    """Return bounded sequential ranges that cover every decision exactly once.
 
     ``batch_size`` defaults to ``PPO_FULL_BUFFER_EVAL_BATCH_SIZE``, read at
-    call time.
+    call time. Each partition is a ``range`` with step one, which
+    ``PPOBufferStorage.batch`` serves by slicing instead of gathering; the
+    ranges still support ``len`` and conversion to index arrays.
     """
     decision_count = int(decision_count)
     if decision_count < 1:
@@ -447,11 +449,7 @@ def full_buffer_indices(decision_count, batch_size=None):
     if batch_size < 1:
         raise ValueError("batch_size must be positive.")
     return tuple(
-        np.arange(
-            offset,
-            min(decision_count, offset + batch_size),
-            dtype=np.int64,
-        )
+        range(offset, min(decision_count, offset + batch_size))
         for offset in range(0, decision_count, batch_size)
     )
 
@@ -559,8 +557,41 @@ class PPOBufferStorage:
             self.preflight["fallback_reason"] = f"{type(exc).__name__}: {exc}"
 
     def batch(self, indices):
+        """Return one batch on the network's backend.
+
+        A step-one ``range`` -- every whole-buffer evaluation partition -- is
+        served by slicing. For the resident GPU copy that avoids a host index
+        transfer, which blocks on the device queue, and a gather per array.
+        The two-dimensional slices are made contiguous so they reach the
+        matrix products with exactly the layout a gathered batch has, and the
+        values are identical either way. Shuffled optimizer minibatches still
+        gather.
+        """
         xp = self.network.xp
-        indices = np.asarray(indices, dtype=np.int64)
+        if isinstance(indices, range) and indices.step == 1:
+            selector = slice(indices.start, indices.stop)
+            if self._device_arrays is not None:
+                arrays = self._device_arrays
+                return {
+                    "states": xp.ascontiguousarray(arrays["states"][:, selector]),
+                    "actions": arrays["actions"][selector],
+                    "legal_masks": xp.ascontiguousarray(
+                        arrays["legal_masks"][:, selector]
+                    ),
+                    "old_log_probs": arrays["old_log_probs"][selector],
+                    "advantages": arrays["advantages"][selector],
+                    "returns": arrays["returns"][selector],
+                    "old_values": (
+                        None
+                        if self.buffer.old_values is None
+                        else arrays["old_values"][selector]
+                    ),
+                }
+            return self._host_batch(selector)
+        return self._host_or_device_gather(np.asarray(indices, dtype=np.int64))
+
+    def _host_or_device_gather(self, indices):
+        xp = self.network.xp
         if self._device_arrays is not None:
             backend_indices = xp.asarray(indices, dtype=xp.int64)
             arrays = self._device_arrays
@@ -578,20 +609,35 @@ class PPOBufferStorage:
                 else arrays["old_values"][backend_indices]
             )
             return batch
-        batch = {
-            "states": xp.asarray(self.buffer.states[:, indices], dtype=xp.float32),
-            "actions": xp.asarray(self._actions[indices], dtype=xp.int64),
-            "legal_masks": xp.asarray(self._legal_masks[:, indices], dtype=xp.bool_),
-            "old_log_probs": xp.asarray(self.buffer.old_log_probs[indices], dtype=xp.float32),
-            "advantages": xp.asarray(self.buffer.advantages[indices], dtype=xp.float32),
-            "returns": xp.asarray(self.buffer.returns[indices], dtype=xp.float32),
+        return self._host_batch(indices)
+
+    def _host_batch(self, selector):
+        """Copy one batch of the canonical host buffer to the backend.
+
+        ``selector`` is an index array or a slice; ``ascontiguousarray`` gives
+        a slice the same contiguous layout an index array produces.
+        """
+        xp = self.network.xp
+
+        def column(array, dtype):
+            return xp.asarray(np.ascontiguousarray(array[:, selector]), dtype=dtype)
+
+        def entry(array, dtype):
+            return xp.asarray(np.ascontiguousarray(array[selector]), dtype=dtype)
+
+        return {
+            "states": column(self.buffer.states, xp.float32),
+            "actions": entry(self._actions, xp.int64),
+            "legal_masks": column(self._legal_masks, xp.bool_),
+            "old_log_probs": entry(self.buffer.old_log_probs, xp.float32),
+            "advantages": entry(self.buffer.advantages, xp.float32),
+            "returns": entry(self.buffer.returns, xp.float32),
+            "old_values": (
+                None
+                if self.buffer.old_values is None
+                else entry(self.buffer.old_values, xp.float32)
+            ),
         }
-        batch["old_values"] = (
-            None
-            if self.buffer.old_values is None
-            else xp.asarray(self.buffer.old_values[indices], dtype=xp.float32)
-        )
-        return batch
 
     def fallback_to_streaming(self, reason):
         """Discard only the optional GPU copy; the canonical RAM buffer survives."""
@@ -778,7 +824,9 @@ def evaluate_full_buffer(
             ratio * batch["advantages"],
             clipped_ratio * batch["advantages"],
         )
-        total += int(len(indices))
+        # Counted from what the storage actually served, so a partition that
+        # ran past the buffer is caught by the coverage check below.
+        total += int(batch["actions"].shape[0])
         partition_sums = [
             xp.sum(surrogate),
             xp.sum(entropy),

@@ -514,6 +514,14 @@ from that storage call `evaluate_actions`/`backward_ppo` with
 cost a host transfer; shape checks still run, and every other caller keeps
 the per-batch checks by default.
 
+Evaluation partitions are step-one `range`s, which the storage serves by
+slicing its buffer instead of gathering it. For the resident GPU copy that
+removes a host index transfer per partition, which blocks on the device queue,
+and a gather per array. Two-dimensional slices are made contiguous, giving the
+matrix products exactly the layout a gathered batch has; strided views measured
+no faster. Shuffled optimizer minibatches still gather, and the evaluation
+counts decisions from the batches it was actually served.
+
 Enable the optional PPO actor-critic with:
 
 ```bash

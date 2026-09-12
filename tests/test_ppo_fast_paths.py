@@ -574,13 +574,14 @@ def test_evaluation_partitions_cover_every_decision_once_in_order(
     partitions = full_buffer_indices(decisions, batch_size)
 
     assert np.array_equal(np.concatenate(partitions), np.arange(decisions))
-    assert all(part.size == batch_size for part in partitions[:-1])
-    assert 1 <= partitions[-1].size <= batch_size
+    assert all(len(part) == batch_size for part in partitions[:-1])
+    assert 1 <= len(partitions[-1]) <= batch_size
+    assert all(isinstance(part, range) and part.step == 1 for part in partitions)
 
 
 def test_evaluation_partitions_default_to_the_evaluation_constant(monkeypatch):
     monkeypatch.setattr(ppo, "PPO_FULL_BUFFER_EVAL_BATCH_SIZE", 300)
-    assert [part.size for part in full_buffer_indices(700)] == [300, 300, 100]
+    assert [len(part) for part in full_buffer_indices(700)] == [300, 300, 100]
     assert ppo.PPO_TARGET_DECISIONS_PER_MINIBATCH == 512
 
 
@@ -1067,3 +1068,65 @@ def test_public_action_evaluation_still_checks_every_batch(device):
             batch["advantages"],
             collect_metrics=False,
         )
+
+
+@pytest.mark.parametrize(("device", "location"), STORAGE_LOCATIONS)
+@pytest.mark.parametrize("with_values", [False, True])
+def test_a_sliced_partition_serves_exactly_the_gathered_batch(
+    device, location, with_values, monkeypatch
+):
+    network = _network("no_critic", device=device)
+    buffer = _real_buffer(network, 1000, seed=18, with_values=with_values)
+    if location == "ram_streamed":
+        monkeypatch.setattr(ppo, "effective_gpu_available_bytes", lambda: 0)
+    storage = PPOBufferStorage(network, buffer)
+    try:
+        assert storage.location == location
+        for partition in (range(0, 1000), range(0, 512), range(512, 1000), range(999, 1000)):
+            sliced = storage.batch(partition)
+            gathered = storage.batch(np.arange(partition.start, partition.stop))
+            assert sliced.keys() == gathered.keys()
+            for key, value in gathered.items():
+                if value is None:
+                    assert sliced[key] is None, key
+                    continue
+                assert sliced[key].shape == value.shape, key
+                assert sliced[key].dtype == value.dtype, key
+                assert sliced[key].flags.c_contiguous, key
+                assert _host(sliced[key]).tobytes() == _host(value).tobytes(), key
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_sliced_and_gathered_evaluations_agree_bit_for_bit(device):
+    network = _network("shared_critic", device=device)
+    buffer = _real_buffer(network, 1337, seed=19, with_values=True)
+    storage = PPOBufferStorage(network, buffer)
+    ranges = full_buffer_indices(buffer.size, 500)
+    arrays = tuple(np.arange(part.start, part.stop) for part in ranges)
+    try:
+        sliced = evaluate_full_buffer(network, storage, ranges, ppo.PPO_CLIP_EPSILON)
+        gathered = evaluate_full_buffer(network, storage, arrays, ppo.PPO_CLIP_EPSILON)
+    finally:
+        storage.close()
+
+    _assert_identical_metrics(gathered, sliced)
+
+
+@pytest.mark.parametrize(
+    "partitions",
+    [
+        (range(0, 500), range(512, 600)),  # a gap
+        (range(0, 512), range(500, 600)),  # an overlap
+    ],
+)
+def test_sliced_partitions_that_miss_or_repeat_decisions_fail_coverage(partitions):
+    network = _network("no_critic")
+    buffer = _real_buffer(network, 600, seed=20, with_values=False)
+    storage = PPOBufferStorage(network, buffer)
+    try:
+        with pytest.raises(AssertionError, match="every decision"):
+            evaluate_full_buffer(network, storage, partitions, ppo.PPO_CLIP_EPSILON)
+    finally:
+        storage.close()

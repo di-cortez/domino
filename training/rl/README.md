@@ -486,7 +486,7 @@ Rollouts remain parallel while all updates stay in the parent:
 |---|---|---:|
 | `--fresh-from-sl` / `--continue-existing-rl` | Force initialization from SL or allow a compatible existing RL checkpoint | continue existing RL (standalone); canonical continuation uses `--resume` |
 | `--gamma-f` | Terminal/final-reward discount using the mode's second distance metric | `0.95` |
-| `--reward-eta` | Convex mix of the terminal and immediate returns per decision: `0` trains on the terminal outcome alone, `1` on draw/pass shaping alone | `0.5` |
+| `--reward-eta` | Convex mix of the terminal and immediate returns per decision: `0` trains on the terminal outcome alone, `1` on draw/pass shaping alone | `0.115` |
 | `--gamma-i` | Local/immediate-event discount using the mode's first distance metric | `0.90` |
 | `--reward-distance-mode` | Distance units in `gamma_i`/`gamma_f` order: `turn-turn`, `decision-decision`, `turn-decision`, or `decision-turn` | `turn-turn` |
 | `--terminal-empty-hand-weight` | Weight `a_E` of the empty-hand terminal component; only the `a_E`/`a_B` ratio matters | `1.0` |
@@ -496,7 +496,7 @@ Rollouts remain parallel while all updates stay in the parent:
 | `--opponent-decision-restarts` | Continue once from every same-iteration pre-action opponent state with at least two tile plays; the learner swaps seats and all decisions join one update | off |
 | `--ppo-max-epochs` | `1` selects one-update REINFORCE; `2`–`16` select masked PPO | `4` standalone/finite, `16` forever |
 | `--value-head` | Train a linear critic with PPO or REINFORCE | off |
-| `--baseline` | Term subtracted from each return: zero, constant, batch mean, fixed lookup, or one of three critic wirings | configuration-dependent historical default |
+| `--baseline` | Term subtracted from each return: zero, constant, batch mean, fixed lookup, or one of three critic wirings | `batch-mean` |
 | `--weight-decay [COEFFICIENT]` | Decoupled L2 shrink on every weight matrix and `Wv` after clipping; shared with supervised training | off (`0.0001`) |
 | `--dropout [RATE]` | Hidden-layer dropout shared with supervised training | off (`0.1`) |
 | `--value-coef` | Critic loss coefficient when the value head is enabled | `0.5` |

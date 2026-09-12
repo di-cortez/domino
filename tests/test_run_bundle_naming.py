@@ -327,14 +327,17 @@ def _derived_suffix(*flags):
     ("flags", "expected"),
     [
         ((), None),
-        (("--learning-rate", "0.001"), "lr_0p001"),
+        (("--learning-rate", "0.01"), "lr_0p01"),
         (("--gpi", "4000"), "gpi_4000"),
         (("--entropy-coef", "0.01"), "entropy_0p01"),
         (("--opponent-buckets", "heuristic"), "bucket_heuristic"),
-        (("--reward-distance-mode", "turn-turn"), "distance_turn_turn"),
+        (
+            ("--reward-distance-mode", "decision-decision"),
+            "distance_decision_decision",
+        ),
         (("--baseline", "zero"), "baseline_zero"),
         (("--terminal-blocked-weight", "2"), "aB_2"),
-        (("--learning-rate", "0.001", "--gpi", "4000"), "lr_0p001_gpi_4000"),
+        (("--learning-rate", "0.01", "--gpi", "4000"), "lr_0p01_gpi_4000"),
     ],
 )
 def test_a_plain_pipeline_run_names_the_parameters_it_varies(flags, expected):
@@ -346,13 +349,13 @@ def test_a_plain_pipeline_run_names_the_parameters_it_varies(flags, expected):
     "flags",
     [
         # Spelled-out defaults are still defaults; they name nothing.
-        ("--learning-rate", "0.01"),
+        ("--learning-rate", "0.001"),
         ("--gpi", "2000"),
         ("--opponent-buckets", "random"),
-        ("--reward-distance-mode", "decision-decision"),
+        ("--reward-distance-mode", "turn-turn"),
         # `--baseline` parks a None on the namespace and resolves to
-        # `lookup-table` only later, so both spellings must read as default.
-        ("--baseline", "lookup-table"),
+        # `batch-mean` only later, so both spellings must read as default.
+        ("--baseline", "batch-mean"),
     ],
 )
 def test_restating_a_default_adds_nothing_to_the_tail(flags):
@@ -362,12 +365,12 @@ def test_restating_a_default_adds_nothing_to_the_tail(flags):
 def test_an_explicit_suffix_wins_over_the_derived_one():
     """`control` is the sequence's name for a run that varies nothing."""
     assert _derived_suffix(
-        "--learning-rate", "0.001", "--bundle-suffix", "control"
+        "--learning-rate", "0.01", "--bundle-suffix", "control"
     ) == "control"
 
 
 def test_an_empty_suffix_opts_out_of_the_tail():
-    assert _derived_suffix("--learning-rate", "0.001", "--bundle-suffix", "") == ""
+    assert _derived_suffix("--learning-rate", "0.01", "--bundle-suffix", "") == ""
     assert bundle_dir_name(
         date="20260910", machine_slug="diego_notebook", suffix=""
     ) == "20260910-XXX_diego_notebook_"
@@ -378,9 +381,9 @@ def test_a_derived_tail_is_a_usable_bundle_directory(tmp_path):
     name = bundle_dir_name(
         date="20260910",
         machine_slug="diego_notebook",
-        suffix=_derived_suffix("--learning-rate", "0.001"),
+        suffix=_derived_suffix("--learning-rate", "0.01"),
     )
-    assert name == "20260910-XXX_diego_notebook_lr_0p001"
+    assert name == "20260910-XXX_diego_notebook_lr_0p01"
     created = run_dir / name
     created.mkdir()
     assert find_bundle_dir(run_dir) == created

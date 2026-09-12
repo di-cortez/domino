@@ -3,11 +3,19 @@
 TURN_DISTANCE = "turn"
 DECISION_DISTANCE = "decision"
 
-# Both clocks count the learner's own decisions. A turn clock also counts the
-# opponent's actions and every draw, so the same gamma discounts far harder
-# under it; keeping both halves on the decision clock makes the discount mean
-# "how many choices of mine remain" rather than "how much happened".
-DEFAULT_REWARD_DISTANCE_MODE = "decision-decision"
+# Both clocks count engine turns: the opponent's actions and every draw count
+# too, so the same gamma discounts harder than it would over the learner's own
+# decisions alone, and the discount means "how much happened" rather than "how
+# many choices of mine remain".
+#
+# The one-factor sweep measured all four modes and put `turn-turn` first,
+# +0.218 pp final and +0.296 pp AUC over the `decision-decision` it replaces.
+# The final-level gain sits exactly on the +/-0.22 pp reading ruler while the
+# AUC gain clears its own comfortably, which is the signature of reaching the
+# same level earlier rather than reaching a higher one. Under a time budget,
+# arriving earlier is a real gain. See
+# references/resumo_expandido/analises_agente_atual/REPORT.md.
+DEFAULT_REWARD_DISTANCE_MODE = "turn-turn"
 HISTORICAL_REWARD_DISTANCE_MODE = "turn-decision"
 HISTORICAL_GAMMA_F = 1.0
 

@@ -30,6 +30,7 @@ from training.rl.ppo import (
 )
 from training.rl import baseline as baselines
 from training.rl.checkpoint_archive import archive_policy_manifest
+from training.rl.lr_warmup import normalize_warmup, warmup_from_arguments
 from training.rl.matchmaking import matchmaking_policy_manifest
 from training.rl.pool import pool_policy_manifest
 from training.rl.reward_distance import (
@@ -52,8 +53,13 @@ from utils.repository import current_git_commit
 # distance metrics. Version 15 is still unambiguous: absence of the field means
 # the historical turn-decision behavior, including the historical numeric
 # defaults when an unusually old durable config omitted those too.
-RESUME_STATE_VERSION = 16
-SUPPORTED_RESUME_STATE_VERSIONS = (15, RESUME_STATE_VERSION)
+# Version 17 persists the KL-gated learning-rate warmup: its configuration in
+# the run identity and its mid-ladder state (exponent, EMA, hold streak,
+# cooldown) in ``training_state``. Versions 15 and 16 are still unambiguous:
+# absence of both means the run never warmed up, which is exactly what every
+# run created before the flag did.
+RESUME_STATE_VERSION = 17
+SUPPORTED_RESUME_STATE_VERSIONS = (15, 16, RESUME_STATE_VERSION)
 OVERLAPPING_MEDIUM_TERM_STATE_VERSIONS = (10, 11)
 # States written before the uniform member remainder rotated. They carry no
 # rotation anchor, so their next match plan cannot be reproduced.
@@ -118,6 +124,20 @@ def run_config_uses_opponent_bucket_features(run_config):
     return bool(locked.get("opponent_bucket_features", False))
 
 
+def run_config_warmup(run_config):
+    """Return the normalized warmup one saved run was created with, or ``None``.
+
+    Read from ``locked_arguments`` rather than ``rl_config`` for the reason
+    ``run_config_uses_opponent_bucket_features`` documents: ``rl_config`` is
+    rebuilt from arguments on every invocation and compared as an immutable run
+    key, so a new member there would make every run created before the flag
+    existed unresumable. A run that predates the flag records none of its keys
+    and so reads as off, which is what it was.
+    """
+    locked = (run_config or {}).get("locked_arguments") or {}
+    return normalize_warmup(warmup_from_arguments(locked))
+
+
 def _renamed(rl_config, current_name):
     """Read one renamed RL parameter from a config written either way."""
     if current_name in rl_config:
@@ -169,6 +189,11 @@ class RLTrainingConfiguration:
     # stays directly comparable between a checkpoint and a run config.
     baseline: dict | None
     baseline_artifact_sha256: str | None
+    # JSON mapping (or None) for the same reason as ``baseline``: one
+    # configuration stays directly comparable between a checkpoint and a run
+    # config. ``learning_rate`` above is the nominal target either way; the rung
+    # a run is currently on is training state, not identity.
+    warmup_lr: dict | None
     weight_decay: float
     dropout_rate: float
     effective_seed: int
@@ -213,6 +238,8 @@ class RLTrainingConfiguration:
                 data["baseline"]
             ).as_mapping()
         data.setdefault("baseline_artifact_sha256", None)
+        # Checkpoints written before --warmup-lr existed never warmed up.
+        data["warmup_lr"] = normalize_warmup(data.get("warmup_lr"))
         data.setdefault(
             "reward_distance_mode",
             HISTORICAL_REWARD_DISTANCE_MODE,
@@ -300,6 +327,8 @@ class RLTrainingConfiguration:
                 baseline,
                 ruleset_name,
             ),
+            # From locked_arguments, not rl_config; see run_config_warmup.
+            "warmup_lr": run_config_warmup(run_config),
             "weight_decay": float(rl["weight_decay"]),
             "dropout_rate": float(rl["dropout_rate"]),
             "effective_seed": int(run_config["seed"]),
@@ -779,6 +808,11 @@ def _validate_resume_configuration(
     saved.setdefault("ruleset_name", DEFAULT_RULESET_NAME)
     saved.setdefault("baseline", None)
     saved.setdefault("baseline_artifact_sha256", None)
+    # A checkpoint written before --warmup-lr existed records no warmup, and
+    # the expected configuration says None for it. Without this every run in
+    # progress when the flag landed would be rejected as a different
+    # experiment on its next resume.
+    saved["warmup_lr"] = normalize_warmup(saved.get("warmup_lr"))
     saved.setdefault(
         "reward_distance_mode",
         HISTORICAL_REWARD_DISTANCE_MODE,
@@ -905,8 +939,14 @@ def _training_state_payload(
     total_rollout_duration_s,
     total_update_duration_s,
     elapsed_rl_seconds,
+    warmup_schedule=None,
 ):
     return {
+        # ``None`` for a run without warmup, so a state written by one reads
+        # exactly like a state written before the flag existed.
+        "warmup_schedule": (
+            None if warmup_schedule is None else warmup_schedule.state_dict()
+        ),
         "win_rate_window": list(win_rate_window),
         "value_loss_window": list(value_loss_window),
         "ppo_window": list(ppo_window),

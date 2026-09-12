@@ -79,6 +79,9 @@ FLAG_SHORT_NAMES = {
     "--terminal-blocked-weight": "aB",
     "--immediate-draw-weight": "aD",
     "--immediate-pass-weight": "aP",
+    # A warmup run is not comparable to a run at the same nominal rate that
+    # never warmed, so its bundle has to say so.
+    "--warmup-lr": "warmup",
 }
 
 

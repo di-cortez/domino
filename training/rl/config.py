@@ -22,6 +22,7 @@ from training.rl.ppo import (
     validate_ppo_max_epochs,
 )
 from training.rl.baseline import resolve as resolve_baseline
+from training.rl.lr_warmup import normalize_warmup
 from training.rl.reward_distance import (
     DEFAULT_REWARD_DISTANCE_MODE,
     resolve_reward_distance_mode,
@@ -56,10 +57,18 @@ DEFAULT_DIFFICULTY_WEIGHT = 0.5
 VALUE_COEF = 0.5
 DEFAULT_MOVING_AVERAGE_WINDOW = 10
 
-# A learning rate ten times the former default. The paired baseline runs
-# showed 0.01 ahead of 0.001 by +0.40 to +0.79 pp on three of four
-# baselines at an equal game budget; see analysis/analise_baselines_0409.
-DEFAULT_LEARNING_RATE = 0.01
+# The one-factor sweep of 49 runs found the learning rate to be its most
+# influential factor by a wide margin, with an interior optimum at 0.001:
+# +0.677 pp final and +0.712 pp AUC over the 0.01 it replaces, against a
+# +/-0.22 pp reading ruler. Every rate below 0.01 beat it and every rate above
+# lost to it, without exception. See
+# references/resumo_expandido/analises_agente_atual/REPORT.md.
+#
+# This reverses the earlier 0.01, which came from analysis/analise_baselines_0409
+# on the reduced double-three game; the full double-six game prefers rates an
+# order of magnitude lower. The 0.001 point itself has no replicate yet, which
+# is what the 0.0007/0.0008/0.0009 runs are measuring.
+DEFAULT_LEARNING_RATE = 0.001
 
 # Entropy regularization off by default. The bonus is a separate lever
 # from the objective, and leaving it on quietly floors the policy's
@@ -70,15 +79,22 @@ DEFAULT_ENTROPY_COEF = 0.0
 # Explicit advantage-normalization CLI flags still win.
 DEFAULT_NORMALIZE_ADVANTAGES = None
 
-# The fixed state-conditioned expected reward. It matched the raw REINFORCE
-# signal on win rate at no measurable throughput cost in the baseline
-# comparison, while every critic wiring cost 21-35% of the rollout and
-# returned nothing. See analysis/analise_baselines_0409.
+# The mean of the iteration's own buffer. The one-factor sweep put it +0.013 pp
+# from the `lookup-table` it replaces, which is well inside the +/-0.22 pp
+# reading ruler: the two are tied, and only `zero` loses (-0.300 pp). What
+# breaks the tie is not win rate but reach -- `lookup-table` needs a packaged
+# format-version-3 artifact and only double-six has one, so it silently pins
+# every experiment to that one ruleset. `batch-mean` is computed from the
+# buffer and works on every ruleset.
+#
+# Subtracting something matters; what is subtracted matters little, as long as
+# it depends on the state or the batch. See
+# references/resumo_expandido/analises_agente_atual/REPORT.md.
 #
 # ``None`` still means "the baseline this run implies" -- the critic when its
 # head is on, otherwise the batch mean -- and remains reachable by passing it
 # explicitly through the API.
-DEFAULT_BASELINE = ("lookup-table",)
+DEFAULT_BASELINE = ("batch-mean",)
 
 
 @dataclass(frozen=True)
@@ -122,6 +138,13 @@ class RLTrainingOptions:
     # the run already implied before ``--baseline`` existed; see
     # ``training/rl/baseline.py``.
     baseline: Any = DEFAULT_BASELINE
+    # ``None`` trains at ``learning_rate`` from the first iteration. Anything
+    # else -- ``True`` or a mapping of the six parameters -- starts at
+    # ``learning_rate / factor ** exponent`` and climbs, gated on
+    # ``EMA(max_approx_kl)``; see ``training/rl/lr_warmup.py``.
+    # ``learning_rate`` stays the nominal target either way, so a run records
+    # what it was aiming at rather than whichever rung it happened to be on.
+    warmup_lr: Any = None
     seed: int | None = None
     ppo_max_epochs: int = DEFAULT_PPO_MAX_EPOCHS
 
@@ -308,6 +331,16 @@ def resolve_training_options(training, resources, execution):
         use_value_head=bool(training.use_value_head),
         normalize_advantages=normalize_advantages,
     )
+    warmup_lr = normalize_warmup(training.warmup_lr)
+    if warmup_lr is not None and not ppo_is_enabled(ppo_max_epochs):
+        # The ladder climbs on EMA(max_approx_kl), and the single-update
+        # REINFORCE path measures no KL at all. Accepting the pair would leave
+        # the run on its first rung forever without a word.
+        raise ValueError(
+            "warmup_lr gates on the PPO max_approx_kl, which the REINFORCE "
+            "path (ppo_max_epochs=1) never measures; use ppo_max_epochs >= 2 "
+            "or drop warmup_lr"
+        )
     workers = resources.workers
     if workers != "auto":
         workers = int(workers)
@@ -336,6 +369,7 @@ def resolve_training_options(training, resources, execution):
         immediate_pass_weight=reward_scales["immediate_pass_weight"],
         normalize_advantages=normalize_advantages,
         baseline=baseline,
+        warmup_lr=warmup_lr,
         ppo_max_epochs=ppo_max_epochs,
     )
     resolved_resources = replace(

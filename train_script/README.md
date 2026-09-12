@@ -51,7 +51,7 @@ Important RL options are:
 | `--rl-iterations` | Legacy fixed iteration budget using the default GPI | unset |
 | `--rl-learning-rate` | Learning rate | `0.001` |
 | `--gamma-f` | Terminal discount per selected terminal-distance unit | `0.95` |
-| `--reward-eta` | Convex mix of the terminal and immediate returns (`0` = terminal only, `1` = draw/pass shaping only) | `0.5` |
+| `--reward-eta` | Convex mix of the terminal and immediate returns (`0` = terminal only, `1` = draw/pass shaping only) | `0.115` |
 | `--gamma-i` | Immediate-event discount crediting a draw/pass event to earlier decisions | `0.90` |
 | `--reward-distance-mode` | Distance units in `gamma_i`/`gamma_f` order | `turn-turn` |
 | `--terminal-empty-hand-weight` / `--terminal-blocked-weight` | Relative value of an empty-hand versus a blocked result; only the ratio matters | `1.0` / `1.0` |

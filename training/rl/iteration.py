@@ -22,6 +22,7 @@ from training.rl.champion_evaluation import (
     evaluate_champion_vs_learner,
 )
 from training.rl.checkpoint_archive import ARCHIVE_INTERVAL_ITERATIONS
+from training.rl.lr_warmup import warmup_trace_row, write_warmup_trace_row
 from training.rl.matchmaking import (
     aggregate_match_results,
     build_match_plan,
@@ -73,6 +74,10 @@ class IterationContext:
     final_iteration: int
     restored_elapsed_rl_seconds: float
     training_perf_started: float
+    # Both ``None`` unless the run warms up its learning rate. The schedule is
+    # mutated in place every iteration; the context stays frozen around it.
+    warmup_schedule: Any = None
+    warmup_stream: Any = None
 
 
 @dataclass
@@ -545,6 +550,39 @@ def _update_policy(context, state, batch, iteration):
     return gradient_metrics, ppo_metrics, update_elapsed
 
 
+def _advance_learning_rate_warmup(context, iteration, ppo_metrics):
+    """Feed this iteration's KL to the warmup and install the next rate.
+
+    Runs after the update and before anything else reads the network, which
+    fixes the one ordering that matters: the KL observed here was produced by
+    the rate this iteration trained with, and the rate installed here is the
+    one the next iteration trains with. Observing before the update would read
+    the previous rate's KL and leave the ladder one step behind for the whole
+    run.
+
+    Setting ``network.lr`` alone is enough. The optimizer applies the policy
+    network's rate to every gradient, the separate critic's included, so a
+    ``value-head-own-nn`` critic warms up in step with the policy.
+    """
+    schedule = context.warmup_schedule
+    if schedule is None:
+        return
+    started = time.perf_counter()
+    max_approx_kl = (
+        None if ppo_metrics is None else ppo_metrics.get("max_approx_kl")
+    )
+    decision = schedule.observe(max_approx_kl)
+    context.network.lr = float(decision.next_learning_rate)
+    write_warmup_trace_row(
+        context.warmup_stream,
+        warmup_trace_row(iteration, decision, max_approx_kl),
+    )
+    context.runtime_profile.add(
+        "learning_rate_warmup",
+        time.perf_counter() - started,
+    )
+
+
 def _checkpoint(context, state, iteration):
     """Write a scheduled checkpoint and return paths exposed to callbacks."""
     execution = context.execution
@@ -567,6 +605,7 @@ def _checkpoint(context, state, iteration):
             context.restored_elapsed_rl_seconds
             + time.perf_counter() - context.training_perf_started
         ),
+        warmup_schedule=context.warmup_schedule,
     )
     if execution.numbered_checkpoints:
         checkpoint_path, checkpoint_state_path = _save_numbered_resume_checkpoint(
@@ -814,6 +853,7 @@ def run_iteration(context, state, iteration):
         batch,
         iteration,
     )
+    _advance_learning_rate_warmup(context, iteration, ppo_metrics)
 
     state.completed_training_games += games
     state.completed_this_invocation += games

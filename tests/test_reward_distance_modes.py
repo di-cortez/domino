@@ -65,7 +65,7 @@ def test_new_run_defaults_are_exposed_by_both_clis(tmp_path):
         assert args.gamma_i == 0.90
         assert args.gamma_f == 0.95
         assert args.reward_eta == 0.115
-        assert args.reward_distance_mode == "decision-decision"
+        assert args.reward_distance_mode == "turn-turn"
 
 
 def test_resolved_schema_freezes_the_selected_mode():

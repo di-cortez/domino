@@ -30,6 +30,17 @@ from training.rl.config import (
     VALUE_COEF,
 )
 from training.rl import baseline as baselines
+from training.rl.lr_warmup import (
+    DEFAULT_WARMUP_COOLDOWN_ITERATIONS,
+    DEFAULT_WARMUP_EMA_ALPHA,
+    DEFAULT_WARMUP_EXPONENT,
+    DEFAULT_WARMUP_FACTOR,
+    DEFAULT_WARMUP_HOLD_ITERATIONS,
+    DEFAULT_WARMUP_KL_THRESHOLD,
+    WARMUP_ARGUMENT_DESTINATIONS,
+    normalize_warmup,
+    warmup_from_arguments,
+)
 from training.rl.pool import DEFAULT_OPPONENT_BUCKETS, canonicalize_bucket_names
 from training.rl.parallel import (
     DEFAULT_RL_WORKERS,
@@ -447,7 +458,128 @@ def add_optional_rl_arguments(
         ),
     )
     baselines.add_argument(parser)
+    add_warmup_arguments(parser)
     return parser
+
+
+# The six sub-parameters, as ``(flag, destination)``. The destinations come
+# from ``training.rl.lr_warmup`` because a canonical run persists them in its
+# ``locked_arguments``. Their parser default is ``None`` rather than the real
+# value so a bare ``--warmup-exponent`` passed without ``--warmup-lr`` can be
+# told apart from an unset one and rejected; the real defaults are named in each
+# help text and filled in by :func:`training.rl.lr_warmup.normalize_warmup`.
+WARMUP_SUBPARAMETERS = tuple(
+    ("--" + destination.replace("_", "-"), destination)
+    for destination in WARMUP_ARGUMENT_DESTINATIONS.values()
+)
+
+
+def add_warmup_arguments(parser):
+    """Declare ``--warmup-lr`` and its six sub-parameters on one RL parser."""
+    group = parser.add_argument_group(
+        "learning-rate warmup",
+        (
+            "Start at learning_rate / factor**exponent and climb one rung at "
+            "a time, only once EMA(max_approx_kl) has stayed below the "
+            "threshold for hold iterations in a row, with a cooldown after "
+            "every climb. Worth it from learning rates of about 0.01 upward, "
+            "where the first iterations show a KL spike; below 0.0025 there "
+            "is no spike and the ladder only delays the run by at least "
+            "1100 iterations."
+        ),
+    )
+    group.add_argument(
+        "--warmup-lr",
+        action="store_true",
+        help="Enable the KL-gated learning-rate warmup.",
+    )
+    group.add_argument(
+        "--warmup-exponent",
+        type=int,
+        default=None,
+        help=(
+            "Initial exponent: the first rung is learning_rate / "
+            f"factor**exponent (default: {DEFAULT_WARMUP_EXPONENT})."
+        ),
+    )
+    group.add_argument(
+        "--warmup-factor",
+        type=float,
+        default=None,
+        help=(
+            "Ratio between consecutive rungs, greater than one "
+            f"(default: {DEFAULT_WARMUP_FACTOR})."
+        ),
+    )
+    group.add_argument(
+        "--warmup-ema-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Weight kept on history in ema = alpha*ema + (1-alpha)*max_kl, "
+            f"in [0, 1) (default: {DEFAULT_WARMUP_EMA_ALPHA})."
+        ),
+    )
+    group.add_argument(
+        "--warmup-kl-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Climb only while the EMA stays below this; half of the enforced "
+            f"PPO stop KL by default (default: {DEFAULT_WARMUP_KL_THRESHOLD})."
+        ),
+    )
+    group.add_argument(
+        "--warmup-hold-iterations",
+        type=int,
+        default=None,
+        help=(
+            "Consecutive iterations the EMA must stay below the threshold "
+            f"before a climb (default: {DEFAULT_WARMUP_HOLD_ITERATIONS})."
+        ),
+    )
+    group.add_argument(
+        "--warmup-cooldown-iterations",
+        type=int,
+        default=None,
+        help=(
+            "Iterations after a climb during which no further climb may "
+            f"happen (default: {DEFAULT_WARMUP_COOLDOWN_ITERATIONS})."
+        ),
+    )
+
+
+def warmup_from_args(args):
+    """Return the warmup mapping one parsed invocation asks for, or ``None``."""
+    return warmup_from_arguments(vars(args))
+
+
+def validate_warmup_arguments(parser, args):
+    """Reject warmup sub-parameters passed without ``--warmup-lr``.
+
+    Silently ignoring them would let an operator believe a run tuned the
+    ladder when it never climbed one. The value ranges are checked by
+    ``normalize_warmup`` so the parser and a restored checkpoint cannot accept
+    different bounds.
+    """
+    if not getattr(args, "warmup_lr", False):
+        orphans = [
+            flag
+            for flag, destination in WARMUP_SUBPARAMETERS
+            if getattr(args, destination, None) is not None
+        ]
+        if orphans:
+            parser.error(
+                ", ".join(orphans)
+                + (" requires" if len(orphans) == 1 else " require")
+                + " --warmup-lr"
+            )
+        return args
+    try:
+        normalize_warmup(warmup_from_args(args))
+    except ValueError as exc:
+        parser.error(str(exc))
+    return args
 
 
 def parse_args(argv=None):
@@ -465,7 +597,8 @@ def parse_args(argv=None):
             "final summary instead of per-iteration/checkpoint logs."
         ),
     )
-    return baselines.validate_arguments(parser, parser.parse_args(argv))
+    args = baselines.validate_arguments(parser, parser.parse_args(argv))
+    return validate_warmup_arguments(parser, args)
 
 
 def training_options_from_args(args):
@@ -504,6 +637,7 @@ def training_options_from_args(args):
         immediate_pass_weight=args.immediate_pass_weight,
         normalize_advantages=args.normalize_advantages,
         baseline=args.baseline,
+        warmup_lr=warmup_from_args(args),
         seed=args.seed,
         ppo_max_epochs=args.ppo_max_epochs,
     )

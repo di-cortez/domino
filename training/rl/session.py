@@ -29,6 +29,11 @@ from training.rl.iteration import (
     IterationState,
     refresh_archive_backed_buckets,
 )
+from training.rl.lr_warmup import (
+    WarmupSchedule,
+    prepare_warmup_trace,
+    warmup_trace_path,
+)
 from training.rl.parallel import RLRolloutRunner
 from training.rl.matchmaking import matchmaking_policy_manifest
 from training.rl.pool import (
@@ -148,6 +153,7 @@ def _resume_inputs(training, resources, execution, reporter):
             reward_distance_mode=saved.reward_distance_mode,
             normalize_advantages=saved.normalize_advantages,
             baseline=baselines.BaselineSpec.from_mapping(saved.baseline),
+            warmup_lr=saved.warmup_lr,
             seed=saved.effective_seed,
             ppo_max_epochs=saved.ppo_max_epochs,
         ),
@@ -279,6 +285,7 @@ def _resume_configuration(
             training.baseline,
             training.ruleset_name,
         ),
+        "warmup_lr": training.warmup_lr,
         "weight_decay": float(training.weight_decay),
         "dropout_rate": float(training.dropout_rate),
         "effective_seed": int(effective_seed),
@@ -302,6 +309,38 @@ def _resume_configuration(
         "run_configuration_sha256": None,
         "git_commit": current_git_commit(),
     })
+
+
+def _warmup_schedule(training, metadata):
+    """Return the learning-rate warmup this invocation runs, or ``None``.
+
+    A fresh run starts on the first rung. A resumed run restores the rung, the
+    EMA, the hold streak and the cooldown it checkpointed, so the next climb
+    lands on the same absolute iteration it would have without the stop.
+    ``training.warmup_lr`` is already normalized by
+    ``resolve_training_options`` and, on resume, is the saved configuration's.
+    """
+    if training.warmup_lr is None:
+        return None
+    schedule = WarmupSchedule.from_warmup(
+        training.learning_rate,
+        training.warmup_lr,
+    )
+    restored = ((metadata or {}).get("training_state") or {}).get(
+        "warmup_schedule"
+    )
+    if metadata is not None and restored is None:
+        # Every warmup run writes its schedule into the first checkpoint it
+        # makes, so a resume that finds none is resuming a checkpoint taken
+        # without warmup under a configuration that asks for it. Starting the
+        # ladder over would silently drop the run back to its first rung.
+        raise ValueError(
+            "This run's configuration enables warmup_lr, but its checkpoint "
+            "records no warmup schedule state to resume from."
+        )
+    if restored is not None:
+        schedule.load_state_dict(restored)
+    return schedule
 
 
 def _invocation_target(training, execution, completed_games):
@@ -397,6 +436,14 @@ def prepare_training_session(training=None, resources=None, execution=None):
             training.use_opponent_bucket_features
         ),
     )
+    warmup_schedule = _warmup_schedule(training, inputs.metadata)
+    if warmup_schedule is not None:
+        # Installed before the optimizer state is restored, and that order is
+        # what keeps the checkpoint guard intact: the optimizer saved the rung
+        # the run was on, the restored schedule reproduces that same rung, and
+        # ``load_optimizer_state_dict`` then finds the two rates equal instead
+        # of having to be told to tolerate a mismatch.
+        network.lr = float(warmup_schedule.learning_rate)
     if inputs.metadata is not None:
         network.load_optimizer_state_dict(inputs.metadata["optimizer_state"])
     supervised_hash = (
@@ -468,6 +515,8 @@ def prepare_training_session(training=None, resources=None, execution=None):
         terminal_blocked_weight=training.terminal_blocked_weight,
         immediate_draw_weight=training.immediate_draw_weight,
         immediate_pass_weight=training.immediate_pass_weight,
+        learning_rate=training.learning_rate,
+        warmup_lr=training.warmup_lr,
     )
     resume_configuration = _resume_configuration(
         inputs,
@@ -623,6 +672,15 @@ def prepare_training_session(training=None, resources=None, execution=None):
         metadata=metrics_header,
     )
     metrics_stream = open(metrics_path, "a", encoding="utf-8")
+    warmup_stream = None
+    if warmup_schedule is not None:
+        warmup_path = prepare_warmup_trace(
+            warmup_trace_path(resources.metrics_output_path),
+            inputs.start_iteration,
+            nominal_learning_rate=training.learning_rate,
+            warmup=training.warmup_lr,
+        )
+        warmup_stream = open(warmup_path, "a", encoding="utf-8")
     start_time = time.time()
     training_perf_started = time.perf_counter()
     runtime_profile.add(
@@ -633,6 +691,8 @@ def prepare_training_session(training=None, resources=None, execution=None):
         preliminary_context,
         metrics_stream=metrics_stream,
         training_perf_started=training_perf_started,
+        warmup_schedule=warmup_schedule,
+        warmup_stream=warmup_stream,
     )
     state = IterationState(
         completed_training_games=inputs.completed_training_games,

@@ -14,6 +14,7 @@ import time
 
 import numpy as np
 
+from training.rl.lr_warmup import normalize_warmup
 from training.rl.pool import CHAMPION_VS_HEURISTIC_BUCKET
 from training.rl.champion_evaluation import (
     champion_evaluation_policy_manifest,
@@ -524,6 +525,34 @@ def _short_opponent_id(opponent_id):
     return suffix.lstrip("0") or "0" if suffix else str(opponent_id)
 
 
+def format_warmup_line(learning_rate, warmup_lr):
+    """Return the one-line description of a run's learning-rate warmup.
+
+    Shared by the training log and the canonical pipeline summary so the two
+    cannot describe the same run differently. ``warmup_lr`` is the normalized
+    mapping or ``None``.
+    """
+    warmup_lr = normalize_warmup(warmup_lr)
+    if warmup_lr is None:
+        return "Learning-rate warmup: off"
+    exponent = warmup_lr["exponent"]
+    factor = warmup_lr["factor"]
+    head = "Learning-rate warmup: on | "
+    if learning_rate is not None:
+        start = float(learning_rate) / factor ** exponent
+        head += (
+            f"{float(learning_rate):g} / {factor:g}^{exponent} = {start:.4g}"
+            f" -> {float(learning_rate):g} | "
+        )
+    return (
+        head
+        + f"EMA alpha {warmup_lr['ema_alpha']:g} | "
+        + f"KL threshold {warmup_lr['kl_threshold']:g} | "
+        + f"hold {warmup_lr['hold_iterations']} | "
+        + f"cooldown {warmup_lr['cooldown_iterations']}"
+    )
+
+
 class RLTrainingReporter:
     """Keep presentation concerns out of the RL orchestration loop."""
 
@@ -574,6 +603,8 @@ class RLTrainingReporter:
         terminal_blocked_weight,
         immediate_draw_weight,
         immediate_pass_weight,
+        learning_rate=None,
+        warmup_lr=None,
     ):
         """Describe the selected fixed algorithm policy once per invocation."""
         policy = fixed_ppo_policy(ppo_max_epochs)
@@ -602,6 +633,7 @@ class RLTrainingReporter:
             f"draw {immediate_draw_weight:g} | "
             f"pass {immediate_pass_weight:g}."
         )
+        self.status(format_warmup_line(learning_rate, warmup_lr) + ".")
         self.status("RL update configuration:")
         self.status(
             f"  value head: {'on' if use_value_head else 'off'}"

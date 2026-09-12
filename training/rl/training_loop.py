@@ -51,6 +51,7 @@ def _ensure_final_checkpoint(session, actual_final_iteration):
             context.restored_elapsed_rl_seconds
             + time.perf_counter() - context.training_perf_started
         ),
+        warmup_schedule=context.warmup_schedule,
     )
     state.final_weights_path, _state_path = _save_numbered_resume_checkpoint(
         context.network,
@@ -127,6 +128,8 @@ def train(training=None, resources=None, execution=None):
         _ensure_final_checkpoint(session, actual_final_iteration)
     finally:
         context.metrics_stream.close()
+        if context.warmup_stream is not None:
+            context.warmup_stream.close()
         final_runtime_workers = context.runner.worker_count
         opponent_count = context.runner.opponent_pool.size
         unique_neural_opponent_count = (

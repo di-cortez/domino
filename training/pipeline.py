@@ -31,6 +31,7 @@ from diagnostics.parallel_runner import MAX_DIAGNOSTIC_WORKERS, ParallelSafetyCo
 from training.datagen import generator as dataset_generator
 from training.rl import baseline as rl_baseline
 from training.rl import cli as rl_cli
+from training.rl import reporting as rl_reporting
 from training.rl.config import DEFAULT_BASELINE, DEFAULT_GPI
 from training.rl import training_loop as rl_training_loop
 from training.supervised import cli as supervised_cli
@@ -316,8 +317,9 @@ _AUTO_BUNDLE_SUFFIX_FLAGS = tuple(FLAG_SHORT_NAMES)
 # `--baseline` stays unset on the command line and is resolved much later, so
 # the parser default (None) is not what a default run actually trains with.
 # Compared against the resolved project default instead, so spelling out
-# `--baseline lookup-table` -- exactly what leaving it off does -- adds nothing
-# to the name.
+# `--baseline batch-mean` -- exactly what leaving it off does -- adds nothing
+# to the name, while `--baseline lookup-table` does name the bundle because it
+# genuinely changes the run.
 _AUTO_BUNDLE_SUFFIX_DEFAULTS = {"baseline": DEFAULT_BASELINE}
 
 
@@ -1357,6 +1359,12 @@ def run_rl_pipeline(root, config, args, assets):
         f"pass {args.immediate_pass_weight:g}"
     )
     print(
+        rl_reporting.format_warmup_line(
+            args.learning_rate,
+            rl_cli.warmup_from_args(args),
+        )
+    )
+    print(
         "Configuration SHA-256: "
         f"{run_configuration['configuration_sha256']}"
     )
@@ -1922,6 +1930,9 @@ def parse_args(argv=None):
         parser.error(str(exc))
     # Checked once --value-head and any resumed baseline are both settled.
     rl_baseline.validate_arguments(parser, args)
+    # Likewise after hydration, so a resumed warmup run is judged on the
+    # sub-parameters it was locked with rather than on the command line.
+    rl_cli.validate_warmup_arguments(parser, args)
     if args.bundle_suffix is None:
         # Derived last, so it reads the same settings the run is created with:
         # a resumed run has already had its locked arguments assigned back

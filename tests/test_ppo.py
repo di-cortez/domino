@@ -109,7 +109,7 @@ class _FakePPONetwork:
         for name, value in arrays.items():
             setattr(self, name, value)
 
-    def evaluate_actions(self, states, legal_masks, actions):
+    def evaluate_actions(self, states, legal_masks, actions, **_options):
         self.eval_calls += 1
         if self.fail_first_eval and self.eval_calls == 1:
             raise MemoryError("simulated CUDA workspace OOM")

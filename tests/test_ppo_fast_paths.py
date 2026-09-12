@@ -249,8 +249,9 @@ def _run_steps(network, step, *, entropy_coef, **step_kwargs):
 # only an exact zero may skip the entropy gradient.
 @pytest.mark.parametrize("entropy_coef", [0.0, 1e-12, 0.03])
 @pytest.mark.parametrize("collect_metrics", [True, False])
+@pytest.mark.parametrize("validate_decisions", [True, False])
 def test_every_step_mode_matches_the_original_update_bit_for_bit(
-    device, wiring, dropout_rate, entropy_coef, collect_metrics
+    device, wiring, dropout_rate, entropy_coef, collect_metrics, validate_decisions
 ):
     reference = _network(wiring, dropout_rate=dropout_rate, device=device)
     candidate = _network(wiring, dropout_rate=dropout_rate, device=device)
@@ -266,6 +267,7 @@ def test_every_step_mode_matches_the_original_update_bit_for_bit(
         PolicyNetwork.backward_ppo,
         entropy_coef=entropy_coef,
         collect_metrics=collect_metrics,
+        validate_decisions=validate_decisions,
     )
 
     _assert_same_parameters(_parameters(reference), _parameters(candidate))
@@ -646,11 +648,11 @@ class _EvaluationOOMNetwork(_FakePPONetwork):
         self.memory_failures = 0
         self.released = 0
 
-    def evaluate_actions(self, states, legal_masks, actions):
+    def evaluate_actions(self, states, legal_masks, actions, **options):
         if np.asarray(actions).size > ppo.PPO_TARGET_DECISIONS_PER_MINIBATCH:
             self.memory_failures += 1
             raise MemoryError("simulated evaluation OOM")
-        return super().evaluate_actions(states, legal_masks, actions)
+        return super().evaluate_actions(states, legal_masks, actions, **options)
 
     def release_disposable_cache(self):
         self.released += 1
@@ -890,8 +892,8 @@ def test_every_statistic_reaches_the_host_in_one_transfer(monkeypatch):
 
     # The floating statistics and the integer counts: two, for 14 partitions.
     assert len(transfers) == 2
-    # Only the public action evaluation's two mask checks still read back.
-    assert len(scalar_reads) == 2 * len(partitions)
+    # The storage validated its decisions once, so no mask check reads back.
+    assert not scalar_reads
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -942,3 +944,126 @@ def test_a_poisoned_epoch_is_rolled_back_through_the_real_evaluation():
     assert metrics["stopped_by_kl"] is False
     assert network.optimizer_step_count == 0
     _assert_same_parameters(before, _parameters(network))
+
+
+def _replace_buffer(buffer, **changes):
+    return PPOBuffer(**{
+        **{field: getattr(buffer, field) for field in buffer.__dataclass_fields__},
+        **changes,
+    })
+
+
+def _defective(buffer, defect):
+    actions = np.array(buffer.actions)
+    masks = np.array(buffer.legal_masks)
+    if defect == "single_legal_action":
+        masks[:, 300] = False
+        masks[actions[300], 300] = True
+    elif defect == "illegal_action":
+        masks[:, 700] = True
+        masks[actions[700], 700] = False
+    elif defect == "negative_action":
+        actions[900] = -1
+    elif defect == "out_of_range_action":
+        actions[5] = masks.shape[0]
+    elif defect == "mask_columns":
+        masks = masks[:, :-1]
+    return _replace_buffer(buffer, actions=actions, legal_masks=masks)
+
+
+STORAGE_LOCATIONS = [
+    ("cpu", "ram"),
+    pytest.param("gpu", "gpu", marks=DEVICES[1].marks),
+    pytest.param("gpu", "ram_streamed", marks=DEVICES[1].marks),
+]
+
+
+@pytest.mark.parametrize(("device", "location"), STORAGE_LOCATIONS)
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "single_legal_action",
+        "illegal_action",
+        "negative_action",
+        "out_of_range_action",
+        "mask_columns",
+    ],
+)
+def test_invalid_decisions_fail_before_the_first_weight_update(
+    device, location, defect, monkeypatch
+):
+    network = _network("no_critic", device=device)
+    valid = _real_buffer(network, 1100, seed=15, with_values=False)
+    buffer = _defective(valid, defect)
+    if location == "ram_streamed":
+        monkeypatch.setattr(ppo, "effective_gpu_available_bytes", lambda: 0)
+    before = _parameters(network)
+    steps = []
+    original = network.backward_ppo
+    network.backward_ppo = lambda *a, **k: steps.append(1) or original(*a, **k)
+
+    with pytest.raises(ValueError, match="PPO"):
+        ppo_update(
+            network, buffer, base_seed=4, iteration=2, entropy_coef=0.0, max_epochs=2
+        )
+
+    assert not steps
+    assert network.optimizer_step_count == 0
+    _assert_same_parameters(before, _parameters(network))
+
+
+@pytest.mark.parametrize(("device", "location"), STORAGE_LOCATIONS)
+def test_every_storage_location_serves_the_validated_decisions(
+    device, location, monkeypatch
+):
+    network = _network("no_critic", device=device)
+    valid = _real_buffer(network, 900, seed=16, with_values=False)
+    # A directly constructed buffer with writable arrays, unlike from_samples.
+    buffer = _replace_buffer(
+        valid,
+        actions=np.array(valid.actions),
+        legal_masks=np.array(valid.legal_masks),
+    )
+    if location == "ram_streamed":
+        monkeypatch.setattr(ppo, "effective_gpu_available_bytes", lambda: 0)
+    storage = PPOBufferStorage(network, buffer)
+    try:
+        assert storage.location == location
+        indices = np.arange(0, 900, 7)
+        expected_actions = _host(storage.batch(indices)["actions"]).copy()
+        expected_masks = _host(storage.batch(indices)["legal_masks"]).copy()
+        # Writing an illegal action after validation must not reach a batch.
+        buffer.actions[indices[0]] = -1
+        buffer.legal_masks[:, indices[1]] = False
+        batch = storage.batch(indices)
+        assert _host(batch["actions"]).tobytes() == expected_actions.tobytes()
+        assert _host(batch["legal_masks"]).tobytes() == expected_masks.tobytes()
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_public_action_evaluation_still_checks_every_batch(device):
+    network = _network("no_critic", device=device)
+    batch = _batch(17)
+    single = batch["masks"].copy()
+    single[:, 2] = False
+    single[batch["actions"][2], 2] = True
+    illegal = batch["masks"].copy()
+    illegal[batch["actions"][4], 4] = False
+    illegal[(batch["actions"][4] + 1) % 5, 4] = True
+    illegal[(batch["actions"][4] + 2) % 5, 4] = True
+
+    with pytest.raises(ValueError, match="at least two legal"):
+        network.evaluate_actions(batch["x"], single, batch["actions"])
+    with pytest.raises(ValueError, match="not legal"):
+        network.evaluate_actions(batch["x"], illegal, batch["actions"])
+    with pytest.raises(ValueError, match="at least two legal"):
+        network.backward_ppo(
+            batch["x"],
+            batch["actions"],
+            single,
+            batch["old_log_probs"],
+            batch["advantages"],
+            collect_metrics=False,
+        )

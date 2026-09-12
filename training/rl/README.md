@@ -502,6 +502,18 @@ statistics are bit-identical to reading each one back as it was produced. A
 non-finite partition is detected at that same point and raises before any
 statistic exists, so the epoch rollback is unchanged.
 
+The decision data of a buffer cannot change during its update, so it is
+validated once rather than per batch. `PPOBufferStorage` checks the whole
+buffer when it is created, before the workspace probe and the first step,
+however the buffer was built: one column per decision, at least two legal
+actions, every action index in range, and every action legal under its mask.
+It keeps read-only copies of the actions and masks, so a later write to the
+buffer cannot reach a batch. Optimizer steps and evaluation partitions drawn
+from that storage call `evaluate_actions`/`backward_ppo` with
+`validate_decisions=False`, which drops the two per-batch checks that each
+cost a host transfer; shape checks still run, and every other caller keeps
+the per-batch checks by default.
+
 Enable the optional PPO actor-critic with:
 
 ```bash

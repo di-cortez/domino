@@ -129,6 +129,39 @@ def scale_advantages(values, epsilon=ADVANTAGE_EPSILON):
     return np.ascontiguousarray(scaled, dtype=np.float32), False, mean, std
 
 
+def _validated_decisions(actions, legal_masks):
+    """Return read-only copies of one buffer's actions and masks, validated.
+
+    Everything the masked evaluation checks about the data itself -- one
+    column per decision, at least two legal actions per decision, an action
+    index in range, and that action legal under its mask -- is checked here
+    once over the whole buffer. The values do not depend on the network, so
+    batches drawn from the returned arrays need no per-batch re-check.
+    Writable inputs are copied so a later write cannot invalidate the result.
+    """
+    actions = np.asarray(actions)
+    legal_masks = np.asarray(legal_masks)
+    if legal_masks.dtype != np.bool_:
+        legal_masks = legal_masks > 0
+    if actions.ndim != 1 or legal_masks.ndim != 2 or (
+        legal_masks.shape[1] != actions.size
+    ):
+        raise ValueError("PPO legal masks must have one column per decision.")
+    if np.any(legal_masks.sum(axis=0) < 2):
+        raise ValueError("PPO buffer contains a forced or single-option action.")
+    if np.any(actions < 0) or np.any(actions >= legal_masks.shape[0]):
+        raise ValueError("PPO buffer contains an out-of-range action index.")
+    if np.any(~legal_masks[actions, np.arange(actions.size)]):
+        raise ValueError("PPO buffer contains an action outside its legal mask.")
+    validated = []
+    for array in (actions, legal_masks):
+        if array.flags.writeable:
+            array = np.array(array, copy=True)
+            array.setflags(write=False)
+        validated.append(array)
+    return tuple(validated)
+
+
 @dataclass(frozen=True)
 class PPOBuffer:
     """One immutable on-policy decision batch in contiguous host arrays."""
@@ -221,12 +254,7 @@ class PPOBuffer:
             raise ValueError("PPO states must have one column per decision.")
         if legal_masks.ndim != 2 or legal_masks.shape[1] != len(samples):
             raise ValueError("PPO legal masks must have one column per decision.")
-        if np.any(legal_masks.sum(axis=0) < 2):
-            raise ValueError("PPO buffer contains a forced or single-option action.")
-        if np.any(actions < 0) or np.any(actions >= legal_masks.shape[0]):
-            raise ValueError("PPO buffer contains an out-of-range action index.")
-        if np.any(~legal_masks[actions, np.arange(len(samples))]):
-            raise ValueError("PPO buffer contains an action outside its legal mask.")
+        actions, legal_masks = _validated_decisions(actions, legal_masks)
         if not np.all(np.isfinite(old_log_probs)):
             raise ValueError("PPO old_log_probs contain NaN or infinity.")
         if baseline is None:
@@ -466,6 +494,16 @@ class PPOBufferStorage:
     def __init__(self, network, buffer):
         self.network = network
         self.buffer = buffer
+        # Validated here, for every storage, whoever built the buffer: a
+        # buffer constructed directly rather than through ``from_samples`` is
+        # checked all the same, before any batch or optimizer step exists.
+        self._actions, self._legal_masks = _validated_decisions(
+            buffer.actions,
+            buffer.legal_masks,
+        )
+        # Every batch indexes actions and masks with the same indices, so a
+        # batch of this storage pairs them exactly as validated above.
+        self.decisions_validated = True
         self.location = "ram_streamed" if network.device == "gpu" else "ram"
         self._device_arrays = None
         self.preflight = {
@@ -499,8 +537,8 @@ class PPOBufferStorage:
         try:
             self._device_arrays = {
                 "states": xp.asarray(self.buffer.states, dtype=xp.float32),
-                "actions": xp.asarray(self.buffer.actions, dtype=xp.int64),
-                "legal_masks": xp.asarray(self.buffer.legal_masks, dtype=xp.bool_),
+                "actions": xp.asarray(self._actions, dtype=xp.int64),
+                "legal_masks": xp.asarray(self._legal_masks, dtype=xp.bool_),
                 "old_log_probs": xp.asarray(self.buffer.old_log_probs, dtype=xp.float32),
                 "advantages": xp.asarray(self.buffer.advantages, dtype=xp.float32),
                 "returns": xp.asarray(self.buffer.returns, dtype=xp.float32),
@@ -542,8 +580,8 @@ class PPOBufferStorage:
             return batch
         batch = {
             "states": xp.asarray(self.buffer.states[:, indices], dtype=xp.float32),
-            "actions": xp.asarray(self.buffer.actions[indices], dtype=xp.int64),
-            "legal_masks": xp.asarray(self.buffer.legal_masks[:, indices], dtype=xp.bool_),
+            "actions": xp.asarray(self._actions[indices], dtype=xp.int64),
+            "legal_masks": xp.asarray(self._legal_masks[:, indices], dtype=xp.bool_),
             "old_log_probs": xp.asarray(self.buffer.old_log_probs[indices], dtype=xp.float32),
             "advantages": xp.asarray(self.buffer.advantages[indices], dtype=xp.float32),
             "returns": xp.asarray(self.buffer.returns[indices], dtype=xp.float32),
@@ -676,6 +714,9 @@ def evaluate_full_buffer(
         )
 
     xp = network.xp
+    # A storage that validated its whole buffer at construction serves only
+    # batches of those decisions; anything else is checked batch by batch.
+    validate_decisions = not getattr(storage, "decisions_validated", False)
     use_value_head = bool(getattr(network, "use_value_head", False))
     sum_count = len(_POLICY_SUMS) + (len(_CRITIC_SUMS) if use_value_head else 0)
     sums = xp.zeros(sum_count, dtype=xp.float64)
@@ -694,7 +735,10 @@ def evaluate_full_buffer(
         finish_phase("partition_batch_materialization", phase_started)
         phase_started = time.perf_counter()
         new_log_probs, entropy, _policy = network.evaluate_actions(
-            batch["states"], batch["legal_masks"], batch["actions"]
+            batch["states"],
+            batch["legal_masks"],
+            batch["actions"],
+            validate_decisions=validate_decisions,
         )
         # Read before the critic forward, which shares the cache on the
         # value-head baselines and would overwrite the policy logits.
@@ -1160,6 +1204,9 @@ def ppo_update(
                     # epoch's steps. A minibatch's own statistics describe an
                     # intermediate policy and were never read.
                     collect_metrics=False,
+                    # ``storage`` validated every decision of this buffer
+                    # before the first step; see ``_validated_decisions``.
+                    validate_decisions=False,
                 )
                 timing["optimizer_steps"] += time.perf_counter() - optimizer_started
                 step_detail = step_metrics.pop("runtime_profile_detail", {})

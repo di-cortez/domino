@@ -459,13 +459,27 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             self.cache[self.last_hidden_activation_key],
         ) + self.bv
 
-    def evaluate_actions(self, x, legal_masks, action_indices, training=False):
+    def evaluate_actions(
+        self,
+        x,
+        legal_masks,
+        action_indices,
+        training=False,
+        *,
+        validate_decisions=True,
+    ):
         """Evaluate observed actions under the normalized masked policy.
 
         Returns one log-probability and entropy value per sample while leaving
         the forward cache ready for a subsequent policy-gradient update.
         Whole-buffer PPO metrics keep the default ``training=False`` so reported
         ratios, KL, and clipping describe the complete network.
+
+        ``validate_decisions=False`` skips the two data checks that each cost a
+        host transfer -- at least two legal actions, and the observed action
+        legal -- and is only for batches of a buffer already validated as a
+        whole, as ``PPOBufferStorage`` does before the first update. Shape
+        checks always run.
         """
         log_probs, entropy, policy, _log_policy = self._evaluate_masked_actions(
             x,
@@ -473,6 +487,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             action_indices,
             training=training,
             need_entropy=True,
+            validate_decisions=validate_decisions,
         )
         return log_probs, entropy, policy
 
@@ -484,6 +499,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         *,
         training,
         need_entropy,
+        validate_decisions=True,
     ):
         """Return ``(log_probs, entropy, policy, log_policy)`` for one batch.
 
@@ -511,14 +527,17 @@ class PolicyNetwork(SupervisedNeuralNetwork):
                 "legal_masks must have the same shape as policy logits: "
                 f"expected {logits.shape}, got {legal_masks.shape}."
             )
-        legal_counts = xp.sum(legal_masks, axis=0)
-        if self._as_float(xp.any(legal_counts < 2)):
-            raise ValueError(
-                "Every saved RL decision must have at least two legal policy actions."
-            )
         columns = xp.arange(sample_count)
-        if self._as_float(xp.any(~legal_masks[action_indices, columns])):
-            raise ValueError("An observed PPO action is not legal under its saved mask.")
+        if validate_decisions:
+            legal_counts = xp.sum(legal_masks, axis=0)
+            if self._as_float(xp.any(legal_counts < 2)):
+                raise ValueError(
+                    "Every saved RL decision must have at least two legal policy actions."
+                )
+            if self._as_float(xp.any(~legal_masks[action_indices, columns])):
+                raise ValueError(
+                    "An observed PPO action is not legal under its saved mask."
+                )
 
         masked_logits = xp.where(legal_masks, logits, -xp.inf)
         shifted = masked_logits - xp.max(masked_logits, axis=0, keepdims=True)
@@ -786,6 +805,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         clip_grad_norm=5.0,
         log_ratio_limit=20.0,
         collect_metrics=True,
+        validate_decisions=True,
     ):
         """Apply one masked PPO clipped-surrogate SGD step.
 
@@ -807,6 +827,8 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         zero, so that gradient is not built, and without ``collect_metrics``
         neither is the entropy. Every other coefficient, however small, takes
         the regularized path unchanged.
+
+        ``validate_decisions`` has the meaning it has in ``evaluate_actions``.
         """
         profile_started = time.perf_counter()
         timing = {}
@@ -831,6 +853,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             action_indices,
             training=True,
             need_entropy=collect_metrics or entropy_in_gradient,
+            validate_decisions=validate_decisions,
         )
         finish_phase("policy_forward_and_action_mask_validation", phase_started)
         phase_started = time.perf_counter()

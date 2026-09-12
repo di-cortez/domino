@@ -69,5 +69,6 @@ is the steadier signal for stages B and C. From stage C on, `--cpu-affinity
 |---|---|---|---|
 | B: discard unused minibatch metrics | Byte-identical in all harness cases and smokes, warmup trace included | 1.213 s -> 0.920 s (0.76x); optimizer step 2.24 ms -> 1.43 ms | Removes 7 policy and 2 critic host transfers per optimizer step |
 | C: exact-zero entropy fast path | Byte-identical in all harness cases and smokes, warmup trace included | Unpinned 0.995 s -> 0.977 s, step 1.53 -> 1.32 ms; pinned 0.811 s -> 0.760 s, step 1.49 -> 1.44 ms (q1 1.40 -> 1.35) | About eight fewer kernel launches per step; the total is within the evaluation's noise |
+| D: skip the redundant unmasked softmax | Byte-identical in all harness cases and smokes, warmup trace included | Pinned median 0.757 s -> 0.788 s (noise), q1 0.744 -> 0.725 s, min 0.736 -> 0.703 s; step 1.41 -> 1.29 ms; evaluation min 20.1 -> 19.2 ms | Five fewer kernel launches per forward in every optimizer step and evaluation partition |
 
 Per-stage evidence lives in `results/<stage>/`.

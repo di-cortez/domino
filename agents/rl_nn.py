@@ -44,11 +44,10 @@ class _CriticNetwork(SupervisedNeuralNetwork):
 
     def forward(self, x, training=False):
         """Return ``V(s)`` per column, leaving the cache ready for backprop."""
-        super().forward(x, training=training)
-        values = self.cache[self.logits_key]
-        # The parent softmaxes the output layer. Over a single output that is
-        # the constant 1.0 and says nothing, so the cached activation is
-        # replaced by the value itself and the cache stays truthful.
+        values = self._forward_logits(x, training=training)
+        # The parent would softmax the output layer. Over a single output that
+        # is the constant 1.0 and says nothing, so it is never computed and the
+        # cached activation is the value itself, which keeps the cache truthful.
         self.cache[f"A{self.layer_count}"] = values
         return values
 
@@ -496,8 +495,9 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         bit-identical to gathering them from the full log-policy.
         """
         xp = self.xp
-        self.forward(x, training=training)
-        logits = self.cache[self.logits_key]
+        # The normalization below is over the legal actions only, so the
+        # full-support softmax ``forward`` would add is never read.
+        logits = self._forward_logits(x, training=training)
         sample_count = logits.shape[1]
         action_indices = xp.asarray(action_indices, dtype=xp.int64).reshape(-1)
         legal_masks = xp.asarray(legal_masks, dtype=xp.bool_)

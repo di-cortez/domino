@@ -1,0 +1,266 @@
+[
+ {
+  "case": "cpu_six_entropy_shared_critic",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     2,
+     2
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "cpu_six_hot_lr",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     1,
+     1
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "cpu_three_own_critic_dropout",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     3,
+     3
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_entropy_shared_critic",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     8,
+     8
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": true,
+    "epochs": [
+     8,
+     8
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_hot_lr",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     1,
+     1
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": true,
+    "epochs": [
+     1,
+     1
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_no_up_entropy_dropout",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     4,
+     4
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": true,
+    "epochs": [
+     4,
+     4
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_own_critic_dropout",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     3,
+     3
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": true,
+    "epochs": [
+     3,
+     3
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_production",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     16,
+     16
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": true,
+    "epochs": [
+     16,
+     16
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_three_production",
+  "all_exact": true,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": true,
+    "epochs": [
+     16,
+     16
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": true,
+    "epochs": [
+     16,
+     16
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {},
+    "parameter_errors": null
+   }
+  ]
+ }
+]

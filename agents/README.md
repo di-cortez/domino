@@ -186,6 +186,13 @@ decisions with temporal decay. PPO reuses exactly that mask and log-probability;
 illegal actions receive zero probability and no direct policy or entropy
 gradient. A decision's reward is not weighted by its number of legal choices.
 
+`forward` is `_forward_logits` followed by the full-support softmax cached as
+`A{L}`. PPO action evaluation and the separate critic call `_forward_logits`
+directly: the first normalizes over the legal subset itself and the second
+reads its single linear output, so neither computes a softmax nobody reads.
+The cached inputs, activations, dropout masks, draws, and logits are identical
+either way, and every other consumer keeps calling `forward`.
+
 `PolicyNetwork` is policy-only by default and self-play updates it with PPO.
 Optional value-head training is retained only for `--ppo-max-epochs 1`
 regression runs; it adds `Wv`/`bv`, reading the last hidden activation, next to

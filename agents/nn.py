@@ -381,6 +381,22 @@ class SupervisedNeuralNetwork:
             )
 
     def forward(self, x, training=False):
+        logits = self._forward_logits(x, training=training)
+        probabilities = self.softmax(logits)
+        self.cache[f"A{self.layer_count}"] = probabilities
+        return probabilities
+
+    def _forward_logits(self, x, training=False):
+        """Run and cache every layer, stopping before the output softmax.
+
+        The cache holds everything backpropagation reads -- the input, hidden
+        pre-activations and activations, dropout masks, and the logits -- but
+        not ``A{L}``. A caller that normalizes over its own subset of actions,
+        as the masked PPO evaluation does, never reads the full-support
+        softmax, so skipping it changes no value. ``forward`` is exactly this
+        followed by that softmax, with the same dropout draws in the same
+        order.
+        """
         x = self._to_backend(x)
         last = self.layer_count
         cache = {"X": x}
@@ -404,11 +420,9 @@ class SupervisedNeuralNetwork:
             getattr(self, f"W{last}"),
             activation,
         ) + getattr(self, f"b{last}")
-        probabilities = self.softmax(logits)
         cache[f"Z{last}"] = logits
-        cache[f"A{last}"] = probabilities
         self.cache = cache
-        return probabilities
+        return logits
 
     def backpropagate_layers(self, delta, inverse_count, hidden_gradient_hook=None):
         """Return every weight and bias gradient from the cached forward pass.

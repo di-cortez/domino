@@ -470,7 +470,9 @@ gradient, so those steps build neither the entropy gradient nor, since they
 report nothing, the entropy itself: only the observed actions' log-probabilities
 are taken. Every non-zero coefficient, however small, keeps the regularized
 path. Both are bit-identical to the previous update, and the whole-buffer
-evaluation still reports entropy for every run.
+evaluation still reports entropy for every run. PPO action evaluation also
+skips the network's full-support softmax, which the masked normalization never
+read; see [`../../agents/README.md`](../../agents/README.md).
 
 Enable the optional PPO actor-critic with:
 

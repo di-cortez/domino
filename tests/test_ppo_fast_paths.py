@@ -434,3 +434,121 @@ def test_only_an_exact_zero_coefficient_without_metrics_skips_the_entropy(
     )
 
     assert requested == [builds_entropy]
+
+
+def _reference_forward(network, x, training):
+    """``SupervisedNeuralNetwork.forward`` exactly as it was before the split."""
+    x = network._to_backend(x)  # pylint: disable=protected-access
+    last = network.layer_count
+    cache = {"X": x}
+    activation = x
+    for index in range(1, last):
+        pre_activation = network.xp.dot(
+            getattr(network, f"W{index}"),
+            activation,
+        ) + getattr(network, f"b{index}")
+        activation, mask = network._hidden_dropout(  # pylint: disable=protected-access
+            network.relu(pre_activation),
+            training,
+        )
+        cache[f"Z{index}"] = pre_activation
+        cache[f"A{index}"] = activation
+        if mask is not None:
+            cache[f"D{index}"] = mask
+    logits = network.xp.dot(
+        getattr(network, f"W{last}"),
+        activation,
+    ) + getattr(network, f"b{last}")
+    probabilities = network.softmax(logits)
+    cache[f"Z{last}"] = logits
+    cache[f"A{last}"] = probabilities
+    return probabilities, cache
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("hidden_sizes", [(6,), (6, 4), (8, 6, 4)])
+@pytest.mark.parametrize("dropout_rate", [0.0, 0.3])
+@pytest.mark.parametrize("training", [False, True])
+def test_forward_still_matches_the_original_layer_loop(
+    device, hidden_sizes, dropout_rate, training
+):
+    network = PolicyNetwork(
+        input_size=7,
+        output_size=5,
+        hidden_sizes=hidden_sizes,
+        random_seed=3,
+        device=device,
+        dropout_rate=dropout_rate,
+    )
+    x = np.random.default_rng(8).normal(size=(7, 16)).astype(np.float32)
+
+    np.random.seed(77)
+    expected, expected_cache = _reference_forward(network, x, training)
+    expected_draws = np.random.random(4)
+    np.random.seed(77)
+    actual = network.forward(x, training=training)
+    actual_draws = np.random.random(4)
+
+    assert _host(actual).tobytes() == _host(expected).tobytes()
+    assert list(network.cache) == list(expected_cache)
+    for key, value in expected_cache.items():
+        assert _host(network.cache[key]).tobytes() == _host(value).tobytes(), key
+    # The same number of dropout draws, in the same order.
+    assert actual_draws.tobytes() == expected_draws.tobytes()
+
+
+def test_logits_forward_caches_everything_but_the_output_softmax():
+    network = _network("no_critic", dropout_rate=0.2)
+    x = _batch(6)["x"]
+
+    np.random.seed(5)
+    network.forward(x, training=True)
+    full_cache = dict(network.cache)
+    np.random.seed(5)
+    logits = network._forward_logits(x, training=True)  # pylint: disable=protected-access
+
+    last = f"A{network.layer_count}"
+    assert set(full_cache) - set(network.cache) == {last}
+    assert logits is network.cache[network.logits_key]
+    for key, value in network.cache.items():
+        assert value.tobytes() == full_cache[key].tobytes(), key
+
+
+@pytest.mark.parametrize("wiring", sorted(WIRINGS))
+def test_masked_ppo_paths_never_build_the_full_support_softmax(wiring, monkeypatch):
+    network = _network(wiring, dropout_rate=0.2)
+    batch = _batch(7)
+
+    def forbidden(_logits):
+        raise AssertionError("the unmasked softmax was computed")
+
+    monkeypatch.setattr(network, "softmax", forbidden)
+    if network.critic_network is not None:
+        monkeypatch.setattr(network.critic_network, "softmax", forbidden)
+    network.evaluate_actions(batch["x"], batch["masks"], batch["actions"])
+    for collect_metrics in (True, False):
+        network.backward_ppo(
+            batch["x"],
+            batch["actions"],
+            batch["masks"],
+            batch["old_log_probs"],
+            batch["advantages"],
+            **_value_arguments(network, batch),
+            entropy_coef=0.01,
+            collect_metrics=collect_metrics,
+        )
+    if network.use_value_head:
+        network.critic_values(batch["x"])
+
+
+def test_a_separate_critic_still_caches_its_value_as_the_output_activation():
+    network = _network("own_critic")
+    critic = network.critic_network
+    x = _batch(8)["x"]
+
+    values = critic.forward(x)
+    _expected, expected_cache = _reference_forward(critic, x, False)
+
+    last = critic.layer_count
+    assert values.tobytes() == expected_cache[f"Z{last}"].tobytes()
+    assert critic.cache[f"A{last}"] is values

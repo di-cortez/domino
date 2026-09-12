@@ -1,0 +1,86 @@
+[
+ {
+  "smoke": "gpu_warmup",
+  "full": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "first_metrics_row_difference": null,
+  "reference_full_equals_split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "candidate_full_equals_split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  }
+ },
+ {
+  "smoke": "gpu_hot_critic",
+  "full": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "first_metrics_row_difference": null,
+  "reference_full_equals_split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "candidate_full_equals_split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  }
+ },
+ {
+  "smoke": "cpu_own_critic",
+  "full": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "first_metrics_row_difference": null,
+  "reference_full_equals_split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  },
+  "candidate_full_equals_split": {
+   "weights": true,
+   "metrics_rows": true,
+   "warmup": true,
+   "optimizer_step_count": true
+  }
+ }
+]

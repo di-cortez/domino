@@ -622,8 +622,14 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         dtype,
         value_coef,
         clip_epsilon,
+        collect_metrics=True,
     ):
-        """Build critic metrics and gradients for one PPO minibatch."""
+        """Build critic gradients, and optionally metrics, for one minibatch.
+
+        ``collect_metrics=False`` skips only the two reported reductions and
+        their host transfers; the finite check guards the update itself and
+        always runs.
+        """
         if not getattr(self, "use_value_head", False):
             if returns is not None or old_values is not None:
                 raise ValueError(
@@ -656,14 +662,16 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             last_hidden,
             inverse_count,
         )
-        return {
-            "loss": self._as_float(xp.mean(losses)),
-            "clip_fraction": self._as_float(
-                xp.mean(xp.abs(value_delta) > float(clip_epsilon))
-            ),
+        terms = {
             "gradients": gradients,
             "shared_hidden_gradient": shared,
         }
+        if collect_metrics:
+            terms["loss"] = self._as_float(xp.mean(losses))
+            terms["clip_fraction"] = self._as_float(
+                xp.mean(xp.abs(value_delta) > float(clip_epsilon))
+            )
+        return terms
 
     def _apply_gradient_step(self, gradients, grad_norm, clip_grad_norm, dtype):
         """Clip, apply, decay, and account for one plain-SGD optimizer step.
@@ -745,6 +753,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         entropy_coef=0.01,
         clip_grad_norm=5.0,
         log_ratio_limit=20.0,
+        collect_metrics=True,
     ):
         """Apply one masked PPO clipped-surrogate SGD step.
 
@@ -752,6 +761,15 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         optimizer already needed.  It therefore attributes asynchronous GPU
         work to the phase ending at the next existing scalar transfer without
         inserting profiler-only device synchronizations.
+
+        ``collect_metrics=False`` is for callers that discard the per-minibatch
+        policy and critic statistics, as ``ppo_update`` does: it reports its
+        epochs from a whole-buffer evaluation instead. Those reductions all run
+        after the gradient exists and each one is a host transfer, so skipping
+        them leaves the update bit-identical. The result then carries only the
+        optimizer keys from ``_apply_gradient_step`` and the runtime profile;
+        the policy and critic metric keys are absent rather than ``None``, so a
+        caller that needs them fails loudly instead of reading a gap as zero.
         """
         profile_started = time.perf_counter()
         timing = {}
@@ -805,8 +823,6 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         clipped_ratio = xp.clip(ratio, lower, upper)
         unclipped = ratio * advantages
         clipped = clipped_ratio * advantages
-        surrogate = xp.minimum(unclipped, clipped)
-        policy_loss = -xp.mean(surrogate)
 
         # Where the clipped branch is strictly smaller, its derivative with
         # respect to theta is zero. Else d[-ratio*A]/dlogpi = -ratio*A.
@@ -835,6 +851,7 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             dtype=dz3.dtype,
             value_coef=value_coef,
             clip_epsilon=clip_epsilon,
+            collect_metrics=collect_metrics,
         )
         gradients = self.backpropagate_layers(
             dz3,
@@ -861,22 +878,34 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             dz3.dtype,
         )
 
-        clip_fraction = xp.mean((ratio < lower) | (ratio > upper))
-        approx_kl = xp.mean((ratio - 1.0) - log_ratio)
-        result = {
-            "policy_loss": self._as_float(policy_loss),
-            "entropy": self._as_float(xp.mean(entropy)),
-            "approx_kl": self._as_float(approx_kl),
-            "clip_fraction": self._as_float(clip_fraction),
-            "ratio_mean": self._as_float(xp.mean(ratio)),
-            "ratio_min": self._as_float(xp.min(ratio)),
-            "ratio_max": self._as_float(xp.max(ratio)),
-            **update_metrics,
-            "value_loss": None if value_terms is None else value_terms["loss"],
-            "value_clip_fraction": (
-                None if value_terms is None else value_terms["clip_fraction"]
-            ),
-        }
+        if collect_metrics:
+            # Reporting reads the clipped ``log_ratio`` the gradient used, as
+            # it always has; ``evaluate_full_buffer`` is the unclamped report.
+            result = {
+                "policy_loss": self._as_float(
+                    -xp.mean(xp.minimum(unclipped, clipped))
+                ),
+                "entropy": self._as_float(xp.mean(entropy)),
+                "approx_kl": self._as_float(
+                    xp.mean((ratio - 1.0) - log_ratio)
+                ),
+                "clip_fraction": self._as_float(
+                    xp.mean((ratio < lower) | (ratio > upper))
+                ),
+                "ratio_mean": self._as_float(xp.mean(ratio)),
+                "ratio_min": self._as_float(xp.min(ratio)),
+                "ratio_max": self._as_float(xp.max(ratio)),
+                **update_metrics,
+                "value_loss": (
+                    None if value_terms is None else value_terms["loss"]
+                ),
+                "value_clip_fraction": (
+                    None if value_terms is None
+                    else value_terms["clip_fraction"]
+                ),
+            }
+        else:
+            result = dict(update_metrics)
         finish_phase(
             "gradient_clipping_parameter_update_and_metric_transfers",
             phase_started,

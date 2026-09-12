@@ -1,0 +1,213 @@
+{
+ "kind": "ppo_harness_timing",
+ "variant": "production",
+ "device": "gpu",
+ "repetitions": 5,
+ "iterations_per_repetition": 3,
+ "checkouts": {
+  "baseline": "<scratch>/ref_36a8160",
+  "stage_b": "/home/diego/CCO/ic/dom"
+ },
+ "runs": {
+  "baseline": [
+   {
+    "file": "<scratch>/perf/timing_stage_b/baseline_rep00.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 539848
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_b/baseline_rep01.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 540488
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_b/baseline_rep02.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 539224
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_b/baseline_rep03.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 540324
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_b/baseline_rep04.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 539828
+   }
+  ],
+  "stage_b": [
+   {
+    "file": "<scratch>/perf/timing_stage_b/stage_b_rep00.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 535364
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_b/stage_b_rep01.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 535716
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_b/stage_b_rep02.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 530920
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_b/stage_b_rep03.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 535576
+   },
+   {
+    "file": "<scratch>/perf/timing_stage_b/stage_b_rep04.json",
+    "peak_gpu_pool_used_bytes": null,
+    "peak_host_rss_kib": 535552
+   }
+  ]
+ },
+ "epochs_completed": {
+  "baseline": [
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16
+  ],
+  "stage_b": [
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16
+  ]
+ },
+ "per_update": {
+  "baseline": {
+   "update_seconds": {
+    "count": 15,
+    "median": 1.2132968869998422,
+    "q1": 1.2089020190001065,
+    "q3": 1.2168178360000184,
+    "min": 0.9975019000000884,
+    "max": 1.2223259510001299
+   },
+   "optimizer_steps_seconds": {
+    "count": 15,
+    "median": 0.5738143879989366,
+    "q1": 0.5704833360007342,
+    "q3": 0.5748782209998353,
+    "min": 0.5034519870011991,
+    "max": 0.6232814340005461
+   },
+   "minibatch_materialization_seconds": {
+    "count": 15,
+    "median": 0.029930472997648394,
+    "q1": 0.029879481998477786,
+    "q3": 0.030846212997630573,
+    "min": 0.02954172400245625,
+    "max": 0.044858033001219155
+   },
+   "full_buffer_evaluation_seconds": {
+    "count": 15,
+    "median": 0.5829344350006522,
+    "q1": 0.5824694030004594,
+    "q3": 0.5858426250003959,
+    "min": 0.43936200000007375,
+    "max": 0.5914241079995008
+   }
+  },
+  "stage_b": {
+   "update_seconds": {
+    "count": 15,
+    "median": 0.9200642800001333,
+    "q1": 0.7866157810001368,
+    "q3": 1.0028543280000122,
+    "min": 0.769662943999947,
+    "max": 1.4105298869999388
+   },
+   "optimizer_steps_seconds": {
+    "count": 15,
+    "median": 0.3653543849995913,
+    "q1": 0.3593190869976297,
+    "q3": 0.4032712010002797,
+    "min": 0.3433489679975992,
+    "max": 0.7434386790009739
+   },
+   "minibatch_materialization_seconds": {
+    "count": 15,
+    "median": 0.03450085000076797,
+    "q1": 0.029229860996792922,
+    "q3": 0.040206334005688404,
+    "min": 0.029014942000458177,
+    "max": 0.06774477300155013
+   },
+   "full_buffer_evaluation_seconds": {
+    "count": 15,
+    "median": 0.46675872600030743,
+    "q1": 0.3388077349998184,
+    "q3": 0.5827620329998808,
+    "min": 0.32548539200047344,
+    "max": 0.5963961820002623
+   }
+  }
+ },
+ "optimizer_seconds_per_step": {
+  "baseline": {
+   "count": 15,
+   "median": 0.002241462453120846,
+   "q1": 0.002228450531252868,
+   "q3": 0.0022456180507806067,
+   "min": 0.001966609324223434,
+   "max": 0.0024346931015646334
+  },
+  "stage_b": {
+   "count": 15,
+   "median": 0.0014271655664046534,
+   "q1": 0.001403590183584491,
+   "q3": 0.0015752781289073425,
+   "min": 0.0013412069062406218,
+   "max": 0.0029040573398475544
+  }
+ },
+ "full_buffer_seconds_per_call": {
+  "baseline": {
+   "count": 15,
+   "median": 0.036433402187540764,
+   "q1": 0.03640433768752871,
+   "q3": 0.03661516406252474,
+   "min": 0.02746012500000461,
+   "max": 0.0369640067499688
+  },
+  "stage_b": {
+   "count": 15,
+   "median": 0.029172420375019215,
+   "q1": 0.02117548343748865,
+   "q3": 0.03642262706249255,
+   "min": 0.02034283700002959,
+   "max": 0.037274761375016396
+  }
+ },
+ "median_update_ratio_vs_first": {
+  "baseline": 1.0,
+  "stage_b": 0.7583175147471164
+ }
+}

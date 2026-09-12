@@ -455,6 +455,16 @@ the canonical `forever` profile runs at most 16. An explicit
 `--ppo-max-epochs` overrides the profile default within the supported 1–16
 range.
 
+Every epoch statistic -- KL, clip fraction, surrogate loss, entropy, and the
+critic moments -- comes from that whole-buffer evaluation of the policy after
+the epoch's last step. An optimizer minibatch describes an intermediate policy,
+so `ppo_update` calls `PolicyNetwork.backward_ppo(..., collect_metrics=False)`
+and receives only what it reads: the gradient norm, the applied norm, the
+clipping and rejection flags, and the step profile. The skipped reductions ran
+after the gradient already existed and each was a host transfer, so the update
+is bit-identical; the non-finite critic check still runs. Direct callers keep
+the complete result by default.
+
 Enable the optional PPO actor-critic with:
 
 ```bash

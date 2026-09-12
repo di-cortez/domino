@@ -1039,6 +1039,11 @@ def ppo_update(
                     entropy_coef=entropy_coef,
                     clip_grad_norm=POLICY_GRADIENT_CLIP_NORM,
                     log_ratio_limit=PPO_LOG_RATIO_LIMIT,
+                    # Epoch statistics come from ``evaluate_full_buffer``
+                    # below, which measures the policy after all of the
+                    # epoch's steps. A minibatch's own statistics describe an
+                    # intermediate policy and were never read.
+                    collect_metrics=False,
                 )
                 timing["optimizer_steps"] += time.perf_counter() - optimizer_started
                 step_detail = step_metrics.pop("runtime_profile_detail", {})

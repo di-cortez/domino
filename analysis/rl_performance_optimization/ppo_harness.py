@@ -309,11 +309,35 @@ class _PeakPoolUsage:
         self.hook.__exit__(*exc)
 
 
+def _apply_module_overrides(assignments):
+    """Set ``module.CONSTANT=value`` overrides before a run, for sweeps.
+
+    Only existing integer or float constants may be overridden, so a typo or a
+    checkout without the constant fails instead of silently measuring nothing.
+    """
+    import importlib  # pylint: disable=import-outside-toplevel
+
+    applied = {}
+    for assignment in assignments or ():
+        target, _, raw = assignment.partition("=")
+        module_name, _, constant = target.rpartition(".")
+        module = importlib.import_module(module_name)
+        if not hasattr(module, constant):
+            raise SystemExit(f"{module_name} has no constant {constant}.")
+        current = getattr(module, constant)
+        if isinstance(current, bool) or not isinstance(current, (int, float)):
+            raise SystemExit(f"{target} is not a numeric constant.")
+        setattr(module, constant, type(current)(raw))
+        applied[target] = getattr(module, constant)
+    return applied
+
+
 def cmd_run(args):
     """Apply fixed PPO updates and record weights, metrics, and timings."""
     # pylint: disable=import-outside-toplevel
     from training.rl.ppo import update_from_samples
 
+    overrides = _apply_module_overrides(args.set)
     variant = dict(VARIANTS[args.variant])
     if args.learning_rate is not None:
         variant["learning_rate"] = float(args.learning_rate)
@@ -398,6 +422,7 @@ def cmd_run(args):
         "kind": "ppo_harness_run",
         "variant": args.variant,
         "variant_settings": variant,
+        "module_overrides": overrides,
         "device": args.device,
         "seed": args.seed,
         "iterations": args.iterations,
@@ -649,6 +674,14 @@ def cmd_timing(args):
     """Alternate checkouts in fresh processes and summarize their timings."""
     checkouts = [Path(path).resolve() for path in args.checkout]
     labels = args.label or [path.name for path in checkouts]
+    if args.set:
+        raise SystemExit("timing takes --label-set LABEL:MODULE.CONSTANT=VALUE")
+    label_overrides = {}
+    for item in args.label_set or ():
+        label, _, assignment = item.partition(":")
+        if label not in labels:
+            raise SystemExit(f"--label-set names unknown label {label!r}.")
+        label_overrides.setdefault(label, []).append(assignment)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     collected = {label: [] for label in labels}
@@ -680,6 +713,8 @@ def cmd_timing(args):
                 command += ["--learning-rate", str(args.learning_rate)]
             if args.measure_gpu_memory:
                 command.append("--measure-gpu-memory")
+            for assignment in label_overrides.get(label, ()):
+                command += ["--set", assignment]
             subprocess.run(
                 command,
                 check=True,
@@ -708,6 +743,7 @@ def cmd_timing(args):
         "repetitions": args.repetitions,
         "iterations_per_repetition": args.iterations,
         "cpu_affinity": args.cpu_affinity,
+        "label_overrides": label_overrides,
         "checkouts": dict(zip(labels, map(str, checkouts))),
         "runs": runs,
         "epochs_completed": epochs,
@@ -783,6 +819,13 @@ def parse_args(argv=None):
         sub.add_argument("--max-epochs", type=int, default=None)
         sub.add_argument("--learning-rate", type=float, default=None)
         sub.add_argument("--measure-gpu-memory", action="store_true")
+        sub.add_argument(
+            "--set",
+            action="append",
+            default=None,
+            metavar="MODULE.CONSTANT=VALUE",
+            help="override a numeric module constant (run only)",
+        )
 
     run = commands.add_parser("run", help=cmd_run.__doc__)
     add_run_arguments(run)
@@ -801,6 +844,13 @@ def parse_args(argv=None):
     timing.add_argument("--label", action="append", default=None)
     timing.add_argument("--repetitions", type=int, default=3)
     timing.add_argument("--output-dir", required=True)
+    timing.add_argument(
+        "--label-set",
+        action="append",
+        default=None,
+        metavar="LABEL:MODULE.CONSTANT=VALUE",
+        help="constant override applied only to one label's runs",
+    )
     timing.add_argument(
         "--cpu-affinity",
         default=None,

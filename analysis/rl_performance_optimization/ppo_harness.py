@@ -605,6 +605,26 @@ def _summarize(values):
     }
 
 
+def _parse_cpu_list(text):
+    cpus = set()
+    for part in text.split(","):
+        first, _, last = part.partition("-")
+        cpus.update(range(int(first), int(last or first) + 1))
+    return cpus
+
+
+def _affinity_setter(cpu_list):
+    """Return a child pre-exec hook pinning the measured process, or ``None``.
+
+    On hybrid CPUs the dispatch-bound learner otherwise migrates between
+    performance and efficiency cores, which dominates run-to-run spread.
+    """
+    if not cpu_list:
+        return None
+    cpus = _parse_cpu_list(cpu_list)
+    return lambda: os.sched_setaffinity(0, cpus)
+
+
 def _timing_rows(run_payload):
     rows = []
     for record in run_payload["records"]:
@@ -660,7 +680,13 @@ def cmd_timing(args):
                 command += ["--learning-rate", str(args.learning_rate)]
             if args.measure_gpu_memory:
                 command.append("--measure-gpu-memory")
-            subprocess.run(command, check=True, env=environment, stdout=subprocess.DEVNULL)
+            subprocess.run(
+                command,
+                check=True,
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                preexec_fn=_affinity_setter(args.cpu_affinity),
+            )
             payload = json.loads(destination.read_text(encoding="utf-8"))
             rows = _timing_rows(payload)
             collected[label].extend(rows)
@@ -681,6 +707,7 @@ def cmd_timing(args):
         "device": args.device,
         "repetitions": args.repetitions,
         "iterations_per_repetition": args.iterations,
+        "cpu_affinity": args.cpu_affinity,
         "checkouts": dict(zip(labels, map(str, checkouts))),
         "runs": runs,
         "epochs_completed": epochs,
@@ -774,6 +801,11 @@ def parse_args(argv=None):
     timing.add_argument("--label", action="append", default=None)
     timing.add_argument("--repetitions", type=int, default=3)
     timing.add_argument("--output-dir", required=True)
+    timing.add_argument(
+        "--cpu-affinity",
+        default=None,
+        help="CPU list for the measured processes, for example 0-11",
+    )
     return parser.parse_args(argv)
 
 

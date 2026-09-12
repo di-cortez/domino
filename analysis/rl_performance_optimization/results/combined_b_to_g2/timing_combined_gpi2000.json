@@ -1,0 +1,263 @@
+{
+ "kind": "ppo_harness_timing",
+ "variant": "production",
+ "device": "gpu",
+ "repetitions": 8,
+ "iterations_per_repetition": 3,
+ "cpu_affinity": "0-11",
+ "label_overrides": {},
+ "checkouts": {
+  "baseline": "<scratch>/ref_36a8160",
+  "stage_g2": "<scratch>/stage_g2"
+ },
+ "runs": {
+  "baseline": [
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/baseline_rep00.json",
+    "peak_gpu_pool_used_bytes": 11857408,
+    "peak_host_rss_kib": 540684
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/baseline_rep01.json",
+    "peak_gpu_pool_used_bytes": 11857408,
+    "peak_host_rss_kib": 540716
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/baseline_rep02.json",
+    "peak_gpu_pool_used_bytes": 11857408,
+    "peak_host_rss_kib": 540428
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/baseline_rep03.json",
+    "peak_gpu_pool_used_bytes": 11857408,
+    "peak_host_rss_kib": 540496
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/baseline_rep04.json",
+    "peak_gpu_pool_used_bytes": 11857408,
+    "peak_host_rss_kib": 540244
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/baseline_rep05.json",
+    "peak_gpu_pool_used_bytes": 11857408,
+    "peak_host_rss_kib": 536356
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/baseline_rep06.json",
+    "peak_gpu_pool_used_bytes": 11857408,
+    "peak_host_rss_kib": 540392
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/baseline_rep07.json",
+    "peak_gpu_pool_used_bytes": 11857408,
+    "peak_host_rss_kib": 540640
+   }
+  ],
+  "stage_g2": [
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/stage_g2_rep00.json",
+    "peak_gpu_pool_used_bytes": 41956352,
+    "peak_host_rss_kib": 536740
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/stage_g2_rep01.json",
+    "peak_gpu_pool_used_bytes": 41956352,
+    "peak_host_rss_kib": 536720
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/stage_g2_rep02.json",
+    "peak_gpu_pool_used_bytes": 41956352,
+    "peak_host_rss_kib": 536468
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/stage_g2_rep03.json",
+    "peak_gpu_pool_used_bytes": 41956352,
+    "peak_host_rss_kib": 536672
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/stage_g2_rep04.json",
+    "peak_gpu_pool_used_bytes": 41956352,
+    "peak_host_rss_kib": 536760
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/stage_g2_rep05.json",
+    "peak_gpu_pool_used_bytes": 41956352,
+    "peak_host_rss_kib": 536792
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/stage_g2_rep06.json",
+    "peak_gpu_pool_used_bytes": 41956352,
+    "peak_host_rss_kib": 536544
+   },
+   {
+    "file": "<scratch>/perf/timing_combined_gpi2000/stage_g2_rep07.json",
+    "peak_gpu_pool_used_bytes": 41956352,
+    "peak_host_rss_kib": 536548
+   }
+  ]
+ },
+ "epochs_completed": {
+  "baseline": [
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16
+  ],
+  "stage_g2": [
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16,
+   16
+  ]
+ },
+ "per_update": {
+  "baseline": {
+   "update_seconds": {
+    "count": 24,
+    "median": 1.2945100394999827,
+    "q1": 1.037457783750142,
+    "q3": 1.3091973977500402,
+    "min": 0.9632401410008242,
+    "max": 1.34850920900044
+   },
+   "optimizer_steps_seconds": {
+    "count": 24,
+    "median": 0.6385026049897533,
+    "q1": 0.5834308397531913,
+    "q3": 0.6474899197453396,
+    "min": 0.5372015259845284,
+    "max": 0.6532623430020976
+   },
+   "minibatch_materialization_seconds": {
+    "count": 24,
+    "median": 0.03612749399690074,
+    "q1": 0.03519156300308168,
+    "q3": 0.0452014272480028,
+    "min": 0.03453681501014216,
+    "max": 0.04766423299770395
+   },
+   "full_buffer_evaluation_seconds": {
+    "count": 24,
+    "median": 0.5920746219985631,
+    "q1": 0.39282028775141953,
+    "q3": 0.6023214475014811,
+    "min": 0.36500149500079715,
+    "max": 0.6332114900014858
+   }
+  },
+  "stage_g2": {
+   "update_seconds": {
+    "count": 24,
+    "median": 0.4201155219998327,
+    "q1": 0.4078193690002081,
+    "q3": 0.4779653017496912,
+    "min": 0.39251731999956974,
+    "max": 0.49224092999975255
+   },
+   "optimizer_steps_seconds": {
+    "count": 24,
+    "median": 0.3108631755080751,
+    "q1": 0.3008179757448488,
+    "q3": 0.3565818494987525,
+    "min": 0.28930181098894536,
+    "max": 0.36913366698536265
+   },
+   "minibatch_materialization_seconds": {
+    "count": 24,
+    "median": 0.03513884400263123,
+    "q1": 0.03423705375143982,
+    "q3": 0.04411800549246436,
+    "min": 0.03307455399954051,
+    "max": 0.04493063900099514
+   },
+   "full_buffer_evaluation_seconds": {
+    "count": 24,
+    "median": 0.04673608500024784,
+    "q1": 0.045890762249200634,
+    "q3": 0.05491740549973656,
+    "min": 0.0437128310013577,
+    "max": 0.05749364300118032
+   }
+  }
+ },
+ "optimizer_seconds_per_step": {
+  "baseline": {
+   "count": 24,
+   "median": 0.002494150800741224,
+   "q1": 0.0022790267177859036,
+   "q3": 0.002529257499005233,
+   "min": 0.002098443460877064,
+   "max": 0.002551806027351944
+  },
+  "stage_g2": {
+   "count": 24,
+   "median": 0.0012143092793284183,
+   "q1": 0.0011750702177533157,
+   "q3": 0.001392897849604502,
+   "min": 0.0011300851991755678,
+   "max": 0.0014419283866615729
+  }
+ },
+ "full_buffer_seconds_per_call": {
+  "baseline": {
+   "count": 24,
+   "median": 0.03700466387491019,
+   "q1": 0.02455126798446372,
+   "q3": 0.03764509046884257,
+   "min": 0.022812593437549822,
+   "max": 0.03957571812509286
+  },
+  "stage_g2": {
+   "count": 24,
+   "median": 0.00292100531251549,
+   "q1": 0.0028681726405750396,
+   "q3": 0.003432337843733535,
+   "min": 0.002732051937584856,
+   "max": 0.00359335268757377
+  }
+ },
+ "median_update_ratio_vs_first": {
+  "baseline": 1.0,
+  "stage_g2": 0.32453631812859984
+ }
+}

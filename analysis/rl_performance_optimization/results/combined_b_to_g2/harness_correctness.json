@@ -1,0 +1,5381 @@
+[
+ {
+  "case": "cpu_six_entropy_shared_critic",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     2,
+     2
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.27792953760580696,
+      "candidate": 0.2779295357733596,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.59320839484109e-09
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0010448301970865657,
+      "candidate": 0.0010448316716340405,
+      "abs": 1.4745474747907689e-09,
+      "rel": 1.4112775433813987e-06
+     },
+     "epoch_metrics[0].explained_variance": {
+      "reference": 0.0022391753638334455,
+      "candidate": 0.002239243450313899,
+      "abs": 6.808648045364407e-08,
+      "rel": 3.0406019695669825e-05
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.37407219869486064,
+      "candidate": -0.37407220144353165,
+      "abs": 2.7486710130197878e-09,
+      "rel": 7.347969195285727e-09
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 1.0016040401154096,
+      "candidate": 1.001603974147305,
+      "abs": 6.596810453451951e-08,
+      "rel": 6.586245850897162e-08
+     },
+     "epoch_metrics[0].value_loss": {
+      "reference": 0.18192974968776562,
+      "candidate": 0.18192975152021298,
+      "abs": 1.832447360516909e-09,
+      "rel": 1.0072279795937159e-08
+     },
+     "epoch_metrics[0].value_mean": {
+      "reference": -0.15892396534965206,
+      "candidate": -0.15892396351720472,
+      "abs": 1.8324473327613333e-09,
+      "rel": 1.1530339862397255e-08
+     },
+     "epoch_metrics[0].value_std": {
+      "reference": 0.019982172497620458,
+      "candidate": 0.0199821813400922,
+      "abs": 8.842471740933e-09,
+      "rel": 4.425178407920604e-07
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.0014966434578914465,
+      "candidate": 0.001496644352641128,
+      "abs": 8.947496814640243e-10,
+      "rel": 5.978372082085231e-07
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.27792953760580696,
+      "candidate": 0.2779295357733596,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.59320839484109e-09
+     },
+     "epoch_metrics[1].explained_variance": {
+      "reference": 0.004230412149695106,
+      "candidate": 0.004230317037508979,
+      "abs": 9.5112186127011e-08,
+      "rel": 2.248295975933832e-05
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.37525968985696706,
+      "candidate": -0.3752596751973883,
+      "abs": 1.4659578773112969e-08,
+      "rel": 3.906515719474312e-08
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 1.0019458465191358,
+      "candidate": 1.0019459051574509,
+      "abs": 5.8638315092451876e-08,
+      "rel": 5.8524432098195114e-08
+     },
+     "epoch_metrics[1].value_loss": {
+      "reference": 0.20422588397406638,
+      "candidate": 0.20422588580651374,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.97264983466882e-09
+     },
+     "epoch_metrics[1].value_mean": {
+      "reference": -0.2159654221729999,
+      "candidate": -0.21596542492167095,
+      "abs": 2.7486710407753634e-09,
+      "rel": 1.2727366159524312e-08
+     },
+     "epoch_metrics[1].value_std": {
+      "reference": 0.02513923648598352,
+      "candidate": 0.02513920376126822,
+      "abs": 3.272471529869314e-08,
+      "rel": 1.3017386314393014e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.0014966434578914465,
+      "candidate": 0.001496644352641128,
+      "abs": 8.947496814640243e-10,
+      "rel": 5.978372082085231e-07
+     },
+     "final_entropy": {
+      "reference": 0.27792953760580696,
+      "candidate": 0.2779295357733596,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.59320839484109e-09
+     },
+     "final_explained_variance": {
+      "reference": 0.004230412149695106,
+      "candidate": 0.004230317037508979,
+      "abs": 9.5112186127011e-08,
+      "rel": 2.248295975933832e-05
+     },
+     "final_policy_loss": {
+      "reference": -0.37525968985696706,
+      "candidate": -0.3752596751973883,
+      "abs": 1.4659578773112969e-08,
+      "rel": 3.906515719474312e-08
+     },
+     "final_value_loss": {
+      "reference": 0.20422588397406638,
+      "candidate": 0.20422588580651374,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.97264983466882e-09
+     },
+     "final_value_mean": {
+      "reference": -0.2159654221729999,
+      "candidate": -0.21596542492167095,
+      "abs": 2.7486710407753634e-09,
+      "rel": 1.2727366159524312e-08
+     },
+     "final_value_std": {
+      "reference": 0.02513923648598352,
+      "candidate": 0.02513920376126822,
+      "abs": 3.272471529869314e-08,
+      "rel": 1.3017386314393014e-06
+     },
+     "max_approx_kl": {
+      "reference": 0.0014966434578914465,
+      "candidate": 0.001496644352641128,
+      "abs": 8.947496814640243e-10,
+      "rel": 5.978372082085231e-07
+     },
+     "value_loss": {
+      "reference": 0.20422588397406638,
+      "candidate": 0.20422588580651374,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.97264983466882e-09
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "cpu_six_hot_lr",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     1,
+     1
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.2490082607129563,
+      "candidate": 0.24900826162917997,
+      "abs": 9.162236802584545e-10,
+      "rel": 3.679491091034094e-09
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.214655463286375,
+      "candidate": 0.2146554733648354,
+      "abs": 1.0078460399576272e-08,
+      "rel": 4.6951797881466525e-08
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.2490082607129563,
+      "candidate": 0.24900826162917997,
+      "abs": 9.162236802584545e-10,
+      "rel": 3.679491091034094e-09
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": 0.05364383717208575,
+      "candidate": 0.0536438378592535,
+      "abs": 6.871677532549469e-10,
+      "rel": 1.2809817132358872e-08
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9871607570068682,
+      "candidate": 0.9871607863260258,
+      "abs": 2.9319157546225938e-08,
+      "rel": 2.9700488463834515e-08
+     },
+     "final_approx_kl": {
+      "reference": 0.214655463286375,
+      "candidate": 0.2146554733648354,
+      "abs": 1.0078460399576272e-08,
+      "rel": 4.6951797881466525e-08
+     },
+     "final_entropy": {
+      "reference": 0.2490082607129563,
+      "candidate": 0.24900826162917997,
+      "abs": 9.162236802584545e-10,
+      "rel": 3.679491091034094e-09
+     },
+     "final_policy_loss": {
+      "reference": 0.05364383717208575,
+      "candidate": 0.0536438378592535,
+      "abs": 6.871677532549469e-10,
+      "rel": 1.2809817132358872e-08
+     },
+     "max_approx_kl": {
+      "reference": 0.214655463286375,
+      "candidate": 0.2146554733648354,
+      "abs": 1.0078460399576272e-08,
+      "rel": 4.6951797881466525e-08
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "cpu_three_own_critic_dropout",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     3,
+     3
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.05295572188525452,
+      "candidate": 0.052955715628721985,
+      "abs": 6.2565325351093826e-09,
+      "rel": 1.1814648752529817e-07
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 2.389118258376693e-06,
+      "candidate": 2.389405532549486e-06,
+      "abs": 2.872741727930495e-10,
+      "rel": 0.00012022830318239414
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.053037766179826924,
+      "candidate": 0.053037753666761854,
+      "abs": 1.2513065070218765e-08,
+      "rel": 2.35927452671982e-07
+     },
+     "epoch_metrics[0].explained_variance": {
+      "reference": -0.17761606149382558,
+      "candidate": -0.1776160328324785,
+      "abs": 2.866134707346646e-08,
+      "rel": 1.613668653184431e-07
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 5.28657341003418,
+      "candidate": 5.286582946777344,
+      "abs": 9.5367431640625e-06,
+      "rel": 1.8039522428899025e-06
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.10402218456083594,
+      "candidate": -0.10402219200908895,
+      "abs": 7.4482530143527015e-09,
+      "rel": 7.16025385592904e-08
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.0214239358901978,
+      "candidate": 1.0214289426803589,
+      "abs": 5.0067901611328125e-06,
+      "rel": 4.901750823698378e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9999081660195911,
+      "candidate": 0.999908170786473,
+      "abs": 4.7668818892177e-09,
+      "rel": 4.767319668433484e-09
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.9544059038162231,
+      "candidate": 0.9544088244438171,
+      "abs": 2.9206275939941406e-06,
+      "rel": 3.0601431160238273e-06
+     },
+     "epoch_metrics[0].value_loss": {
+      "reference": 0.2722090185154084,
+      "candidate": 0.2722090173236879,
+      "abs": 1.1917205000600006e-09,
+      "rel": 4.377961121786063e-09
+     },
+     "epoch_metrics[0].value_mean": {
+      "reference": 0.24142912006944242,
+      "candidate": 0.2414291272197653,
+      "abs": 7.150322889337701e-09,
+      "rel": 2.961665384653024e-08
+     },
+     "epoch_metrics[0].value_std": {
+      "reference": 0.24242017701585133,
+      "candidate": 0.24242018955847755,
+      "abs": 1.254262621541713e-08,
+      "rel": 5.173919811819778e-08
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 1.9791210099347158e-05,
+      "candidate": 1.9791358264302208e-05,
+      "abs": 1.481649550499984e-10,
+      "rel": 7.486345963290676e-06
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.05297696430286144,
+      "candidate": 0.052976956854608424,
+      "abs": 7.4482530143527015e-09,
+      "rel": 1.4059418300701687e-07
+     },
+     "epoch_metrics[1].explained_variance": {
+      "reference": -0.17341785777013352,
+      "candidate": -0.17341786209395793,
+      "abs": 4.323824409624422e-09,
+      "rel": 2.493298185905308e-08
+     },
+     "epoch_metrics[1].legal_logit_deficit_max": {
+      "reference": 5.343318939208984,
+      "candidate": 5.343317031860352,
+      "abs": 1.9073486328125e-06,
+      "rel": 3.5695953292559037e-07
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.10404723303573499,
+      "candidate": -0.10404723720675668,
+      "abs": 4.171021694698851e-09,
+      "rel": 4.008776981180612e-08
+     },
+     "epoch_metrics[1].ratio_max": {
+      "reference": 1.0608876943588257,
+      "candidate": 1.0608885288238525,
+      "abs": 8.344650268554688e-07,
+      "rel": 7.865718255815182e-07
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9997895516964913,
+      "candidate": 0.9997894944939082,
+      "abs": 5.720258311470161e-08,
+      "rel": 5.721462383522362e-08
+     },
+     "epoch_metrics[1].value_loss": {
+      "reference": 0.27105918224064196,
+      "candidate": 0.27105918819924435,
+      "abs": 5.958602389277701e-09,
+      "rel": 2.198266153183407e-08
+     },
+     "epoch_metrics[1].value_std": {
+      "reference": 0.24007567851759887,
+      "candidate": 0.2400756816200593,
+      "abs": 3.1024604274509926e-09,
+      "rel": 1.2922843357208111e-08
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 5.606122815941357e-05,
+      "candidate": 5.606250701863778e-05,
+      "abs": 1.2788592242138157e-09,
+      "rel": 2.2811309950671017e-05
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.05295572188525452,
+      "candidate": 0.052955715628721985,
+      "abs": 6.2565325351093826e-09,
+      "rel": 1.1814648752529817e-07
+     },
+     "epoch_metrics[2].explained_variance": {
+      "reference": -0.16957094151624164,
+      "candidate": -0.16957087540206817,
+      "abs": 6.611417346924497e-08,
+      "rel": 3.8989093814114673e-07
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.10402349336785624,
+      "candidate": -0.1040235172022659,
+      "abs": 2.3834409654255317e-08,
+      "rel": 2.2912520452381074e-07
+     },
+     "epoch_metrics[2].ratio_max": {
+      "reference": 1.1129717826843262,
+      "candidate": 1.1129659414291382,
+      "abs": 5.841255187988281e-06,
+      "rel": 5.248340774552274e-06
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 0.9995904724063891,
+      "candidate": 0.9995904295044518,
+      "abs": 4.290193733602621e-08,
+      "rel": 4.29195140613387e-08
+     },
+     "epoch_metrics[2].ratio_min": {
+      "reference": 0.8189883828163147,
+      "candidate": 0.8189898133277893,
+      "abs": 1.430511474609375e-06,
+      "rel": 1.7466779822288616e-06
+     },
+     "epoch_metrics[2].value_loss": {
+      "reference": 0.2699096736890083,
+      "candidate": 0.2699096641552445,
+      "abs": 9.533763833946551e-09,
+      "rel": 3.532205312852705e-08
+     },
+     "epoch_metrics[2].value_mean": {
+      "reference": 0.24807236768870902,
+      "candidate": 0.24807234921704155,
+      "abs": 1.8471667473374254e-08,
+      "rel": 7.446080208559636e-08
+     },
+     "epoch_metrics[2].value_std": {
+      "reference": 0.2379281685361863,
+      "candidate": 0.23792821033473197,
+      "abs": 4.179854565244945e-08,
+      "rel": 1.7567713216370894e-07
+     },
+     "final_approx_kl": {
+      "reference": 5.606122815941357e-05,
+      "candidate": 5.606250701863778e-05,
+      "abs": 1.2788592242138157e-09,
+      "rel": 2.2811309950671017e-05
+     },
+     "final_entropy": {
+      "reference": 0.05295572188525452,
+      "candidate": 0.052955715628721985,
+      "abs": 6.2565325351093826e-09,
+      "rel": 1.1814648752529817e-07
+     },
+     "final_explained_variance": {
+      "reference": -0.16957094151624164,
+      "candidate": -0.16957087540206817,
+      "abs": 6.611417346924497e-08,
+      "rel": 3.8989093814114673e-07
+     },
+     "final_policy_loss": {
+      "reference": -0.10402349336785624,
+      "candidate": -0.1040235172022659,
+      "abs": 2.3834409654255317e-08,
+      "rel": 2.2912520452381074e-07
+     },
+     "final_value_loss": {
+      "reference": 0.2699096736890083,
+      "candidate": 0.2699096641552445,
+      "abs": 9.533763833946551e-09,
+      "rel": 3.532205312852705e-08
+     },
+     "final_value_mean": {
+      "reference": 0.24807236768870902,
+      "candidate": 0.24807234921704155,
+      "abs": 1.8471667473374254e-08,
+      "rel": 7.446080208559636e-08
+     },
+     "final_value_std": {
+      "reference": 0.2379281685361863,
+      "candidate": 0.23792821033473197,
+      "abs": 4.179854565244945e-08,
+      "rel": 1.7567713216370894e-07
+     },
+     "max_approx_kl": {
+      "reference": 5.606122815941357e-05,
+      "candidate": 5.606250701863778e-05,
+      "abs": 1.2788592242138157e-09,
+      "rel": 2.2811309950671017e-05
+     },
+     "value_loss": {
+      "reference": 0.2699096736890083,
+      "candidate": 0.2699096641552445,
+      "abs": 9.533763833946551e-09,
+      "rel": 3.532205312852705e-08
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_entropy_shared_critic",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     8,
+     8
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0010448325753312187,
+      "candidate": 0.0010448306963568878,
+      "abs": 1.878974330944347e-09,
+      "rel": 1.798349683296101e-06
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.2780118781692543,
+      "candidate": 0.2780118616772282,
+      "abs": 1.6492026133629878e-08,
+      "rel": 5.9321300378358264e-08
+     },
+     "epoch_metrics[0].explained_variance": {
+      "reference": 0.002239223701551718,
+      "candidate": 0.0022392415621008688,
+      "abs": 1.7860549150761074e-08,
+      "rel": 7.976160077166577e-06
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 4.566425323486328,
+      "candidate": 4.566429138183594,
+      "abs": 3.814697265625e-06,
+      "rel": 8.353786186513313e-07
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.3740721787669957,
+      "candidate": -0.3740721292909173,
+      "abs": 4.9476078400889634e-08,
+      "rel": 1.32263453978243e-07
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.4580376148223877,
+      "candidate": 1.4580472707748413,
+      "abs": 9.655952453613281e-06,
+      "rel": 6.6225235951930946e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 1.0016039503254897,
+      "candidate": 1.0016038550382276,
+      "abs": 9.528726208074545e-08,
+      "rel": 9.513467079455917e-08
+     },
+     "epoch_metrics[0].value_mean": {
+      "reference": -0.15892390190116265,
+      "candidate": -0.15892389640382062,
+      "abs": 5.4973420260395756e-09,
+      "rel": 3.459103357189444e-08
+     },
+     "epoch_metrics[0].value_std": {
+      "reference": 0.019982167733930904,
+      "candidate": 0.019982248710504955,
+      "abs": 8.097657405031766e-08,
+      "rel": 4.052425491418647e-06
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.0014966488890220126,
+      "candidate": 0.0014966506284153933,
+      "abs": 1.7393933806307549e-09,
+      "rel": 1.1621906593340158e-06
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.27792956371818167,
+      "candidate": 0.2779295527234976,
+      "abs": 1.0994684052079151e-08,
+      "rel": 3.9559246252865966e-08
+     },
+     "epoch_metrics[1].explained_variance": {
+      "reference": 0.004230478485165334,
+      "candidate": 0.004230403190042975,
+      "abs": 7.529512235926461e-08,
+      "rel": 1.7798252047208308e-05
+     },
+     "epoch_metrics[1].legal_logit_deficit_max": {
+      "reference": 4.62199592590332,
+      "candidate": 4.622007369995117,
+      "abs": 1.1444091796875e-05,
+      "rel": 2.4760003350853785e-06
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.37525975118668925,
+      "candidate": -0.3752596980457162,
+      "abs": 5.31409730664123e-08,
+      "rel": 1.4161117172402274e-07
+     },
+     "epoch_metrics[1].ratio_max": {
+      "reference": 1.5236986875534058,
+      "candidate": 1.5236862897872925,
+      "abs": 1.239776611328125e-05,
+      "rel": 8.136625839842569e-06
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 1.0019459198170297,
+      "candidate": 1.0019459051574509,
+      "abs": 1.4659578884135271e-08,
+      "rel": 1.463110792128614e-08
+     },
+     "epoch_metrics[1].value_loss": {
+      "reference": 0.2042259091702174,
+      "candidate": 0.20422591558378314,
+      "abs": 6.413565734053606e-09,
+      "rel": 3.1404269706517524e-08
+     },
+     "epoch_metrics[1].value_mean": {
+      "reference": -0.21596548081131503,
+      "candidate": -0.21596548447620972,
+      "abs": 3.6648946932782422e-09,
+      "rel": 1.6969816737923966e-08
+     },
+     "epoch_metrics[1].value_std": {
+      "reference": 0.02513924411999404,
+      "candidate": 0.025139212635704247,
+      "abs": 3.1484289793326514e-08,
+      "rel": 1.2523960403521464e-06
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 0.0015622634761428237,
+      "candidate": 0.0015622654517501203,
+      "abs": 1.9756072966795046e-09,
+      "rel": 1.2645784968657791e-06
+     },
+     "epoch_metrics[2].explained_variance": {
+      "reference": 0.005590587375832068,
+      "candidate": 0.005590698602267019,
+      "abs": 1.1122643495120599e-07,
+      "rel": 1.9894908107924805e-05
+     },
+     "epoch_metrics[2].legal_logit_deficit_max": {
+      "reference": 4.6150054931640625,
+      "candidate": 4.615011215209961,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.2398769215509206e-06
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.37600100508568823,
+      "candidate": -0.3760010041694646,
+      "abs": 9.162236525028788e-10,
+      "rel": 2.436758519552567e-09
+     },
+     "epoch_metrics[2].ratio_max": {
+      "reference": 1.5188227891921997,
+      "candidate": 1.5188246965408325,
+      "abs": 1.9073486328125e-06,
+      "rel": 1.2558056483783428e-06
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 1.0020418319436444,
+      "candidate": 1.00204188325217,
+      "abs": 5.130852565038424e-08,
+      "rel": 5.120397311523568e-08
+     },
+     "epoch_metrics[2].ratio_min": {
+      "reference": 0.6190786957740784,
+      "candidate": 0.6190741062164307,
+      "abs": 4.589557647705078e-06,
+      "rel": 7.413528649966586e-06
+     },
+     "epoch_metrics[2].value_loss": {
+      "reference": 0.21871692615782526,
+      "candidate": 0.21871692432537793,
+      "abs": 1.8324473327613333e-09,
+      "rel": 8.378168827405001e-09
+     },
+     "epoch_metrics[2].value_mean": {
+      "reference": -0.24688995616038306,
+      "candidate": -0.246889950663041,
+      "abs": 5.497342053795151e-09,
+      "rel": 2.2266365709198812e-08
+     },
+     "epoch_metrics[2].value_std": {
+      "reference": 0.03154069561077765,
+      "candidate": 0.03154077858430058,
+      "abs": 8.297352292740978e-08,
+      "rel": 2.630674531563715e-06
+     },
+     "epoch_metrics[3].approx_kl": {
+      "reference": 0.0016226322979890986,
+      "candidate": 0.0016226367431055157,
+      "abs": 4.4451164170952046e-09,
+      "rel": 2.739440257335619e-06
+     },
+     "epoch_metrics[3].entropy": {
+      "reference": 0.2779147053188646,
+      "candidate": 0.27791471448110133,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.296780008277122e-08
+     },
+     "epoch_metrics[3].explained_variance": {
+      "reference": 0.0074587655659180685,
+      "candidate": 0.007458750430070049,
+      "abs": 1.5135848019376397e-08,
+      "rel": 2.0292698417198996e-06
+     },
+     "epoch_metrics[3].legal_logit_deficit_max": {
+      "reference": 4.580364227294922,
+      "candidate": 4.580358505249023,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.2492556518407782e-06
+     },
+     "epoch_metrics[3].policy_loss": {
+      "reference": -0.3766998440131028,
+      "candidate": -0.37669983118597133,
+      "abs": 1.2827131468107211e-08,
+      "rel": 3.405133204053316e-08
+     },
+     "epoch_metrics[3].ratio_max": {
+      "reference": 1.5624758005142212,
+      "candidate": 1.5624679327011108,
+      "abs": 7.867813110351562e-06,
+      "rel": 5.035478378456942e-06
+     },
+     "epoch_metrics[3].ratio_mean": {
+      "reference": 1.0020271173914441,
+      "candidate": 1.0020271393808122,
+      "abs": 2.1989368104158302e-08,
+      "rel": 2.1944882768091797e-08
+     },
+     "epoch_metrics[3].value_loss": {
+      "reference": 0.22839937385310785,
+      "candidate": 0.2283993830153446,
+      "abs": 9.162236747073393e-09,
+      "rel": 4.011498028634274e-08
+     },
+     "epoch_metrics[3].value_mean": {
+      "reference": -0.26670342320881646,
+      "candidate": -0.26670343053860585,
+      "abs": 7.3297893865564845e-09,
+      "rel": 2.7482921279842642e-08
+     },
+     "epoch_metrics[3].value_std": {
+      "reference": 0.036767079456761505,
+      "candidate": 0.03676705743704695,
+      "abs": 2.2019714551735348e-08,
+      "rel": 5.988975702470678e-07
+     },
+     "epoch_metrics[4].approx_kl": {
+      "reference": 0.0014417562322827308,
+      "candidate": 0.0014417559889108175,
+      "abs": 2.433719133339285e-10,
+      "rel": 1.6880240076964886e-07
+     },
+     "epoch_metrics[4].entropy": {
+      "reference": 0.27783777826299355,
+      "candidate": 0.2778377764305462,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.595385882989479e-09
+     },
+     "epoch_metrics[4].explained_variance": {
+      "reference": 0.00894824169528674,
+      "candidate": 0.008948319569463625,
+      "abs": 7.787417688476239e-08,
+      "rel": 8.702659340700131e-06
+     },
+     "epoch_metrics[4].legal_logit_deficit_max": {
+      "reference": 4.595197677612305,
+      "candidate": 4.595203399658203,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.24522146263713e-06
+     },
+     "epoch_metrics[4].policy_loss": {
+      "reference": -0.37735507922598016,
+      "candidate": -0.37735502700123075,
+      "abs": 5.222474941390942e-08,
+      "rel": 1.3839683706134634e-07
+     },
+     "epoch_metrics[4].ratio_max": {
+      "reference": 1.4776532649993896,
+      "candidate": 1.4776302576065063,
+      "abs": 2.300739288330078e-05,
+      "rel": 1.557022437419396e-05
+     },
+     "epoch_metrics[4].ratio_mean": {
+      "reference": 1.0018478600621237,
+      "candidate": 1.0018478490674396,
+      "abs": 1.0994684052079151e-08,
+      "rel": 1.0974404887581813e-08
+     },
+     "epoch_metrics[4].ratio_min": {
+      "reference": 0.6125293970108032,
+      "candidate": 0.6125249266624451,
+      "abs": 4.470348358154297e-06,
+      "rel": 7.298177654770507e-06
+     },
+     "epoch_metrics[4].value_loss": {
+      "reference": 0.23559749525850585,
+      "candidate": 0.23559749342605849,
+      "abs": 1.832447360516909e-09,
+      "rel": 7.777872844133098e-09
+     },
+     "epoch_metrics[4].value_mean": {
+      "reference": -0.2810249924158669,
+      "candidate": -0.28102499058341956,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.520585036811293e-09
+     },
+     "epoch_metrics[4].value_std": {
+      "reference": 0.038871482899936444,
+      "candidate": 0.0388714548992473,
+      "abs": 2.8000689142326785e-08,
+      "rel": 7.203401324926703e-07
+     },
+     "epoch_metrics[5].approx_kl": {
+      "reference": 0.0014694308775075704,
+      "candidate": 0.0014694299111779145,
+      "abs": 9.663296558336948e-10,
+      "rel": 6.576217164245048e-07
+     },
+     "epoch_metrics[5].entropy": {
+      "reference": 0.27771616652044223,
+      "candidate": 0.27771614636352143,
+      "abs": 2.0156920799152545e-08,
+      "rel": 7.258101338392494e-08
+     },
+     "epoch_metrics[5].explained_variance": {
+      "reference": 0.010326539912542287,
+      "candidate": 0.010326573723637433,
+      "abs": 3.381109514588587e-08,
+      "rel": 3.274183291646152e-06
+     },
+     "epoch_metrics[5].legal_logit_deficit_max": {
+      "reference": 4.620658874511719,
+      "candidate": 4.620660781860352,
+      "abs": 1.9073486328125e-06,
+      "rel": 4.12786984991478e-07
+     },
+     "epoch_metrics[5].policy_loss": {
+      "reference": -0.3779309164422664,
+      "candidate": -0.3779309081962533,
+      "abs": 8.246013094570515e-09,
+      "rel": 2.1818837083232365e-08
+     },
+     "epoch_metrics[5].ratio_max": {
+      "reference": 1.521588683128357,
+      "candidate": 1.5215837955474854,
+      "abs": 4.887580871582031e-06,
+      "rel": 3.212156429511068e-06
+     },
+     "epoch_metrics[5].ratio_mean": {
+      "reference": 1.0019483203230548,
+      "candidate": 1.001948247025161,
+      "abs": 7.329789375454254e-08,
+      "rel": 7.315536367275844e-08
+     },
+     "epoch_metrics[5].ratio_min": {
+      "reference": 0.5954108238220215,
+      "candidate": 0.59540855884552,
+      "abs": 2.2649765014648438e-06,
+      "rel": 3.804056646007302e-06
+     },
+     "epoch_metrics[5].value_loss": {
+      "reference": 0.23809578433906645,
+      "candidate": 0.23809576967948767,
+      "abs": 1.4659578773112969e-08,
+      "rel": 6.157008959149238e-08
+     },
+     "epoch_metrics[5].value_mean": {
+      "reference": -0.2861387569591952,
+      "candidate": -0.28613876062408994,
+      "abs": 3.664894721033818e-09,
+      "rel": 1.2808103009324601e-08
+     },
+     "epoch_metrics[5].value_std": {
+      "reference": 0.04172896672199985,
+      "candidate": 0.04172900197199918,
+      "abs": 3.524999932918993e-08,
+      "rel": 8.447362185379664e-07
+     },
+     "epoch_metrics[6].approx_kl": {
+      "reference": 0.0017467361796699654,
+      "candidate": 0.0017467418989099287,
+      "abs": 5.7192399633473195e-09,
+      "rel": 3.274232997397307e-06
+     },
+     "epoch_metrics[6].entropy": {
+      "reference": 0.2777260250871717,
+      "candidate": 0.27772599576801416,
+      "abs": 2.9319157546225938e-08,
+      "rel": 1.0556863562578746e-07
+     },
+     "epoch_metrics[6].explained_variance": {
+      "reference": 0.011422280612546798,
+      "candidate": 0.011422270127026568,
+      "abs": 1.048552022986371e-08,
+      "rel": 9.179883234829562e-07
+     },
+     "epoch_metrics[6].legal_logit_deficit_max": {
+      "reference": 4.618839263916016,
+      "candidate": 4.618854522705078,
+      "abs": 1.52587890625e-05,
+      "rel": 3.3035872828407546e-06
+     },
+     "epoch_metrics[6].policy_loss": {
+      "reference": -0.3784769460678788,
+      "candidate": -0.3784769451516551,
+      "abs": 9.162237080140301e-10,
+      "rel": 2.420817747376634e-09
+     },
+     "epoch_metrics[6].ratio_max": {
+      "reference": 1.5274876356124878,
+      "candidate": 1.5275213718414307,
+      "abs": 3.3736228942871094e-05,
+      "rel": 2.2085601920058236e-05
+     },
+     "epoch_metrics[6].ratio_mean": {
+      "reference": 1.0023208660310352,
+      "candidate": 1.0023209319991397,
+      "abs": 6.596810453451951e-08,
+      "rel": 6.581535157900516e-08
+     },
+     "epoch_metrics[6].ratio_min": {
+      "reference": 0.5962443947792053,
+      "candidate": 0.5962468385696411,
+      "abs": 2.4437904357910156e-06,
+      "rel": 4.098622043269053e-06
+     },
+     "epoch_metrics[6].value_loss": {
+      "reference": 0.24253581594387222,
+      "candidate": 0.2425358104465302,
+      "abs": 5.4973420260395756e-09,
+      "rel": 2.2666103992293548e-08
+     },
+     "epoch_metrics[6].value_mean": {
+      "reference": -0.29480727649155936,
+      "candidate": -0.2948072728266647,
+      "abs": 3.6648946655226666e-09,
+      "rel": 1.2431493242425434e-08
+     },
+     "epoch_metrics[6].value_std": {
+      "reference": 0.04467938132784344,
+      "candidate": 0.04467931835662723,
+      "abs": 6.297121620674195e-08,
+      "rel": 1.4094021522965752e-06
+     },
+     "epoch_metrics[7].approx_kl": {
+      "reference": 0.0017111287320864161,
+      "candidate": 0.0017111320390812387,
+      "abs": 3.306994822514092e-09,
+      "rel": 1.9326356745033675e-06
+     },
+     "epoch_metrics[7].explained_variance": {
+      "reference": 0.012467770937327982,
+      "candidate": 0.012467697467319239,
+      "abs": 7.347000874347032e-08,
+      "rel": 5.892794238263089e-06
+     },
+     "epoch_metrics[7].legal_logit_deficit_max": {
+      "reference": 4.604778289794922,
+      "candidate": 4.604787826538086,
+      "abs": 9.5367431640625e-06,
+      "rel": 2.071049421452344e-06
+     },
+     "epoch_metrics[7].policy_loss": {
+      "reference": -0.37901748745642144,
+      "candidate": -0.37901753693249984,
+      "abs": 4.9476078400889634e-08,
+      "rel": 1.305377022955562e-07
+     },
+     "epoch_metrics[7].ratio_max": {
+      "reference": 1.5509251356124878,
+      "candidate": 1.5509439706802368,
+      "abs": 1.8835067749023438e-05,
+      "rel": 1.2144260595540704e-05
+     },
+     "epoch_metrics[7].ratio_mean": {
+      "reference": 1.0023798671707294,
+      "candidate": 1.0023799221441498,
+      "abs": 5.497342048244036e-08,
+      "rel": 5.4842898653485565e-08
+     },
+     "epoch_metrics[7].ratio_min": {
+      "reference": 0.5609376430511475,
+      "candidate": 0.5609354972839355,
+      "abs": 2.1457672119140625e-06,
+      "rel": 3.825322187761264e-06
+     },
+     "epoch_metrics[7].value_loss": {
+      "reference": 0.24635786430108758,
+      "candidate": 0.2463578670497586,
+      "abs": 2.7486710130197878e-09,
+      "rel": 1.1157228490148519e-08
+     },
+     "epoch_metrics[7].value_mean": {
+      "reference": -0.30229063413145163,
+      "candidate": -0.30229064695858304,
+      "abs": 1.282713141259606e-08,
+      "rel": 4.243310714920502e-08
+     },
+     "epoch_metrics[7].value_std": {
+      "reference": 0.05010332872105984,
+      "candidate": 0.0501032421871417,
+      "abs": 8.653391814217315e-08,
+      "rel": 1.7271091632241294e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.0017111287320864161,
+      "candidate": 0.0017111320390812387,
+      "abs": 3.306994822514092e-09,
+      "rel": 1.9326356745033675e-06
+     },
+     "final_explained_variance": {
+      "reference": 0.012467770937327982,
+      "candidate": 0.012467697467319239,
+      "abs": 7.347000874347032e-08,
+      "rel": 5.892794238263089e-06
+     },
+     "final_policy_loss": {
+      "reference": -0.37901748745642144,
+      "candidate": -0.37901753693249984,
+      "abs": 4.9476078400889634e-08,
+      "rel": 1.305377022955562e-07
+     },
+     "final_value_loss": {
+      "reference": 0.24635786430108758,
+      "candidate": 0.2463578670497586,
+      "abs": 2.7486710130197878e-09,
+      "rel": 1.1157228490148519e-08
+     },
+     "final_value_mean": {
+      "reference": -0.30229063413145163,
+      "candidate": -0.30229064695858304,
+      "abs": 1.282713141259606e-08,
+      "rel": 4.243310714920502e-08
+     },
+     "final_value_std": {
+      "reference": 0.05010332872105984,
+      "candidate": 0.0501032421871417,
+      "abs": 8.653391814217315e-08,
+      "rel": 1.7271091632241294e-06
+     },
+     "legal_logit_deficit_max": {
+      "reference": 4.62199592590332,
+      "candidate": 4.622007369995117,
+      "abs": 1.1444091796875e-05,
+      "rel": 2.4760003350853785e-06
+     },
+     "max_approx_kl": {
+      "reference": 0.0017467361796699654,
+      "candidate": 0.0017467418989099287,
+      "abs": 5.7192399633473195e-09,
+      "rel": 3.274232997397307e-06
+     },
+     "value_loss": {
+      "reference": 0.24635786430108758,
+      "candidate": 0.2463578670497586,
+      "abs": 2.7486710130197878e-09,
+      "rel": 1.1157228490148519e-08
+     }
+    },
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": false,
+    "epochs": [
+     8,
+     8
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.27786617615764936,
+      "candidate": 0.27786621097414893,
+      "abs": 3.4816499572265514e-08,
+      "rel": 1.2529950817051533e-07
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0011643124246591564,
+      "candidate": 0.0011643147080603433,
+      "abs": 2.2834011868810844e-09,
+      "rel": 1.961154635489447e-06
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.27800607938962324,
+      "candidate": 0.2780060830545179,
+      "abs": 3.6648946655226666e-09,
+      "rel": 1.3182785877400995e-08
+     },
+     "epoch_metrics[0].explained_variance": {
+      "reference": 0.0030971028789908983,
+      "candidate": 0.003097193888940364,
+      "abs": 9.100994946553698e-08,
+      "rel": 2.9384647112510612e-05
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 4.605083465576172,
+      "candidate": 4.60508918762207,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.2425483340947393e-06
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.3737888488217507,
+      "candidate": -0.3737888185863694,
+      "abs": 3.023538125423997e-08,
+      "rel": 8.08889332829144e-08
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.7755128145217896,
+      "candidate": 1.7755005359649658,
+      "abs": 1.2278556823730469e-05,
+      "rel": 6.915498848166597e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 1.0016565672186253,
+      "candidate": 1.0016565598888358,
+      "abs": 7.329789442067636e-09,
+      "rel": 7.3176672344103036e-09
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.6658371686935425,
+      "candidate": 0.6658395528793335,
+      "abs": 2.384185791015625e-06,
+      "rel": 3.580721182311166e-06
+     },
+     "epoch_metrics[0].value_loss": {
+      "reference": 0.1875358651175968,
+      "candidate": 0.18753585870403108,
+      "abs": 6.41356570629803e-09,
+      "rel": 3.41991421335664e-08
+     },
+     "epoch_metrics[0].value_mean": {
+      "reference": -0.1750410615259736,
+      "candidate": -0.17504106244219728,
+      "abs": 9.162236802584545e-10,
+      "rel": 5.2343356894386616e-09
+     },
+     "epoch_metrics[0].value_std": {
+      "reference": 0.02030690400138404,
+      "candidate": 0.020306913023294616,
+      "abs": 9.021910576251235e-09,
+      "rel": 4.442777967238031e-07
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.001417390204956226,
+      "candidate": 0.0014173843067663264,
+      "abs": 5.898189899596756e-09,
+      "rel": 4.161302850106061e-06
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.2776895561781739,
+      "candidate": 0.277689525026569,
+      "abs": 3.115160490674285e-08,
+      "rel": 1.1218140622744574e-07
+     },
+     "epoch_metrics[1].explained_variance": {
+      "reference": 0.00453487420690446,
+      "candidate": 0.00453476772070982,
+      "abs": 1.0648619463982101e-07,
+      "rel": 2.34816203893138e-05
+     },
+     "epoch_metrics[1].legal_logit_deficit_max": {
+      "reference": 4.6335906982421875,
+      "candidate": 4.633615493774414,
+      "abs": 2.47955322265625e-05,
+      "rel": 5.351227839227711e-06
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.3751739750421533,
+      "candidate": -0.37517394755544303,
+      "abs": 2.748671024122018e-08,
+      "rel": 7.326390440096988e-08
+     },
+     "epoch_metrics[1].ratio_max": {
+      "reference": 1.7583626508712769,
+      "candidate": 1.7583684921264648,
+      "abs": 5.841255187988281e-06,
+      "rel": 3.3219744405930634e-06
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 1.0016548135665138,
+      "candidate": 1.001654883199513,
+      "abs": 6.963299914453103e-08,
+      "rel": 6.951795504865651e-08
+     },
+     "epoch_metrics[1].ratio_min": {
+      "reference": 0.6663814187049866,
+      "candidate": 0.666376531124115,
+      "abs": 4.887580871582031e-06,
+      "rel": 7.334509538216596e-06
+     },
+     "epoch_metrics[1].value_loss": {
+      "reference": 0.20656710414306964,
+      "candidate": 0.20656709956195127,
+      "abs": 4.581118373536697e-09,
+      "rel": 2.2177385855028426e-08
+     },
+     "epoch_metrics[1].value_mean": {
+      "reference": -0.2213602866590474,
+      "candidate": -0.221360276580587,
+      "abs": 1.0078460399576272e-08,
+      "rel": 4.552966817891654e-08
+     },
+     "epoch_metrics[1].value_std": {
+      "reference": 0.02336230831759587,
+      "candidate": 0.023362418518548967,
+      "abs": 1.1020095309552391e-07,
+      "rel": 4.717018189192531e-06
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 0.0013390177328703684,
+      "candidate": 0.0013390184629861084,
+      "abs": 7.301157400017855e-10,
+      "rel": 5.452618915900341e-07
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.2776470177454494,
+      "candidate": 0.27764702874013353,
+      "abs": 1.0994684107590302e-08,
+      "rel": 3.9599502135788696e-08
+     },
+     "epoch_metrics[2].explained_variance": {
+      "reference": 0.006884423654326399,
+      "candidate": 0.006884423106468196,
+      "abs": 5.478582032480972e-10,
+      "rel": 7.957938540052005e-08
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.37608942356203534,
+      "candidate": -0.3760894134835749,
+      "abs": 1.0078460455087423e-08,
+      "rel": 2.6798042762361803e-08
+     },
+     "epoch_metrics[2].ratio_max": {
+      "reference": 1.5877408981323242,
+      "candidate": 1.5877572298049927,
+      "abs": 1.633167266845703e-05,
+      "rel": 1.02860011353643e-05
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 1.0015676092296943,
+      "candidate": 1.0015676642031146,
+      "abs": 5.4973420260395756e-08,
+      "rel": 5.488737528695548e-08
+     },
+     "epoch_metrics[2].ratio_min": {
+      "reference": 0.6324793696403503,
+      "candidate": 0.6324817538261414,
+      "abs": 2.384185791015625e-06,
+      "rel": 3.7695724447269947e-06
+     },
+     "epoch_metrics[2].value_loss": {
+      "reference": 0.2160199926840639,
+      "candidate": 0.21601998352182716,
+      "abs": 9.162236747073393e-09,
+      "rel": 4.241383694736744e-08
+     },
+     "epoch_metrics[2].value_mean": {
+      "reference": -0.24184815319872596,
+      "candidate": -0.24184816510963372,
+      "abs": 1.1910907760093181e-08,
+      "rel": 4.924952709355381e-08
+     },
+     "epoch_metrics[2].value_std": {
+      "reference": 0.0294956366614101,
+      "candidate": 0.029495527349615823,
+      "abs": 1.0931179427603466e-07,
+      "rel": 3.706032710222868e-06
+     },
+     "epoch_metrics[3].approx_kl": {
+      "reference": 0.001423024010641085,
+      "candidate": 0.0014230183701390935,
+      "abs": 5.64050199147563e-09,
+      "rel": 3.963743372773123e-06
+     },
+     "epoch_metrics[3].entropy": {
+      "reference": 0.27769088470250086,
+      "candidate": 0.2776908956971849,
+      "abs": 1.0994684052079151e-08,
+      "rel": 3.959324638452887e-08
+     },
+     "epoch_metrics[3].explained_variance": {
+      "reference": 0.008530241111032066,
+      "candidate": 0.008530191045330482,
+      "abs": 5.0065701584500744e-08,
+      "rel": 5.869201225713459e-06
+     },
+     "epoch_metrics[3].legal_logit_deficit_max": {
+      "reference": 4.615787506103516,
+      "candidate": 4.615785598754883,
+      "abs": 1.9073486328125e-06,
+      "rel": 4.1322279898942234e-07
+     },
+     "epoch_metrics[3].policy_loss": {
+      "reference": -0.3767711459137289,
+      "candidate": -0.3767711101810056,
+      "abs": 3.5732723280279544e-08,
+      "rel": 9.483933063298174e-08
+     },
+     "epoch_metrics[3].ratio_mean": {
+      "reference": 1.0017098749444109,
+      "candidate": 1.0017098786093055,
+      "abs": 3.6648946100115154e-09,
+      "rel": 3.658638781819307e-09
+     },
+     "epoch_metrics[3].ratio_min": {
+      "reference": 0.6519960761070251,
+      "candidate": 0.6519937515258789,
+      "abs": 2.3245811462402344e-06,
+      "rel": 3.5653299635175324e-06
+     },
+     "epoch_metrics[3].value_loss": {
+      "reference": 0.22321098174627366,
+      "candidate": 0.22321099548962875,
+      "abs": 1.3743355092854515e-08,
+      "rel": 6.157113838728023e-08
+     },
+     "epoch_metrics[3].value_mean": {
+      "reference": -0.2567895055747739,
+      "candidate": -0.2567895074072213,
+      "abs": 1.832447360516909e-09,
+      "rel": 7.135990013840332e-09
+     },
+     "epoch_metrics[3].value_std": {
+      "reference": 0.035480395450228276,
+      "candidate": 0.035480369276184275,
+      "abs": 2.6174044001625596e-08,
+      "rel": 7.377044046293795e-07
+     },
+     "epoch_metrics[4].approx_kl": {
+      "reference": 0.0016234624127430032,
+      "candidate": 0.0016234591343801707,
+      "abs": 3.2783628325060155e-09,
+      "rel": 2.0193647889678527e-06
+     },
+     "epoch_metrics[4].entropy": {
+      "reference": 0.27777933327106924,
+      "candidate": 0.2777793406008586,
+      "abs": 7.3297893865564845e-09,
+      "rel": 2.638709333351275e-08
+     },
+     "epoch_metrics[4].explained_variance": {
+      "reference": 0.010021586710886488,
+      "candidate": 0.010021518757623693,
+      "abs": 6.795326279451785e-08,
+      "rel": 6.780689002141743e-06
+     },
+     "epoch_metrics[4].legal_logit_deficit_max": {
+      "reference": 4.630733489990234,
+      "candidate": 4.630743026733398,
+      "abs": 9.5367431640625e-06,
+      "rel": 2.0594412406403546e-06
+     },
+     "epoch_metrics[4].policy_loss": {
+      "reference": -0.3773480654478617,
+      "candidate": -0.37734809843191397,
+      "abs": 3.2984052267259756e-08,
+      "rel": 8.741014570982704e-08
+     },
+     "epoch_metrics[4].ratio_max": {
+      "reference": 1.4784661531448364,
+      "candidate": 1.478461503982544,
+      "abs": 4.649162292480469e-06,
+      "rel": 3.1445848676287e-06
+     },
+     "epoch_metrics[4].ratio_mean": {
+      "reference": 1.0020233352201189,
+      "candidate": 1.0020233865286445,
+      "abs": 5.130852565038424e-08,
+      "rel": 5.120491830847852e-08
+     },
+     "epoch_metrics[4].ratio_min": {
+      "reference": 0.5985103845596313,
+      "candidate": 0.5985147953033447,
+      "abs": 4.410743713378906e-06,
+      "rel": 7.369481503198953e-06
+     },
+     "epoch_metrics[4].value_loss": {
+      "reference": 0.2300989234148275,
+      "candidate": 0.23009892524727485,
+      "abs": 1.832447360516909e-09,
+      "rel": 7.963737155867534e-09
+     },
+     "epoch_metrics[4].value_mean": {
+      "reference": -0.2707437167322849,
+      "candidate": -0.27074372222962695,
+      "abs": 5.4973420260395756e-09,
+      "rel": 2.030459646771456e-08
+     },
+     "epoch_metrics[4].value_std": {
+      "reference": 0.0380893538031015,
+      "candidate": 0.03808927263171804,
+      "abs": 8.117138346197539e-08,
+      "rel": 2.131077987869824e-06
+     },
+     "epoch_metrics[5].approx_kl": {
+      "reference": 0.0015189220377902703,
+      "candidate": 0.0015189227822220053,
+      "abs": 7.444317350058238e-10,
+      "rel": 4.901050558454379e-07
+     },
+     "epoch_metrics[5].entropy": {
+      "reference": 0.27773537973088064,
+      "candidate": 0.2777353705686439,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.298908751183013e-08
+     },
+     "epoch_metrics[5].explained_variance": {
+      "reference": 0.011392709372812893,
+      "candidate": 0.0113927292227618,
+      "abs": 1.9849948906802695e-08,
+      "rel": 1.7423348276499032e-06
+     },
+     "epoch_metrics[5].legal_logit_deficit_max": {
+      "reference": 4.6209716796875,
+      "candidate": 4.62098503112793,
+      "abs": 1.33514404296875e-05,
+      "rel": 2.8893061413853066e-06
+     },
+     "epoch_metrics[5].policy_loss": {
+      "reference": -0.37797925124953485,
+      "candidate": -0.3779792237628246,
+      "abs": 2.748671024122018e-08,
+      "rel": 7.272015633226906e-08
+     },
+     "epoch_metrics[5].ratio_max": {
+      "reference": 1.50885009765625,
+      "candidate": 1.5088375806808472,
+      "abs": 1.2516975402832031e-05,
+      "rel": 8.295705068565187e-06
+     },
+     "epoch_metrics[5].ratio_mean": {
+      "reference": 1.0019107808066943,
+      "candidate": 1.0019108504396936,
+      "abs": 6.963299936657563e-08,
+      "rel": 6.950019488861394e-08
+     },
+     "epoch_metrics[5].ratio_min": {
+      "reference": 0.6037232279777527,
+      "candidate": 0.6037275791168213,
+      "abs": 4.351139068603516e-06,
+      "rel": 7.207123244176941e-06
+     },
+     "epoch_metrics[5].value_loss": {
+      "reference": 0.23490948938759376,
+      "candidate": 0.23490948205780435,
+      "abs": 7.32978941431206e-09,
+      "rel": 3.1202610986132294e-08
+     },
+     "epoch_metrics[5].value_mean": {
+      "reference": -0.2803877634318977,
+      "candidate": -0.2803877506047663,
+      "abs": 1.282713141259606e-08,
+      "rel": 4.574782884814298e-08
+     },
+     "epoch_metrics[5].value_std": {
+      "reference": 0.04389841435880726,
+      "candidate": 0.04389853281308609,
+      "abs": 1.1845427883017123e-07,
+      "rel": 2.69836532657101e-06
+     },
+     "epoch_metrics[6].approx_kl": {
+      "reference": 0.0015484807484717133,
+      "candidate": 0.0015484810848975935,
+      "abs": 3.3642588020965647e-10,
+      "rel": 2.1726185969646863e-07
+     },
+     "epoch_metrics[6].entropy": {
+      "reference": 0.27778240124604076,
+      "candidate": 0.2777824195705142,
+      "abs": 1.8324473438635636e-08,
+      "rel": 6.5967002040545e-08
+     },
+     "epoch_metrics[6].explained_variance": {
+      "reference": 0.012974992605356284,
+      "candidate": 0.012974963278453933,
+      "abs": 2.932690235102342e-08,
+      "rel": 2.2602635117431055e-06
+     },
+     "epoch_metrics[6].legal_logit_deficit_max": {
+      "reference": 4.627416610717773,
+      "candidate": 4.627414703369141,
+      "abs": 1.9073486328125e-06,
+      "rel": 4.1218433378027857e-07
+     },
+     "epoch_metrics[6].policy_loss": {
+      "reference": -0.3784909511480037,
+      "candidate": -0.37849092457751715,
+      "abs": 2.657048653320615e-08,
+      "rel": 7.020111432681551e-08
+     },
+     "epoch_metrics[6].ratio_mean": {
+      "reference": 1.0020686956217584,
+      "candidate": 1.0020687322707054,
+      "abs": 3.6648946988293574e-08,
+      "rel": 3.657328664995505e-08
+     },
+     "epoch_metrics[6].ratio_min": {
+      "reference": 0.5730346441268921,
+      "candidate": 0.5730388164520264,
+      "abs": 4.172325134277344e-06,
+      "rel": 7.281051500333472e-06
+     },
+     "epoch_metrics[6].value_loss": {
+      "reference": 0.23685288111445166,
+      "candidate": 0.23685287744955696,
+      "abs": 3.6648946932782422e-09,
+      "rel": 1.547329581145056e-08
+     },
+     "epoch_metrics[6].value_mean": {
+      "reference": -0.28445335343288636,
+      "candidate": -0.2844533406057549,
+      "abs": 1.2827131468107211e-08,
+      "rel": 4.509397169449659e-08
+     },
+     "epoch_metrics[6].value_std": {
+      "reference": 0.04587375851353237,
+      "candidate": 0.04587387799710798,
+      "abs": 1.194835756099244e-07,
+      "rel": 2.60461031041363e-06
+     },
+     "epoch_metrics[7].approx_kl": {
+      "reference": 0.0017679021633929732,
+      "candidate": 0.0017678984841822834,
+      "abs": 3.6792106898001636e-09,
+      "rel": 2.081116685065304e-06
+     },
+     "epoch_metrics[7].entropy": {
+      "reference": 0.27786617615764936,
+      "candidate": 0.27786621097414893,
+      "abs": 3.4816499572265514e-08,
+      "rel": 1.2529950817051533e-07
+     },
+     "epoch_metrics[7].explained_variance": {
+      "reference": 0.014488867568260844,
+      "candidate": 0.014488801832733045,
+      "abs": 6.573552779887137e-08,
+      "rel": 4.536967950681729e-06
+     },
+     "epoch_metrics[7].legal_logit_deficit_max": {
+      "reference": 4.61937141418457,
+      "candidate": 4.6193695068359375,
+      "abs": 1.9073486328125e-06,
+      "rel": 4.1290220287454256e-07
+     },
+     "epoch_metrics[7].policy_loss": {
+      "reference": -0.37895458967470674,
+      "candidate": -0.37895456127177285,
+      "abs": 2.840293389372306e-08,
+      "rel": 7.495075839589128e-08
+     },
+     "epoch_metrics[7].ratio_max": {
+      "reference": 1.557305097579956,
+      "candidate": 1.557295560836792,
+      "abs": 9.5367431640625e-06,
+      "rel": 6.12387590516627e-06
+     },
+     "epoch_metrics[7].ratio_mean": {
+      "reference": 1.0025084170170502,
+      "candidate": 1.0025083620436297,
+      "abs": 5.497342048244036e-08,
+      "rel": 5.483586925485674e-08
+     },
+     "epoch_metrics[7].ratio_min": {
+      "reference": 0.5521097779273987,
+      "candidate": 0.5521179437637329,
+      "abs": 8.165836334228516e-06,
+      "rel": 1.4790021636614134e-05
+     },
+     "epoch_metrics[7].value_loss": {
+      "reference": 0.2393388625624029,
+      "candidate": 0.23933887172463963,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.8281440373858636e-08
+     },
+     "epoch_metrics[7].value_std": {
+      "reference": 0.04957377507960286,
+      "candidate": 0.04957376121808337,
+      "abs": 1.386151948779002e-08,
+      "rel": 2.796139584998711e-07
+     },
+     "final_approx_kl": {
+      "reference": 0.0017679021633929732,
+      "candidate": 0.0017678984841822834,
+      "abs": 3.6792106898001636e-09,
+      "rel": 2.081116685065304e-06
+     },
+     "final_entropy": {
+      "reference": 0.27786617615764936,
+      "candidate": 0.27786621097414893,
+      "abs": 3.4816499572265514e-08,
+      "rel": 1.2529950817051533e-07
+     },
+     "final_explained_variance": {
+      "reference": 0.014488867568260844,
+      "candidate": 0.014488801832733045,
+      "abs": 6.573552779887137e-08,
+      "rel": 4.536967950681729e-06
+     },
+     "final_policy_loss": {
+      "reference": -0.37895458967470674,
+      "candidate": -0.37895456127177285,
+      "abs": 2.840293389372306e-08,
+      "rel": 7.495075839589128e-08
+     },
+     "final_value_loss": {
+      "reference": 0.2393388625624029,
+      "candidate": 0.23933887172463963,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.8281440373858636e-08
+     },
+     "final_value_std": {
+      "reference": 0.04957377507960286,
+      "candidate": 0.04957376121808337,
+      "abs": 1.386151948779002e-08,
+      "rel": 2.796139584998711e-07
+     },
+     "legal_logit_deficit_max": {
+      "reference": 4.6335906982421875,
+      "candidate": 4.633615493774414,
+      "abs": 2.47955322265625e-05,
+      "rel": 5.351227839227711e-06
+     },
+     "max_approx_kl": {
+      "reference": 0.0017679021633929732,
+      "candidate": 0.0017678984841822834,
+      "abs": 3.6792106898001636e-09,
+      "rel": 2.081116685065304e-06
+     },
+     "value_loss": {
+      "reference": 0.2393388625624029,
+      "candidate": 0.23933887172463963,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.8281440373858636e-08
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_hot_lr",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     1,
+     1
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.24900810129003706,
+      "candidate": 0.24900812602807626,
+      "abs": 2.4738039200444817e-08,
+      "rel": 9.934631288962652e-08
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.2146606509448157,
+      "candidate": 0.21466072057781493,
+      "abs": 6.963299922779775e-08,
+      "rel": 3.24386310827442e-07
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.24900810129003706,
+      "candidate": 0.24900812602807626,
+      "abs": 2.4738039200444817e-08,
+      "rel": 9.934631288962652e-08
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 6.788728713989258,
+      "candidate": 6.788730621337891,
+      "abs": 1.9073486328125e-06,
+      "rel": 2.80958067008499e-07
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": 0.0536448255483738,
+      "candidate": 0.053644830129492165,
+      "abs": 4.581118366597803e-09,
+      "rel": 8.539720147383326e-08
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9871608183938543,
+      "candidate": 0.9871608367183278,
+      "abs": 1.8324473494146787e-08,
+      "rel": 1.8562804370424405e-08
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 3.448368079261854e-05,
+      "candidate": 3.4483942727092654e-05,
+      "abs": 2.6193447411060333e-10,
+      "rel": 7.595838915044129e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.2146606509448157,
+      "candidate": 0.21466072057781493,
+      "abs": 6.963299922779775e-08,
+      "rel": 3.24386310827442e-07
+     },
+     "final_entropy": {
+      "reference": 0.24900810129003706,
+      "candidate": 0.24900812602807626,
+      "abs": 2.4738039200444817e-08,
+      "rel": 9.934631288962652e-08
+     },
+     "final_policy_loss": {
+      "reference": 0.0536448255483738,
+      "candidate": 0.053644830129492165,
+      "abs": 4.581118366597803e-09,
+      "rel": 8.539720147383326e-08
+     },
+     "legal_logit_deficit_max": {
+      "reference": 6.788728713989258,
+      "candidate": 6.788730621337891,
+      "abs": 1.9073486328125e-06,
+      "rel": 2.80958067008499e-07
+     },
+     "max_approx_kl": {
+      "reference": 0.2146606509448157,
+      "candidate": 0.21466072057781493,
+      "abs": 6.963299922779775e-08,
+      "rel": 3.24386310827442e-07
+     }
+    },
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": false,
+    "epochs": [
+     1,
+     1
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.27051747087185674,
+      "candidate": 0.270517501107238,
+      "abs": 3.023538125423997e-08,
+      "rel": 1.1176866979210384e-07
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.09228269527321233,
+      "candidate": 0.09228262930510782,
+      "abs": 6.596810450676394e-08,
+      "rel": 7.148480472038515e-07
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.27051747087185674,
+      "candidate": 0.270517501107238,
+      "abs": 3.023538125423997e-08,
+      "rel": 1.1176866979210384e-07
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 6.227392196655273,
+      "candidate": 6.227397918701172,
+      "abs": 5.7220458984375e-06,
+      "rel": 9.188502121012573e-07
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": 0.03297930736136319,
+      "candidate": 0.032979297511958695,
+      "abs": 9.849404493389446e-09,
+      "rel": 2.9865407376409873e-07
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 18.330886840820312,
+      "candidate": 18.331026077270508,
+      "abs": 0.0001392364501953125,
+      "rel": 7.595671382954294e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 1.003055091034225,
+      "candidate": 1.0030551020289091,
+      "abs": 1.0994684052079151e-08,
+      "rel": 1.096119647847848e-08
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.0033540537115186453,
+      "candidate": 0.0033540218137204647,
+      "abs": 3.189779818058014e-08,
+      "rel": 9.510222830074324e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.09228269527321233,
+      "candidate": 0.09228262930510782,
+      "abs": 6.596810450676394e-08,
+      "rel": 7.148480472038515e-07
+     },
+     "final_entropy": {
+      "reference": 0.27051747087185674,
+      "candidate": 0.270517501107238,
+      "abs": 3.023538125423997e-08,
+      "rel": 1.1176866979210384e-07
+     },
+     "final_policy_loss": {
+      "reference": 0.03297930736136319,
+      "candidate": 0.032979297511958695,
+      "abs": 9.849404493389446e-09,
+      "rel": 2.9865407376409873e-07
+     },
+     "legal_logit_deficit_max": {
+      "reference": 6.227392196655273,
+      "candidate": 6.227397918701172,
+      "abs": 5.7220458984375e-06,
+      "rel": 9.188502121012573e-07
+     },
+     "max_approx_kl": {
+      "reference": 0.09228269527321233,
+      "candidate": 0.09228262930510782,
+      "abs": 6.596810450676394e-08,
+      "rel": 7.148480472038515e-07
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_no_up_entropy_dropout",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     4,
+     4
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.2736277144482346,
+      "candidate": 0.2736277126157872,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.696863160268712e-09
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0015175360776917967,
+      "candidate": 0.001517536242325738,
+      "abs": 1.6463394124539843e-10,
+      "rel": 1.0848765034638289e-07
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.276334291405218,
+      "candidate": 0.2763342694158498,
+      "abs": 2.1989368159669453e-08,
+      "rel": 7.957524217442899e-08
+     },
+     "epoch_metrics[0].explained_variance": {
+      "reference": -0.0026098836056080987,
+      "candidate": -0.002609870423993632,
+      "abs": 1.3181614466617475e-08,
+      "rel": 5.050652235330694e-06
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.36998236584494465,
+      "candidate": -0.3699823667611683,
+      "abs": 9.162236525028788e-10,
+      "rel": 2.476398160602938e-09
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.7968963384628296,
+      "candidate": 1.7968838214874268,
+      "abs": 1.2516975402832031e-05,
+      "rel": 6.965886197720112e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9996531433713841,
+      "candidate": 0.9996531397064894,
+      "abs": 3.664894721033818e-09,
+      "rel": 3.666166355135705e-09
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.3798235058784485,
+      "candidate": 0.3798242211341858,
+      "abs": 7.152557373046875e-07,
+      "rel": 1.8831230277228664e-06
+     },
+     "epoch_metrics[0].value_loss": {
+      "reference": 0.2586671697058368,
+      "candidate": 0.2586671687896131,
+      "abs": 9.162237080140301e-10,
+      "rel": 3.542095075521119e-09
+     },
+     "epoch_metrics[0].value_mean": {
+      "reference": -0.32090998274289045,
+      "candidate": -0.3209099864077852,
+      "abs": 3.664894721033818e-09,
+      "rel": 1.1420319953448818e-08
+     },
+     "epoch_metrics[0].value_std": {
+      "reference": 0.025979877888830428,
+      "candidate": 0.02597969155179727,
+      "abs": 1.8633703315756867e-07,
+      "rel": 7.1723598530723215e-06
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.0020149969977320092,
+      "candidate": 0.0020150017792743067,
+      "abs": 4.7815422975217015e-09,
+      "rel": 2.3729717495553532e-06
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.2749804247895881,
+      "candidate": 0.2749804229571408,
+      "abs": 1.8324473050057577e-09,
+      "rel": 6.663919100452061e-09
+     },
+     "epoch_metrics[1].explained_variance": {
+      "reference": -0.001924302978808079,
+      "candidate": -0.0019241211598610697,
+      "abs": 1.8181894700930457e-07,
+      "rel": 9.448561323847451e-05
+     },
+     "epoch_metrics[1].legal_logit_deficit_max": {
+      "reference": 4.636373519897461,
+      "candidate": 4.636377334594727,
+      "abs": 3.814697265625e-06,
+      "rel": 8.227754106986309e-07
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.3696396063109098,
+      "candidate": -0.3696395806566469,
+      "abs": 2.565426288070327e-08,
+      "rel": 6.940344714880218e-08
+     },
+     "epoch_metrics[1].ratio_max": {
+      "reference": 1.820117712020874,
+      "candidate": 1.8201079368591309,
+      "abs": 9.775161743164062e-06,
+      "rel": 5.370620635470172e-06
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9992774147023613,
+      "candidate": 0.9992773743885196,
+      "abs": 4.031384170932739e-08,
+      "rel": 4.0342992962905126e-08
+     },
+     "epoch_metrics[1].ratio_min": {
+      "reference": 0.37820708751678467,
+      "candidate": 0.3782106935977936,
+      "abs": 3.606081008911133e-06,
+      "rel": 9.534582363622968e-06
+     },
+     "epoch_metrics[1].value_loss": {
+      "reference": 0.3027216642289742,
+      "candidate": 0.3027216752236583,
+      "abs": 1.0994684107590302e-08,
+      "rel": 3.631944788712984e-08
+     },
+     "epoch_metrics[1].value_mean": {
+      "reference": -0.39627609124658375,
+      "candidate": -0.39627608391679436,
+      "abs": 7.3297893865564845e-09,
+      "rel": 1.849667327518759e-08
+     },
+     "epoch_metrics[1].value_std": {
+      "reference": 0.03275743930292666,
+      "candidate": 0.03275754195829012,
+      "abs": 1.0265536345976933e-07,
+      "rel": 3.1337932373094253e-06
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 0.0039399969587810505,
+      "candidate": 0.0039400074237733234,
+      "abs": 1.0464992272925244e-08,
+      "rel": 2.6560844047605827e-06
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.274164763077605,
+      "candidate": 0.2741647777371838,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.346995662282243e-08
+     },
+     "epoch_metrics[2].explained_variance": {
+      "reference": 0.0034822042332947056,
+      "candidate": 0.0034823770585835634,
+      "abs": 1.728252888577586e-07,
+      "rel": 4.962853991694233e-05
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.36765547784791786,
+      "candidate": -0.36765549800483865,
+      "abs": 2.0156920799152545e-08,
+      "rel": 5.4825566076227325e-08
+     },
+     "epoch_metrics[2].ratio_max": {
+      "reference": 2.509943962097168,
+      "candidate": 2.5099573135375977,
+      "abs": 1.33514404296875e-05,
+      "rel": 5.319389440480022e-06
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 0.9990591500663552,
+      "candidate": 0.9990590987578294,
+      "abs": 5.130852576140654e-08,
+      "rel": 5.135684484547161e-08
+     },
+     "epoch_metrics[2].ratio_min": {
+      "reference": 0.1716114729642868,
+      "candidate": 0.17161114513874054,
+      "abs": 3.2782554626464844e-07,
+      "rel": 1.9102775624615176e-06
+     },
+     "epoch_metrics[2].value_loss": {
+      "reference": 0.24438248399899645,
+      "candidate": 0.2443824858314438,
+      "abs": 1.832447360516909e-09,
+      "rel": 7.498276131706057e-09
+     },
+     "epoch_metrics[2].value_mean": {
+      "reference": -0.2961870580356892,
+      "candidate": -0.29618706536547856,
+      "abs": 7.3297893865564845e-09,
+      "rel": 2.4747162329698385e-08
+     },
+     "epoch_metrics[2].value_std": {
+      "reference": 0.03287784723987962,
+      "candidate": 0.03287778817474108,
+      "abs": 5.9065138537095496e-08,
+      "rel": 1.7965026148503925e-06
+     },
+     "epoch_metrics[3].approx_kl": {
+      "reference": 0.004417691552024852,
+      "candidate": 0.004417702188809064,
+      "abs": 1.0636784212106343e-08,
+      "rel": 2.4077639817033107e-06
+     },
+     "epoch_metrics[3].entropy": {
+      "reference": 0.2736277144482346,
+      "candidate": 0.2736277126157872,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.696863160268712e-09
+     },
+     "epoch_metrics[3].explained_variance": {
+      "reference": 0.0050044131417553706,
+      "candidate": 0.0050044775074492565,
+      "abs": 6.436569388590385e-08,
+      "rel": 1.286162117625553e-05
+     },
+     "epoch_metrics[3].legal_logit_deficit_max": {
+      "reference": 4.744132995605469,
+      "candidate": 4.744140625,
+      "abs": 7.62939453125e-06,
+      "rel": 1.6081720872787155e-06
+     },
+     "epoch_metrics[3].ratio_max": {
+      "reference": 2.6413209438323975,
+      "candidate": 2.641312837600708,
+      "abs": 8.106231689453125e-06,
+      "rel": 3.0690067060504473e-06
+     },
+     "epoch_metrics[3].ratio_mean": {
+      "reference": 0.9987144832123195,
+      "candidate": 0.9987144942070035,
+      "abs": 1.0994684052079151e-08,
+      "rel": 1.1008835974498517e-08
+     },
+     "epoch_metrics[3].value_loss": {
+      "reference": 0.25429635811241447,
+      "candidate": 0.2542963746044406,
+      "abs": 1.6492026133629878e-08,
+      "rel": 6.485356371785998e-08
+     },
+     "epoch_metrics[3].value_mean": {
+      "reference": -0.3149001202950375,
+      "candidate": -0.31490012212748486,
+      "abs": 1.832447360516909e-09,
+      "rel": 5.8191382973648285e-09
+     },
+     "epoch_metrics[3].value_std": {
+      "reference": 0.0389349153879089,
+      "candidate": 0.03893482408762048,
+      "abs": 9.130028841980442e-08,
+      "rel": 2.344946367808402e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.004417691552024852,
+      "candidate": 0.004417702188809064,
+      "abs": 1.0636784212106343e-08,
+      "rel": 2.4077639817033107e-06
+     },
+     "final_entropy": {
+      "reference": 0.2736277144482346,
+      "candidate": 0.2736277126157872,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.696863160268712e-09
+     },
+     "final_explained_variance": {
+      "reference": 0.0050044131417553706,
+      "candidate": 0.0050044775074492565,
+      "abs": 6.436569388590385e-08,
+      "rel": 1.286162117625553e-05
+     },
+     "final_value_loss": {
+      "reference": 0.25429635811241447,
+      "candidate": 0.2542963746044406,
+      "abs": 1.6492026133629878e-08,
+      "rel": 6.485356371785998e-08
+     },
+     "final_value_mean": {
+      "reference": -0.3149001202950375,
+      "candidate": -0.31490012212748486,
+      "abs": 1.832447360516909e-09,
+      "rel": 5.8191382973648285e-09
+     },
+     "final_value_std": {
+      "reference": 0.0389349153879089,
+      "candidate": 0.03893482408762048,
+      "abs": 9.130028841980442e-08,
+      "rel": 2.344946367808402e-06
+     },
+     "legal_logit_deficit_max": {
+      "reference": 4.744132995605469,
+      "candidate": 4.744140625,
+      "abs": 7.62939453125e-06,
+      "rel": 1.6081720872787155e-06
+     },
+     "max_approx_kl": {
+      "reference": 0.004417691552024852,
+      "candidate": 0.004417702188809064,
+      "abs": 1.0636784212106343e-08,
+      "rel": 2.4077639817033107e-06
+     },
+     "value_loss": {
+      "reference": 0.25429635811241447,
+      "candidate": 0.2542963746044406,
+      "abs": 1.6492026133629878e-08,
+      "rel": 6.485356371785998e-08
+     }
+    },
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": false,
+    "epochs": [
+     4,
+     4
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.2730125311801911,
+      "candidate": 0.2730125495046646,
+      "abs": 1.8324473494146787e-08,
+      "rel": 6.711952812203493e-08
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0005655234228402208,
+      "candidate": 0.0005655272774218482,
+      "abs": 3.854581627407011e-09,
+      "rel": 6.815907527890529e-06
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.2761182724334361,
+      "candidate": 0.2761182467791733,
+      "abs": 2.565426282519212e-08,
+      "rel": 9.291041334968731e-08
+     },
+     "epoch_metrics[0].explained_variance": {
+      "reference": 0.004492037403175386,
+      "candidate": 0.004491962831349894,
+      "abs": 7.457182549241992e-08,
+      "rel": 1.6600891488504898e-05
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 4.640777587890625,
+      "candidate": 4.640771865844727,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.2329929176886807e-06
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.37046443489801273,
+      "candidate": -0.37046442665199963,
+      "abs": 8.246013094570515e-09,
+      "rel": 2.2258582249172195e-08
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.3712624311447144,
+      "candidate": 1.3712577819824219,
+      "abs": 4.649162292480469e-06,
+      "rel": 3.3904249010887002e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9997508274745838,
+      "candidate": 0.9997508348043732,
+      "abs": 7.329789442067636e-09,
+      "rel": 7.331616225658763e-09
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.5501626133918762,
+      "candidate": 0.5501646995544434,
+      "abs": 2.086162567138672e-06,
+      "rel": 3.791887354510699e-06
+     },
+     "epoch_metrics[0].value_loss": {
+      "reference": 0.16685643934238653,
+      "candidate": 0.1668564475883996,
+      "abs": 8.246013066814939e-09,
+      "rel": 4.941980478426671e-08
+     },
+     "epoch_metrics[0].value_mean": {
+      "reference": -0.11270167015316651,
+      "candidate": -0.1127016788572914,
+      "abs": 8.704124893066378e-09,
+      "rel": 7.723154598333875e-08
+     },
+     "epoch_metrics[0].value_std": {
+      "reference": 0.019131092532206635,
+      "candidate": 0.01913105023569876,
+      "abs": 4.229650787598849e-08,
+      "rel": 2.2108778055818584e-06
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.0014552929324234492,
+      "candidate": 0.0014552936696971867,
+      "abs": 7.372737375038046e-10,
+      "rel": 5.066150927855094e-07
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.2749947723942071,
+      "candidate": 0.2749947998809173,
+      "abs": 2.748671018570903e-08,
+      "rel": 9.995356347687946e-08
+     },
+     "epoch_metrics[1].explained_variance": {
+      "reference": 0.006331573328492213,
+      "candidate": 0.006331581103268036,
+      "abs": 7.774775823143898e-09,
+      "rel": 1.2279359130582658e-06
+     },
+     "epoch_metrics[1].legal_logit_deficit_max": {
+      "reference": 4.725994110107422,
+      "candidate": 4.725992202758789,
+      "abs": 1.9073486328125e-06,
+      "rel": 4.035867562198773e-07
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.37026079665631023,
+      "candidate": -0.3702608433837176,
+      "abs": 4.6727407387869846e-08,
+      "rel": 1.2620132056320137e-07
+     },
+     "epoch_metrics[1].ratio_max": {
+      "reference": 1.5514957904815674,
+      "candidate": 1.5514791011810303,
+      "abs": 1.6689300537109375e-05,
+      "rel": 1.0756909970042006e-05
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9997699197434973,
+      "candidate": 0.9997699270732866,
+      "abs": 7.329789331045333e-09,
+      "rel": 7.331476105209988e-09
+     },
+     "epoch_metrics[1].ratio_min": {
+      "reference": 0.5253923535346985,
+      "candidate": 0.5253912806510925,
+      "abs": 1.0728836059570312e-06,
+      "rel": 2.042061706339955e-06
+     },
+     "epoch_metrics[1].value_loss": {
+      "reference": 0.1797403917602378,
+      "candidate": 0.17974038259800104,
+      "abs": 9.162236747073393e-09,
+      "rel": 5.097483463424978e-08
+     },
+     "epoch_metrics[1].value_std": {
+      "reference": 0.02316790123161756,
+      "candidate": 0.023167866627865335,
+      "abs": 3.4603752224748874e-08,
+      "rel": 1.4936075511891706e-06
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 0.002780662917770142,
+      "candidate": 0.0027806587374996305,
+      "abs": 4.180270511688899e-09,
+      "rel": 1.5033359437328437e-06
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.27392497955428546,
+      "candidate": 0.2739249832191802,
+      "abs": 3.664894721033818e-09,
+      "rel": 1.337919118571731e-08
+     },
+     "epoch_metrics[2].explained_variance": {
+      "reference": 0.008747550586420516,
+      "candidate": 0.008747569045205905,
+      "abs": 1.8458785389086074e-08,
+      "rel": 2.11016172535413e-06
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.3695724553330056,
+      "candidate": -0.3695724040244799,
+      "abs": 5.130852570589539e-08,
+      "rel": 1.3883211523343514e-07
+     },
+     "epoch_metrics[2].ratio_max": {
+      "reference": 1.900084137916565,
+      "candidate": 1.9001010656356812,
+      "abs": 1.6927719116210938e-05,
+      "rel": 8.908851967065103e-06
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 0.9994507294049337,
+      "candidate": 0.9994506964208815,
+      "abs": 3.2984052267259756e-08,
+      "rel": 3.300217939397397e-08
+     },
+     "epoch_metrics[2].value_loss": {
+      "reference": 0.18553322212198164,
+      "candidate": 0.18553322853554738,
+      "abs": 6.413565734053606e-09,
+      "rel": 3.456828614840168e-08
+     },
+     "epoch_metrics[2].value_mean": {
+      "reference": -0.17115194948979096,
+      "candidate": -0.1711519586520277,
+      "abs": 9.162236747073393e-09,
+      "rel": 5.353276012284096e-08
+     },
+     "epoch_metrics[2].value_std": {
+      "reference": 0.027876191442097804,
+      "candidate": 0.027876112591957436,
+      "abs": 7.885014036840277e-08,
+      "rel": 2.828583686985504e-06
+     },
+     "epoch_metrics[3].approx_kl": {
+      "reference": 0.004174900524496273,
+      "candidate": 0.004174899293320712,
+      "abs": 1.2311755616736808e-09,
+      "rel": 2.948993765120259e-07
+     },
+     "epoch_metrics[3].entropy": {
+      "reference": 0.2730125311801911,
+      "candidate": 0.2730125495046646,
+      "abs": 1.8324473494146787e-08,
+      "rel": 6.711952812203493e-08
+     },
+     "epoch_metrics[3].explained_variance": {
+      "reference": 0.01142827250187528,
+      "candidate": 0.011428266295348433,
+      "abs": 6.206526848018257e-09,
+      "rel": 5.430853041874719e-07
+     },
+     "epoch_metrics[3].policy_loss": {
+      "reference": -0.3685272159991007,
+      "candidate": -0.3685271472823252,
+      "abs": 6.871677549202815e-08,
+      "rel": 1.8646323123173576e-07
+     },
+     "epoch_metrics[3].ratio_max": {
+      "reference": 2.212739944458008,
+      "candidate": 2.2127583026885986,
+      "abs": 1.8358230590820312e-05,
+      "rel": 8.29653675618989e-06
+     },
+     "epoch_metrics[3].ratio_mean": {
+      "reference": 0.9992621504159568,
+      "candidate": 0.9992621540808514,
+      "abs": 3.6648946100115154e-09,
+      "rel": 3.6676007342463455e-09
+     },
+     "epoch_metrics[3].ratio_min": {
+      "reference": 0.37501442432403564,
+      "candidate": 0.37501582503318787,
+      "abs": 1.4007091522216797e-06,
+      "rel": 3.7350667857755626e-06
+     },
+     "epoch_metrics[3].value_loss": {
+      "reference": 0.16645804742268186,
+      "candidate": 0.16645805475247125,
+      "abs": 7.3297893865564845e-09,
+      "rel": 4.4033852236565716e-08
+     },
+     "epoch_metrics[3].value_mean": {
+      "reference": -0.11423783367015426,
+      "candidate": -0.1142378267984767,
+      "abs": 6.871677560305045e-09,
+      "rel": 6.015237981618289e-08
+     },
+     "epoch_metrics[3].value_std": {
+      "reference": 0.02807292666449882,
+      "candidate": 0.028072948508083742,
+      "abs": 2.1843584923492143e-08,
+      "rel": 7.781008438498071e-07
+     },
+     "final_approx_kl": {
+      "reference": 0.004174900524496273,
+      "candidate": 0.004174899293320712,
+      "abs": 1.2311755616736808e-09,
+      "rel": 2.948993765120259e-07
+     },
+     "final_entropy": {
+      "reference": 0.2730125311801911,
+      "candidate": 0.2730125495046646,
+      "abs": 1.8324473494146787e-08,
+      "rel": 6.711952812203493e-08
+     },
+     "final_explained_variance": {
+      "reference": 0.01142827250187528,
+      "candidate": 0.011428266295348433,
+      "abs": 6.206526848018257e-09,
+      "rel": 5.430853041874719e-07
+     },
+     "final_policy_loss": {
+      "reference": -0.3685272159991007,
+      "candidate": -0.3685271472823252,
+      "abs": 6.871677549202815e-08,
+      "rel": 1.8646323123173576e-07
+     },
+     "final_value_loss": {
+      "reference": 0.16645804742268186,
+      "candidate": 0.16645805475247125,
+      "abs": 7.3297893865564845e-09,
+      "rel": 4.4033852236565716e-08
+     },
+     "final_value_mean": {
+      "reference": -0.11423783367015426,
+      "candidate": -0.1142378267984767,
+      "abs": 6.871677560305045e-09,
+      "rel": 6.015237981618289e-08
+     },
+     "final_value_std": {
+      "reference": 0.02807292666449882,
+      "candidate": 0.028072948508083742,
+      "abs": 2.1843584923492143e-08,
+      "rel": 7.781008438498071e-07
+     },
+     "max_approx_kl": {
+      "reference": 0.004174900524496273,
+      "candidate": 0.004174899293320712,
+      "abs": 1.2311755616736808e-09,
+      "rel": 2.948993765120259e-07
+     },
+     "value_loss": {
+      "reference": 0.16645804742268186,
+      "candidate": 0.16645805475247125,
+      "abs": 7.3297893865564845e-09,
+      "rel": 4.4033852236565716e-08
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_own_critic_dropout",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     3,
+     3
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.267853176263081,
+      "candidate": 0.2678531606872786,
+      "abs": 1.5575802425615848e-08,
+      "rel": 5.815052351784527e-08
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0026260737727437683,
+      "candidate": 0.0026260703297469943,
+      "abs": 3.4429967739682543e-09,
+      "rel": 1.311081512523904e-06
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.2746399849334713,
+      "candidate": 0.2746400105877342,
+      "abs": 2.565426288070327e-08,
+      "rel": 9.341050790743389e-08
+     },
+     "epoch_metrics[0].explained_variance": {
+      "reference": -0.2426964636274096,
+      "candidate": -0.24269650140380072,
+      "abs": 3.77763911263429e-08,
+      "rel": 1.55652804666888e-07
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 4.64030647277832,
+      "candidate": 4.640298843383789,
+      "abs": 7.62939453125e-06,
+      "rel": 1.644157465892981e-06
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.9383981044343701,
+      "candidate": -0.9383981484131064,
+      "abs": 4.397873631933891e-08,
+      "rel": 4.686575351167292e-08
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.9184467792510986,
+      "candidate": 1.9184520244598389,
+      "abs": 5.245208740234375e-06,
+      "rel": 2.7340838724967443e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9993206073187888,
+      "candidate": 0.9993206329730517,
+      "abs": 2.5654262936214423e-08,
+      "rel": 2.5671703445060592e-08
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.501251220703125,
+      "candidate": 0.5012476444244385,
+      "abs": 3.5762786865234375e-06,
+      "rel": 7.134703196347032e-06
+     },
+     "epoch_metrics[0].value_loss": {
+      "reference": 0.21960459594983106,
+      "candidate": 0.21960459228493637,
+      "abs": 3.6648946932782422e-09,
+      "rel": 1.668860652677548e-08
+     },
+     "epoch_metrics[0].value_mean": {
+      "reference": -0.1701933561975363,
+      "candidate": -0.17019335711375996,
+      "abs": 9.162236525028788e-10,
+      "rel": 5.383427814344483e-09
+     },
+     "epoch_metrics[0].value_std": {
+      "reference": 0.24096466917388384,
+      "candidate": 0.24096466187270296,
+      "abs": 7.301180882102187e-09,
+      "rel": 3.029979833613509e-08
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.006575821770816573,
+      "candidate": 0.006575823460103971,
+      "abs": 1.689287398333461e-09,
+      "rel": 2.5689366641037405e-07
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.2713475653972605,
+      "candidate": 0.27134754065922134,
+      "abs": 2.473803917268924e-08,
+      "rel": 9.116735260355865e-08
+     },
+     "epoch_metrics[1].explained_variance": {
+      "reference": -0.23063303593513984,
+      "candidate": -0.23063315311371846,
+      "abs": 1.1717857861803793e-07,
+      "rel": 5.080734362603134e-07
+     },
+     "epoch_metrics[1].legal_logit_deficit_max": {
+      "reference": 4.7794952392578125,
+      "candidate": 4.779500961303711,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.1972057218452134e-06
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.9335265147581497,
+      "candidate": -0.9335265624017808,
+      "abs": 4.7643631040372725e-08,
+      "rel": 5.103618146418352e-08
+     },
+     "epoch_metrics[1].ratio_max": {
+      "reference": 2.2728097438812256,
+      "candidate": 2.272800922393799,
+      "abs": 8.821487426757812e-06,
+      "rel": 3.881313625351482e-06
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9989002072483291,
+      "candidate": 0.9989002438972759,
+      "abs": 3.664894687727127e-08,
+      "rel": 3.668929615462197e-08
+     },
+     "epoch_metrics[1].ratio_min": {
+      "reference": 0.3499195873737335,
+      "candidate": 0.3499141335487366,
+      "abs": 5.453824996948242e-06,
+      "rel": 1.558593800901821e-05
+     },
+     "epoch_metrics[1].value_loss": {
+      "reference": 0.21578944355009613,
+      "candidate": 0.21578945179610917,
+      "abs": 8.246013039059363e-09,
+      "rel": 3.821323503268682e-08
+     },
+     "epoch_metrics[1].value_mean": {
+      "reference": -0.09681233584386927,
+      "candidate": -0.09681233721820479,
+      "abs": 1.3743355203876817e-09,
+      "rel": 1.419587172335355e-08
+     },
+     "epoch_metrics[1].value_std": {
+      "reference": 0.23778399879833273,
+      "candidate": 0.23778399149572155,
+      "abs": 7.302611182424812e-09,
+      "rel": 3.071111268768862e-08
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 0.016678229176555773,
+      "candidate": 0.016678233185034346,
+      "abs": 4.008478573375163e-09,
+      "rel": 2.403419192490987e-07
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.267853176263081,
+      "candidate": 0.2678531606872786,
+      "abs": 1.5575802425615848e-08,
+      "rel": 5.815052351784527e-08
+     },
+     "epoch_metrics[2].explained_variance": {
+      "reference": -0.22447944507038242,
+      "candidate": -0.2244794498642777,
+      "abs": 4.793895280741367e-09,
+      "rel": 2.135560864765037e-08
+     },
+     "epoch_metrics[2].legal_logit_deficit_max": {
+      "reference": 5.101495742797852,
+      "candidate": 5.101497650146484,
+      "abs": 1.9073486328125e-06,
+      "rel": 3.7388013552407154e-07
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.9231433055259692,
+      "candidate": -0.9231432578823382,
+      "abs": 4.7643631040372725e-08,
+      "rel": 5.161022211305246e-08
+     },
+     "epoch_metrics[2].ratio_max": {
+      "reference": 4.369073390960693,
+      "candidate": 4.369081974029541,
+      "abs": 8.58306884765625e-06,
+      "rel": 1.964501673046022e-06
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 0.9981683461022174,
+      "candidate": 0.9981683057883757,
+      "abs": 4.031384170932739e-08,
+      "rel": 4.038781821398197e-08
+     },
+     "epoch_metrics[2].ratio_min": {
+      "reference": 0.14684244990348816,
+      "candidate": 0.1468418836593628,
+      "abs": 5.662441253662109e-07,
+      "rel": 3.856133738836239e-06
+     },
+     "epoch_metrics[2].value_loss": {
+      "reference": 0.21905897719327236,
+      "candidate": 0.219058975360825,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.365086809020243e-09
+     },
+     "epoch_metrics[2].value_mean": {
+      "reference": -0.06581848289294591,
+      "candidate": -0.0658184865578406,
+      "abs": 3.6648946932782422e-09,
+      "rel": 5.568184388526726e-08
+     },
+     "epoch_metrics[2].value_std": {
+      "reference": 0.23593145437926313,
+      "candidate": 0.23593145141514096,
+      "abs": 2.964122169935024e-09,
+      "rel": 1.2563488737581196e-08
+     },
+     "final_approx_kl": {
+      "reference": 0.016678229176555773,
+      "candidate": 0.016678233185034346,
+      "abs": 4.008478573375163e-09,
+      "rel": 2.403419192490987e-07
+     },
+     "final_entropy": {
+      "reference": 0.267853176263081,
+      "candidate": 0.2678531606872786,
+      "abs": 1.5575802425615848e-08,
+      "rel": 5.815052351784527e-08
+     },
+     "final_explained_variance": {
+      "reference": -0.22447944507038242,
+      "candidate": -0.2244794498642777,
+      "abs": 4.793895280741367e-09,
+      "rel": 2.135560864765037e-08
+     },
+     "final_policy_loss": {
+      "reference": -0.9231433055259692,
+      "candidate": -0.9231432578823382,
+      "abs": 4.7643631040372725e-08,
+      "rel": 5.161022211305246e-08
+     },
+     "final_value_loss": {
+      "reference": 0.21905897719327236,
+      "candidate": 0.219058975360825,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.365086809020243e-09
+     },
+     "final_value_mean": {
+      "reference": -0.06581848289294591,
+      "candidate": -0.0658184865578406,
+      "abs": 3.6648946932782422e-09,
+      "rel": 5.568184388526726e-08
+     },
+     "final_value_std": {
+      "reference": 0.23593145437926313,
+      "candidate": 0.23593145141514096,
+      "abs": 2.964122169935024e-09,
+      "rel": 1.2563488737581196e-08
+     },
+     "legal_logit_deficit_max": {
+      "reference": 5.101495742797852,
+      "candidate": 5.101497650146484,
+      "abs": 1.9073486328125e-06,
+      "rel": 3.7388013552407154e-07
+     },
+     "max_approx_kl": {
+      "reference": 0.016678229176555773,
+      "candidate": 0.016678233185034346,
+      "abs": 4.008478573375163e-09,
+      "rel": 2.403419192490987e-07
+     },
+     "value_loss": {
+      "reference": 0.21905897719327236,
+      "candidate": 0.219058975360825,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.365086809020243e-09
+     }
+    },
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": false,
+    "epochs": [
+     3,
+     3
+    ],
+    "stopped_by_kl": [
+     true,
+     true
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.26706646492862895,
+      "candidate": 0.2670664530177212,
+      "abs": 1.1910907760093181e-08,
+      "rel": 4.459903928138735e-08
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0031454970896193945,
+      "candidate": 0.0031454939544165107,
+      "abs": 3.1352028837666746e-09,
+      "rel": 9.967273198609237e-07
+     },
+     "epoch_metrics[0].explained_variance": {
+      "reference": -0.24175468303611058,
+      "candidate": -0.2417547735610217,
+      "abs": 9.052491112271355e-08,
+      "rel": 3.7444932229999593e-07
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 4.583269119262695,
+      "candidate": 4.583272933959961,
+      "abs": 3.814697265625e-06,
+      "rel": 8.323085534269265e-07
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.9374970332677445,
+      "candidate": -0.937496978294324,
+      "abs": 5.497342048244036e-08,
+      "rel": 5.863850074365006e-08
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.8492892980575562,
+      "candidate": 1.8492990732192993,
+      "abs": 9.775161743164062e-06,
+      "rel": 5.285873920948466e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9994626879563233,
+      "candidate": 0.999462643977587,
+      "abs": 4.397873631933891e-08,
+      "rel": 4.400237932770211e-08
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.3877224028110504,
+      "candidate": 0.38771748542785645,
+      "abs": 4.9173831939697266e-06,
+      "rel": 1.2682741978069617e-05
+     },
+     "epoch_metrics[0].value_loss": {
+      "reference": 0.21913798064104403,
+      "candidate": 0.2191379815572677,
+      "abs": 9.162236802584545e-10,
+      "rel": 4.181035499859326e-09
+     },
+     "epoch_metrics[0].value_mean": {
+      "reference": -0.1679017186179172,
+      "candidate": -0.1679017149530225,
+      "abs": 3.6648946932782422e-09,
+      "rel": 2.1827618701260588e-08
+     },
+     "epoch_metrics[0].value_std": {
+      "reference": 0.2407404620998227,
+      "candidate": 0.2407404598985414,
+      "abs": 2.2012812961325068e-09,
+      "rel": 9.143794428789243e-09
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.00993965674780906,
+      "candidate": 0.009939654170929978,
+      "abs": 2.576879081644945e-09,
+      "rel": 2.5925232098311154e-07
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.27077244080256857,
+      "candidate": 0.2707724353052265,
+      "abs": 5.497342081550727e-09,
+      "rel": 2.03024431336388e-08
+     },
+     "epoch_metrics[1].explained_variance": {
+      "reference": -0.23000970164294543,
+      "candidate": -0.23000969325493403,
+      "abs": 8.38801139657619e-09,
+      "rel": 3.646807650573489e-08
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9996958302323438,
+      "candidate": 0.999695815572765,
+      "abs": 1.4659578773112969e-08,
+      "rel": 1.4664039130488192e-08
+     },
+     "epoch_metrics[1].ratio_min": {
+      "reference": 0.24739812314510345,
+      "candidate": 0.24739818274974823,
+      "abs": 5.960464477539063e-08,
+      "rel": 2.409259603805691e-07
+     },
+     "epoch_metrics[1].value_loss": {
+      "reference": 0.21576853578397318,
+      "candidate": 0.215768513794605,
+      "abs": 2.198936818742503e-08,
+      "rel": 1.0191183857057231e-07
+     },
+     "epoch_metrics[1].value_mean": {
+      "reference": -0.09713539974706949,
+      "candidate": -0.0971353960821748,
+      "abs": 3.6648946932782422e-09,
+      "rel": 3.7729753548358766e-08
+     },
+     "epoch_metrics[1].value_std": {
+      "reference": 0.23758695299435073,
+      "candidate": 0.23758695256452564,
+      "abs": 4.298250921852542e-10,
+      "rel": 1.8091275079211715e-09
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 0.020736922532896242,
+      "candidate": 0.020736914515939096,
+      "abs": 8.016957146750325e-09,
+      "rel": 3.8660303302153626e-07
+     },
+     "epoch_metrics[2].clip_fraction": {
+      "reference": 0.13846523357751891,
+      "candidate": 0.13858532484688363,
+      "abs": 0.00012009126936471382,
+      "rel": 0.0008665511265164401
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.26706646492862895,
+      "candidate": 0.2670664530177212,
+      "abs": 1.1910907760093181e-08,
+      "rel": 4.459903928138735e-08
+     },
+     "epoch_metrics[2].explained_variance": {
+      "reference": -0.2231398665699995,
+      "candidate": -0.22313988813526509,
+      "abs": 2.156526557328675e-08,
+      "rel": 9.664460152554219e-08
+     },
+     "epoch_metrics[2].legal_logit_deficit_max": {
+      "reference": 4.819192886352539,
+      "candidate": 4.819190979003906,
+      "abs": 1.9073486328125e-06,
+      "rel": 3.9578175802299095e-07
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.9181971269966933,
+      "candidate": -0.9181971343264826,
+      "abs": 7.329789331045333e-09,
+      "rel": 7.98280571461584e-09
+     },
+     "epoch_metrics[2].ratio_max": {
+      "reference": 4.593446254730225,
+      "candidate": 4.593478202819824,
+      "abs": 3.1948089599609375e-05,
+      "rel": 6.9550976817517545e-06
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 0.9986206380863127,
+      "candidate": 0.9986205904426817,
+      "abs": 4.7643631040372725e-08,
+      "rel": 4.7709439624313864e-08
+     },
+     "epoch_metrics[2].ratio_min": {
+      "reference": 0.11864544451236725,
+      "candidate": 0.11864742636680603,
+      "abs": 1.9818544387817383e-06,
+      "rel": 1.6703728850002273e-05
+     },
+     "epoch_metrics[2].value_loss": {
+      "reference": 0.21949921327721275,
+      "candidate": 0.2194992114447654,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.348309468438281e-09
+     },
+     "epoch_metrics[2].value_mean": {
+      "reference": -0.06220574354343774,
+      "candidate": -0.06220574445966141,
+      "abs": 9.162236733195606e-10,
+      "rel": 1.4728923852261016e-08
+     },
+     "epoch_metrics[2].value_std": {
+      "reference": 0.23558967254493968,
+      "candidate": 0.23558967278915066,
+      "abs": 2.442109847677898e-10,
+      "rel": 1.036594609078451e-09
+     },
+     "final_approx_kl": {
+      "reference": 0.020736922532896242,
+      "candidate": 0.020736914515939096,
+      "abs": 8.016957146750325e-09,
+      "rel": 3.8660303302153626e-07
+     },
+     "final_clip_fraction": {
+      "reference": 0.13846523357751891,
+      "candidate": 0.13858532484688363,
+      "abs": 0.00012009126936471382,
+      "rel": 0.0008665511265164401
+     },
+     "final_entropy": {
+      "reference": 0.26706646492862895,
+      "candidate": 0.2670664530177212,
+      "abs": 1.1910907760093181e-08,
+      "rel": 4.459903928138735e-08
+     },
+     "final_explained_variance": {
+      "reference": -0.2231398665699995,
+      "candidate": -0.22313988813526509,
+      "abs": 2.156526557328675e-08,
+      "rel": 9.664460152554219e-08
+     },
+     "final_policy_loss": {
+      "reference": -0.9181971269966933,
+      "candidate": -0.9181971343264826,
+      "abs": 7.329789331045333e-09,
+      "rel": 7.98280571461584e-09
+     },
+     "final_value_loss": {
+      "reference": 0.21949921327721275,
+      "candidate": 0.2194992114447654,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.348309468438281e-09
+     },
+     "final_value_mean": {
+      "reference": -0.06220574354343774,
+      "candidate": -0.06220574445966141,
+      "abs": 9.162236733195606e-10,
+      "rel": 1.4728923852261016e-08
+     },
+     "final_value_std": {
+      "reference": 0.23558967254493968,
+      "candidate": 0.23558967278915066,
+      "abs": 2.442109847677898e-10,
+      "rel": 1.036594609078451e-09
+     },
+     "legal_logit_deficit_max": {
+      "reference": 4.819192886352539,
+      "candidate": 4.819190979003906,
+      "abs": 1.9073486328125e-06,
+      "rel": 3.9578175802299095e-07
+     },
+     "max_approx_kl": {
+      "reference": 0.020736922532896242,
+      "candidate": 0.020736914515939096,
+      "abs": 8.016957146750325e-09,
+      "rel": 3.8660303302153626e-07
+     },
+     "value_loss": {
+      "reference": 0.21949921327721275,
+      "candidate": 0.2194992114447654,
+      "abs": 1.832447360516909e-09,
+      "rel": 8.348309468438281e-09
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_six_production",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     16,
+     16
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.27740590432346746,
+      "candidate": 0.27740590249102015,
+      "abs": 1.8324473050057577e-09,
+      "rel": 6.605653579993898e-09
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0005896989763019264,
+      "candidate": 0.0005896984430311163,
+      "abs": 5.33270810105721e-10,
+      "rel": 9.043102184947424e-07
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.27743429672078124,
+      "candidate": 0.27743431138036,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.2839818911276674e-08
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 4.620412826538086,
+      "candidate": 4.620418548583984,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.2384258781471497e-06
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.0029217989859610196,
+      "candidate": -0.002921780947807443,
+      "abs": 1.8038153576718785e-08,
+      "rel": 6.173646326592105e-06
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.4526680707931519,
+      "candidate": 1.452653169631958,
+      "abs": 1.4901161193847656e-05,
+      "rel": 1.0257788061461055e-05
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9998830312209154,
+      "candidate": 0.9998831118485987,
+      "abs": 8.062768330763248e-08,
+      "rel": 8.0637108830218e-08
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.7373377680778503,
+      "candidate": 0.7373458743095398,
+      "abs": 8.106231689453125e-06,
+      "rel": 1.0993798123633506e-05
+     },
+     "epoch_metrics[10].approx_kl": {
+      "reference": 0.0021718818592799016,
+      "candidate": 0.0021718832550894043,
+      "abs": 1.3958095027022388e-09,
+      "rel": 6.426724362055e-07
+     },
+     "epoch_metrics[10].entropy": {
+      "reference": 0.2772282334354383,
+      "candidate": 0.27722828291151663,
+      "abs": 4.947607834537848e-08,
+      "rel": 1.7846692201015377e-07
+     },
+     "epoch_metrics[10].legal_logit_deficit_max": {
+      "reference": 4.710966110229492,
+      "candidate": 4.710960388183594,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.2146225985392949e-06
+     },
+     "epoch_metrics[10].policy_loss": {
+      "reference": -0.009726859404572035,
+      "candidate": -0.009726884772515001,
+      "abs": 2.5367942966744716e-08,
+      "rel": 2.608023386729761e-06
+     },
+     "epoch_metrics[10].ratio_max": {
+      "reference": 1.5465606451034546,
+      "candidate": 1.5465764999389648,
+      "abs": 1.5854835510253906e-05,
+      "rel": 1.0251568875435267e-05
+     },
+     "epoch_metrics[10].ratio_mean": {
+      "reference": 0.998677740810555,
+      "candidate": 0.9986777078265028,
+      "abs": 3.2984052267259756e-08,
+      "rel": 3.302772347813517e-08
+     },
+     "epoch_metrics[10].ratio_min": {
+      "reference": 0.5212270617485046,
+      "candidate": 0.5212250351905823,
+      "abs": 2.0265579223632812e-06,
+      "rel": 3.888052004753944e-06
+     },
+     "epoch_metrics[11].approx_kl": {
+      "reference": 0.002269211437602826,
+      "candidate": 0.00226921816612043,
+      "abs": 6.7285176037594485e-09,
+      "rel": 2.965125920555652e-06
+     },
+     "epoch_metrics[11].entropy": {
+      "reference": 0.27731687441097813,
+      "candidate": 0.2773168450918206,
+      "abs": 2.9319157546225938e-08,
+      "rel": 1.0572439058567899e-07
+     },
+     "epoch_metrics[11].legal_logit_deficit_max": {
+      "reference": 4.732551574707031,
+      "candidate": 4.732563018798828,
+      "abs": 1.1444091796875e-05,
+      "rel": 2.4181594099046198e-06
+     },
+     "epoch_metrics[11].policy_loss": {
+      "reference": -0.010204998344823609,
+      "candidate": -0.010205082064761797,
+      "abs": 8.371993818860612e-08,
+      "rel": 8.203749627618528e-06
+     },
+     "epoch_metrics[11].ratio_max": {
+      "reference": 1.6289218664169312,
+      "candidate": 1.6289191246032715,
+      "abs": 2.7418136596679688e-06,
+      "rel": 1.6832075965061586e-06
+     },
+     "epoch_metrics[11].ratio_mean": {
+      "reference": 0.9987401063235793,
+      "candidate": 0.9987401099884741,
+      "abs": 3.664894721033818e-09,
+      "rel": 3.669517909995737e-09
+     },
+     "epoch_metrics[11].ratio_min": {
+      "reference": 0.5119075775146484,
+      "candidate": 0.511900007724762,
+      "abs": 7.569789886474609e-06,
+      "rel": 1.4787415187769899e-05
+     },
+     "epoch_metrics[12].approx_kl": {
+      "reference": 0.002122086122626658,
+      "candidate": 0.002122090102473241,
+      "abs": 3.979846582933405e-09,
+      "rel": 1.8754371354425512e-06
+     },
+     "epoch_metrics[12].entropy": {
+      "reference": 0.27728103815442706,
+      "candidate": 0.2772810234948483,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.286902728973685e-08
+     },
+     "epoch_metrics[12].legal_logit_deficit_max": {
+      "reference": 4.7214813232421875,
+      "candidate": 4.721473693847656,
+      "abs": 7.62939453125e-06,
+      "rel": 1.6158900160619468e-06
+     },
+     "epoch_metrics[12].policy_loss": {
+      "reference": -0.010722259921416009,
+      "candidate": -0.010722254137754067,
+      "abs": 5.783661941732854e-09,
+      "rel": 5.394069892095144e-07
+     },
+     "epoch_metrics[12].ratio_max": {
+      "reference": 1.5772716999053955,
+      "candidate": 1.5772817134857178,
+      "abs": 1.0013580322265625e-05,
+      "rel": 6.348631469349941e-06
+     },
+     "epoch_metrics[12].ratio_mean": {
+      "reference": 0.9984600552279107,
+      "candidate": 0.9984600955417523,
+      "abs": 4.031384159830509e-08,
+      "rel": 4.0376016806591844e-08
+     },
+     "epoch_metrics[12].ratio_min": {
+      "reference": 0.5250747203826904,
+      "candidate": 0.5250727534294128,
+      "abs": 1.9669532775878906e-06,
+      "rel": 3.7460445175389804e-06
+     },
+     "epoch_metrics[13].approx_kl": {
+      "reference": 0.002223033449494339,
+      "candidate": 0.002223034830987847,
+      "abs": 1.3814935081318813e-09,
+      "rel": 6.214448324761465e-07
+     },
+     "epoch_metrics[13].entropy": {
+      "reference": 0.2774560593235918,
+      "candidate": 0.2774560666533812,
+      "abs": 7.3297893865564845e-09,
+      "rel": 2.6417837875981297e-08
+     },
+     "epoch_metrics[13].legal_logit_deficit_max": {
+      "reference": 4.720205307006836,
+      "candidate": 4.720188140869141,
+      "abs": 1.71661376953125e-05,
+      "rel": 3.6367353915369935e-06
+     },
+     "epoch_metrics[13].policy_loss": {
+      "reference": -0.011182194413494002,
+      "candidate": -0.011182193840854206,
+      "abs": 5.726397966920871e-10,
+      "rel": 5.1209966086894326e-08
+     },
+     "epoch_metrics[13].ratio_max": {
+      "reference": 1.6137417554855347,
+      "candidate": 1.6137473583221436,
+      "abs": 5.602836608886719e-06,
+      "rel": 3.4719416146478707e-06
+     },
+     "epoch_metrics[13].ratio_mean": {
+      "reference": 0.9986315503102671,
+      "candidate": 0.9986315722996352,
+      "abs": 2.1989368104158302e-08,
+      "rel": 2.201950019817768e-08
+     },
+     "epoch_metrics[13].ratio_min": {
+      "reference": 0.5145636200904846,
+      "candidate": 0.5145558714866638,
+      "abs": 7.748603820800781e-06,
+      "rel": 1.5058592403866815e-05
+     },
+     "epoch_metrics[14].approx_kl": {
+      "reference": 0.00228306065591226,
+      "candidate": 0.0022830703120508213,
+      "abs": 9.65613856148545e-09,
+      "rel": 4.229452991665245e-06
+     },
+     "epoch_metrics[14].entropy": {
+      "reference": 0.2774265656254222,
+      "candidate": 0.2774265546307381,
+      "abs": 1.0994684052079151e-08,
+      "rel": 3.9630970549965406e-08
+     },
+     "epoch_metrics[14].legal_logit_deficit_max": {
+      "reference": 4.713247299194336,
+      "candidate": 4.71324348449707,
+      "abs": 3.814697265625e-06,
+      "rel": 8.093564847057929e-07
+     },
+     "epoch_metrics[14].policy_loss": {
+      "reference": -0.011637127641384894,
+      "candidate": -0.011637166695418987,
+      "abs": 3.9054034093460865e-08,
+      "rel": 3.35597444941943e-06
+     },
+     "epoch_metrics[14].ratio_max": {
+      "reference": 1.595483422279358,
+      "candidate": 1.5954859256744385,
+      "abs": 2.5033950805664062e-06,
+      "rel": 1.5690486768212509e-06
+     },
+     "epoch_metrics[14].ratio_mean": {
+      "reference": 0.9985466933384998,
+      "candidate": 0.9985466860087103,
+      "abs": 7.329789442067636e-09,
+      "rel": 7.340457377673066e-09
+     },
+     "epoch_metrics[14].ratio_min": {
+      "reference": 0.4988563358783722,
+      "candidate": 0.4988600015640259,
+      "abs": 3.6656856536865234e-06,
+      "rel": 7.348125009409184e-06
+     },
+     "epoch_metrics[15].approx_kl": {
+      "reference": 0.002112721021083476,
+      "candidate": 0.0021127230754287444,
+      "abs": 2.0543452685511943e-09,
+      "rel": 9.723684530374605e-07
+     },
+     "epoch_metrics[15].entropy": {
+      "reference": 0.27740590432346746,
+      "candidate": 0.27740590249102015,
+      "abs": 1.8324473050057577e-09,
+      "rel": 6.605653579993898e-09
+     },
+     "epoch_metrics[15].policy_loss": {
+      "reference": -0.012084444473667907,
+      "candidate": -0.012084439148117803,
+      "abs": 5.32555010333835e-09,
+      "rel": 4.4069465625356324e-07
+     },
+     "epoch_metrics[15].ratio_max": {
+      "reference": 1.5642666816711426,
+      "candidate": 1.56429123878479,
+      "abs": 2.4557113647460938e-05,
+      "rel": 1.569855602243095e-05
+     },
+     "epoch_metrics[15].ratio_mean": {
+      "reference": 0.9984407522275524,
+      "candidate": 0.9984408072009727,
+      "abs": 5.497342037141806e-08,
+      "rel": 5.505926838620554e-08
+     },
+     "epoch_metrics[15].ratio_min": {
+      "reference": 0.5350639224052429,
+      "candidate": 0.5350599884986877,
+      "abs": 3.933906555175781e-06,
+      "rel": 7.3522179135007106e-06
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.001463508822844354,
+      "candidate": 0.0014635029604444416,
+      "abs": 5.862399912303501e-09,
+      "rel": 4.005715456439701e-06
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.2773256683257987,
+      "candidate": 0.2773256408390885,
+      "abs": 2.748671018570903e-08,
+      "rel": 9.911347316548424e-08
+     },
+     "epoch_metrics[1].legal_logit_deficit_max": {
+      "reference": 4.724470138549805,
+      "candidate": 4.724464416503906,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.2111508234008873e-06
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.004415126240266333,
+      "candidate": -0.004415042749384063,
+      "abs": 8.349088227027623e-08,
+      "rel": 1.8910191402644883e-05
+     },
+     "epoch_metrics[1].ratio_max": {
+      "reference": 1.5597233772277832,
+      "candidate": 1.5597203969955444,
+      "abs": 2.9802322387695312e-06,
+      "rel": 1.9107440987814957e-06
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9997141968521076,
+      "candidate": 0.9997142005170023,
+      "abs": 3.664894721033818e-09,
+      "rel": 3.665942445489438e-09
+     },
+     "epoch_metrics[1].ratio_min": {
+      "reference": 0.6065947413444519,
+      "candidate": 0.6066015362739563,
+      "abs": 6.794929504394531e-06,
+      "rel": 1.1201635831871307e-05
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 0.0017579908082218062,
+      "candidate": 0.0017579934352068708,
+      "abs": 2.62698506459276e-09,
+      "rel": 1.4943088022872117e-06
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.27724258241439276,
+      "candidate": 0.27724257691705073,
+      "abs": 5.4973420260395756e-09,
+      "rel": 1.9828635190761327e-08
+     },
+     "epoch_metrics[2].legal_logit_deficit_max": {
+      "reference": 4.771736145019531,
+      "candidate": 4.771753311157227,
+      "abs": 1.71661376953125e-05,
+      "rel": 3.5974486893894848e-06
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.00521578261356072,
+      "candidate": -0.005215792004853376,
+      "abs": 9.391292655862304e-09,
+      "rel": 1.8005496858623887e-06
+     },
+     "epoch_metrics[2].ratio_max": {
+      "reference": 1.5609418153762817,
+      "candidate": 1.560951828956604,
+      "abs": 1.0013580322265625e-05,
+      "rel": 6.4150476244734986e-06
+     },
+     "epoch_metrics[2].ratio_min": {
+      "reference": 0.5529587864875793,
+      "candidate": 0.5529607534408569,
+      "abs": 1.9669532775878906e-06,
+      "rel": 3.557129986799814e-06
+     },
+     "epoch_metrics[3].approx_kl": {
+      "reference": 0.0018455412037964986,
+      "candidate": 0.0018455388559733346,
+      "abs": 2.347823163965576e-09,
+      "rel": 1.2721597107319108e-06
+     },
+     "epoch_metrics[3].entropy": {
+      "reference": 0.27726109746239175,
+      "candidate": 0.2772611066246285,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.3045517485716954e-08
+     },
+     "epoch_metrics[3].legal_logit_deficit_max": {
+      "reference": 4.767705917358398,
+      "candidate": 4.767709732055664,
+      "abs": 3.814697265625e-06,
+      "rel": 8.001110554144915e-07
+     },
+     "epoch_metrics[3].policy_loss": {
+      "reference": -0.005873614604753421,
+      "candidate": -0.005873667173086702,
+      "abs": 5.2568333280995916e-08,
+      "rel": 8.949831805565253e-06
+     },
+     "epoch_metrics[3].ratio_max": {
+      "reference": 1.5525436401367188,
+      "candidate": 1.552536964416504,
+      "abs": 6.67572021484375e-06,
+      "rel": 4.299859947418856e-06
+     },
+     "epoch_metrics[3].ratio_mean": {
+      "reference": 0.9992066858996431,
+      "candidate": 0.99920672254859,
+      "abs": 3.664894687727127e-08,
+      "rel": 3.667804274153999e-08
+     },
+     "epoch_metrics[3].ratio_min": {
+      "reference": 0.5292891263961792,
+      "candidate": 0.5292792916297913,
+      "abs": 9.834766387939453e-06,
+      "rel": 1.8581085266010195e-05
+     },
+     "epoch_metrics[4].approx_kl": {
+      "reference": 0.0018396261818657779,
+      "candidate": 0.001839622044543251,
+      "abs": 4.137322526893625e-09,
+      "rel": 2.2490017633351397e-06
+     },
+     "epoch_metrics[4].entropy": {
+      "reference": 0.27716087816828683,
+      "candidate": 0.27716085984381333,
+      "abs": 1.8324473494146787e-08,
+      "rel": 6.6114935178624e-08
+     },
+     "epoch_metrics[4].legal_logit_deficit_max": {
+      "reference": 4.762702941894531,
+      "candidate": 4.762689590454102,
+      "abs": 1.33514404296875e-05,
+      "rel": 2.8033326017970164e-06
+     },
+     "epoch_metrics[4].policy_loss": {
+      "reference": -0.006523407763960668,
+      "candidate": -0.00652339298985393,
+      "abs": 1.4774106738349446e-08,
+      "rel": 2.264783572164649e-06
+     },
+     "epoch_metrics[4].ratio_max": {
+      "reference": 1.523844838142395,
+      "candidate": 1.523828148841858,
+      "abs": 1.6689300537109375e-05,
+      "rel": 1.0952099662229424e-05
+     },
+     "epoch_metrics[4].ratio_mean": {
+      "reference": 0.9987328864810303,
+      "candidate": 0.9987329158001879,
+      "abs": 2.9319157546225938e-08,
+      "rel": 2.93563545192013e-08
+     },
+     "epoch_metrics[4].ratio_min": {
+      "reference": 0.5238949656486511,
+      "candidate": 0.5238988399505615,
+      "abs": 3.874301910400391e-06,
+      "rel": 7.3951335925194925e-06
+     },
+     "epoch_metrics[5].approx_kl": {
+      "reference": 0.0020009257956056215,
+      "candidate": 0.0020009317725334934,
+      "abs": 5.976927871902127e-09,
+      "rel": 2.9870722999887193e-06
+     },
+     "epoch_metrics[5].entropy": {
+      "reference": 0.2770584237465298,
+      "candidate": 0.2770584329087665,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.306969093444074e-08
+     },
+     "epoch_metrics[5].legal_logit_deficit_max": {
+      "reference": 4.775091171264648,
+      "candidate": 4.775077819824219,
+      "abs": 1.33514404296875e-05,
+      "rel": 2.796059792540352e-06
+     },
+     "epoch_metrics[5].policy_loss": {
+      "reference": -0.00713462882272705,
+      "candidate": -0.0071346209202978635,
+      "abs": 7.902429186718019e-09,
+      "rel": 1.1076160208286063e-06
+     },
+     "epoch_metrics[5].ratio_max": {
+      "reference": 1.5529872179031372,
+      "candidate": 1.5530000925064087,
+      "abs": 1.2874603271484375e-05,
+      "rel": 8.290149713195363e-06
+     },
+     "epoch_metrics[5].ratio_mean": {
+      "reference": 0.9986481009747096,
+      "candidate": 0.9986481266289724,
+      "abs": 2.565426282519212e-08,
+      "rel": 2.5688991088172788e-08
+     },
+     "epoch_metrics[5].ratio_min": {
+      "reference": 0.4989418387413025,
+      "candidate": 0.49894005060195923,
+      "abs": 1.7881393432617188e-06,
+      "rel": 3.5838632971183947e-06
+     },
+     "epoch_metrics[6].approx_kl": {
+      "reference": 0.0022123226122193595,
+      "candidate": 0.0022123209801959407,
+      "abs": 1.6320234187509886e-09,
+      "rel": 7.376968484328667e-07
+     },
+     "epoch_metrics[6].entropy": {
+      "reference": 0.2771788879189297,
+      "candidate": 0.2771788805891403,
+      "abs": 7.3297893865564845e-09,
+      "rel": 2.644425569923034e-08
+     },
+     "epoch_metrics[6].legal_logit_deficit_max": {
+      "reference": 4.779214859008789,
+      "candidate": 4.7792205810546875,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.1972759577409479e-06
+     },
+     "epoch_metrics[6].policy_loss": {
+      "reference": -0.007665124105007061,
+      "candidate": -0.007665107555716954,
+      "abs": 1.6549290106707137e-08,
+      "rel": 2.159037463711345e-06
+     },
+     "epoch_metrics[6].ratio_max": {
+      "reference": 1.5536818504333496,
+      "candidate": 1.5536857843399048,
+      "abs": 3.933906555175781e-06,
+      "rel": 2.53198336164679e-06
+     },
+     "epoch_metrics[6].ratio_mean": {
+      "reference": 0.9988630617081482,
+      "candidate": 0.9988630360538854,
+      "abs": 2.565426282519212e-08,
+      "rel": 2.568346333812861e-08
+     },
+     "epoch_metrics[6].ratio_min": {
+      "reference": 0.4906281530857086,
+      "candidate": 0.49063003063201904,
+      "abs": 1.8775463104248047e-06,
+      "rel": 3.826806744801556e-06
+     },
+     "epoch_metrics[7].approx_kl": {
+      "reference": 0.0021592178836624147,
+      "candidate": 0.0021592106111370042,
+      "abs": 7.272525410443459e-09,
+      "rel": 3.3681294812675283e-06
+     },
+     "epoch_metrics[7].entropy": {
+      "reference": 0.27726663145338115,
+      "candidate": 0.2772666167938024,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.287177435045151e-08
+     },
+     "epoch_metrics[7].legal_logit_deficit_max": {
+      "reference": 4.766664505004883,
+      "candidate": 4.766666412353516,
+      "abs": 1.9073486328125e-06,
+      "rel": 4.0014309116940217e-07
+     },
+     "epoch_metrics[7].policy_loss": {
+      "reference": -0.008210297634124298,
+      "candidate": -0.008210249188797548,
+      "abs": 4.844532675019053e-08,
+      "rel": 5.900556704404743e-06
+     },
+     "epoch_metrics[7].ratio_max": {
+      "reference": 1.5627362728118896,
+      "candidate": 1.5627373456954956,
+      "abs": 1.0728836059570312e-06,
+      "rel": 6.865412213461533e-07
+     },
+     "epoch_metrics[7].ratio_mean": {
+      "reference": 0.9988781280902392,
+      "candidate": 0.9988781537445021,
+      "abs": 2.565426282519212e-08,
+      "rel": 2.568307528703255e-08
+     },
+     "epoch_metrics[7].ratio_min": {
+      "reference": 0.4928600490093231,
+      "candidate": 0.4928693473339081,
+      "abs": 9.298324584960938e-06,
+      "rel": 1.8865698658799993e-05
+     },
+     "epoch_metrics[8].approx_kl": {
+      "reference": 0.002250013949705857,
+      "candidate": 0.002250017206594697,
+      "abs": 3.2568888402167984e-09,
+      "rel": 1.4474950816691564e-06
+     },
+     "epoch_metrics[8].entropy": {
+      "reference": 0.27725098006247445,
+      "candidate": 0.27725096906779034,
+      "abs": 1.0994684107590302e-08,
+      "rel": 3.965606940366022e-08
+     },
+     "epoch_metrics[8].legal_logit_deficit_max": {
+      "reference": 4.719476699829102,
+      "candidate": 4.719484329223633,
+      "abs": 7.62939453125e-06,
+      "rel": 1.6165737608254872e-06
+     },
+     "epoch_metrics[8].policy_loss": {
+      "reference": -0.008705365181083766,
+      "candidate": -0.008705351724048559,
+      "abs": 1.3457035206651535e-08,
+      "rel": 1.545832360472696e-06
+     },
+     "epoch_metrics[8].ratio_max": {
+      "reference": 1.6009405851364136,
+      "candidate": 1.600960373878479,
+      "abs": 1.9788742065429688e-05,
+      "rel": 1.2360544575809565e-05
+     },
+     "epoch_metrics[8].ratio_min": {
+      "reference": 0.5019586086273193,
+      "candidate": 0.5019549131393433,
+      "abs": 3.6954879760742188e-06,
+      "rel": 7.362136862599252e-06
+     },
+     "epoch_metrics[9].approx_kl": {
+      "reference": 0.002208077966257835,
+      "candidate": 0.0022080797342832054,
+      "abs": 1.7680253702051507e-09,
+      "rel": 8.007072130387055e-07
+     },
+     "epoch_metrics[9].entropy": {
+      "reference": 0.2771402246542333,
+      "candidate": 0.27714020999465455,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.289588976628205e-08
+     },
+     "epoch_metrics[9].legal_logit_deficit_max": {
+      "reference": 4.750326156616211,
+      "candidate": 4.750333786010742,
+      "abs": 7.62939453125e-06,
+      "rel": 1.6060754622586319e-06
+     },
+     "epoch_metrics[9].policy_loss": {
+      "reference": -0.00923619414057296,
+      "candidate": -0.009236152624187742,
+      "abs": 4.151638521680823e-08,
+      "rel": 4.494966713013764e-06
+     },
+     "epoch_metrics[9].ratio_max": {
+      "reference": 1.588001012802124,
+      "candidate": 1.588017225265503,
+      "abs": 1.621246337890625e-05,
+      "rel": 1.0209249069194236e-05
+     },
+     "epoch_metrics[9].ratio_mean": {
+      "reference": 0.998757543892538,
+      "candidate": 0.998757496248907,
+      "abs": 4.7643631040372725e-08,
+      "rel": 4.770289979957235e-08
+     },
+     "epoch_metrics[9].ratio_min": {
+      "reference": 0.49413007497787476,
+      "candidate": 0.49412819743156433,
+      "abs": 1.8775463104248047e-06,
+      "rel": 3.799700535347649e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.002112721021083476,
+      "candidate": 0.0021127230754287444,
+      "abs": 2.0543452685511943e-09,
+      "rel": 9.723684530374605e-07
+     },
+     "final_entropy": {
+      "reference": 0.27740590432346746,
+      "candidate": 0.27740590249102015,
+      "abs": 1.8324473050057577e-09,
+      "rel": 6.605653579993898e-09
+     },
+     "final_policy_loss": {
+      "reference": -0.012084444473667907,
+      "candidate": -0.012084439148117803,
+      "abs": 5.32555010333835e-09,
+      "rel": 4.4069465625356324e-07
+     },
+     "legal_logit_deficit_max": {
+      "reference": 4.779214859008789,
+      "candidate": 4.7792205810546875,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.1972759577409479e-06
+     },
+     "max_approx_kl": {
+      "reference": 0.00228306065591226,
+      "candidate": 0.0022830703120508213,
+      "abs": 9.65613856148545e-09,
+      "rel": 4.229452991665245e-06
+     }
+    },
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": false,
+    "epochs": [
+     16,
+     16
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.2774219881719482,
+      "candidate": 0.2774219735123694,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.284216607959299e-08
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 0.0006684851063762348,
+      "candidate": 0.0006684868421906167,
+      "abs": 1.7358143818797453e-09,
+      "rel": 2.5966320835747786e-06
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.2775590538592045,
+      "candidate": 0.27755907768102,
+      "abs": 2.3821815520186362e-08,
+      "rel": 8.582610851432203e-08
+     },
+     "epoch_metrics[0].legal_logit_deficit_max": {
+      "reference": 4.636343002319336,
+      "candidate": 4.636344909667969,
+      "abs": 1.9073486328125e-06,
+      "rel": 4.113905824467866e-07
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.0029559192700991327,
+      "candidate": -0.0029559272297922986,
+      "abs": 7.95969316586681e-09,
+      "rel": 2.692790636265463e-06
+     },
+     "epoch_metrics[0].ratio_max": {
+      "reference": 1.4637110233306885,
+      "candidate": 1.4637138843536377,
+      "abs": 2.86102294921875e-06,
+      "rel": 1.954632650411833e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 1.0000181870399238,
+      "candidate": 1.0000181320665034,
+      "abs": 5.497342048244036e-08,
+      "rel": 5.497242069683044e-08
+     },
+     "epoch_metrics[0].ratio_min": {
+      "reference": 0.7388697862625122,
+      "candidate": 0.7388755083084106,
+      "abs": 5.7220458984375e-06,
+      "rel": 7.744262509847717e-06
+     },
+     "epoch_metrics[10].approx_kl": {
+      "reference": 0.00221522218814285,
+      "candidate": 0.002215227807170849,
+      "abs": 5.619027998969572e-09,
+      "rel": 2.536546345608511e-06
+     },
+     "epoch_metrics[10].entropy": {
+      "reference": 0.2772454364511365,
+      "candidate": 0.2772454382835838,
+      "abs": 1.8324473050057577e-09,
+      "rel": 6.609476846040718e-09
+     },
+     "epoch_metrics[10].legal_logit_deficit_max": {
+      "reference": 4.792793273925781,
+      "candidate": 4.792804718017578,
+      "abs": 1.1444091796875e-05,
+      "rel": 2.3877650916702817e-06
+     },
+     "epoch_metrics[10].policy_loss": {
+      "reference": -0.0097267884545013,
+      "candidate": -0.009726730846937813,
+      "abs": 5.7607563486855584e-08,
+      "rel": 5.92256773716471e-06
+     },
+     "epoch_metrics[10].ratio_max": {
+      "reference": 1.61513090133667,
+      "candidate": 1.6151257753372192,
+      "abs": 5.125999450683594e-06,
+      "rel": 3.173736225615742e-06
+     },
+     "epoch_metrics[10].ratio_mean": {
+      "reference": 0.9984974408186941,
+      "candidate": 0.9984974994570092,
+      "abs": 5.8638315092451876e-08,
+      "rel": 5.8726551768371836e-08
+     },
+     "epoch_metrics[10].ratio_min": {
+      "reference": 0.5070454478263855,
+      "candidate": 0.5070397853851318,
+      "abs": 5.662441253662109e-06,
+      "rel": 1.1167522118453085e-05
+     },
+     "epoch_metrics[11].approx_kl": {
+      "reference": 0.002288678041150966,
+      "candidate": 0.002288671312633362,
+      "abs": 6.728517604193129e-09,
+      "rel": 2.9399144323547525e-06
+     },
+     "epoch_metrics[11].entropy": {
+      "reference": 0.27738566036139617,
+      "candidate": 0.2773856548640541,
+      "abs": 5.497342081550727e-09,
+      "rel": 1.9818407607619045e-08
+     },
+     "epoch_metrics[11].legal_logit_deficit_max": {
+      "reference": 4.749948501586914,
+      "candidate": 4.749940872192383,
+      "abs": 7.62939453125e-06,
+      "rel": 1.6062057364834775e-06
+     },
+     "epoch_metrics[11].policy_loss": {
+      "reference": -0.010238363832446497,
+      "candidate": -0.0102383927507562,
+      "abs": 2.8918309701725375e-08,
+      "rel": 2.8244970090241454e-06
+     },
+     "epoch_metrics[11].ratio_max": {
+      "reference": 1.611750841140747,
+      "candidate": 1.6117515563964844,
+      "abs": 7.152557373046875e-07,
+      "rel": 4.4377542833204343e-07
+     },
+     "epoch_metrics[11].ratio_mean": {
+      "reference": 0.998497118307961,
+      "candidate": 0.9984971329675397,
+      "abs": 1.4659578773112969e-08,
+      "rel": 1.4681643330857254e-08
+     },
+     "epoch_metrics[11].ratio_min": {
+      "reference": 0.5102887153625488,
+      "candidate": 0.5102944374084473,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.1213224128989456e-05
+     },
+     "epoch_metrics[12].approx_kl": {
+      "reference": 0.0022630534732386146,
+      "candidate": 0.002263045685337388,
+      "abs": 7.787901226685712e-09,
+      "rel": 3.441324440089605e-06
+     },
+     "epoch_metrics[12].entropy": {
+      "reference": 0.27727104398659386,
+      "candidate": 0.2772710274945677,
+      "abs": 1.6492026133629878e-08,
+      "rel": 5.9479799608744116e-08
+     },
+     "epoch_metrics[12].legal_logit_deficit_max": {
+      "reference": 4.752340316772461,
+      "candidate": 4.752330780029297,
+      "abs": 9.5367431640625e-06,
+      "rel": 2.0067466823460476e-06
+     },
+     "epoch_metrics[12].policy_loss": {
+      "reference": -0.010711615979206208,
+      "candidate": -0.010711626401250497,
+      "abs": 1.042204428834681e-08,
+      "rel": 9.72965626128458e-07
+     },
+     "epoch_metrics[12].ratio_max": {
+      "reference": 1.6262853145599365,
+      "candidate": 1.6262953281402588,
+      "abs": 1.0013580322265625e-05,
+      "rel": 6.1572951412930645e-06
+     },
+     "epoch_metrics[12].ratio_mean": {
+      "reference": 0.998416408164541,
+      "candidate": 0.9984163385315418,
+      "abs": 6.963299925555333e-08,
+      "rel": 6.974344440468938e-08
+     },
+     "epoch_metrics[12].ratio_min": {
+      "reference": 0.5121803879737854,
+      "candidate": 0.5121822357177734,
+      "abs": 1.8477439880371094e-06,
+      "rel": 3.607590929911258e-06
+     },
+     "epoch_metrics[13].approx_kl": {
+      "reference": 0.0022343045324928206,
+      "candidate": 0.002234303981327017,
+      "abs": 5.511658035355083e-10,
+      "rel": 2.4668338425674265e-07
+     },
+     "epoch_metrics[13].clip_fraction": {
+      "reference": 0.030022817341179297,
+      "candidate": 0.030142908610544014,
+      "abs": 0.00012009126936471728,
+      "rel": 0.003984063745019924
+     },
+     "epoch_metrics[13].entropy": {
+      "reference": 0.27736390966949337,
+      "candidate": 0.27736393165886153,
+      "abs": 2.1989368159669453e-08,
+      "rel": 7.92798401297356e-08
+     },
+     "epoch_metrics[13].legal_logit_deficit_max": {
+      "reference": 4.702674865722656,
+      "candidate": 4.702667236328125,
+      "abs": 7.62939453125e-06,
+      "rel": 1.622352118548514e-06
+     },
+     "epoch_metrics[13].policy_loss": {
+      "reference": -0.011192651560602318,
+      "candidate": -0.011192691931707941,
+      "abs": 4.037110562342405e-08,
+      "rel": 3.6069165371251e-06
+     },
+     "epoch_metrics[13].ratio_max": {
+      "reference": 1.5790550708770752,
+      "candidate": 1.5790762901306152,
+      "abs": 2.1219253540039062e-05,
+      "rel": 1.3437763376387524e-05
+     },
+     "epoch_metrics[13].ratio_mean": {
+      "reference": 0.9983070806908954,
+      "candidate": 0.9983070147227909,
+      "abs": 6.596810442349721e-08,
+      "rel": 6.607997248486193e-08
+     },
+     "epoch_metrics[13].ratio_min": {
+      "reference": 0.5154615640640259,
+      "candidate": 0.5154597163200378,
+      "abs": 1.8477439880371094e-06,
+      "rel": 3.584639703238086e-06
+     },
+     "epoch_metrics[14].approx_kl": {
+      "reference": 0.0023738559596289733,
+      "candidate": 0.002373854871613361,
+      "abs": 1.088015612500659e-09,
+      "rel": 4.583326162176717e-07
+     },
+     "epoch_metrics[14].entropy": {
+      "reference": 0.2772854470227451,
+      "candidate": 0.27728543786050835,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.30426167166351e-08
+     },
+     "epoch_metrics[14].legal_logit_deficit_max": {
+      "reference": 4.729175567626953,
+      "candidate": 4.72918701171875,
+      "abs": 1.1444091796875e-05,
+      "rel": 2.4198856523366418e-06
+     },
+     "epoch_metrics[14].policy_loss": {
+      "reference": -0.011601648082162805,
+      "candidate": -0.011601713878475375,
+      "abs": 6.579631257018492e-08,
+      "rel": 5.671257993377739e-06
+     },
+     "epoch_metrics[14].ratio_max": {
+      "reference": 1.6027617454528809,
+      "candidate": 1.6027456521987915,
+      "abs": 1.609325408935547e-05,
+      "rel": 1.0040952209530128e-05
+     },
+     "epoch_metrics[14].ratio_mean": {
+      "reference": 0.9981790970708051,
+      "candidate": 0.9981790750814369,
+      "abs": 2.1989368215180605e-08,
+      "rel": 2.2029481763051592e-08
+     },
+     "epoch_metrics[15].approx_kl": {
+      "reference": 0.002286710583234558,
+      "candidate": 0.0022867190726195345,
+      "abs": 8.48938497667942e-09,
+      "rel": 3.712473945019607e-06
+     },
+     "epoch_metrics[15].entropy": {
+      "reference": 0.2774219881719482,
+      "candidate": 0.2774219735123694,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.284216607959299e-08
+     },
+     "epoch_metrics[15].policy_loss": {
+      "reference": -0.01207908828733519,
+      "candidate": -0.012079028847324357,
+      "abs": 5.9440010833494705e-08,
+      "rel": 4.9209020929019115e-06
+     },
+     "epoch_metrics[15].ratio_max": {
+      "reference": 1.5709798336029053,
+      "candidate": 1.5709799528121948,
+      "abs": 1.1920928955078125e-07,
+      "rel": 7.588212016161374e-08
+     },
+     "epoch_metrics[15].ratio_mean": {
+      "reference": 0.9982767426926105,
+      "candidate": 0.9982767646819786,
+      "abs": 2.1989368104158302e-08,
+      "rel": 2.202732637092226e-08
+     },
+     "epoch_metrics[15].ratio_min": {
+      "reference": 0.5305449962615967,
+      "candidate": 0.5305504202842712,
+      "abs": 5.424022674560547e-06,
+      "rel": 1.0223387763323855e-05
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 0.0013378437837088997,
+      "candidate": 0.0013378419297875599,
+      "abs": 1.8539213397957e-09,
+      "rel": 1.3857532264761736e-06
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.2772829448158921,
+      "candidate": 0.277282933821208,
+      "abs": 1.0994684107590302e-08,
+      "rel": 3.96514979126843e-08
+     },
+     "epoch_metrics[1].legal_logit_deficit_max": {
+      "reference": 4.7114410400390625,
+      "candidate": 4.711437225341797,
+      "abs": 3.814697265625e-06,
+      "rel": 8.096667735426808e-07
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.004378408003901324,
+      "candidate": -0.004378409378236835,
+      "abs": 1.3743355108467026e-09,
+      "rel": 3.138892214323141e-07
+     },
+     "epoch_metrics[1].ratio_max": {
+      "reference": 1.5840529203414917,
+      "candidate": 1.5840638875961304,
+      "abs": 1.0967254638671875e-05,
+      "rel": 6.923492622077919e-06
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9997244750492796,
+      "candidate": 0.9997243907567016,
+      "abs": 8.42925780286663e-08,
+      "rel": 8.431580913782394e-08
+     },
+     "epoch_metrics[1].ratio_min": {
+      "reference": 0.6045300960540771,
+      "candidate": 0.6045256853103638,
+      "abs": 4.410743713378906e-06,
+      "rel": 7.296152403608953e-06
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 0.0015153437781279522,
+      "candidate": 0.0015153404138691503,
+      "abs": 3.3642588018797243e-09,
+      "rel": 2.2201290891469603e-06
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.2771924997959387,
+      "candidate": 0.2771925236177542,
+      "abs": 2.3821815520186362e-08,
+      "rel": 8.593960330992338e-08
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.005242483146596931,
+      "candidate": -0.005242478851798461,
+      "abs": 4.294798469986483e-09,
+      "rel": 8.192298095940238e-07
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 0.9993159345780528,
+      "candidate": 0.9993159602323156,
+      "abs": 2.565426282519212e-08,
+      "rel": 2.567182337328842e-08
+     },
+     "epoch_metrics[3].approx_kl": {
+      "reference": 0.0017843493124553103,
+      "candidate": 0.001784356971512583,
+      "abs": 7.659057272733569e-09,
+      "rel": 4.2923346589337764e-06
+     },
+     "epoch_metrics[3].entropy": {
+      "reference": 0.27712351777365446,
+      "candidate": 0.2771234811247075,
+      "abs": 3.664894693278242e-08,
+      "rel": 1.3224769672098382e-07
+     },
+     "epoch_metrics[3].legal_logit_deficit_max": {
+      "reference": 4.748222351074219,
+      "candidate": 4.748207092285156,
+      "abs": 1.52587890625e-05,
+      "rel": 3.2135793006930084e-06
+     },
+     "epoch_metrics[3].policy_loss": {
+      "reference": -0.005906263376407525,
+      "candidate": -0.005906265037062933,
+      "abs": 1.6606554083253844e-09,
+      "rel": 2.811684538205544e-07
+     },
+     "epoch_metrics[3].ratio_max": {
+      "reference": 1.5198255777359009,
+      "candidate": 1.519830346107483,
+      "abs": 4.76837158203125e-06,
+      "rel": 3.1374367502555637e-06
+     },
+     "epoch_metrics[3].ratio_mean": {
+      "reference": 0.9991451156687676,
+      "candidate": 0.9991451706421881,
+      "abs": 5.497342048244036e-08,
+      "rel": 5.50204535814419e-08
+     },
+     "epoch_metrics[3].ratio_min": {
+      "reference": 0.5376451015472412,
+      "candidate": 0.537647008895874,
+      "abs": 1.9073486328125e-06,
+      "rel": 3.547585313883697e-06
+     },
+     "epoch_metrics[4].approx_kl": {
+      "reference": 0.0019380643371489494,
+      "candidate": 0.0019380698559649842,
+      "abs": 5.518816034808666e-09,
+      "rel": 2.8475836502089302e-06
+     },
+     "epoch_metrics[4].entropy": {
+      "reference": 0.2772097096833144,
+      "candidate": 0.27720971151576174,
+      "abs": 1.832447360516909e-09,
+      "rel": 6.610328875194254e-09
+     },
+     "epoch_metrics[4].legal_logit_deficit_max": {
+      "reference": 4.724842071533203,
+      "candidate": 4.724826812744141,
+      "abs": 1.52587890625e-05,
+      "rel": 3.229481288789098e-06
+     },
+     "epoch_metrics[4].policy_loss": {
+      "reference": -0.006514951477563867,
+      "candidate": -0.006514952737371418,
+      "abs": 1.2598075516817575e-09,
+      "rel": 1.9337171004406255e-07
+     },
+     "epoch_metrics[4].ratio_max": {
+      "reference": 1.5569403171539307,
+      "candidate": 1.5569186210632324,
+      "abs": 2.1696090698242188e-05,
+      "rel": 1.3935081813477858e-05
+     },
+     "epoch_metrics[4].ratio_mean": {
+      "reference": 0.998984118677265,
+      "candidate": 0.9989841003527915,
+      "abs": 1.8324473494146787e-08,
+      "rel": 1.8343107914878425e-08
+     },
+     "epoch_metrics[4].ratio_min": {
+      "reference": 0.5019212961196899,
+      "candidate": 0.501924991607666,
+      "abs": 3.6954879760742188e-06,
+      "rel": 7.362629950418625e-06
+     },
+     "epoch_metrics[5].approx_kl": {
+      "reference": 0.0019102107473563301,
+      "candidate": 0.0019102072828855636,
+      "abs": 3.464470766474312e-09,
+      "rel": 1.8136589228539455e-06
+     },
+     "epoch_metrics[5].entropy": {
+      "reference": 0.27715684678412233,
+      "candidate": 0.27715682662720154,
+      "abs": 2.0156920799152545e-08,
+      "rel": 7.272748637832781e-08
+     },
+     "epoch_metrics[5].legal_logit_deficit_max": {
+      "reference": 4.735748291015625,
+      "candidate": 4.735738754272461,
+      "abs": 9.5367431640625e-06,
+      "rel": 2.0137774598694427e-06
+     },
+     "epoch_metrics[5].policy_loss": {
+      "reference": -0.0070989226699376485,
+      "candidate": -0.007098952332679086,
+      "abs": 2.966274143759856e-08,
+      "rel": 4.178467476257033e-06
+     },
+     "epoch_metrics[5].ratio_max": {
+      "reference": 1.5523227453231812,
+      "candidate": 1.5523310899734497,
+      "abs": 8.344650268554688e-06,
+      "rel": 5.375560872582543e-06
+     },
+     "epoch_metrics[5].ratio_mean": {
+      "reference": 0.998711269099672,
+      "candidate": 0.998711258104988,
+      "abs": 1.0994684052079151e-08,
+      "rel": 1.1008871524991148e-08
+     },
+     "epoch_metrics[5].ratio_min": {
+      "reference": 0.5192350149154663,
+      "candidate": 0.5192369222640991,
+      "abs": 1.9073486328125e-06,
+      "rel": 3.6733686512423448e-06
+     },
+     "epoch_metrics[6].approx_kl": {
+      "reference": 0.002012843031034015,
+      "candidate": 0.0020128378844338477,
+      "abs": 5.146600167305754e-09,
+      "rel": 2.5568810324279984e-06
+     },
+     "epoch_metrics[6].entropy": {
+      "reference": 0.27708744742195474,
+      "candidate": 0.27708743276237596,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.2905964920125186e-08
+     },
+     "epoch_metrics[6].legal_logit_deficit_max": {
+      "reference": 4.747365951538086,
+      "candidate": 4.747367858886719,
+      "abs": 1.9073486328125e-06,
+      "rel": 4.017697152416966e-07
+     },
+     "epoch_metrics[6].policy_loss": {
+      "reference": -0.007621091368734672,
+      "candidate": -0.00762108575686467,
+      "abs": 5.611870001684394e-09,
+      "rel": 7.363604148228616e-07
+     },
+     "epoch_metrics[6].ratio_max": {
+      "reference": 1.534424901008606,
+      "candidate": 1.5344417095184326,
+      "abs": 1.6808509826660156e-05,
+      "rel": 1.0954153372131236e-05
+     },
+     "epoch_metrics[6].ratio_mean": {
+      "reference": 0.9985410457357748,
+      "candidate": 0.9985411117038793,
+      "abs": 6.596810442349721e-08,
+      "rel": 6.606448512763916e-08
+     },
+     "epoch_metrics[6].ratio_min": {
+      "reference": 0.49403804540634155,
+      "candidate": 0.4940415918827057,
+      "abs": 3.546476364135742e-06,
+      "rel": 7.178497564589135e-06
+     },
+     "epoch_metrics[7].approx_kl": {
+      "reference": 0.002121430965435953,
+      "candidate": 0.002121428946880672,
+      "abs": 2.018555281257939e-09,
+      "rel": 9.51506466222966e-07
+     },
+     "epoch_metrics[7].entropy": {
+      "reference": 0.27730525165556486,
+      "candidate": 0.2773052846396171,
+      "abs": 3.2984052267259756e-08,
+      "rel": 1.1894491051667285e-07
+     },
+     "epoch_metrics[7].legal_logit_deficit_max": {
+      "reference": 4.754398345947266,
+      "candidate": 4.754405975341797,
+      "abs": 7.62939453125e-06,
+      "rel": 1.60469984490576e-06
+     },
+     "epoch_metrics[7].policy_loss": {
+      "reference": -0.008196260858386652,
+      "candidate": -0.008196191568971325,
+      "abs": 6.928941532688415e-08,
+      "rel": 8.453783563511794e-06
+     },
+     "epoch_metrics[7].ratio_max": {
+      "reference": 1.5291342735290527,
+      "candidate": 1.5291290283203125,
+      "abs": 5.245208740234375e-06,
+      "rel": 3.4301819212573673e-06
+     },
+     "epoch_metrics[7].ratio_mean": {
+      "reference": 0.9987876400077731,
+      "candidate": 0.9987875996939315,
+      "abs": 4.031384159830509e-08,
+      "rel": 4.036277581287584e-08
+     },
+     "epoch_metrics[8].approx_kl": {
+      "reference": 0.0021872968107937937,
+      "candidate": 0.0021872974908035514,
+      "abs": 6.800097577044917e-10,
+      "rel": 3.108903843960774e-07
+     },
+     "epoch_metrics[8].entropy": {
+      "reference": 0.2772675646271928,
+      "candidate": 0.277267544470272,
+      "abs": 2.0156920799152545e-08,
+      "rel": 7.269844500655909e-08
+     },
+     "epoch_metrics[8].policy_loss": {
+      "reference": -0.008697785663478756,
+      "candidate": -0.008697786007062632,
+      "abs": 3.4358387662747347e-10,
+      "rel": 3.95024522733121e-08
+     },
+     "epoch_metrics[8].ratio_max": {
+      "reference": 1.5629973411560059,
+      "candidate": 1.5630006790161133,
+      "abs": 3.337860107421875e-06,
+      "rel": 2.135546165931937e-06
+     },
+     "epoch_metrics[8].ratio_mean": {
+      "reference": 0.9986540692557203,
+      "candidate": 0.9986539996227211,
+      "abs": 6.963299925555333e-08,
+      "rel": 6.97268467623124e-08
+     },
+     "epoch_metrics[8].ratio_min": {
+      "reference": 0.49489524960517883,
+      "candidate": 0.4949045777320862,
+      "abs": 9.328126907348633e-06,
+      "rel": 1.8848334258888915e-05
+     },
+     "epoch_metrics[9].approx_kl": {
+      "reference": 0.0021535055797985083,
+      "candidate": 0.0021535079777276543,
+      "abs": 2.3979291460460295e-09,
+      "rel": 1.113499077248037e-06
+     },
+     "epoch_metrics[9].entropy": {
+      "reference": 0.27736304383812166,
+      "candidate": 0.2773630346758849,
+      "abs": 9.162236747073393e-09,
+      "rel": 3.3033372508057636e-08
+     },
+     "epoch_metrics[9].legal_logit_deficit_max": {
+      "reference": 4.746593475341797,
+      "candidate": 4.746599197387695,
+      "abs": 5.7220458984375e-06,
+      "rel": 1.2055043327834894e-06
+     },
+     "epoch_metrics[9].policy_loss": {
+      "reference": -0.009220730976367235,
+      "candidate": -0.009220723417521927,
+      "abs": 7.558845308355822e-09,
+      "rel": 8.197663859545591e-07
+     },
+     "epoch_metrics[9].ratio_max": {
+      "reference": 1.5876902341842651,
+      "candidate": 1.5876919031143188,
+      "abs": 1.6689300537109375e-06,
+      "rel": 1.051167452852324e-06
+     },
+     "epoch_metrics[9].ratio_mean": {
+      "reference": 0.9984893047524712,
+      "candidate": 0.9984893414014182,
+      "abs": 3.6648946988293574e-08,
+      "rel": 3.6704394797900764e-08
+     },
+     "epoch_metrics[9].ratio_min": {
+      "reference": 0.5014090538024902,
+      "candidate": 0.5014126896858215,
+      "abs": 3.635883331298828e-06,
+      "rel": 7.251279048356402e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.002286710583234558,
+      "candidate": 0.0022867190726195345,
+      "abs": 8.48938497667942e-09,
+      "rel": 3.712473945019607e-06
+     },
+     "final_entropy": {
+      "reference": 0.2774219881719482,
+      "candidate": 0.2774219735123694,
+      "abs": 1.4659578773112969e-08,
+      "rel": 5.284216607959299e-08
+     },
+     "final_policy_loss": {
+      "reference": -0.01207908828733519,
+      "candidate": -0.012079028847324357,
+      "abs": 5.9440010833494705e-08,
+      "rel": 4.9209020929019115e-06
+     },
+     "max_approx_kl": {
+      "reference": 0.0023738559596289733,
+      "candidate": 0.002373854871613361,
+      "abs": 1.088015612500659e-09,
+      "rel": 4.583326162176717e-07
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ },
+ {
+  "case": "gpu_three_production",
+  "all_exact": false,
+  "iterations": [
+   {
+    "iteration": 1,
+    "exact": false,
+    "epochs": [
+     16,
+     16
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.05322863183443117,
+      "candidate": 0.05322862438617815,
+      "abs": 7.448253021291595e-09,
+      "rel": 1.3992944707764705e-07
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 1.6917792064222423e-06,
+      "candidate": 1.6917148706820635e-06,
+      "abs": 6.433574017880528e-11,
+      "rel": 3.802844953678196e-05
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.05307119066213973,
+      "candidate": 0.05307118857662889,
+      "abs": 2.0855108404105316e-09,
+      "rel": 3.929647732396377e-08
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.00014893407562456068,
+      "candidate": -0.00014893526734504353,
+      "abs": 1.1917204828482911e-09,
+      "rel": 8.001600320006078e-06
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9999426830116566,
+      "candidate": 0.9999426448766011,
+      "abs": 3.813505544680851e-08,
+      "rel": 3.8137241358626914e-08
+     },
+     "epoch_metrics[10].approx_kl": {
+      "reference": 0.00020469797985213356,
+      "candidate": 0.00020469856872963778,
+      "abs": 5.888775042139742e-10,
+      "rel": 2.876803232521636e-06
+     },
+     "epoch_metrics[10].entropy": {
+      "reference": 0.05318744448489303,
+      "candidate": 0.053187448060054474,
+      "abs": 3.5751614446688507e-09,
+      "rel": 6.721814215700104e-08
+     },
+     "epoch_metrics[10].policy_loss": {
+      "reference": -0.00156316247741642,
+      "candidate": -0.001563159498115213,
+      "abs": 2.979301206998755e-09,
+      "rel": 1.9059446794826572e-06
+     },
+     "epoch_metrics[10].ratio_mean": {
+      "reference": 0.9996024897157383,
+      "candidate": 0.9996024039118635,
+      "abs": 8.580387478307472e-08,
+      "rel": 8.583799626937222e-08
+     },
+     "epoch_metrics[10].ratio_min": {
+      "reference": 0.762198805809021,
+      "candidate": 0.7621939182281494,
+      "abs": 4.887580871582031e-06,
+      "rel": 6.412475110603466e-06
+     },
+     "epoch_metrics[11].approx_kl": {
+      "reference": 0.00022242846818724038,
+      "candidate": 0.0002224284274546067,
+      "abs": 4.073263368308336e-11,
+      "rel": 1.831268902539697e-07
+     },
+     "epoch_metrics[11].entropy": {
+      "reference": 0.053193613723902654,
+      "candidate": 0.053193616405273744,
+      "abs": 2.681371090440532e-09,
+      "rel": 5.0407760773615956e-08
+     },
+     "epoch_metrics[11].policy_loss": {
+      "reference": -0.0016359146294538695,
+      "candidate": -0.001635918204615318,
+      "abs": 3.5751614485719785e-09,
+      "rel": 2.1854157735304796e-06
+     },
+     "epoch_metrics[11].ratio_mean": {
+      "reference": 0.9995730017841105,
+      "candidate": 0.9995730399191659,
+      "abs": 3.813505544680851e-08,
+      "rel": 3.8151344547960634e-08
+     },
+     "epoch_metrics[12].approx_kl": {
+      "reference": 0.00023731347947372416,
+      "candidate": 0.00023731370524889377,
+      "abs": 2.257751696103233e-10,
+      "rel": 9.513785534363938e-07
+     },
+     "epoch_metrics[12].entropy": {
+      "reference": 0.05320532446315757,
+      "candidate": 0.05320532863417926,
+      "abs": 4.171021687759957e-09,
+      "rel": 7.839481109943714e-08
+     },
+     "epoch_metrics[12].policy_loss": {
+      "reference": -0.0017003137146968537,
+      "candidate": -0.001700314608487216,
+      "abs": 8.937903622514148e-10,
+      "rel": 5.256617556480489e-07
+     },
+     "epoch_metrics[12].ratio_mean": {
+      "reference": 0.9995347856916662,
+      "candidate": 0.9995349048637144,
+      "abs": 1.1917204822964322e-07,
+      "rel": 1.1922750036017223e-07
+     },
+     "epoch_metrics[12].ratio_min": {
+      "reference": 0.7421075105667114,
+      "candidate": 0.7421063780784607,
+      "abs": 1.1324882507324219e-06,
+      "rel": 1.5260433759356453e-06
+     },
+     "epoch_metrics[13].approx_kl": {
+      "reference": 0.00025023364743304526,
+      "candidate": 0.0002502337428637871,
+      "abs": 9.543074181361452e-11,
+      "rel": 3.813664005559856e-07
+     },
+     "epoch_metrics[13].entropy": {
+      "reference": 0.05320886297920129,
+      "candidate": 0.05320886089369045,
+      "abs": 2.0855108404105316e-09,
+      "rel": 3.919480183641084e-08
+     },
+     "epoch_metrics[13].policy_loss": {
+      "reference": -0.0017586999742435834,
+      "candidate": -0.001758700570103825,
+      "abs": 5.958602415732234e-10,
+      "rel": 3.388071009370553e-07
+     },
+     "epoch_metrics[13].ratio_mean": {
+      "reference": 0.9995136016683629,
+      "candidate": 0.9995136255027726,
+      "abs": 2.3834409668133105e-08,
+      "rel": 2.3846007758167365e-08
+     },
+     "epoch_metrics[14].approx_kl": {
+      "reference": 0.00026386797600371956,
+      "candidate": 0.0002638679375986649,
+      "abs": 3.840505463561378e-11,
+      "rel": 1.455464782701498e-07
+     },
+     "epoch_metrics[14].entropy": {
+      "reference": 0.053217317938097045,
+      "candidate": 0.0532173173422368,
+      "abs": 5.958602430911064e-10,
+      "rel": 1.1196735690141646e-08
+     },
+     "epoch_metrics[14].policy_loss": {
+      "reference": -0.0018204138153085705,
+      "candidate": -0.0018204120277278463,
+      "abs": 1.7875807242859892e-09,
+      "rel": 9.81963940975137e-07
+     },
+     "epoch_metrics[14].ratio_mean": {
+      "reference": 0.9994834368395008,
+      "candidate": 0.9994834988089659,
+      "abs": 6.196946511494161e-08,
+      "rel": 6.200148895783422e-08
+     },
+     "epoch_metrics[14].ratio_min": {
+      "reference": 0.7317625284194946,
+      "candidate": 0.7317636609077454,
+      "abs": 1.1324882507324219e-06,
+      "rel": 1.5476147713150741e-06
+     },
+     "epoch_metrics[15].approx_kl": {
+      "reference": 0.0002740072455956615,
+      "candidate": 0.00027400778443021576,
+      "abs": 5.388345542868024e-10,
+      "rel": 1.966493599469371e-06
+     },
+     "epoch_metrics[15].entropy": {
+      "reference": 0.05322863183443117,
+      "candidate": 0.05322862438617815,
+      "abs": 7.448253021291595e-09,
+      "rel": 1.3992944707764705e-07
+     },
+     "epoch_metrics[15].policy_loss": {
+      "reference": -0.0018759211760988386,
+      "candidate": -0.0018759193885181144,
+      "abs": 1.7875807242859892e-09,
+      "rel": 9.529082282675853e-07
+     },
+     "epoch_metrics[15].ratio_mean": {
+      "reference": 0.9994497254504818,
+      "candidate": 0.9994497111498359,
+      "abs": 1.4300645889697705e-08,
+      "rel": 1.4308519503821943e-08
+     },
+     "epoch_metrics[15].ratio_min": {
+      "reference": 0.7300319075584412,
+      "candidate": 0.7300295233726501,
+      "abs": 2.384185791015625e-06,
+      "rel": 3.2658651852484464e-06
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 7.491813878325402e-06,
+      "candidate": 7.491614070209776e-06,
+      "abs": 1.998081156256686e-10,
+      "rel": 2.6670192141816855e-05
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.0003164169826346686,
+      "candidate": -0.00031641608884430645,
+      "abs": 8.937903621429946e-10,
+      "rel": 2.8247231065184473e-06
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9998994187912469,
+      "candidate": 0.9998993997237191,
+      "abs": 1.9067527778915405e-08,
+      "rel": 1.906944580682491e-08
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 1.8234211650072727e-05,
+      "candidate": 1.8234275367549718e-05,
+      "abs": 6.371747699029776e-11,
+      "rel": 3.4943794423381014e-06
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.053083623881937374,
+      "candidate": 0.05308362537158798,
+      "abs": 1.489650604258319e-09,
+      "rel": 2.806233737486262e-08
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.00048749977929336656,
+      "candidate": -0.0004874994813632459,
+      "abs": 2.9793012067819147e-10,
+      "rel": 6.111389857653735e-07
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 0.9998572461867995,
+      "candidate": 0.9998573748926117,
+      "abs": 1.2870581223012323e-07,
+      "rel": 1.28724171528911e-07
+     },
+     "epoch_metrics[3].approx_kl": {
+      "reference": 3.2074317121945184e-05,
+      "candidate": 3.207415593709472e-05,
+      "abs": 1.6118485046706004e-10,
+      "rel": 5.025355640596871e-06
+     },
+     "epoch_metrics[3].entropy": {
+      "reference": 0.05309361496853553,
+      "candidate": 0.053093616756116256,
+      "abs": 1.7875807292733192e-09,
+      "rel": 3.366846785903683e-08
+     },
+     "epoch_metrics[3].policy_loss": {
+      "reference": -0.0006483474845850478,
+      "candidate": -0.0006483519535368585,
+      "abs": 4.468951810714973e-09,
+      "rel": 6.892786836433763e-06
+     },
+     "epoch_metrics[3].ratio_mean": {
+      "reference": 0.9998188251184322,
+      "candidate": 0.9998188584866058,
+      "abs": 3.336817355759081e-08,
+      "rel": 3.337421901413138e-08
+     },
+     "epoch_metrics[4].approx_kl": {
+      "reference": 5.125276911951385e-05,
+      "candidate": 5.1252723149827254e-05,
+      "abs": 4.596968659410002e-11,
+      "rel": 8.96921032440326e-07
+     },
+     "epoch_metrics[4].entropy": {
+      "reference": 0.0531050417803854,
+      "candidate": 0.053105038205223956,
+      "abs": 3.5751614446688507e-09,
+      "rel": 6.732244858132008e-08
+     },
+     "epoch_metrics[4].policy_loss": {
+      "reference": -0.0008099286938339276,
+      "candidate": -0.000809931375205014,
+      "abs": 2.681371086428984e-09,
+      "rel": 3.310615156438731e-06
+     },
+     "epoch_metrics[4].ratio_mean": {
+      "reference": 0.9997833690506263,
+      "candidate": 0.9997833928850359,
+      "abs": 2.3834409668133105e-08,
+      "rel": 2.383957348936861e-08
+     },
+     "epoch_metrics[5].approx_kl": {
+      "reference": 7.228090368753595e-05,
+      "candidate": 7.228094762059086e-05,
+      "abs": 4.393305490723535e-11,
+      "rel": 6.078096144760563e-07
+     },
+     "epoch_metrics[5].entropy": {
+      "reference": 0.053118516861815186,
+      "candidate": 0.0531185141804441,
+      "abs": 2.681371083501638e-09,
+      "rel": 5.0479027689667484e-08
+     },
+     "epoch_metrics[5].policy_loss": {
+      "reference": -0.0009640193439878102,
+      "candidate": -0.0009640196419179309,
+      "abs": 2.9793012067819147e-10,
+      "rel": 3.090498447577844e-07
+     },
+     "epoch_metrics[5].ratio_mean": {
+      "reference": 0.9997594917390318,
+      "candidate": 0.9997595203403233,
+      "abs": 2.8601291557350805e-08,
+      "rel": 2.8608171240634724e-08
+     },
+     "epoch_metrics[5].ratio_min": {
+      "reference": 0.8583676218986511,
+      "candidate": 0.8583649396896362,
+      "abs": 2.682209014892578e-06,
+      "rel": 3.1247788784946397e-06
+     },
+     "epoch_metrics[6].approx_kl": {
+      "reference": 9.849491176829418e-05,
+      "candidate": 9.849476687649718e-05,
+      "abs": 1.4489179699247144e-10,
+      "rel": 1.4710587013197628e-06
+     },
+     "epoch_metrics[6].entropy": {
+      "reference": 0.053133202731255554,
+      "candidate": 0.05313320571055676,
+      "abs": 2.979301208516638e-09,
+      "rel": 5.607230297276598e-08
+     },
+     "epoch_metrics[6].policy_loss": {
+      "reference": -0.0011079258488253182,
+      "candidate": -0.0011079306157072498,
+      "abs": 4.766881931501585e-09,
+      "rel": 4.302509438696787e-06
+     },
+     "epoch_metrics[6].ratio_mean": {
+      "reference": 0.9997292220387671,
+      "candidate": 0.9997292411062949,
+      "abs": 1.9067527778915405e-08,
+      "rel": 1.9072691879868777e-08
+     },
+     "epoch_metrics[6].ratio_min": {
+      "reference": 0.8366894721984863,
+      "candidate": 0.8366934061050415,
+      "abs": 3.933906555175781e-06,
+      "rel": 4.7017300799450835e-06
+     },
+     "epoch_metrics[7].approx_kl": {
+      "reference": 0.00012578831573029453,
+      "candidate": 0.00012578824764860678,
+      "abs": 6.808168774834894e-11,
+      "rel": 5.412401569500651e-07
+     },
+     "epoch_metrics[7].entropy": {
+      "reference": 0.053146939693261445,
+      "candidate": 0.0531469390974012,
+      "abs": 5.958602430911064e-10,
+      "rel": 1.1211562632394733e-08
+     },
+     "epoch_metrics[7].policy_loss": {
+      "reference": -0.0012481782407322663,
+      "candidate": -0.0012481758572913005,
+      "abs": 2.3834409658592126e-09,
+      "rel": 1.9095357442386784e-06
+     },
+     "epoch_metrics[7].ratio_min": {
+      "reference": 0.8162278532981873,
+      "candidate": 0.8162290453910828,
+      "abs": 1.1920928955078125e-06,
+      "rel": 1.4604882076165774e-06
+     },
+     "epoch_metrics[8].approx_kl": {
+      "reference": 0.0001563297858725336,
+      "candidate": 0.00015633002328559854,
+      "abs": 2.3741306492898635e-10,
+      "rel": 1.5186658323158926e-06
+     },
+     "epoch_metrics[8].entropy": {
+      "reference": 0.053164393631453366,
+      "candidate": 0.05316439541903409,
+      "abs": 1.7875807223344253e-09,
+      "rel": 3.3623644325209985e-08
+     },
+     "epoch_metrics[8].policy_loss": {
+      "reference": -0.0013858493660733463,
+      "candidate": -0.0013858469826323805,
+      "abs": 2.3834409658592126e-09,
+      "rel": 1.7198412931503759e-06
+     },
+     "epoch_metrics[8].ratio_mean": {
+      "reference": 0.9996664469706122,
+      "candidate": 0.9996664708050219,
+      "abs": 2.3834409668133105e-08,
+      "rel": 2.3842361791867923e-08
+     },
+     "epoch_metrics[8].ratio_min": {
+      "reference": 0.7966697812080383,
+      "candidate": 0.796668529510498,
+      "abs": 1.2516975402832031e-06,
+      "rel": 1.5711623182006212e-06
+     },
+     "epoch_metrics[9].approx_kl": {
+      "reference": 0.00018451394503357185,
+      "candidate": 0.00018451385891314634,
+      "abs": 8.612042551531598e-11,
+      "rel": 4.667420963745943e-07
+     },
+     "epoch_metrics[9].entropy": {
+      "reference": 0.05317662038567736,
+      "candidate": 0.05317661770430627,
+      "abs": 2.681371090440532e-09,
+      "rel": 5.042387182549749e-08
+     },
+     "epoch_metrics[9].policy_loss": {
+      "reference": -0.0014837506933906457,
+      "candidate": -0.0014837492037400421,
+      "abs": 1.4896506036077978e-09,
+      "rel": 1.0039763487514669e-06
+     },
+     "epoch_metrics[9].ratio_mean": {
+      "reference": 0.999634485027262,
+      "candidate": 0.9996344373584427,
+      "abs": 4.766881933626621e-08,
+      "rel": 4.7686249374406275e-08
+     },
+     "epoch_metrics[9].ratio_min": {
+      "reference": 0.7746897339820862,
+      "candidate": 0.7746908664703369,
+      "abs": 1.1324882507324219e-06,
+      "rel": 1.4618582711479342e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.0002740072455956615,
+      "candidate": 0.00027400778443021576,
+      "abs": 5.388345542868024e-10,
+      "rel": 1.966493599469371e-06
+     },
+     "final_entropy": {
+      "reference": 0.05322863183443117,
+      "candidate": 0.05322862438617815,
+      "abs": 7.448253021291595e-09,
+      "rel": 1.3992944707764705e-07
+     },
+     "final_policy_loss": {
+      "reference": -0.0018759211760988386,
+      "candidate": -0.0018759193885181144,
+      "abs": 1.7875807242859892e-09,
+      "rel": 9.529082282675853e-07
+     },
+     "max_approx_kl": {
+      "reference": 0.0002740072455956615,
+      "candidate": 0.00027400778443021576,
+      "abs": 5.388345542868024e-10,
+      "rel": 1.966493599469371e-06
+     }
+    },
+    "parameter_errors": null
+   },
+   {
+    "iteration": 2,
+    "exact": false,
+    "epochs": [
+     16,
+     16
+    ],
+    "stopped_by_kl": [
+     false,
+     false
+    ],
+    "metric_differences": {
+     "entropy": {
+      "reference": 0.05324602946383027,
+      "candidate": 0.053246033038991725,
+      "abs": 3.5751614516077446e-09,
+      "rel": 6.71441842247605e-08
+     },
+     "epoch_metrics[0].approx_kl": {
+      "reference": 2.4564330360914155e-06,
+      "candidate": 2.4563526709688265e-06,
+      "abs": 8.03651225889992e-11,
+      "rel": 3.271618701109523e-05
+     },
+     "epoch_metrics[0].entropy": {
+      "reference": 0.05306828137451096,
+      "candidate": 0.053068280778650716,
+      "abs": 5.958602430911064e-10,
+      "rel": 1.122818051871757e-08
+     },
+     "epoch_metrics[0].policy_loss": {
+      "reference": -0.00017112867789728796,
+      "candidate": -0.00017112629445632224,
+      "abs": 2.3834409657236873e-09,
+      "rel": 1.3927770581820523e-05
+     },
+     "epoch_metrics[0].ratio_mean": {
+      "reference": 0.9999581896785794,
+      "candidate": 0.9999582039792252,
+      "abs": 1.4300645778675403e-08,
+      "rel": 1.4301243513746408e-08
+     },
+     "epoch_metrics[10].approx_kl": {
+      "reference": 0.00019531796073325163,
+      "candidate": 0.00019531790370756446,
+      "abs": 5.7025687178000745e-11,
+      "rel": 2.9196335536126905e-07
+     },
+     "epoch_metrics[10].entropy": {
+      "reference": 0.05320484032671141,
+      "candidate": 0.05320483764534032,
+      "abs": 2.681371090440532e-09,
+      "rel": 5.039712691505539e-08
+     },
+     "epoch_metrics[10].policy_loss": {
+      "reference": -0.0015523818759983756,
+      "candidate": -0.0015523803863477723,
+      "abs": 1.4896506033909573e-09,
+      "rel": 9.595903085591782e-07
+     },
+     "epoch_metrics[10].ratio_mean": {
+      "reference": 0.9996041247562407,
+      "candidate": 0.9996040818543034,
+      "abs": 4.290193733602621e-08,
+      "rel": 4.2918927877061425e-08
+     },
+     "epoch_metrics[10].ratio_min": {
+      "reference": 0.7730076313018799,
+      "candidate": 0.7730051875114441,
+      "abs": 2.4437904357910156e-06,
+      "rel": 3.161405317144471e-06
+     },
+     "epoch_metrics[11].approx_kl": {
+      "reference": 0.00021175512277644263,
+      "candidate": 0.00021175506225938688,
+      "abs": 6.051705574920511e-11,
+      "rel": 2.857879184018377e-07
+     },
+     "epoch_metrics[11].entropy": {
+      "reference": 0.05321839793478463,
+      "candidate": 0.053218389890671375,
+      "abs": 8.044113257443808e-09,
+      "rel": 1.5115286385173222e-07
+     },
+     "epoch_metrics[11].policy_loss": {
+      "reference": -0.0016195806105857118,
+      "candidate": -0.0016195791209351082,
+      "abs": 1.4896506036077978e-09,
+      "rel": 9.197755232875222e-07
+     },
+     "epoch_metrics[11].ratio_min": {
+      "reference": 0.7634099721908569,
+      "candidate": 0.7634137272834778,
+      "abs": 3.7550926208496094e-06,
+      "rel": 4.918817263362143e-06
+     },
+     "epoch_metrics[12].approx_kl": {
+      "reference": 0.00022773722565498102,
+      "candidate": 0.00022773711393118574,
+      "abs": 1.1172379528142685e-10,
+      "rel": 4.905820511341742e-07
+     },
+     "epoch_metrics[12].entropy": {
+      "reference": 0.05322670273689954,
+      "candidate": 0.053226708099641716,
+      "abs": 5.36274217394217e-09,
+      "rel": 1.0075284317607964e-07
+     },
+     "epoch_metrics[12].policy_loss": {
+      "reference": -0.0016833555322257998,
+      "candidate": -0.0016833510632739892,
+      "abs": 4.468951810606553e-09,
+      "rel": 2.654787847875206e-06
+     },
+     "epoch_metrics[12].ratio_mean": {
+      "reference": 0.9995520465711398,
+      "candidate": 0.9995520656386676,
+      "abs": 1.9067527778915405e-08,
+      "rel": 1.9076072607315494e-08
+     },
+     "epoch_metrics[12].ratio_min": {
+      "reference": 0.7566500902175903,
+      "candidate": 0.7566524147987366,
+      "abs": 2.3245811462402344e-06,
+      "rel": 3.072191538381007e-06
+     },
+     "epoch_metrics[13].approx_kl": {
+      "reference": 0.0002442298306315737,
+      "candidate": 0.00024422983645052136,
+      "abs": 5.8189476457790046e-12,
+      "rel": 2.3825703404415407e-08
+     },
+     "epoch_metrics[13].entropy": {
+      "reference": 0.0532332506450926,
+      "candidate": 0.053233248261651635,
+      "abs": 2.3834409654255317e-09,
+      "rel": 4.4773537902390967e-08
+     },
+     "epoch_metrics[13].policy_loss": {
+      "reference": -0.0017473676062419764,
+      "candidate": -0.00174736909589258,
+      "abs": 1.4896506036077978e-09,
+      "rel": 8.525105583642383e-07
+     },
+     "epoch_metrics[13].ratio_mean": {
+      "reference": 0.9995258430211629,
+      "candidate": 0.999525828720517,
+      "abs": 1.4300645889697705e-08,
+      "rel": 1.430742985741382e-08
+     },
+     "epoch_metrics[13].ratio_min": {
+      "reference": 0.7509844303131104,
+      "candidate": 0.7509855628013611,
+      "abs": 1.1324882507324219e-06,
+      "rel": 1.508002692499123e-06
+     },
+     "epoch_metrics[14].approx_kl": {
+      "reference": 0.0002571190604099219,
+      "candidate": 0.00025711892657412545,
+      "abs": 1.338357964492283e-10,
+      "rel": 5.205207122173497e-07
+     },
+     "epoch_metrics[14].entropy": {
+      "reference": 0.05323832916193029,
+      "candidate": 0.05323832975779053,
+      "abs": 5.958602430911064e-10,
+      "rel": 1.1192316622290584e-08
+     },
+     "epoch_metrics[14].policy_loss": {
+      "reference": -0.0018011347571971527,
+      "candidate": -0.001801136544777877,
+      "abs": 1.7875807242859892e-09,
+      "rel": 9.924737407992798e-07
+     },
+     "epoch_metrics[14].ratio_mean": {
+      "reference": 0.999504625629686,
+      "candidate": 0.9995047018997969,
+      "abs": 7.627011089361702e-08,
+      "rel": 7.63079060545163e-08
+     },
+     "epoch_metrics[15].approx_kl": {
+      "reference": 0.0002706203818023298,
+      "candidate": 0.00027062031895769495,
+      "abs": 6.284463482377975e-11,
+      "rel": 2.322243225186327e-07
+     },
+     "epoch_metrics[15].entropy": {
+      "reference": 0.05324602946383027,
+      "candidate": 0.053246033038991725,
+      "abs": 3.5751614516077446e-09,
+      "rel": 6.71441842247605e-08
+     },
+     "epoch_metrics[15].policy_loss": {
+      "reference": -0.0018642062658222344,
+      "candidate": -0.0018642053720318724,
+      "abs": 8.937903620345744e-10,
+      "rel": 4.794482125830403e-07
+     },
+     "epoch_metrics[15].ratio_mean": {
+      "reference": 0.9994726255512804,
+      "candidate": 0.9994725921831068,
+      "abs": 3.336817355759081e-08,
+      "rel": 3.338578036510593e-08
+     },
+     "epoch_metrics[15].ratio_min": {
+      "reference": 0.7426631450653076,
+      "candidate": 0.7426641583442688,
+      "abs": 1.0132789611816406e-06,
+      "rel": 1.3643838197883328e-06
+     },
+     "epoch_metrics[1].approx_kl": {
+      "reference": 9.203946963592698e-06,
+      "candidate": 9.203987223436891e-06,
+      "abs": 4.0259844193301264e-11,
+      "rel": 4.374174280770861e-06
+     },
+     "epoch_metrics[1].entropy": {
+      "reference": 0.0530760186197459,
+      "candidate": 0.053076017428025424,
+      "abs": 1.191720479243319e-09,
+      "rel": 2.245308729317467e-08
+     },
+     "epoch_metrics[1].policy_loss": {
+      "reference": -0.0003282796662511471,
+      "candidate": -0.0003282737076487328,
+      "abs": 5.958602414268561e-09,
+      "rel": 1.815099449293942e-05
+     },
+     "epoch_metrics[1].ratio_mean": {
+      "reference": 0.9999176664152803,
+      "candidate": 0.9999176282802249,
+      "abs": 3.813505544680851e-08,
+      "rel": 3.8138195501158855e-08
+     },
+     "epoch_metrics[2].approx_kl": {
+      "reference": 1.7936958782130464e-05,
+      "candidate": 1.7936967874236197e-05,
+      "abs": 9.092105733799144e-12,
+      "rel": 5.06892011935786e-07
+     },
+     "epoch_metrics[2].entropy": {
+      "reference": 0.053080547455510885,
+      "candidate": 0.05308055073274221,
+      "abs": 3.2772313265927444e-09,
+      "rel": 6.174071823582676e-08
+     },
+     "epoch_metrics[2].policy_loss": {
+      "reference": -0.00047292295227718145,
+      "candidate": -0.00047292712329887143,
+      "abs": 4.1710216899825715e-09,
+      "rel": 8.819586537747909e-06
+     },
+     "epoch_metrics[2].ratio_mean": {
+      "reference": 0.9998844841501557,
+      "candidate": 0.9998845270520931,
+      "abs": 4.290193733602621e-08,
+      "rel": 4.290689192132189e-08
+     },
+     "epoch_metrics[3].approx_kl": {
+      "reference": 3.188784763459041e-05,
+      "candidate": 3.188772383647872e-05,
+      "abs": 1.2379811168843112e-10,
+      "rel": 3.882297516817688e-06
+     },
+     "epoch_metrics[3].entropy": {
+      "reference": 0.05308908523898019,
+      "candidate": 0.0530890882182814,
+      "abs": 2.979301208516638e-09,
+      "rel": 5.611889954234901e-08
+     },
+     "epoch_metrics[3].policy_loss": {
+      "reference": -0.000635981596994683,
+      "candidate": -0.0006359842783657695,
+      "abs": 2.681371086428984e-09,
+      "rel": 4.216096494270357e-06
+     },
+     "epoch_metrics[3].ratio_mean": {
+      "reference": 0.9998496430101189,
+      "candidate": 0.9998495953412996,
+      "abs": 4.766881933626621e-08,
+      "rel": 4.767598775427455e-08
+     },
+     "epoch_metrics[4].approx_kl": {
+      "reference": 4.894003127746677e-05,
+      "candidate": 4.893998938104355e-05,
+      "abs": 4.1896423220370675e-11,
+      "rel": 8.560767561188881e-07
+     },
+     "epoch_metrics[4].entropy": {
+      "reference": 0.05310598562300783,
+      "candidate": 0.053105986814728307,
+      "abs": 1.191720479243319e-09,
+      "rel": 2.2440416810272126e-08
+     },
+     "epoch_metrics[4].policy_loss": {
+      "reference": -0.0007898201982664413,
+      "candidate": -0.0007898139417339063,
+      "abs": 6.256532535000962e-09,
+      "rel": 7.921464339267704e-06
+     },
+     "epoch_metrics[4].ratio_mean": {
+      "reference": 0.9998165846839244,
+      "candidate": 0.9998166466533895,
+      "abs": 6.196946511494161e-08,
+      "rel": 6.19808295074575e-08
+     },
+     "epoch_metrics[5].approx_kl": {
+      "reference": 6.786537738106691e-05,
+      "candidate": 6.786549288717816e-05,
+      "abs": 1.1550611125389371e-10,
+      "rel": 1.7019858891456794e-06
+     },
+     "epoch_metrics[5].entropy": {
+      "reference": 0.053124094113674955,
+      "candidate": 0.0531240961991858,
+      "abs": 2.0855108473494255e-09,
+      "rel": 3.92573426478621e-08
+     },
+     "epoch_metrics[5].policy_loss": {
+      "reference": -0.0009368481169786724,
+      "candidate": -0.0009368472231883103,
+      "abs": 8.937903621429946e-10,
+      "rel": 9.54039770102182e-07
+     },
+     "epoch_metrics[5].ratio_mean": {
+      "reference": 0.9997794363730328,
+      "candidate": 0.999779426839269,
+      "abs": 9.5337637784354e-09,
+      "rel": 9.53586704385687e-09
+     },
+     "epoch_metrics[5].ratio_min": {
+      "reference": 0.8662108778953552,
+      "candidate": 0.8662095665931702,
+      "abs": 1.3113021850585938e-06,
+      "rel": 1.5138371250251246e-06
+     },
+     "epoch_metrics[6].approx_kl": {
+      "reference": 8.739384751847221e-05,
+      "candidate": 8.739356471761544e-05,
+      "abs": 2.828008567747715e-10,
+      "rel": 3.235935535564979e-06
+     },
+     "epoch_metrics[6].entropy": {
+      "reference": 0.05314256756873996,
+      "candidate": 0.053142563099788154,
+      "abs": 4.468951805836063e-09,
+      "rel": 8.409363736623132e-08
+     },
+     "epoch_metrics[6].policy_loss": {
+      "reference": -0.0010673400202009017,
+      "candidate": -0.001067340616061143,
+      "abs": 5.958602413563829e-10,
+      "rel": 5.582662482716284e-07
+     },
+     "epoch_metrics[6].ratio_mean": {
+      "reference": 0.9997348803276198,
+      "candidate": 0.9997348088243908,
+      "abs": 7.150322900439932e-08,
+      "rel": 7.152219094423036e-08
+     },
+     "epoch_metrics[6].ratio_min": {
+      "reference": 0.8484021425247192,
+      "candidate": 0.8484060764312744,
+      "abs": 3.933906555175781e-06,
+      "rel": 4.636820344007106e-06
+     },
+     "epoch_metrics[7].approx_kl": {
+      "reference": 0.00011391265876998532,
+      "candidate": 0.00011391245510681686,
+      "abs": 2.0366316845607437e-10,
+      "rel": 1.787888814598868e-06
+     },
+     "epoch_metrics[7].entropy": {
+      "reference": 0.053159851090902835,
+      "candidate": 0.05315985734743537,
+      "abs": 6.2565325351093826e-09,
+      "rel": 1.1769280143508927e-07
+     },
+     "epoch_metrics[7].policy_loss": {
+      "reference": -0.0012099424849000434,
+      "candidate": -0.001209941889039802,
+      "abs": 5.958602413563829e-10,
+      "rel": 4.924698891002315e-07
+     },
+     "epoch_metrics[7].ratio_mean": {
+      "reference": 0.9996990524430232,
+      "candidate": 0.9996990381423774,
+      "abs": 1.4300645778675403e-08,
+      "rel": 1.4304950818676958e-08
+     },
+     "epoch_metrics[7].ratio_min": {
+      "reference": 0.8275927901268005,
+      "candidate": 0.8275941014289856,
+      "abs": 1.3113021850585938e-06,
+      "rel": 1.5844750256126786e-06
+     },
+     "epoch_metrics[8].approx_kl": {
+      "reference": 0.00014532682791664167,
+      "candidate": 0.00014532652358567851,
+      "abs": 3.043309631536005e-10,
+      "rel": 2.0941141254948628e-06
+     },
+     "epoch_metrics[8].entropy": {
+      "reference": 0.05317571229466942,
+      "candidate": 0.053175716763621234,
+      "abs": 4.468951812774957e-09,
+      "rel": 8.404121438814856e-08
+     },
+     "epoch_metrics[8].policy_loss": {
+      "reference": -0.0013540906110654507,
+      "candidate": -0.0013540888234847264,
+      "abs": 1.7875807242859892e-09,
+      "rel": 1.3201337559526033e-06
+     },
+     "epoch_metrics[8].ratio_mean": {
+      "reference": 0.9996687112395296,
+      "candidate": 0.999668682638238,
+      "abs": 2.8601291557350805e-08,
+      "rel": 2.861076998387487e-08
+     },
+     "epoch_metrics[8].ratio_min": {
+      "reference": 0.8058443665504456,
+      "candidate": 0.8058468103408813,
+      "abs": 2.4437904357910156e-06,
+      "rel": 3.032574435279166e-06
+     },
+     "epoch_metrics[9].approx_kl": {
+      "reference": 0.0001692193612963734,
+      "candidate": 0.00016921924375363045,
+      "abs": 1.1754274295431091e-10,
+      "rel": 6.946175783540794e-07
+     },
+     "epoch_metrics[9].entropy": {
+      "reference": 0.053185666735862724,
+      "candidate": 0.05318566524621212,
+      "abs": 1.489650604258319e-09,
+      "rel": 2.8008497320460554e-08
+     },
+     "epoch_metrics[9].policy_loss": {
+      "reference": -0.0014626280436922483,
+      "candidate": -0.0014626295333428519,
+      "abs": 1.4896506036077978e-09,
+      "rel": 1.0184743092143018e-06
+     },
+     "epoch_metrics[9].ratio_mean": {
+      "reference": 0.9996339130014302,
+      "candidate": 0.9996339797377772,
+      "abs": 6.673634700415931e-08,
+      "rel": 6.676078280338721e-08
+     },
+     "epoch_metrics[9].ratio_min": {
+      "reference": 0.7874434590339661,
+      "candidate": 0.7874447107315063,
+      "abs": 1.2516975402832031e-06,
+      "rel": 1.5895687954020588e-06
+     },
+     "final_approx_kl": {
+      "reference": 0.0002706203818023298,
+      "candidate": 0.00027062031895769495,
+      "abs": 6.284463482377975e-11,
+      "rel": 2.322243225186327e-07
+     },
+     "final_entropy": {
+      "reference": 0.05324602946383027,
+      "candidate": 0.053246033038991725,
+      "abs": 3.5751614516077446e-09,
+      "rel": 6.71441842247605e-08
+     },
+     "final_policy_loss": {
+      "reference": -0.0018642062658222344,
+      "candidate": -0.0018642053720318724,
+      "abs": 8.937903620345744e-10,
+      "rel": 4.794482125830403e-07
+     },
+     "max_approx_kl": {
+      "reference": 0.0002706203818023298,
+      "candidate": 0.00027062031895769495,
+      "abs": 6.284463482377975e-11,
+      "rel": 2.322243225186327e-07
+     }
+    },
+    "parameter_errors": null
+   }
+  ]
+ }
+]

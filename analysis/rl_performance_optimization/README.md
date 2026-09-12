@@ -75,6 +75,23 @@ is the steadier signal for stages B and C. From stage C on, `--cpu-affinity
 | G1: validate decisions once per buffer | Byte-identical to F in all harness cases and smokes | Update median 0.519 -> 0.430 s, min 0.423 -> 0.382 s; step median 1.47 -> 1.22 ms, min 1.21 -> 1.07 ms; evaluation min 3.89 -> 2.88 ms | Two blocking host transfers fewer per optimizer step and per evaluation partition |
 | G2: sliced evaluation partitions | Byte-identical to G1 in all harness cases and smokes; a strided-view variant was byte-identical too | Evaluation min 2.70 -> 2.40 ms, median 3.32 -> 2.94 ms; update min 0.364 -> 0.355 s | Views measured 2.37 ms, no faster than contiguous slices, so the contiguous layout of a gathered batch is kept |
 
+### Combined PPO stages B-G2
+
+`36a8160` against `65df615` on the same workloads, pinned and interleaved
+(`results/combined_b_to_g2/`):
+
+| Workload | Median PPO update | Optimizer steps | Whole-buffer evaluation | Peak CuPy pool |
+|---|---|---|---|---|
+| GPI 2,000 (8,327 decisions), 8 process pairs | 1.295 s -> 0.420 s (0.32x) | 0.639 s -> 0.311 s; 2.49 -> 1.21 ms per step | 0.592 s -> 0.047 s; 37.0 -> 2.9 ms per call | 11 -> 40 MiB |
+| GPI 8,000 (33,204 decisions), 5 process pairs | 4.891 s -> 1.632 s (0.33x) | 2.554 s -> 1.304 s; 2.46 -> 1.25 ms per step | 2.097 s -> 0.132 s; 131 -> 8.3 ms per call | 29 -> 58 MiB |
+
+Weights, optimizer counters, and KL stop epochs are identical to `36a8160` in
+every harness case; the metric differences are exactly stage E's. The training
+smokes keep identical weights and metrics rows against `36a8160`; only the
+warmup trace's full-precision KL differs, by stage E's amount, with every
+promotion on the same iteration. The percentages of the individual stages must
+not be added: each one changes what the next one is measured against.
+
 Per-stage evidence lives in `results/<stage>/`.
 
 ### Stage E numerical tolerances

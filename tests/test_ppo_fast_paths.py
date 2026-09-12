@@ -236,7 +236,9 @@ def _run_steps(network, step, *, entropy_coef, **step_kwargs):
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("wiring", sorted(WIRINGS))
 @pytest.mark.parametrize("dropout_rate", [0.0, 0.25])
-@pytest.mark.parametrize("entropy_coef", [0.0, 0.03])
+# A coefficient far below any real one must still take the regularized path:
+# only an exact zero may skip the entropy gradient.
+@pytest.mark.parametrize("entropy_coef", [0.0, 1e-12, 0.03])
 @pytest.mark.parametrize("collect_metrics", [True, False])
 def test_every_step_mode_matches_the_original_update_bit_for_bit(
     device, wiring, dropout_rate, entropy_coef, collect_metrics
@@ -373,3 +375,62 @@ def test_ppo_update_asks_the_optimizer_for_minimal_metrics():
     )
 
     assert requested and not any(requested)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_observed_log_probabilities_do_not_depend_on_building_the_entropy(device):
+    network = _network("no_critic", device=device)
+    batch = _batch(4, columns=64)
+    # Saturate a few legal logits so some probabilities reach the float floor.
+    network.parameter_array("b3")[0] = 300.0
+
+    full = network._evaluate_masked_actions(  # pylint: disable=protected-access
+        batch["x"], batch["masks"], batch["actions"],
+        training=False, need_entropy=True,
+    )
+    lean = network._evaluate_masked_actions(  # pylint: disable=protected-access
+        batch["x"], batch["masks"], batch["actions"],
+        training=False, need_entropy=False,
+    )
+
+    assert _host(full[0]).tobytes() == _host(lean[0]).tobytes()
+    assert _host(full[2]).tobytes() == _host(lean[2]).tobytes()
+    assert lean[1] is None and lean[3] is None
+    assert np.any(_host(full[0]) == np.float32(np.log(np.finfo(np.float32).tiny)))
+    public = network.evaluate_actions(batch["x"], batch["masks"], batch["actions"])
+    assert _host(public[1]).tobytes() == _host(full[1]).tobytes()
+
+
+@pytest.mark.parametrize(
+    ("entropy_coef", "collect_metrics", "builds_entropy"),
+    [
+        (0.0, False, False),
+        (0.0, True, True),
+        (1e-12, False, True),
+        (0.03, False, True),
+    ],
+)
+def test_only_an_exact_zero_coefficient_without_metrics_skips_the_entropy(
+    entropy_coef, collect_metrics, builds_entropy
+):
+    network = _network("no_critic")
+    batch = _batch(5)
+    requested = []
+    original = network._evaluate_masked_actions  # pylint: disable=protected-access
+
+    def recording(*args, **kwargs):
+        requested.append(kwargs["need_entropy"])
+        return original(*args, **kwargs)
+
+    network._evaluate_masked_actions = recording  # pylint: disable=protected-access
+    network.backward_ppo(
+        batch["x"],
+        batch["actions"],
+        batch["masks"],
+        batch["old_log_probs"],
+        batch["advantages"],
+        entropy_coef=entropy_coef,
+        collect_metrics=collect_metrics,
+    )
+
+    assert requested == [builds_entropy]

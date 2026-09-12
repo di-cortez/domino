@@ -468,6 +468,33 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         Whole-buffer PPO metrics keep the default ``training=False`` so reported
         ratios, KL, and clipping describe the complete network.
         """
+        log_probs, entropy, policy, _log_policy = self._evaluate_masked_actions(
+            x,
+            legal_masks,
+            action_indices,
+            training=training,
+            need_entropy=True,
+        )
+        return log_probs, entropy, policy
+
+    def _evaluate_masked_actions(
+        self,
+        x,
+        legal_masks,
+        action_indices,
+        *,
+        training,
+        need_entropy,
+    ):
+        """Return ``(log_probs, entropy, policy, log_policy)`` for one batch.
+
+        ``need_entropy=False`` serves an update whose gradient has no entropy
+        term and which reports nothing. The logarithm is then taken of the
+        observed actions' probabilities alone, so neither the full log-policy
+        nor the entropy is built and both come back as ``None``. ``log`` and
+        ``maximum`` act element by element, so the log-probabilities are
+        bit-identical to gathering them from the full log-policy.
+        """
         xp = self.xp
         self.forward(x, training=training)
         logits = self.cache[self.logits_key]
@@ -501,10 +528,15 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             np.finfo(np.float32).tiny,
             dtype=policy.dtype,
         )
+        if not need_entropy:
+            log_probs = xp.log(
+                xp.maximum(policy[action_indices, columns], probability_floor)
+            )
+            return log_probs, None, policy, None
         log_policy = xp.log(xp.maximum(policy, probability_floor))
         log_probs = log_policy[action_indices, columns]
         entropy = -xp.sum(policy * log_policy, axis=0)
-        return log_probs, entropy, policy
+        return log_probs, entropy, policy, log_policy
 
     def clipped_value_loss_terms(
         self,
@@ -770,6 +802,11 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         optimizer keys from ``_apply_gradient_step`` and the runtime profile;
         the policy and critic metric keys are absent rather than ``None``, so a
         caller that needs them fails loudly instead of reading a gap as zero.
+
+        An ``entropy_coef`` of exactly zero multiplies the entropy gradient by
+        zero, so that gradient is not built, and without ``collect_metrics``
+        neither is the entropy. Every other coefficient, however small, takes
+        the regularized path unchanged.
         """
         profile_started = time.perf_counter()
         timing = {}
@@ -780,12 +817,20 @@ class PolicyNetwork(SupervisedNeuralNetwork):
             )
 
         xp = self.xp
+        entropy_coef = float(entropy_coef)
+        entropy_in_gradient = entropy_coef != 0.0
         phase_started = time.perf_counter()
-        new_log_probs, entropy, masked_policy = self.evaluate_actions(
+        (
+            new_log_probs,
+            entropy,
+            masked_policy,
+            log_policy,
+        ) = self._evaluate_masked_actions(
             x,
             legal_masks,
             action_indices,
             training=True,
+            need_entropy=collect_metrics or entropy_in_gradient,
         )
         finish_phase("policy_forward_and_action_mask_validation", phase_started)
         phase_started = time.perf_counter()
@@ -829,15 +874,12 @@ class PolicyNetwork(SupervisedNeuralNetwork):
         active_weights = xp.where(unclipped <= clipped, ratio * advantages, 0.0)
         sampled = xp.zeros_like(masked_policy)
         sampled[action_indices, xp.arange(sample_count)] = 1.0
-        entropy_row = entropy.reshape(1, -1)
-        probability_floor = xp.asarray(
-            np.finfo(np.float32).tiny,
-            dtype=masked_policy.dtype,
-        )
-        log_policy = xp.log(xp.maximum(masked_policy, probability_floor))
-        dz3_policy = (masked_policy - sampled) * active_weights.reshape(1, -1)
-        dz3_entropy = masked_policy * (log_policy + entropy_row)
-        dz3 = dz3_policy + float(entropy_coef) * dz3_entropy
+        dz3 = (masked_policy - sampled) * active_weights.reshape(1, -1)
+        if entropy_in_gradient:
+            # The evaluation's log-policy is the floored logarithm this term
+            # has always used, so it is reused rather than recomputed.
+            dz3_entropy = masked_policy * (log_policy + entropy.reshape(1, -1))
+            dz3 = dz3 + entropy_coef * dz3_entropy
 
         last_hidden = self.cache[self.last_hidden_activation_key]
         inverse_count = xp.asarray(1.0 / sample_count, dtype=dz3.dtype)

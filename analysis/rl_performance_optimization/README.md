@@ -23,6 +23,7 @@ arguments point.
 | `ppo_harness.py timing` | Alternates checkouts in fresh processes (order reversed on odd repetitions), one untimed warm-up update per process, and reports medians and quartiles. |
 | `correctness_suite.sh` | Five variants on GPU plus three CPU cases, reference versus candidate. |
 | `training_smoke.py` / `smoke_suite.sh` | Real `train()` runs, uninterrupted and stopped/resumed, fingerprinting final weights, deterministic metrics rows, and the warmup trace. |
+| `save_stage_results.py` | Copies one stage's compact evidence into `results/<stage>/` with scratch paths redacted. |
 
 Harness variants:
 
@@ -56,12 +57,17 @@ byte in every harness case, every smoke, and every full-versus-split pair.
 Timings were taken while an unrelated long training run occupied the same
 machine, so absolute values are inflated (the reference optimizer step costs
 2.24 ms here against 1.45 ms in that run's own profile). Only the interleaved
-ratios are meaningful.
+ratios are meaningful, and the whole-buffer evaluation is bimodal (about 20 ms
+or 36 ms per call) depending on whether that run's own GPU work overlaps, which
+hides small changes in the total update time. The optimizer-step time per step
+is the steadier signal for stages B and C. From stage C on, `--cpu-affinity
+0-11` pins the measured processes to the performance cores of this hybrid CPU.
 
 ## Results
 
 | Stage | Correctness | Median PPO update (production, GPU) | Notes |
 |---|---|---|---|
 | B: discard unused minibatch metrics | Byte-identical in all harness cases and smokes, warmup trace included | 1.213 s -> 0.920 s (0.76x); optimizer step 2.24 ms -> 1.43 ms | Removes 7 policy and 2 critic host transfers per optimizer step |
+| C: exact-zero entropy fast path | Byte-identical in all harness cases and smokes, warmup trace included | Unpinned 0.995 s -> 0.977 s, step 1.53 -> 1.32 ms; pinned 0.811 s -> 0.760 s, step 1.49 -> 1.44 ms (q1 1.40 -> 1.35) | About eight fewer kernel launches per step; the total is within the evaluation's noise |
 
 Per-stage evidence lives in `results/<stage>/`.

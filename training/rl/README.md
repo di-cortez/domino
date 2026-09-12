@@ -465,6 +465,13 @@ after the gradient already existed and each was a host transfer, so the update
 is bit-identical; the non-finite critic check still runs. Direct callers keep
 the complete result by default.
 
+An `--entropy-coef` of exactly `0` (the default) contributes a zero entropy
+gradient, so those steps build neither the entropy gradient nor, since they
+report nothing, the entropy itself: only the observed actions' log-probabilities
+are taken. Every non-zero coefficient, however small, keeps the regularized
+path. Both are bit-identical to the previous update, and the whole-buffer
+evaluation still reports entropy for every run.
+
 Enable the optional PPO actor-critic with:
 
 ```bash

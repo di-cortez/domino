@@ -271,6 +271,67 @@ way every built-in experiment spells it. A wrapper whose `EXPERIMENT_KIND` is
 already one the runner decodes -- `buckets`, `ppo_lr`, `baselines`,
 `one_factor` -- can declare points without it.
 
+## Extending the one-factor sweep
+
+`run_one_factor_ext_tests_<machine>.sh` runs four more `forever` points on
+`double-six`, each on the project defaults except for the single parameter it
+tests, so all four are directly comparable to the one-factor sweep's
+`control`:
+
+| Point | Flag | Why |
+|---|---|---|
+| `lr_0p0007` | `--learning-rate 0.0007` | bracket the measured optimum |
+| `lr_0p0008` | `--learning-rate 0.0008` | bracket the measured optimum |
+| `lr_0p0009` | `--learning-rate 0.0009` | bracket the measured optimum |
+| `gpi_8000` | `--gpi 8000` | continue a monotone ladder |
+
+The sweep found the learning rate to be its most influential factor, peaking at
+`0.001` (+0.677 pp against a +/-0.22 pp ruler). That peak rests on a single run
+with no replicate, and its nearest measured neighbours are a factor of four
+below and 2.5 above, so nothing yet separates a sharp peak from a broad
+plateau. The three rates above bracket it from below at a spacing the ladder
+has never had.
+
+The GPI ladder measured 1000, 2000 and 4000 and rose monotonically without a
+turning point, so it stopped at the largest value `--gpi` then accepted. `8000`
+is the next step, reachable since `--gpi` gained `6000, 8000, 10000, 12000`.
+
+There is one wrapper per machine, each carrying that machine's coefficient so
+every point gets the same machine-adjusted budget the sweep gave its 49 runs:
+
+| Machine | Coefficient | Per point | Four points |
+|---|---:|---:|---:|
+| Diego notebook | 1.0 | 5h00 | ~20h |
+| Rick new notebook | 1.5 | 7h30 | ~30h |
+| Rick desktop | 2.4 | 12h00 | ~48h |
+| Rick old notebook | 3.4 | 17h00 | ~68h |
+
+Running the same four points on more than one machine is the design, not a
+duplication: 22 of the sweep's 27 levels had a replicate on a different
+machine, and the recommendation these points probe rests on the one rate that
+never got one. Prefer `--only` over `--time-limit` when a machine cannot afford
+all four -- a shortened budget makes a point incomparable to the same point
+elsewhere, while a skipped point costs nothing.
+
+The four points themselves live in `_one_factor_ext_points.bash`, sourced by
+every wrapper after it sets `MACHINE_SLUG`. They are shared rather than copied
+because these runs are only worth anything as replicates of each other: a point
+whose flags drifted on one machine would still run, still produce a bundle, and
+silently stop being a replicate.
+
+Each wrapper reuses `EXPERIMENT_KIND="one_factor"` -- as
+`run_ppo_lr_ext_tests_diego_notebook.sh` reuses `ppo_lr` -- so the runner
+decodes the mixed `lr=` and `gpi=` points without an edit, and the four rows
+join that machine's existing one-factor state file rather than opening a second
+one. Rows are upserted by run name, so the sweep's own rows are preserved.
+
+```bash
+export PYTHON=/path/to/the/project/venv/bin/python
+train_script/run_one_factor_ext_tests_diego_notebook.sh --dry-run
+train_script/run_one_factor_ext_tests_rick_desktop.sh
+train_script/run_one_factor_ext_tests_rick_old_notebook.sh --only '*gpi_8000*'
+```
+
 ## Validation
 
 For script-only changes, run at least:

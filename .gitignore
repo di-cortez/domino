@@ -93,6 +93,11 @@ train_script/run_ppo_lr_tests_rick_desktop.sh
 train_script/run_ppo_lr_tests_rick_new_notebook.sh
 train_script/run_ppo_lr_tests_rick_old_notebook.sh
 train_script/run_training_pipeline.sh
+train_script/run_one_factor_ext_tests_diego_notebook.sh
+train_script/run_one_factor_ext_tests_rick_desktop.sh
+train_script/run_one_factor_ext_tests_rick_new_notebook.sh
+train_script/run_one_factor_ext_tests_rick_old_notebook.sh
+train_script/_one_factor_ext_points.bash
 
 analysis/analise_baselines_0409/*
 analysis/recompensa_anterior_vs_atual/*

@@ -54,7 +54,7 @@ Default behavior:
 - train against the fixed heuristic and the 200 most recent frozen learner
   snapshots, splitting half the games uniformly and half by measured
   difficulty;
-- use a fixed GPI of 2,000 and select rollout workers with isolated,
+- use a fixed GPI of 8,000 and select rollout workers with isolated,
   discarded benchmarks;
 - update the policy with masked PPO minibatches for at most four epochs;
 - save `models/domino_rl_weights.npz`.
@@ -278,7 +278,10 @@ once with a stable seed after every count is final.
 
 GPI is never autotuned. Canonical pipelines and direct RL training accept
 `--gpi` with choices `100, 200, 400, 600, 800, 1000, 2000, 4000, 6000, 8000, 10000, 12000`, defaulting to
-`2000`.
+`8000`. At the canonical 100,000-game monitor cadence an 8,000-game iteration
+does not divide a milestone, so every milestone segment ends with one
+shortened 4,000-game iteration. A run keeps the GPI locked into its
+configuration, so runs created with the former 2,000 default resume at 2,000.
 
 Worker tuning tests 1, 2, 4, 6, ... workers, never exceeding 20, on exactly 1%
 of the real game budget per candidate. Starting from the one-worker baseline,
@@ -310,7 +313,7 @@ reported separately and persisted cumulatively for exact resume.
 
 | Flag | Meaning | Default |
 |---|---|---:|
-| `--gpi` | Fixed positive number of games per RL iteration | `2000` |
+| `--gpi` | Fixed positive number of games per RL iteration | `8000` |
 | `--opponent-buckets` | Named active bucket selection | `heuristic,recent` |
 | `--difficulty-weight` | Uniform/difficulty allocation mixture in `[0, 1]` | `0.5` |
 | `--opponent-decision-restarts` | Add one same-iteration continuation from every genuine opponent tile-choice state | off |
@@ -569,7 +572,7 @@ Rollouts remain parallel while all updates stay in the parent:
 | `--value-coef` | Critic loss coefficient when the value head is enabled | `0.5` |
 | `--normalize-advantages` / `--no-normalize-advantages` | Standardize once over the complete iteration buffer | on for PPO |
 | `--total-training-games` | Exact real-game budget; final iteration may be partial | `100000` |
-| `--gpi` | Fixed positive number of games per RL iteration | `2000` |
+| `--gpi` | Fixed positive number of games per RL iteration | `8000` |
 | `--moving-average-window` | Trailing-iteration window for the value-loss/win-rate moving averages printed in the iteration log | `10` |
 | `--seed` | Fix `random`/NumPy state, for reproducible comparisons between hyperparameter configurations | unset |
 | `--device` | Array backend: `auto` matches `GPU_ENABLED` exactly (CuPy when installed, else NumPy); `cpu`/`gpu` force one backend regardless of what's installed/enabled globally | `auto` |

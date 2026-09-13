@@ -2135,7 +2135,9 @@ def test_rl_workload_and_pool_defaults_use_games():
     assert not hasattr(standalone, "pool_interval")
     assert not hasattr(standalone, "pool_refresh_games")
     assert pipeline.total_rl_games == 500_000
-    assert pipeline.rl_iterations * pipeline.rl_games_per_iteration == 500_000
+    assert pipeline.rl_games_per_iteration == DEFAULT_GPI
+    # The final iteration is shortened, so the iterations cover the budget.
+    assert pipeline.rl_iterations == -(-500_000 // DEFAULT_GPI)
 
 
 def test_rl_gpi_is_fixed_explicit_and_positive():

@@ -329,6 +329,8 @@ def _derived_suffix(*flags):
         ((), None),
         (("--learning-rate", "0.01"), "lr_0p01"),
         (("--gpi", "4000"), "gpi_4000"),
+        # The former default names the bundle now that it is not the default.
+        (("--gpi", "2000"), "gpi_2000"),
         (("--entropy-coef", "0.01"), "entropy_0p01"),
         (("--opponent-buckets", "heuristic"), "bucket_heuristic"),
         (
@@ -350,7 +352,7 @@ def test_a_plain_pipeline_run_names_the_parameters_it_varies(flags, expected):
     [
         # Spelled-out defaults are still defaults; they name nothing.
         ("--learning-rate", "0.001"),
-        ("--gpi", "2000"),
+        ("--gpi", "8000"),
         ("--opponent-buckets", "random"),
         ("--reward-distance-mode", "turn-turn"),
         # `--baseline` parks a None on the namespace and resolves to

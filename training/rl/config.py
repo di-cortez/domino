@@ -48,7 +48,13 @@ DEFAULT_DEVICE = "auto"
 COMMON_GPI_VALUES = (
     100, 200, 400, 600, 800, 1000, 2000, 4000, 6000, 8000, 10000, 12000,
 )
-DEFAULT_GPI = 2000
+# The one-factor sweep's GPI ladder (1000, 2000, 4000) rose monotonically
+# without a turning point, and its extension continued it at 8000; see
+# train_script/README.md. At the canonical 100,000-game monitor cadence an
+# 8000-game iteration no longer divides a milestone, so every milestone segment
+# ends with one shortened 4000-game iteration, exactly as that sweep point ran.
+# Existing runs keep the GPI locked into their configuration.
+DEFAULT_GPI = 8000
 DEFAULT_TOTAL_TRAINING_GAMES = 100_000
 
 SL_WEIGHTS = "models/domino_sl_weights.npz"

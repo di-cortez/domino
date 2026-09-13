@@ -17,13 +17,25 @@ import time
 from agents.network_architecture import architecture_from_hidden_sizes
 from agents.nn import GPUContextLostError, resolve_device
 from diagnostics import evaluate
+from diagnostics.periodic_queue import (
+    ASYNC_OUTSTANDING_LIMIT,
+    ASYNC_WORKER_NICENESS,
+    DEFAULT_ASYNC_WORKERS,
+    DEFAULT_STOP_GRACE_SECONDS,
+    PeriodicDiagnosticQueue,
+    build_task,
+)
 from diagnostics.rl_progress import (
     archive_periodic_history,
     checkpoint_path_for_record,
     final_diagnostic_seed,
     periodic_diagnostic_seed,
+    periodic_point_identity,
+    periodic_training_window,
+    publish_periodic_point,
     read_periodic_history,
     rebuild_progress_reports,
+    recorded_periodic_point,
     run_periodic_diagnostic,
 )
 from diagnostics.runtime_profile import RuntimeProfileRecorder
@@ -1220,6 +1232,280 @@ def _run_periodic_point(
     return row
 
 
+class _AsyncPeriodicPoints:
+    """Queue, measure beside training, and publish periodic points in order.
+
+    The training process stays the only publisher: it captures each point's
+    training window when the checkpoint is produced, and records the measured
+    point once a background worker has written its result. See
+    ``diagnostics.periodic_queue`` for the durable task protocol.
+    """
+
+    def __init__(self, *, args, run_dir, level, runtime_profiler, queue=None):
+        self.args = args
+        self.run_dir = Path(run_dir)
+        self.level = level
+        self.runtime_profiler = runtime_profiler
+        self.queue = queue or PeriodicDiagnosticQueue(
+            self.run_dir,
+            status_callback=_status,
+        )
+        self._unattributed_blocking_seconds = 0.0
+
+    def _identity(self, games):
+        return periodic_point_identity(
+            self.run_dir,
+            seed=self.args.seed,
+            rl_games=games,
+            diagnostic_games=self.args.periodic_diagnostic_games,
+        )
+
+    def request(
+        self,
+        *,
+        checkpoint,
+        games,
+        iterations,
+        elapsed_rl_seconds,
+        start=True,
+    ):
+        """Queue the point at ``games`` unless it is recorded or queued.
+
+        ``start=False`` only records the task. The pipeline uses it before the
+        first RL segment of an invocation, whose rollout-worker autotuning must
+        not measure throughput beside a diagnostic.
+        """
+        identity = self._identity(games)
+        if recorded_periodic_point(self.run_dir, identity) is not None:
+            return None
+        if self.queue.find(identity) is not None:
+            if start:
+                self.queue.pump()
+            return None
+        capture_started = time.perf_counter()
+        history = read_periodic_history(periodic_diagnostics_path(self.run_dir))
+        previous_iteration = max(
+            max(
+                (
+                    int(row["rl_iterations"])
+                    for row in history
+                    if int(row["rl_games"]) < int(games)
+                ),
+                default=0,
+            ),
+            self.queue.latest_iteration_before(games),
+        )
+        window = periodic_training_window(
+            self.run_dir,
+            rl_iterations=iterations,
+            previous_iteration=previous_iteration,
+        )
+        task = build_task(
+            run_dir=self.run_dir,
+            identity=identity,
+            pipeline_level=self.level,
+            seed=self.args.seed,
+            rl_iterations=iterations,
+            checkpoint_path=checkpoint,
+            checkpoint_sha256=file_sha256(checkpoint),
+            rl_elapsed_seconds=elapsed_rl_seconds,
+            training_window=window,
+            workers=self.args.async_diagnostic_workers,
+            safety_config=ParallelSafetyConfig(
+                memory_reserve_mb=self.args.diagnostic_memory_reserve_mb,
+                estimated_worker_mb=self.args.diagnostic_estimated_worker_mb,
+                max_worker_rss_mb=self.args.diagnostic_max_worker_rss_mb,
+            ),
+        )
+        task["window_capture_seconds"] = time.perf_counter() - capture_started
+        self.queue.enqueue(task)
+        if start:
+            self.queue.pump()
+        return task
+
+    def publish_ready(self, *, end_rl_games):
+        """Publish every measured point that is next in order; return games."""
+        published = []
+        ready = self.queue.completed()
+        if ready and self._unattributed_blocking_seconds > 0.0:
+            self._flush_blocking()
+            ready = self.queue.completed()
+        for completed in ready:
+            published.append(self._publish(completed, end_rl_games=end_rl_games))
+        return published
+
+    def _publish(self, completed, *, end_rl_games):
+        task, result = completed.task, completed.result
+        publish_started = time.perf_counter()
+        row = dict(result["row"])
+        # Measured beside training, the point held RL back only for the time
+        # the loop waited on the queue. That, not the measurement's own
+        # duration, is what joins the progress clock; see diagnostics/README.
+        row["diagnostic_seconds"] = float(task["blocking_seconds"])
+        publish_sections = {}
+        row, appended = publish_periodic_point(
+            self.run_dir,
+            row,
+            runtime_sections=publish_sections,
+        )
+        publish_seconds = time.perf_counter() - publish_started
+        if appended:
+            self._record_profile(
+                task,
+                result,
+                publish_sections=publish_sections,
+                publish_seconds=publish_seconds,
+                end_rl_games=end_rl_games,
+            )
+            self._print_point(task, result, row)
+        self.queue.acknowledge(task)
+        return int(task["rl_games"])
+
+    def _record_profile(
+        self,
+        task,
+        result,
+        *,
+        publish_sections,
+        publish_seconds,
+        end_rl_games,
+    ):
+        sections = {
+            **result["measure_sections_seconds"],
+            "diagnostic_summary_payload": float(
+                task.get("window_capture_seconds", 0.0)
+            ),
+            **publish_sections,
+        }
+        execution_seconds = (
+            float(result["measure_seconds"])
+            + float(task.get("window_capture_seconds", 0.0))
+            + float(publish_seconds)
+        )
+        sections["unaccounted"] = max(
+            0.0, execution_seconds - sum(sections.values())
+        )
+        pairwise = result["pairwise_runtime_profile"]
+        self.runtime_profiler.record_diagnostic(
+            {
+                "execution_count": 1,
+                "reused_execution_count": 0,
+                "async_execution_count": 1,
+                "games": int(task["diagnostic_games"]),
+                "execution_seconds": execution_seconds,
+                "sections_seconds": sections,
+                "pairwise_sections_seconds": dict(pairwise["sections_seconds"]),
+                "game_worker": dict(pairwise.get("game_worker", {})),
+                # Diagnostic work overlapped training, so these stay separate
+                # quantities and are never added to RL time as wall clock.
+                "async_queue_wait_seconds": _seconds_between(
+                    task["enqueued_at"], result["started_at"]
+                ),
+                "async_blocking_seconds": float(task["blocking_seconds"]),
+            },
+            end_rl_games=end_rl_games,
+        )
+
+    def _print_point(self, task, result, row):
+        print("\n" + "-" * 70)
+        print("Periodic RL diagnostic (recorded; measured beside training)")
+        print("-" * 70)
+        print(f"Checkpoint: {int(task['rl_games']):,} RL games")
+        print(f"Weights: {Path(task['checkpoint_path']).name}")
+        print(f"Opponent: random | games: {int(task['diagnostic_games']):,}")
+        print(
+            f"Workers: {int(result['selected_workers'])} "
+            f"(asynchronous, nice +{int(task['niceness'])})"
+        )
+        print(f"Wins/losses: {row['wins']:,}/{row['losses']:,}")
+        print(
+            f"Win rate: {row['win_rate']:.2%} | "
+            f"95% CI: [{row['ci95_win_rate_low']:.2%}, "
+            f"{row['ci95_win_rate_high']:.2%}]"
+        )
+        print(
+            f"Time: {format_duration(float(result['measure_seconds']))} measuring"
+            f" | held training back {format_duration(float(task['blocking_seconds']))}"
+        )
+        print(f"History: {periodic_diagnostics_path(self.run_dir)}")
+        print(f"Graph: {rl_progress_png_path(self.run_dir)}")
+        print("-" * 70)
+
+    def _flush_blocking(self):
+        self.queue.add_blocking_seconds(self._unattributed_blocking_seconds)
+        self._unattributed_blocking_seconds = 0.0
+
+    def _wait(self, condition, *, publish, shutdown):
+        last = time.monotonic()
+        try:
+            while True:
+                self.queue.pump()
+                now = time.monotonic()
+                self._unattributed_blocking_seconds += now - last
+                last = now
+                publish()
+                if condition() or shutdown():
+                    return
+                time.sleep(self.queue.poll_seconds)
+        finally:
+            self._unattributed_blocking_seconds += time.monotonic() - last
+            self._flush_blocking()
+
+    def wait_for_capacity(self, *, publish, shutdown):
+        """Hold training at a milestone while the backlog is at its limit."""
+        if self.queue.outstanding() < ASYNC_OUTSTANDING_LIMIT:
+            return
+        _status(
+            f"{self.queue.outstanding()} periodic diagnostics are outstanding; "
+            "holding RL until one is recorded."
+        )
+        self._wait(
+            lambda: self.queue.outstanding() < ASYNC_OUTSTANDING_LIMIT,
+            publish=publish,
+            shutdown=shutdown,
+        )
+
+    def drain(self, *, publish, shutdown):
+        """Measure and publish everything outstanding, for a finished target."""
+        if self.queue.outstanding() == 0:
+            return
+        _status(
+            f"RL target reached; waiting for {self.queue.outstanding()} "
+            "periodic diagnostics."
+        )
+        self._wait(
+            lambda: self.queue.outstanding() == 0,
+            publish=publish,
+            shutdown=shutdown,
+        )
+
+    def stop(self, *, publish):
+        """Publish finished points and stop the worker at a shutdown."""
+        publish()
+        self.queue.stop(DEFAULT_STOP_GRACE_SECONDS)
+        publish()
+        if self.queue.outstanding():
+            _status(
+                f"{self.queue.outstanding()} periodic diagnostics remain queued "
+                "and will be measured when this run resumes."
+            )
+
+
+def _seconds_between(first, second):
+    """Return seconds between two ISO timestamps, or 0.0 when either is absent."""
+    from datetime import datetime  # pylint: disable=import-outside-toplevel
+
+    try:
+        return max(
+            0.0,
+            (
+                datetime.fromisoformat(second) - datetime.fromisoformat(first)
+            ).total_seconds(),
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def run_rl_pipeline(root, config, args, assets):
     """Run finite milestone segments or an unbounded sequence with exact resume."""
     seed = int(args.seed)
@@ -1386,44 +1672,116 @@ def run_rl_pipeline(root, config, args, assets):
         print(f"Next periodic diagnostic: {periodic_text}")
     print("-" * 70)
 
-    if config.periodic_diagnostics and not args.skip_periodic_diagnostics:
-        _run_periodic_point(
+    periodic_enabled = (
+        config.periodic_diagnostics and not args.skip_periodic_diagnostics
+    )
+    async_points = None
+    if periodic_enabled and getattr(args, "async_periodic_diagnostics", False):
+        async_points = _AsyncPeriodicPoints(
             args=args,
             run_dir=run_dir,
             level=config.scale_name,
-            checkpoint=supervised_path,
-            games=0,
-            iterations=0,
-            elapsed_rl_seconds=0.0,
             runtime_profiler=runtime_profiler,
+        )
+        # Before anything is measured: a task for a checkpoint newer than the
+        # one training resumed from must never be published.
+        async_points.queue.reconcile(restored_rl_games=completed)
+        print(
+            "Periodic diagnostics: asynchronous, "
+            f"{args.async_diagnostic_workers} workers at nice "
+            f"+{ASYNC_WORKER_NICENESS}, at most {ASYNC_OUTSTANDING_LIMIT} "
+            "outstanding."
         )
 
-    if (
-        config.periodic_diagnostics
-        and not args.skip_periodic_diagnostics
-        and completed > 0
-        and completed % int(args.periodic_diagnostic_every_games) == 0
-        and last_periodic < completed
+    def next_periodic_after(games):
+        if not config.periodic_diagnostics:
+            return None
+        value = (
+            (int(games) // int(args.periodic_diagnostic_every_games) + 1)
+            * int(args.periodic_diagnostic_every_games)
+        )
+        return None if target is not None and value > target else value
+
+    def publish_async_points():
+        nonlocal last_periodic
+        if async_points is None:
+            return
+        published = async_points.publish_ready(end_rl_games=completed)
+        if published and max(published) > last_periodic:
+            last_periodic = max(published)
+            if (run_dir / "training_state.json").is_file():
+                update_diagnostic_markers(
+                    run_dir,
+                    last_periodic_diagnostic_game=last_periodic,
+                    next_periodic_diagnostic_game=next_periodic_after(completed),
+                )
+
+    def request_periodic_point(
+        *, checkpoint, games, point_iterations, elapsed, start=True
     ):
-        state = resume_point.training_state
-        checkpoint_value = (
-            state.get("latest_milestone_checkpoint")
-            or state["latest_weights_path"]
-        )
-        checkpoint = Path(checkpoint_value)
-        if not checkpoint.is_absolute():
-            checkpoint = resume_point.run_dir / checkpoint
-        _run_periodic_point(
-            args=args,
-            run_dir=run_dir,
-            level=config.scale_name,
+        """Measure one point now, or queue it when diagnostics are asynchronous."""
+        nonlocal last_periodic
+        if async_points is None:
+            _run_periodic_point(
+                args=args,
+                run_dir=run_dir,
+                level=config.scale_name,
+                checkpoint=checkpoint,
+                games=games,
+                iterations=point_iterations,
+                elapsed_rl_seconds=elapsed,
+                runtime_profiler=runtime_profiler,
+            )
+            last_periodic = max(last_periodic, int(games))
+            return
+        async_points.request(
             checkpoint=checkpoint,
-            games=completed,
-            iterations=iterations,
-            elapsed_rl_seconds=elapsed_rl,
-            runtime_profiler=runtime_profiler,
+            games=games,
+            iterations=point_iterations,
+            elapsed_rl_seconds=elapsed,
+            start=start,
         )
-        last_periodic = completed
+        publish_async_points()
+
+    try:
+        if periodic_enabled:
+            publish_async_points()
+            # Queued now, measured from the first milestone on: the rollout
+            # worker autotune at the start of the first segment must measure an
+            # otherwise quiet machine.
+            request_periodic_point(
+                checkpoint=supervised_path,
+                games=0,
+                point_iterations=0,
+                elapsed=0.0,
+                start=False,
+            )
+
+        if (
+            periodic_enabled
+            and completed > 0
+            and completed % int(args.periodic_diagnostic_every_games) == 0
+            and last_periodic < completed
+        ):
+            state = resume_point.training_state
+            checkpoint_value = (
+                state.get("latest_milestone_checkpoint")
+                or state["latest_weights_path"]
+            )
+            checkpoint = Path(checkpoint_value)
+            if not checkpoint.is_absolute():
+                checkpoint = resume_point.run_dir / checkpoint
+            request_periodic_point(
+                checkpoint=checkpoint,
+                games=completed,
+                point_iterations=iterations,
+                elapsed=elapsed_rl,
+                start=False,
+            )
+    except BaseException:
+        if async_points is not None:
+            async_points.queue.stop(DEFAULT_STOP_GRACE_SECONDS)
+        raise
     if (
         resume_point is not None
         and resume_point.run_dir.resolve() == run_dir.resolve()
@@ -1451,7 +1809,16 @@ def run_rl_pipeline(root, config, args, assets):
     checkpoint_base = run_dir / "checkpoint_states" / "training.npz"
     last_summary = None
 
-    with ShutdownFlag() as shutdown, _rl_progress(target, completed) as progress_bar:
+    with contextlib.ExitStack() as stack:
+        if async_points is not None:
+            # Whatever ends this block -- a target, a signal, an exception --
+            # never leaves the background worker running unmanaged.
+            stack.callback(
+                async_points.queue.stop,
+                DEFAULT_STOP_GRACE_SECONDS,
+            )
+        shutdown = stack.enter_context(ShutdownFlag())
+        progress_bar = stack.enter_context(_rl_progress(target, completed))
         while target is None or completed < target:
             if shutdown() and resume_point is not None:
                 break
@@ -1640,27 +2007,46 @@ def run_rl_pipeline(root, config, args, assets):
                 and not args.skip_periodic_diagnostics
             ):
                 checkpoint = run_dir / state["latest_milestone_checkpoint"]
-                _run_periodic_point(
-                    args=args,
-                    run_dir=run_dir,
-                    level=config.scale_name,
-                    checkpoint=checkpoint,
-                    games=completed,
-                    iterations=iterations,
-                    elapsed_rl_seconds=elapsed_rl,
-                    runtime_profiler=runtime_profiler,
-                )
-                last_periodic = completed
-                update_diagnostic_markers(
-                    run_dir,
-                    last_periodic_diagnostic_game=last_periodic,
-                    next_periodic_diagnostic_game=next_periodic,
-                )
+                if async_points is None:
+                    _run_periodic_point(
+                        args=args,
+                        run_dir=run_dir,
+                        level=config.scale_name,
+                        checkpoint=checkpoint,
+                        games=completed,
+                        iterations=iterations,
+                        elapsed_rl_seconds=elapsed_rl,
+                        runtime_profiler=runtime_profiler,
+                    )
+                    last_periodic = completed
+                    update_diagnostic_markers(
+                        run_dir,
+                        last_periodic_diagnostic_game=last_periodic,
+                        next_periodic_diagnostic_game=next_periodic,
+                    )
+                else:
+                    request_periodic_point(
+                        checkpoint=checkpoint,
+                        games=completed,
+                        point_iterations=iterations,
+                        elapsed=elapsed_rl,
+                    )
+                    async_points.wait_for_capacity(
+                        publish=publish_async_points,
+                        shutdown=shutdown,
+                    )
             if target is not None and completed >= target:
                 break
             if shutdown():
                 break
 
+        if async_points is not None:
+            if not shutdown() and target is not None and completed >= target:
+                async_points.drain(
+                    publish=publish_async_points,
+                    shutdown=shutdown,
+                )
+            async_points.stop(publish=publish_async_points)
         shutdown_seen = shutdown()
 
     runtime_profiler.finish(
@@ -1804,6 +2190,27 @@ def parse_args(argv=None):
     diagnostics.add_argument("--diagnostic-memory-reserve-mb", type=int, default=512)
     diagnostics.add_argument("--diagnostic-estimated-worker-mb", type=int, default=256)
     diagnostics.add_argument("--diagnostic-max-worker-rss-mb", type=int, default=1024)
+    diagnostics.add_argument(
+        "--async-periodic-diagnostics",
+        action="store_true",
+        help=(
+            "Measure periodic RL-vs-random points in one background process "
+            f"at nice +{ASYNC_WORKER_NICENESS} while training continues, "
+            "instead of pausing RL for each one. Games, wins, and training "
+            "windows are identical; publication is later, and "
+            "diagnostic_seconds records only the time RL waited. Locked into "
+            "a new run's configuration."
+        ),
+    )
+    diagnostics.add_argument(
+        "--async-diagnostic-workers",
+        type=int,
+        default=DEFAULT_ASYNC_WORKERS,
+        help=(
+            "Game workers of the background periodic diagnostic. Independent "
+            "of --diagnostic-workers and periodic_diagnostic_tuning.json."
+        ),
+    )
     canonical = parser.add_argument_group("canonical pipeline controls")
     canonical.add_argument(
         "--resume",
@@ -1980,9 +2387,14 @@ def validate_args(args, config):
     for name in (
         "periodic_diagnostic_games",
         "periodic_diagnostic_every_games",
+        "async_diagnostic_workers",
     ):
         if int(getattr(args, name)) < 1:
             raise ValueError(f"{name} must be positive.")
+    if int(args.async_diagnostic_workers) > MAX_DIAGNOSTIC_WORKERS:
+        raise ValueError(
+            f"async_diagnostic_workers cannot exceed {MAX_DIAGNOSTIC_WORKERS}."
+        )
 
 
 def main(argv=None):

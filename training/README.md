@@ -393,7 +393,9 @@ algorithm.
 The optional value accepted by `--resume` is a convenience alias for
 `--resume-from`. In `forever`, diagnostic-worker autotuning is performed once,
 persisted in `periodic_diagnostic_tuning.json`, and reused at subsequent
-100,000-game monitors and after resume. Progress exposes a single cumulative
+100,000-game monitors and after resume. `--async-periodic-diagnostics` measures
+the monitors beside training instead, through a durable queue described in
+[`../diagnostics/README.md`](../diagnostics/README.md#asynchronous-monitoring). Progress exposes a single cumulative
 `avg_games_s` rate across the persisted history of that run.
 
 `forever` has no percentage or target. SIGINT/SIGTERM stops admission of a new

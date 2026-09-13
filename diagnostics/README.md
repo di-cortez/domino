@@ -186,6 +186,67 @@ denominator; this keeps profiling overhead negligible while preserving useful
 work accounting when workers execute concurrently. Reused diagnostic points are
 timed but add zero games to the profiled diagnostic-game counter.
 
+### Asynchronous monitoring
+
+`--async-periodic-diagnostics` measures each monitor point in one background
+process instead of pausing RL for it. Like every other non-operational
+pipeline argument it is locked into a new run's configuration (and therefore
+its configuration hash); runs created without it keep the synchronous path.
+The measured games, wins, seeds, and training windows are identical to the
+synchronous path's, and the RL weights are unaffected. Only when a point is
+published, and what its `diagnostic_seconds` means, change.
+
+The protocol lives in `diagnostics/periodic_queue.py` and
+`diagnostics/periodic_worker.py`:
+
+1. After a milestone checkpoint is published, the training process captures
+   that checkpoint's training window from `training_metrics.jsonl` and
+   atomically writes `diagnostics/periodic_queue/task_games_N.json`. The task
+   names the immutable `checkpoints/games_N_weights.npz` and its SHA-256.
+2. One worker at a time runs `python -m diagnostics.periodic_worker TASK`,
+   CPU-only, at nice +10, with `--async-diagnostic-workers` game workers
+   (default 4). It verifies the checkpoint hash, plays the games, and writes
+   only `result_games_N.json`, by atomic replacement.
+3. At each milestone the training process publishes finished results in
+   checkpoint order -- history append, CSV, plot, best pointer, pruning,
+   `training_state.json` markers, runtime profile -- and then removes the task.
+
+The training process is the only publisher, and publishing is idempotent: a
+point already in the history is never appended twice or profiled twice.
+Points queued when an invocation starts -- point zero, or a milestone whose
+diagnostic a stop interrupted -- are measured from the first milestone on, so
+the rollout-worker autotune at the start of the first segment measures a quiet
+machine. When three points are outstanding, training waits at the milestone
+until one is recorded. A task fails twice before the pipeline stops, as a failed synchronous
+diagnostic stops it; the task and its `worker_games_N.log` remain for the next
+run, which retries it.
+
+Resume reconciles the queue before starting anything: a task for a checkpoint
+newer than the one training resumed from is discarded with its result, a task
+left running is measured again, and a result that finished before the stop is
+published without being measured again. On a shutdown, finished results are
+published, the running worker receives SIGTERM (its game workers are
+terminated with it, and it is killed after 60 s), and unfinished tasks stay
+queued. The worker also exits when the training process dies. A run that
+reaches its RL target waits for every outstanding point.
+
+The asynchronous resource policy does not read or write
+`periodic_diagnostic_tuning.json`: that file keeps meaning the synchronous
+path's one-time autotuned selection. The worker count cannot change results,
+because every game's seed is fixed by its identity.
+
+Timing keeps overlapping work apart. `rl_elapsed_seconds` is still RL training
+time when the checkpoint was produced. For an asynchronous point,
+`diagnostic_seconds` is the time training actually waited on diagnostics --
+backlog holds and the final wait, charged to the newest outstanding point --
+not the measurement's own duration, which ran beside training. The progress
+clock (`rl_elapsed_seconds` plus cumulative `diagnostic_seconds`) therefore
+stays the run's active wall time in both modes; synchronous points, whose wait
+was their whole duration, keep their recorded meaning. The real measurement
+time, the time a task waited in the queue (`async_queue_wait_seconds`), and the
+time training was held (`async_blocking_seconds`) are kept per session in
+`runtime_profile.json`, whose `async_execution_count` counts these points.
+
 A killed final JSONL append is tolerated and repaired before the next append.
 Rebuild CSV and plots without starting training:
 

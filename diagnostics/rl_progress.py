@@ -1178,7 +1178,49 @@ def rebuild_best_checkpoint(run_dir):
     return value
 
 
-def run_periodic_diagnostic(
+def periodic_point_identity(run_dir, *, seed, rl_games, diagnostic_games):
+    """Return the identity a periodic point at ``rl_games`` is recorded under.
+
+    Two points share an identity exactly when ``append_periodic_point`` would
+    treat them as the same measurement, so a caller can ask whether a point is
+    already recorded -- or already queued -- without running anything.
+    """
+    try:
+        run_config = load_run_config(run_dir)
+    except (FileNotFoundError, ValueError):
+        run_config = {}
+    return {
+        "rl_games": int(rl_games),
+        "configuration_sha256": run_config.get("configuration_sha256"),
+        "diagnostic_seed": int(periodic_diagnostic_seed(seed)),
+        "diagnostic_games": int(diagnostic_games),
+        "opponent": "random",
+        "ruleset_name": run_config.get("ruleset_name", DEFAULT_RULESET_NAME),
+    }
+
+
+def recorded_periodic_point(run_dir, identity):
+    """Return the recorded point matching ``identity``, or ``None``."""
+    for existing in read_periodic_history(periodic_diagnostics_path(run_dir)):
+        if _point_key(existing) == _point_key(identity):
+            return existing
+    return None
+
+
+def periodic_training_window(run_dir, *, rl_iterations, previous_iteration):
+    """Return the training-window summary one periodic point records.
+
+    The window starts after ``previous_iteration``, the iteration count of the
+    point before this one, so consecutive windows tile the run.
+    """
+    return summarize_training_window(
+        run_dir,
+        first_iteration=int(previous_iteration) + 1,
+        last_iteration=int(rl_iterations),
+    )
+
+
+def measure_periodic_point(
     *,
     run_dir,
     pipeline_level,
@@ -1188,15 +1230,26 @@ def run_periodic_diagnostic(
     checkpoint_path,
     diagnostic_games,
     rl_elapsed_seconds,
+    training_window,
     workers="auto",
     safety_config=None,
     autotune_fraction=DEFAULT_AUTOTUNE_FRACTION,
     autotune_minimum_gain=DEFAULT_MINIMUM_GAIN,
     status_callback=None,
+    runtime_sections=None,
 ):
-    """Evaluate one checkpoint on the fixed monitor set and persist one point."""
-    runtime_profile_started = time.perf_counter()
-    runtime_sections = {}
+    """Play one periodic point's games and return its unpublished record.
+
+    Nothing here writes the history, the reports, or the best pointer; see
+    ``publish_periodic_point``. That split is what lets a separate process
+    measure a point while the training process stays the only publisher.
+    ``training_window`` is captured by the caller, so the record describes the
+    checkpoint's own window however late it is measured.
+
+    Returns ``(row, pairwise_runtime_profile, selected_workers)``; timing goes
+    into ``runtime_sections`` when one is given.
+    """
+    runtime_sections = {} if runtime_sections is None else runtime_sections
 
     def add_runtime(section, started):
         runtime_sections[section] = runtime_sections.get(section, 0.0) + (
@@ -1217,55 +1270,6 @@ def run_periodic_diagnostic(
         run_config
     )
     diagnostic_seed = periodic_diagnostic_seed(seed)
-    identity = {
-        "rl_games": int(rl_games),
-        "configuration_sha256": run_config.get("configuration_sha256"),
-        "diagnostic_seed": int(diagnostic_seed),
-        "diagnostic_games": int(diagnostic_games),
-        "opponent": "random",
-        "ruleset_name": ruleset_name,
-    }
-    history_path = periodic_diagnostics_path(run_dir)
-    existing_history = read_periodic_history(history_path)
-    _repair_final_partial_line(history_path, existing_history)
-    runtime_sections["identity_hash_and_history_read"] = (
-        time.perf_counter() - runtime_profile_started
-    )
-    for existing in existing_history:
-        if _point_key(existing) == _point_key(identity):
-            section_started = time.perf_counter()
-            rebuild_progress_csv(run_dir)
-            add_runtime("progress_csv_rebuild", section_started)
-            section_started = time.perf_counter()
-            rebuild_progress_plot(run_dir)
-            add_runtime("progress_plot_rebuild", section_started)
-            section_started = time.perf_counter()
-            rebuild_best_checkpoint(run_dir)
-            _update_best(run_dir, existing)
-            add_runtime("best_checkpoint_update", section_started)
-            section_started = time.perf_counter()
-            prune_periodic_diagnostic_artifacts(run_dir)
-            add_runtime("diagnostic_artifact_pruning", section_started)
-            runtime_total_seconds = time.perf_counter() - runtime_profile_started
-            runtime_sections["unaccounted"] = max(
-                0.0,
-                runtime_total_seconds - sum(runtime_sections.values()),
-            )
-            existing = dict(existing)
-            existing["runtime_profile_delta"] = {
-                "execution_count": 1,
-                "reused_execution_count": 1,
-                "games": 0,
-                "execution_seconds": float(runtime_total_seconds),
-                "sections_seconds": {
-                    name: float(seconds)
-                    for name, seconds in runtime_sections.items()
-                },
-                "pairwise_sections_seconds": {},
-                "game_worker": {},
-            }
-            return existing, False
-
     safety_config = safety_config or ParallelSafetyConfig()
     output_dir = run_dir / "diagnostics" / f"games_{int(rl_games):010d}"
     section_started = time.perf_counter()
@@ -1340,9 +1344,7 @@ def run_periodic_diagnostic(
         np.random.set_state(numpy_state)
         add_runtime("rng_restore", section_started)
     diagnostic_seconds = time.time() - started
-    section_started = time.perf_counter()
     summary = result["summary"]
-    wins = int(summary["counts"]["win"])
     row = {
         "format_version": FORMAT_VERSION,
         "pipeline_level": pipeline_level,
@@ -1352,31 +1354,41 @@ def run_periodic_diagnostic(
         "configuration_sha256": run_config.get("configuration_sha256"),
         "opponent": "random",
         "diagnostic_games": int(diagnostic_games),
-        "wins": wins,
+        "wins": int(summary["counts"]["win"]),
         "diagnostic_seed": int(diagnostic_seed),
         "diagnostic_seed_namespace": PERIODIC_NAMESPACE,
         "diagnostic_seconds": float(diagnostic_seconds),
         "rl_elapsed_seconds": float(rl_elapsed_seconds),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    # The training this record covers: everything since the previous point.
-    # `existing_history` was read before the diagnostic ran, so its last entry
-    # is the previous record and the windows tile the run exactly.
-    previous_iteration = max(
-        (int(existing["rl_iterations"]) for existing in existing_history),
-        default=0,
-    )
-    row.update(
-        summarize_training_window(
-            run_dir,
-            first_iteration=previous_iteration + 1,
-            last_iteration=int(rl_iterations),
+    row.update(training_window)
+    return row, result["runtime_profile_delta"], selected_workers
+
+
+def publish_periodic_point(run_dir, row, *, runtime_sections=None):
+    """Record one measured point and rebuild everything derived from history.
+
+    The only writer of the history, the CSV and plot, the best pointer, and
+    the per-point artifact retention. Publishing a point that is already
+    recorded changes nothing but the derived files, so a publication
+    interrupted anywhere can simply be repeated. Returns ``(row, appended)``.
+    """
+    runtime_sections = {} if runtime_sections is None else runtime_sections
+
+    def add_runtime(section, started):
+        runtime_sections[section] = runtime_sections.get(section, 0.0) + (
+            time.perf_counter() - started
         )
-    )
-    add_runtime("diagnostic_summary_payload", section_started)
+
+    run_dir = Path(run_dir)
     section_started = time.perf_counter()
-    row, appended = append_periodic_point(history_path, row)
+    row, appended = append_periodic_point(periodic_diagnostics_path(run_dir), row)
     add_runtime("history_jsonl_atomic_update", section_started)
+    _rebuild_after_point(run_dir, row, add_runtime)
+    return row, appended
+
+
+def _rebuild_after_point(run_dir, row, add_runtime):
     section_started = time.perf_counter()
     rebuild_progress_csv(run_dir)
     add_runtime("progress_csv_rebuild", section_started)
@@ -1390,12 +1402,112 @@ def run_periodic_diagnostic(
     section_started = time.perf_counter()
     prune_periodic_diagnostic_artifacts(run_dir)
     add_runtime("diagnostic_artifact_pruning", section_started)
+
+
+def run_periodic_diagnostic(
+    *,
+    run_dir,
+    pipeline_level,
+    seed,
+    rl_games,
+    rl_iterations,
+    checkpoint_path,
+    diagnostic_games,
+    rl_elapsed_seconds,
+    workers="auto",
+    safety_config=None,
+    autotune_fraction=DEFAULT_AUTOTUNE_FRACTION,
+    autotune_minimum_gain=DEFAULT_MINIMUM_GAIN,
+    status_callback=None,
+):
+    """Evaluate one checkpoint on the fixed monitor set and persist one point."""
+    runtime_profile_started = time.perf_counter()
+    runtime_sections = {}
+
+    def add_runtime(section, started):
+        runtime_sections[section] = runtime_sections.get(section, 0.0) + (
+            time.perf_counter() - started
+        )
+
+    run_dir = Path(run_dir)
+    identity = periodic_point_identity(
+        run_dir,
+        seed=seed,
+        rl_games=rl_games,
+        diagnostic_games=diagnostic_games,
+    )
+    history_path = periodic_diagnostics_path(run_dir)
+    existing_history = read_periodic_history(history_path)
+    _repair_final_partial_line(history_path, existing_history)
+    runtime_sections["identity_hash_and_history_read"] = (
+        time.perf_counter() - runtime_profile_started
+    )
+    for existing in existing_history:
+        if _point_key(existing) == _point_key(identity):
+            _rebuild_after_point(run_dir, existing, add_runtime)
+            runtime_total_seconds = time.perf_counter() - runtime_profile_started
+            runtime_sections["unaccounted"] = max(
+                0.0,
+                runtime_total_seconds - sum(runtime_sections.values()),
+            )
+            existing = dict(existing)
+            existing["runtime_profile_delta"] = {
+                "execution_count": 1,
+                "reused_execution_count": 1,
+                "games": 0,
+                "execution_seconds": float(runtime_total_seconds),
+                "sections_seconds": {
+                    name: float(seconds)
+                    for name, seconds in runtime_sections.items()
+                },
+                "pairwise_sections_seconds": {},
+                "game_worker": {},
+            }
+            return existing, False
+
+    # The training this record covers: everything since the previous point.
+    # `existing_history` was read before the diagnostic ran, so its last entry
+    # is the previous record and the windows tile the run exactly.
+    previous_iteration = max(
+        (int(existing["rl_iterations"]) for existing in existing_history),
+        default=0,
+    )
+    row, pairwise_profile, selected_workers = measure_periodic_point(
+        run_dir=run_dir,
+        pipeline_level=pipeline_level,
+        seed=seed,
+        rl_games=rl_games,
+        rl_iterations=rl_iterations,
+        checkpoint_path=checkpoint_path,
+        diagnostic_games=diagnostic_games,
+        rl_elapsed_seconds=rl_elapsed_seconds,
+        training_window={},
+        workers=workers,
+        safety_config=safety_config,
+        autotune_fraction=autotune_fraction,
+        autotune_minimum_gain=autotune_minimum_gain,
+        status_callback=status_callback,
+        runtime_sections=runtime_sections,
+    )
+    section_started = time.perf_counter()
+    row.update(
+        periodic_training_window(
+            run_dir,
+            rl_iterations=rl_iterations,
+            previous_iteration=previous_iteration,
+        )
+    )
+    add_runtime("diagnostic_summary_payload", section_started)
+    row, appended = publish_periodic_point(
+        run_dir,
+        row,
+        runtime_sections=runtime_sections,
+    )
     runtime_total_seconds = time.perf_counter() - runtime_profile_started
     runtime_sections["unaccounted"] = max(
         0.0,
         runtime_total_seconds - sum(runtime_sections.values()),
     )
-    pairwise_profile = result["runtime_profile_delta"]
     row["runtime_profile_delta"] = {
         "execution_count": 1,
         "reused_execution_count": 0,

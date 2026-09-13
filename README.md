@@ -310,7 +310,10 @@ run's provenance. `--resume RUN_DIR` is an explicit alias for
 
 The `forever` periodic RL-vs-random worker autotune runs once. Its selection is
 stored in `periodic_diagnostic_tuning.json` and reused at every later milestone
-and after resume. The RL progress bar reports one `avg_games_s` value computed
+and after resume. A new run started with `--async-periodic-diagnostics`
+instead measures those points in one low-priority background process while RL
+continues; see
+[`diagnostics/README.md`](diagnostics/README.md#asynchronous-monitoring). The RL progress bar reports one `avg_games_s` value computed
 over the full persisted history of the run.
 
 The first SIGINT/SIGTERM finishes the current iteration, publishes a safe

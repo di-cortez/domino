@@ -74,6 +74,39 @@ is the steadier signal for stages B and C. From stage C on, `--cpu-affinity
 | F: device-side evaluation accumulators | Byte-identical to E in all harness cases and smokes (reference: stage E smokes); at 512 partitions byte-identical to D | Alone at 512: evaluation median 29.8 -> 18.5 ms, q1 20.4 -> 18.2, min 18.6 -> 17.9. After E: update median 0.491 -> 0.477 s, q1 0.474 -> 0.444, min 0.441 -> 0.440; evaluation median 6.6 -> 4.4 ms, min 3.9 -> 4.1 | Mostly removes contention-sensitive spread; the kernel launches, not the transfers, dominate what remains |
 | G1: validate decisions once per buffer | Byte-identical to F in all harness cases and smokes | Update median 0.519 -> 0.430 s, min 0.423 -> 0.382 s; step median 1.47 -> 1.22 ms, min 1.21 -> 1.07 ms; evaluation min 3.89 -> 2.88 ms | Two blocking host transfers fewer per optimizer step and per evaluation partition |
 | G2: sliced evaluation partitions | Byte-identical to G1 in all harness cases and smokes; a strided-view variant was byte-identical too | Evaluation min 2.70 -> 2.40 ms, median 3.32 -> 2.94 ms; update min 0.364 -> 0.355 s | Views measured 2.37 ms, no faster than contiguous slices, so the contiguous layout of a gathered batch is kept |
+| A: asynchronous periodic diagnostics (opt-in) | Same games, wins, and training windows as the synchronous path, and byte-identical weights, in the pipeline tests; worker results identical for 1 and 3 workers | Not yet measured at scale (see below) | Functional check only: 4,000 RL games, 1 RL and 1 diagnostic worker, wall 28.6 s -> 17.0 s |
+
+### Stage A benchmark status
+
+The representative comparison was deliberately not run: a time-budgeted
+one-factor sweep point was training on the same machine, and a pipeline
+benchmark with several rollout and diagnostic workers would both distort its
+own result and cost that point real games. The only run so far is a functional
+check (`results/stage_a/functional_check_*.json`): 4,000 RL games at GPI
+2,000 with 2,000-game monitors, one RL worker and one diagnostic worker. It
+recorded identical wins at every point in both modes, wall clock 28.6 s
+synchronous against 17.0 s asynchronous, and progress clocks of 27.1 s and
+15.6 s, which track the wall clock in both modes as the timing contract
+requires.
+
+On an otherwise idle machine, run the scaled production ratio (one monitor
+game per RL game) in alternating order and compare:
+
+```bash
+export PYTHONPATH=$PWD PY=/home/diego/CCO/amb_virtual/bin/python
+for mode in sync async async sync; do
+  $PY analysis/rl_performance_optimization/pipeline_benchmark.py run \
+    --mode $mode --weights models/domino_sl_standard_seed52.npz \
+    --output-dir /tmp/pipeline_bench_${mode}_$RANDOM \
+    --total-games 60000 --every-games 10000 --rl-workers 8 --diagnostic-workers 4
+done
+$PY analysis/rl_performance_optimization/pipeline_benchmark.py compare /tmp/pipeline_bench_*/benchmark.json
+```
+
+The comparison reports wall clock, progress clock, median rollout and update
+seconds (to see whether low-priority diagnostics slow rollouts), diagnostic
+execution and blocking time, mean machine CPU utilization, and the largest
+queue depth.
 
 ### Combined PPO stages B-G2
 

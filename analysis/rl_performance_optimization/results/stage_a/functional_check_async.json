@@ -1,0 +1,152 @@
+{
+ "kind": "pipeline_benchmark",
+ "mode": "async",
+ "pythonpath": "<checkout>",
+ "arguments": {
+  "command": "run",
+  "mode": "async",
+  "weights": "<scratch>/sl_double_six_seed52.npz",
+  "output_dir": "<scratch>/pipebench_smoke_async",
+  "seed": 52,
+  "gpi": 2000,
+  "total_games": 4000,
+  "every_games": 2000,
+  "rl_workers": 1,
+  "diagnostic_workers": 1,
+  "device": "gpu"
+ },
+ "wall_seconds": 17.02202649300034,
+ "rl_elapsed_seconds": 11.592765359000623,
+ "progress_clock_seconds": 15.6,
+ "completed_training_games": 4000,
+ "iterations": [
+  {
+   "iteration": 1,
+   "rollout_seconds": 5.03308,
+   "update_seconds": 0.62565,
+   "iteration_seconds": 5.90789
+  },
+  {
+   "iteration": 2,
+   "rollout_seconds": 4.70721,
+   "update_seconds": 0.86889,
+   "iteration_seconds": 5.64432
+  }
+ ],
+ "profile": {
+  "rl_execution_seconds": 11.851367666999977,
+  "rollout_game_execution_seconds": 9.740295704000346,
+  "ppo_update_seconds": 1.4014836250007647,
+  "diagnostic_execution_seconds": 12.849790504001248,
+  "diagnostic_pairwise_seconds": 11.777450408998448,
+  "async_queue_wait_seconds": 0.7454770000000001,
+  "async_blocking_seconds": 4.009278306999477
+ },
+ "points": [
+  {
+   "rl_games": 0,
+   "rl_iterations": 0,
+   "wins": 1233,
+   "diagnostic_seconds": 0.0
+  },
+  {
+   "rl_games": 2000,
+   "rl_iterations": 1,
+   "wins": 1231,
+   "diagnostic_seconds": 0.0
+  },
+  {
+   "rl_games": 4000,
+   "rl_iterations": 2,
+   "wins": 1246,
+   "diagnostic_seconds": 4.01
+  }
+ ],
+ "samples": [
+  {
+   "t": 1.000274680000075,
+   "cpu_busy_percent": 36.33618520382486,
+   "queue_depth": 1
+  },
+  {
+   "t": 2.000542795999536,
+   "cpu_busy_percent": 26.59627953745601,
+   "queue_depth": 1
+  },
+  {
+   "t": 3.00092874999973,
+   "cpu_busy_percent": 67.50756811301716,
+   "queue_depth": 1
+  },
+  {
+   "t": 4.0012083429992344,
+   "cpu_busy_percent": 74.08152994464017,
+   "queue_depth": 1
+  },
+  {
+   "t": 5.001623223000024,
+   "cpu_busy_percent": 43.63267376966007,
+   "queue_depth": 1
+  },
+  {
+   "t": 6.001849072999903,
+   "cpu_busy_percent": 30.09610520991401,
+   "queue_depth": 1
+  },
+  {
+   "t": 7.002110363999236,
+   "cpu_busy_percent": 34.3087790110999,
+   "queue_depth": 1
+  },
+  {
+   "t": 8.002878001999306,
+   "cpu_busy_percent": 28.63659401926001,
+   "queue_depth": 1
+  },
+  {
+   "t": 9.003259264999542,
+   "cpu_busy_percent": 28.94069944247339,
+   "queue_depth": 1
+  },
+  {
+   "t": 10.003624725000009,
+   "cpu_busy_percent": 37.88413098236776,
+   "queue_depth": 1
+  },
+  {
+   "t": 11.004002123999271,
+   "cpu_busy_percent": 71.0819009100101,
+   "queue_depth": 1
+  },
+  {
+   "t": 12.004658399999244,
+   "cpu_busy_percent": 66.56580937972768,
+   "queue_depth": 1
+  },
+  {
+   "t": 13.004961097999512,
+   "cpu_busy_percent": 35.42084168336673,
+   "queue_depth": 1
+  },
+  {
+   "t": 14.005559384999287,
+   "cpu_busy_percent": 24.42211055276382,
+   "queue_depth": 1
+  },
+  {
+   "t": 15.005856189999577,
+   "cpu_busy_percent": 25.616507297433316,
+   "queue_depth": 1
+  },
+  {
+   "t": 16.00618539199968,
+   "cpu_busy_percent": 22.161080540270135,
+   "queue_depth": 1
+  },
+  {
+   "t": 17.00653406299989,
+   "cpu_busy_percent": 26.028084252758276,
+   "queue_depth": 1
+  }
+ ]
+}

@@ -305,7 +305,11 @@ chosen action.
 RL versus random on a fixed periodic seed namespace, appends deduplicated JSONL
 points, and derives CSV/PNG reports. Final all-pairs evaluation uses a distinct
 holdout namespace. Diagnostic execution preserves parent training RNG state
-and never mutates the checkpoint or training schedule.
+and never mutates the checkpoint or training schedule. With
+`--async-periodic-diagnostics` a point is measured by one CPU-only,
+low-priority `diagnostics.periodic_worker` process from a durable task, and the
+worker writes only its result envelope; the training process remains the sole
+publisher of the history, reports, best pointer, and training-state markers.
 
 Every new canonical pipeline initializes RL from its selected supervised
 checkpoint, independent of an older RL output. Canonical

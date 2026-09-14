@@ -1,0 +1,364 @@
+{
+  "settings": {
+    "rolling_points": 5,
+    "late_window": [
+      16000000,
+      17000000
+    ],
+    "common_games": 17000000,
+    "ruler_pp": 0.22,
+    "oscillation_from_games": 5000000,
+    "diagnostic_games": 100000,
+    "seed": 52,
+    "ruleset": "double-six",
+    "budget_hours": 5
+  },
+  "reference_configs": {
+    "gpi1000": {
+      "learning_rate": 0.01,
+      "reward_distance_mode": "decision-decision"
+    },
+    "gpi2000": {
+      "learning_rate": 0.01,
+      "reward_distance_mode": "decision-decision"
+    },
+    "gpi4000": {
+      "learning_rate": 0.01,
+      "reward_distance_mode": "decision-decision"
+    },
+    "gpi8000": {
+      "learning_rate": 0.01,
+      "reward_distance_mode": "decision-decision"
+    },
+    "gpi8000_nova": {
+      "learning_rate": 0.001,
+      "reward_distance_mode": "turn-turn"
+    },
+    "gpi12000_nova": {
+      "learning_rate": 0.001,
+      "reward_distance_mode": "turn-turn"
+    }
+  },
+  "ladder": [
+    "gpi1000",
+    "gpi2000",
+    "gpi4000",
+    "gpi8000"
+  ],
+  "pair": [
+    "gpi8000_nova",
+    "gpi12000_nova"
+  ],
+  "fits": {
+    "late_log_linear": {
+      "slope_pp_per_doubling": 0.17701818181817222,
+      "intercept": 63.45748407644614,
+      "r2": 0.9894079153826474
+    },
+    "max_quadratic": {
+      "coefficients": [
+        -0.05575000000000469,
+        1.433534947739944,
+        56.79546469106913
+      ],
+      "vertex_gpi": 7418.005770573138,
+      "vertex_value": 66.01081198430496,
+      "r2": 0.9900892079460918
+    }
+  },
+  "ladder_gain_vs_8000": {
+    "gpi1000": -0.5493636363636227,
+    "gpi2000": -0.3346363636363492,
+    "gpi4000": -0.21254545454544882,
+    "gpi8000": 0.0
+  },
+  "ladder_order": {
+    "fully_ordered_share_after_5M": 0.8760330578512396,
+    "last_swap_games": {
+      "gpi1000_gpi2000": 4400000.0,
+      "gpi2000_gpi4000": 8600000.0,
+      "gpi4000_gpi8000": 14800000.0
+    }
+  },
+  "direct_pair": {
+    "common_end_games": 23200000.0,
+    "late_16_17_delta": -0.034000000000020236,
+    "max_to_17_delta": 0.05300000000001148,
+    "auc_to_17_delta": -0.02392941176469776,
+    "end_window": [
+      22200000.0,
+      23200000.0
+    ],
+    "end_window_8000": 66.49236363636363,
+    "end_window_12000": 66.54845454545455,
+    "auc_to_end_8000": 66.17379956896552,
+    "auc_to_end_12000": 66.17140732758621,
+    "games_in_budget_ratio": 1.0737113402061855,
+    "end_window_delta": 0.05609090909091208,
+    "auc_to_end_delta": -0.0023922413793115993,
+    "difference_mean_after_5M": 0.004295081967212967,
+    "difference_points_after_5M": 183,
+    "difference_points_outside_ruler": 8,
+    "difference_share_inside_ruler": 0.9562841530054644,
+    "rolling_points_outside_ruler": 3,
+    "rolling_abs_max_after_1M": 0.230600000000004
+  },
+  "bridge": {
+    "late_16_17": 65.7272727272727,
+    "max_to_17": 66.05500000000002,
+    "linear_prediction_12000": 65.85621263467313,
+    "quadratic_prediction_12000": 65.98396610777208,
+    "five_point_linear_late": {
+      "slope_pp_per_doubling": 0.15164938586360696,
+      "intercept": 63.7331478345934,
+      "r2": 0.953436176692495
+    },
+    "five_point_quadratic_max": {
+      "coefficients": [
+        -0.04357495513521896,
+        1.1608991137532332,
+        58.309578051002696
+      ],
+      "vertex_gpi": 10231.393017962806,
+      "vertex_value": 66.04158114848718,
+      "r2": 0.9858954830517613
+    }
+  },
+  "additivity": {
+    "delta_lr_0p001_at_gpi2000": 0.7687272727272614,
+    "delta_turn_turn_at_gpi2000": 0.20772727272725433,
+    "predicted_gpi8000_nova": 66.73772727272724,
+    "observed_gpi8000_nova": 66.45109090909092,
+    "error": 0.28663636363631895
+  },
+  "runs": {
+    "gpi1000": {
+      "key": "gpi1000",
+      "gpi": 1000,
+      "config": "antiga",
+      "run_name": "one_factor_gpi_1000_diego_notebook",
+      "directory": "models/rl/run_one_factor_tests_diego_notebook/domino_rl_forever_seed52_runone_factor_gpi_1000_diego_notebook",
+      "git_commit": "4da4b03",
+      "learning_rate": 0.01,
+      "reward_distance_mode": "decision-decision",
+      "games_total": 18600000,
+      "iterations_total": 18600,
+      "rl_hours": 3.6287315020808233,
+      "million_games_per_rl_hour": 5.1257006119302675,
+      "start_win_rate": 62.580000000000005,
+      "late_16_17": 65.2119090909091,
+      "late_16_17_points": 11,
+      "max_to_17": 65.553,
+      "max_to_17_games": 17000000.0,
+      "auc_to_17": 64.89599705882353,
+      "final_win_rate": 65.39,
+      "oscillation_pp": 0.13308352892230893,
+      "mechanism": {
+        "updates": 17000,
+        "shortened_updates": 0,
+        "mean_games_per_update": 1000.0,
+        "optimizer_steps_per_million_games": 128087.5294117647,
+        "optimizer_steps_per_update": 128.0,
+        "decisions_per_game": 4.227401176470588,
+        "kl_median": 0.00631,
+        "kl_p90": 0.00807,
+        "epochs_mean": 15.999176470588235,
+        "stopped_by_kl_percent": 0.02941176470588235,
+        "clip_fraction_median": 0.10089,
+        "entropy_first_20": 0.2755675,
+        "entropy_last_20": 0.2501295,
+        "update_share_of_iteration_time": 0.5191731880749202
+      }
+    },
+    "gpi2000": {
+      "key": "gpi2000",
+      "gpi": 2000,
+      "config": "antiga",
+      "run_name": "one_factor_control_diego_notebook",
+      "directory": "models/rl/run_one_factor_tests_diego_notebook/domino_rl_forever_seed52_runone_factor_control_diego_notebook",
+      "git_commit": "6aa9f95",
+      "learning_rate": 0.01,
+      "reward_distance_mode": "decision-decision",
+      "games_total": 17200000,
+      "iterations_total": 8600,
+      "rl_hours": 3.1743994237227717,
+      "million_games_per_rl_hour": 5.4182614311140505,
+      "start_win_rate": 62.580000000000005,
+      "late_16_17": 65.42663636363638,
+      "late_16_17_points": 11,
+      "max_to_17": 65.78699999999999,
+      "max_to_17_games": 15700000.0,
+      "auc_to_17": 65.11090294117648,
+      "final_win_rate": 65.457,
+      "oscillation_pp": 0.10680054426377733,
+      "mechanism": {
+        "updates": 8500,
+        "shortened_updates": 0,
+        "mean_games_per_update": 2000.0,
+        "optimizer_steps_per_million_games": 132504.29411764705,
+        "optimizer_steps_per_update": 272.0,
+        "decisions_per_game": 4.229691823529412,
+        "kl_median": 0.00611,
+        "kl_p90": 0.00819,
+        "epochs_mean": 15.993882352941176,
+        "stopped_by_kl_percent": 0.07058823529411765,
+        "clip_fraction_median": 0.0922,
+        "entropy_first_20": 0.273431,
+        "entropy_last_20": 0.24888149999999998,
+        "update_share_of_iteration_time": 0.5505993743055535
+      }
+    },
+    "gpi4000": {
+      "key": "gpi4000",
+      "gpi": 4000,
+      "config": "antiga",
+      "run_name": "one_factor_gpi_4000_diego_notebook",
+      "directory": "models/rl/run_one_factor_tests_diego_notebook/domino_rl_forever_seed52_runone_factor_gpi_4000_diego_notebook",
+      "git_commit": "4da4b03",
+      "learning_rate": 0.01,
+      "reward_distance_mode": "decision-decision",
+      "games_total": 21168000,
+      "iterations_total": 5292,
+      "rl_hours": 3.4674066399066668,
+      "million_games_per_rl_hour": 6.104313361181518,
+      "start_win_rate": 62.580000000000005,
+      "late_16_17": 65.54872727272728,
+      "late_16_17_points": 11,
+      "max_to_17": 65.991,
+      "max_to_17_games": 14700000.0,
+      "auc_to_17": 65.26562647058823,
+      "final_win_rate": 65.766,
+      "oscillation_pp": 0.09382565933557453,
+      "mechanism": {
+        "updates": 4250,
+        "shortened_updates": 0,
+        "mean_games_per_update": 4000.0,
+        "optimizer_steps_per_million_games": 131906.88235294117,
+        "optimizer_steps_per_update": 528.0,
+        "decisions_per_game": 4.231918352941176,
+        "kl_median": 0.00611,
+        "kl_p90": 0.00823,
+        "epochs_mean": 15.984941176470588,
+        "stopped_by_kl_percent": 0.3058823529411765,
+        "clip_fraction_median": 0.085315,
+        "entropy_first_20": 0.272366,
+        "entropy_last_20": 0.2520885,
+        "update_share_of_iteration_time": 0.5862926940348
+      }
+    },
+    "gpi8000": {
+      "key": "gpi8000",
+      "gpi": 8000,
+      "config": "antiga",
+      "run_name": "one_factor_gpi_8000_diego_notebook",
+      "directory": "models/rl/domino_rl_forever_seed52_runone_factor_gpi_8000_diego_notebook",
+      "git_commit": "066fa27",
+      "learning_rate": 0.01,
+      "reward_distance_mode": "decision-decision",
+      "games_total": 17696000,
+      "iterations_total": 2300,
+      "rl_hours": 3.5891546887858317,
+      "million_games_per_rl_hour": 4.948851711751258,
+      "start_win_rate": 62.580000000000005,
+      "late_16_17": 65.76127272727273,
+      "late_16_17_points": 11,
+      "max_to_17": 66.00200000000001,
+      "max_to_17_games": 15700000.0,
+      "auc_to_17": 65.45355294117647,
+      "final_win_rate": 65.788,
+      "oscillation_pp": 0.06898957444397082,
+      "mechanism": {
+        "updates": 2210,
+        "shortened_updates": 170,
+        "mean_games_per_update": 7692.307692307692,
+        "optimizer_steps_per_million_games": 132040.0588235294,
+        "optimizer_steps_per_update": 1056.0,
+        "decisions_per_game": 4.234470352941177,
+        "kl_median": 0.00621,
+        "kl_p90": 0.008521,
+        "epochs_mean": 15.98235294117647,
+        "stopped_by_kl_percent": 0.39215686274509803,
+        "clip_fraction_median": 0.07874,
+        "entropy_first_20": 0.271418,
+        "entropy_last_20": 0.2415775,
+        "update_share_of_iteration_time": 0.6247325503758144
+      }
+    },
+    "gpi8000_nova": {
+      "key": "gpi8000_nova",
+      "gpi": 8000,
+      "config": "nova",
+      "run_name": "test_control_diego_notebook",
+      "directory": "models/rl/domino_rl_forever_seed52_runtest_control_diego_notebook",
+      "git_commit": "2c3e046",
+      "learning_rate": 0.001,
+      "reward_distance_mode": "turn-turn",
+      "games_total": 23280000,
+      "iterations_total": 3026,
+      "rl_hours": 3.149171048294714,
+      "million_games_per_rl_hour": 7.391418626693535,
+      "start_win_rate": 62.580000000000005,
+      "late_16_17": 66.45109090909092,
+      "late_16_17_points": 11,
+      "max_to_17": 66.52799999999999,
+      "max_to_17_games": 14000000.0,
+      "auc_to_17": 66.08004705882352,
+      "final_win_rate": 66.545,
+      "oscillation_pp": 0.049149948530252376,
+      "mechanism": {
+        "updates": 2210,
+        "shortened_updates": 170,
+        "mean_games_per_update": 7692.307692307692,
+        "optimizer_steps_per_million_games": 132511.0588235294,
+        "optimizer_steps_per_update": 1056.0,
+        "decisions_per_game": 4.243332588235294,
+        "kl_median": 0.00182,
+        "kl_p90": 0.00202,
+        "epochs_mean": 16.0,
+        "stopped_by_kl_percent": 0.0,
+        "clip_fraction_median": 0.02361,
+        "entropy_first_20": 0.27953300000000003,
+        "entropy_last_20": 0.21898050000000002,
+        "update_share_of_iteration_time": 0.365071240697459
+      }
+    },
+    "gpi12000_nova": {
+      "key": "gpi12000_nova",
+      "gpi": 12000,
+      "config": "nova",
+      "run_name": "test_gpi_12000_diego_notebook",
+      "directory": "models/rl/domino_rl_forever_seed52_runtest_gpi_12000_diego_notebook",
+      "git_commit": "2c3e046",
+      "learning_rate": 0.001,
+      "reward_distance_mode": "turn-turn",
+      "games_total": 24996000,
+      "iterations_total": 2249,
+      "rl_hours": 3.1054925878894406,
+      "million_games_per_rl_hour": 8.0486221538235,
+      "start_win_rate": 62.580000000000005,
+      "late_16_17": 66.4170909090909,
+      "late_16_17_points": 11,
+      "max_to_17": 66.581,
+      "max_to_17_games": 16700000.0,
+      "auc_to_17": 66.05611764705883,
+      "final_win_rate": 66.557,
+      "oscillation_pp": 0.051368879919620206,
+      "mechanism": {
+        "updates": 1530,
+        "shortened_updates": 170,
+        "mean_games_per_update": 11111.111111111111,
+        "optimizer_steps_per_million_games": 132620.23529411765,
+        "optimizer_steps_per_update": 1600.0,
+        "decisions_per_game": 4.243415294117647,
+        "kl_median": 0.00183,
+        "kl_p90": 0.00204,
+        "epochs_mean": 16.0,
+        "stopped_by_kl_percent": 0.0,
+        "clip_fraction_median": 0.023425,
+        "entropy_first_20": 0.27859249999999997,
+        "entropy_last_20": 0.21886,
+        "update_share_of_iteration_time": 0.36256470814228614
+      }
+    }
+  }
+}

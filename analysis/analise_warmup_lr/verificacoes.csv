@@ -1,0 +1,17 @@
+verificacao,ok,detalhe
+Trace contíguo,True,"2903 linhas, iterações 1..2903; 2903 linhas de métricas; training_state 2903"
+Configuração gravada,True,"warmup_lr=True, parâmetros {'exponent': 6, 'factor': 1.5, 'ema_alpha': 0.9, 'kl_threshold': 0.0075, 'hold_iterations': 100, 'cooldown_iterations': 100}, lr nominal 0.001"
+Degraus exatos,True,"degraus observados: 8.77915e-05, 0.000131687, 0.000197531, 0.000296296, 0.000444444, 0.000666667, 0.001"
+lr aplicada = lr instalada na iteração anterior,True,applied_learning_rate[i+1] == next_learning_rate[i] em todas as iterações
+Replay offline reproduz cada decisão,True,2903/2903 linhas idênticas ao replay de WarmupSchedule
+Escada na velocidade mínima teórica,True,"promoções em [100, 300, 500, 700, 900, 1100]; EMA máxima durante a escada 0.00167 < limiar 0.0075"
+"Após a escada, lr nominal constante",True,1803 iterações após a iteração 1100 com lr 0.001 e agenda inativa
+Trace coincide com training_metrics.jsonl,True,maior diferença de max_approx_kl (métricas arredondadas a 5 casas): 0.00e+00
+Checkpoint de retomada,True,"otimizador lr 0.001; estado salvo {'cooldown': 100, 'ema': 0.0017280801901489338, 'exponent': 0, 'streak': 0}"
+PPO sem anomalias,True,paradas por KL 0; épocas mínimas 16; iterações com gradiente recortado 0; buffer ['gpu']; KL ausente 0
+Avaliação em lotes de 4096 sem fallback de memória,True,batch_size_memory_fallbacks = 0
+Diagnósticos e métricas contíguos (warmup),True,"224 pontos de 0 a 22,300,000 a cada 100 mil; 2903 iterações contíguas; janelas encadeadas: True"
+Diagnósticos e métricas contíguos (gpi12000),True,"250 pontos de 0 a 24,900,000 a cada 100 mil; 2249 iterações contíguas; janelas encadeadas: True"
+Log test_gpi_12000_diego_notebook.attempt1.log,True,"0 erros; parada por SIGTERM com checkpoint seguro (sim); última contagem 2,900,000 partidas"
+Log test_gpi_12000_diego_notebook.attempt2.log,True,"0 erros; parada por SIGTERM com checkpoint seguro (sim); última contagem 24,996,000 partidas"
+Log test_warmup_diego_notebook.attempt1.log,True,"0 erros; parada por SIGTERM com checkpoint seguro (sim); última contagem 22,332,000 partidas"

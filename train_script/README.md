@@ -321,7 +321,8 @@ silently stop being a replicate.
 
 Each wrapper reuses `EXPERIMENT_KIND="one_factor"` -- as
 `run_ppo_lr_ext_tests_diego_notebook.sh` reuses `ppo_lr` -- so the runner
-decodes the mixed `lr=` and `gpi=` points without an edit, and the four rows
+decodes the mixed `lr=` and `gpi=` points without an edit (it also accepts
+`warmup=on`, which adds `--warmup-lr` with its default sub-parameters), and the four rows
 join that machine's existing one-factor state file rather than opening a second
 one. Rows are upserted by run name, so the sweep's own rows are preserved.
 
@@ -331,6 +332,99 @@ train_script/run_one_factor_ext_tests_diego_notebook.sh --dry-run
 train_script/run_one_factor_ext_tests_rick_desktop.sh
 train_script/run_one_factor_ext_tests_rick_old_notebook.sh --only '*gpi_8000*'
 ```
+
+## Adaptive learning-rate search
+
+`run_lr_factor_search_<machine>.sh` searches the learning rate around the
+project default in powers of two, deciding after each run whether the next one
+is worth its budget. Every run uses `--warmup-lr` and the project defaults for
+everything else, so only the rate moves. Candidates are tried in a fixed order,
+alternating directions:
+
+| # | Test | Rate at the 0.001 default | Run name |
+|---:|---|---:|---|
+| 1 | `LR` | 0.001 | `lr_search_0p001_<machine>` |
+| 2 | `2 LR` | 0.002 | `lr_search_0p002_<machine>` |
+| 3 | `LR/2` | 0.0005 | `lr_search_0p0005_<machine>` |
+| 4 | `4 LR` | 0.004 | `lr_search_0p004_<machine>` |
+| 5 | `LR/4` | 0.00025 | `lr_search_0p00025_<machine>` |
+| 6 | `8 LR` | 0.008 | `lr_search_0p008_<machine>` |
+| 7 | `LR/8` | 0.000125 | `lr_search_0p000125_<machine>` |
+
+Each finished run is scored by its **sustained final level**: the mean win rate
+against `random` over the last fifth of its horizon on the progress clock -- the
+last hour of a 5-hour Diego-notebook run, the window the one-factor sweep reads
+-- with at least three monitor points in it. The decision replays the runs in
+order against the best score measured before each one:
+
+- more than **0.22 pp** below that best (the sweep's reading ruler) is *worse*;
+  within the ruler it is a tie, and a tie above still becomes the new best;
+- the upward (`2 LR`, `4 LR`, `8 LR`) and downward (`LR/2`, `LR/4`, `LR/8`)
+  directions count their worse runs separately, and a direction stops after its
+  second one, skipping its remaining factors;
+- the search ends when both directions have stopped or run out of factors, and
+  the best rate tested is the recommended new default.
+
+A search therefore needs between five and seven runs at the machine's per-run
+budget (5h00 on the Diego notebook, 7h30, 12h00 and 17h00 on Rick's new
+notebook, desktop and old notebook), one fewer launched when a reference run
+stands in for `LR_default` and one more with a control run.
+
+Every warmup run takes part in the decision, and only the project default
+*without* the warmup stays outside it. The machines differ in what they
+already have:
+
+- **Rick's three wrappers** set `LR_SEARCH_CONTROL_RUN=1`. Those machines have
+  not measured the default yet, so a **control run** comes first --
+  `lr_search_default_<machine>`, no `--warmup-lr`, bundle tail `control` --
+  reported with its score but never compared. The search starts right after it
+  at `LR_default` with the warmup.
+- **The Diego notebook** already ran both. Its wrapper names the finished
+  `test_warmup_diego_notebook` as the **reference run**
+  (`LR_SEARCH_REFERENCE_RUN`, with `LR_SEARCH_REFERENCE_RESULTS_DIR` pointing at
+  the sequence that ran it), so the search scores that run as its `LR_default`
+  instead of repeating it. It is accepted only if its runner state says
+  `completed` and every locked training argument equals what the search would
+  have launched for `LR_default`, identity (`bundle_suffix`, `run_ordinal`,
+  `machine_slug`) aside. The control without the warmup,
+  `test_control_diego_notebook`, stays outside the search.
+
+Every run the search launches gets `--run-ordinal`, numbered in **launch
+order** from 101 (`LR_SEARCH_FIRST_ORDINAL` changes the start), so its bundle
+is `<date>-101_<machine>_...`, then 102, and so on, instead of the `XXX`
+placeholder. On Rick's machines the control run takes 101, `LR_default` 102 and
+the rest of the search follows from 103; on the Diego notebook `2 LR` takes
+101. A skipped candidate and a reference run are never launched and take no
+number, and replaying the decisions reproduces every number already handed
+out, so a resumed or restarted run keeps its own.
+
+The shell loop in `_lr_factor_search.bash` asks
+`python -m train_script.lr_factor_search next` for one run at a time and hands
+it to the sequence runner as a single `combined` point
+(`lr=<rate>+warmup=on`), so budgets, graceful stops and exact resume are the
+runner's; the control run goes through as the `one_factor` point `default`. No
+decision is stored: every call rescores the finished runs and replays the
+decisions, so re-running the wrapper resumes an interrupted run and then the
+search. A run is scored only after its recorded configuration is checked to
+carry the expected rate and warmup setting.
+
+Results live in `grid_search_results/<machine>/lr_factor_search/`, apart from
+any `combined` sequence: `sequence_state.tsv`, one log per attempt,
+`search_config.json` (the definition the search was started with -- a later
+change of default rate, ruler, window, control run, reference run or first
+number is refused
+rather than mixed in), and
+`lr_factor_search_summary.{md,json}`, rewritten after every decision.
+
+```bash
+export PYTHON=/path/to/the/project/venv/bin/python
+train_script/run_lr_factor_search_diego_notebook.sh --dry-run   # plan, decisions, next command
+train_script/run_lr_factor_search_diego_notebook.sh             # run or resume the search
+train_script/run_lr_factor_search_rick_desktop.sh --report      # summary only
+```
+
+`--only`, `--force` and a forwarded `--run-ordinal` are refused: the search
+chooses and numbers its runs.
 
 ## Validation
 

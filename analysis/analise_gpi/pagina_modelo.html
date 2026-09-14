@@ -1,0 +1,829 @@
+<title>Escada de GPI 1k–12k</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap">
+<style>
+  :root {
+    color-scheme: light;
+    --ground: #f2f4f1;
+    --surface: #fbfcfa;
+    --ink: #17201b;
+    --ink-2: #4b5650;
+    --ink-3: #78837d;
+    --rule: #d9e0db;
+    --grid: #e5eae6;
+    --accent: #1d5b4e;
+    --band: rgba(29, 91, 78, 0.10);
+    --note: #e9eee9;
+    --gpi-1: #b5452f;
+    --gpi-2: #c98a0e;
+    --gpi-3: #14a393;
+    --gpi-4: #3f66d0;
+    --gpi-5: #7a3a8f;
+    --serif: "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif;
+    --sans: "IBM Plex Sans", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground: #0f1412;
+      --surface: #161b19;
+      --ink: #e3eae5;
+      --ink-2: #a3aea8;
+      --ink-3: #75817a;
+      --rule: #2a332e;
+      --grid: #212925;
+      --accent: #74c7b2;
+      --band: rgba(116, 199, 178, 0.12);
+      --note: #1b221f;
+      --gpi-1: #ba4342;
+      --gpi-2: #b68a2b;
+      --gpi-3: #14a898;
+      --gpi-4: #6488d0;
+      --gpi-5: #834198;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground: #0f1412;
+    --surface: #161b19;
+    --ink: #e3eae5;
+    --ink-2: #a3aea8;
+    --ink-3: #75817a;
+    --rule: #2a332e;
+    --grid: #212925;
+    --accent: #74c7b2;
+    --band: rgba(116, 199, 178, 0.12);
+    --note: #1b221f;
+    --gpi-1: #ba4342;
+    --gpi-2: #b68a2b;
+    --gpi-3: #14a898;
+    --gpi-4: #6488d0;
+    --gpi-5: #834198;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    padding-inline: 20px;
+    padding-block: 0 72px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1000px; margin: 0 auto; }
+  .prose { max-width: 680px; }
+  h1, h2, h3 { font-family: var(--serif); font-weight: 600; text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+  h1 { font-size: clamp(2rem, 1.4rem + 2.6vw, 3rem); line-height: 1.1; }
+  h2 { font-size: 1.6rem; line-height: 1.2; }
+  h3 { font-size: 1.15rem; line-height: 1.3; }
+  p { margin: 0; }
+  code, .mono { font-family: var(--mono); font-size: 0.86em; }
+  code { background: var(--note); padding: 0.05em 0.35em; border-radius: 3px; }
+  strong { font-weight: 600; }
+  a { color: var(--accent); }
+  .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* Masthead */
+  header.mast { padding-block: 48px 36px; display: grid; gap: 18px; border-bottom: 1px solid var(--rule); }
+  .eyebrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); }
+  .tile { width: 40px; height: 21px; flex: none; }
+  .tile rect { fill: var(--surface); stroke: var(--ink); stroke-width: 1.4; }
+  .tile line { stroke: var(--ink); stroke-width: 1.2; }
+  .tile circle { fill: var(--ink); }
+  .lead { font-size: 1.14rem; line-height: 1.55; color: var(--ink); max-width: 680px; }
+  .meta { font-size: 0.86rem; color: var(--ink-3); }
+
+  /* Key figures */
+  .figures-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--rule); }
+  .kf { padding: 24px 20px 26px 0; display: grid; gap: 6px; align-content: start; }
+  .kf + .kf { padding-left: 20px; border-left: 1px solid var(--rule); }
+  .kf .label { font-size: 0.8rem; color: var(--ink-2); letter-spacing: 0.02em; }
+  .kf .value { font-family: var(--sans); font-weight: 600; font-size: 2.1rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .kf .value small { font-size: 1rem; font-weight: 500; color: var(--ink-2); margin-left: 3px; }
+  .kf .sub { font-size: 0.84rem; color: var(--ink-2); line-height: 1.45; }
+  @media (max-width: 640px) {
+    .figures-row { grid-template-columns: 1fr; }
+    .kf, .kf + .kf { padding: 18px 0; border-left: 0; }
+    .kf + .kf { border-top: 1px solid var(--rule); }
+  }
+
+  /* Sections */
+  section { padding-block: 48px 8px; display: grid; gap: 18px; }
+  section > .prose { display: grid; gap: 14px; }
+
+  /* Figures */
+  figure { margin: 0; display: grid; gap: 12px; }
+  .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 16px 10px; display: grid; gap: 10px; }
+  .panel-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px 16px; }
+  .panel-title { font-size: 0.92rem; font-weight: 600; }
+  .panel-sub { font-size: 0.8rem; color: var(--ink-2); }
+  .twin { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 760px) { .twin { grid-template-columns: 1fr; } }
+  figcaption { font-size: 0.88rem; color: var(--ink-2); max-width: 760px; line-height: 1.55; }
+  figcaption b { font-family: var(--mono); font-weight: 500; font-size: 0.8rem; color: var(--ink); margin-right: 6px; letter-spacing: 0.02em; }
+  .chart { position: relative; width: 100%; }
+  .chart svg { display: block; max-width: 100%; height: auto; overflow: visible; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 0.8rem; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .key { width: 22px; height: 10px; flex: none; }
+
+  .seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    font: inherit; font-size: 0.8rem; color: var(--ink-2); background: transparent;
+    border: 0; padding: 5px 11px; cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid var(--rule); }
+  .seg button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+  .seg button:focus-visible, .seg button:hover { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  svg .grid line { stroke: var(--grid); stroke-width: 1; }
+  svg .axis { stroke: var(--rule); stroke-width: 1; }
+  svg .tick { fill: var(--ink-3); font-family: var(--sans); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  svg .axis-title { fill: var(--ink-2); font-family: var(--sans); font-size: 12px; }
+  svg .ann { fill: var(--ink-2); font-family: var(--sans); font-size: 11.5px; }
+  svg .ann-strong { fill: var(--ink); font-family: var(--sans); font-size: 12px; font-weight: 600; }
+  svg .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  svg .faint { fill: none; stroke-width: 1; opacity: 0.35; }
+  svg .fit { fill: none; stroke: var(--ink-2); stroke-width: 1.5; }
+  svg .band { fill: var(--band); }
+  svg .band-edge { stroke: var(--accent); stroke-width: 1; opacity: 0.45; }
+  svg .zero { stroke: var(--ink-3); stroke-width: 1; }
+  svg .cross { stroke: var(--ink-3); stroke-width: 1; }
+  svg .ring { stroke: var(--surface); stroke-width: 2; }
+  svg .whisker { stroke-width: 1.5; }
+  svg .hit { fill: transparent; cursor: default; }
+
+  .tip {
+    position: absolute; pointer-events: none; z-index: 2;
+    background: var(--surface); color: var(--ink);
+    border: 1px solid var(--rule); border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+    padding: 8px 10px; font-size: 0.78rem; line-height: 1.45; min-width: 180px;
+  }
+  .tip .t { font-weight: 600; margin-bottom: 3px; }
+  .tip .r { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; align-items: center; }
+  .tip .r .v { font-variant-numeric: tabular-nums; text-align: right; }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.86rem; }
+  th, td { padding: 9px 12px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+  th { font-weight: 500; color: var(--ink-2); font-size: 0.76rem; letter-spacing: 0.02em; vertical-align: bottom; line-height: 1.3; white-space: normal; }
+  td { font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child, .txt { text-align: left; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tr.divide td { border-top: 1px solid var(--rule); }
+  .run { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; }
+  .chip { font-family: var(--mono); font-size: 0.7rem; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--rule); color: var(--ink-2); }
+  .chip.nova { border-color: var(--accent); color: var(--accent); }
+  .muted { color: var(--ink-3); }
+  .table-note { font-size: 0.8rem; color: var(--ink-3); }
+
+  ol.limits { margin: 0; padding-left: 1.2em; display: grid; gap: 12px; max-width: 680px; }
+  ol.limits li::marker { font-family: var(--mono); color: var(--ink-3); font-size: 0.85em; }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--rule); font-size: 0.82rem; color: var(--ink-3); display: grid; gap: 8px; }
+  footer code { font-size: 0.78rem; }
+  footer ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+  footer ul code { background: none; padding: 0; overflow-wrap: anywhere; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .seg button { transition: background-color 120ms ease, color 120ms ease; }
+  }
+</style>
+
+<div class="page">
+  <header class="mast">
+    <div class="eyebrow">
+      <svg class="tile" viewBox="0 0 40 21" aria-hidden="true">
+        <rect x="0.7" y="0.7" width="38.6" height="19.6" rx="3"></rect>
+        <line x1="20" y1="3" x2="20" y2="18"></line>
+        <circle cx="6.5" cy="5.5" r="1.4"></circle><circle cx="6.5" cy="10.5" r="1.4"></circle><circle cx="6.5" cy="15.5" r="1.4"></circle>
+        <circle cx="13.5" cy="5.5" r="1.4"></circle><circle cx="13.5" cy="10.5" r="1.4"></circle><circle cx="13.5" cy="15.5" r="1.4"></circle>
+        <circle cx="26.5" cy="5.5" r="1.4"></circle><circle cx="26.5" cy="10.5" r="1.4"></circle><circle cx="26.5" cy="15.5" r="1.4"></circle>
+        <circle cx="33.5" cy="5.5" r="1.4"></circle><circle cx="33.5" cy="10.5" r="1.4"></circle><circle cx="33.5" cy="15.5" r="1.4"></circle>
+      </svg>
+      <span>Dominó double-six</span><span>PPO</span><span>semente 52</span><span>partidas por iteração</span>
+    </div>
+    <h1>Mais partidas por iteração ajudam até 8.000; com 12.000, empata</h1>
+    <p class="lead">
+      De 1.000 a 8.000, cada dobra do GPI rende <strong class="num">{{slope}} pp</strong> de vitória contra o
+      oponente aleatório (R² = {{r2}}). De 8.000 para 12.000, no mesmo código e com os mesmos
+      hiperparâmetros, a diferença é de <strong class="num">{{pair_late}} pp</strong>, dentro da régua de
+      ±{{ruler}} pp. O padrão atual, GPI 8.000, está no platô.
+    </p>
+    <p class="meta">Notebook do Diego (RTX 3050 6 GB) · seis corridas <code>forever</code> de 5 h cada · painel fixo de 100.000 partidas a cada 100.000 partidas de RL</p>
+  </header>
+
+  <div class="figures-row">
+    <div class="kf">
+      <span class="label">Ganho por dobra do GPI, 1k → 8k</span>
+      <span class="value">{{slope}}<small>pp</small></span>
+      <span class="sub">Média de 16 a 17 M partidas; ajuste log-linear com R² = {{r2}}. Da escada inteira: {{gain_1k_8k}} pp.</span>
+    </div>
+    <div class="kf">
+      <span class="label">GPI 12k menos GPI 8k, mesmo código</span>
+      <span class="value">{{pair_late}}<small>pp</small></span>
+      <span class="sub">Em 16–17 M partidas. Em 22,2–23,2 M: {{pair_end}} pp. Área sob a curva até 23,2 M: {{pair_auc_end}} pp.</span>
+    </div>
+    <div class="kf">
+      <span class="label">Régua de leitura</span>
+      <span class="value">±{{ruler}}<small>pp</small></span>
+      <span class="sub">90º percentil das diferenças entre as 22 duplas de réplicas do sweep de fator único.</span>
+    </div>
+  </div>
+
+  <section>
+    <div class="prose">
+      <h2>As cinco corridas não formam uma escada única</h2>
+      <p>
+        As corridas de 1k, 2k, 4k e 8k são pontos do sweep de fator único: mesmo código de treino,
+        <code>learning_rate = 0,01</code>, distância <code>decision-decision</code>, e só o GPI muda. A corrida de 12k
+        veio depois da mudança de padrões do projeto: <code>learning_rate = 0,001</code>, distância
+        <code>turn-turn</code> e a atualização do PPO três vezes mais rápida.
+      </p>
+      <p>
+        Colocada direto ao lado das outras, a curva de 12k fica <strong class="num">{{raw_gap}} pp</strong> acima da de 8k.
+        Esse salto é da taxa de aprendizado e da distância, não do GPI. Para isolar o GPI, a análise usa a
+        corrida-controle de GPI 8.000 feita no mesmo commit da de 12k e com a mesma configuração, em que só o GPI muda.
+      </p>
+    </div>
+    <div class="table-wrap">
+      <table id="runs-table">
+        <thead>
+          <tr>
+            <th>Corrida</th><th class="txt">Config.</th><th>lr</th><th class="txt">Distância</th><th class="txt">Commit</th>
+            <th>Partidas em 5 h</th><th>Atualizações até 17 M</th><th>M partidas por hora de RL</th>
+            <th>Média 16–17 M</th><th>Máximo até 17 M</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="table-note">Todas partem do mesmo checkpoint supervisionado ({{start}}%), com semente 52, oponente <code>random</code>, baseline <code>batch-mean</code> e 16 épocas de PPO. O código de treino é idêntico entre os commits das corridas antigas.</p>
+  </section>
+
+  <section>
+    <figure>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-title">Vitórias contra o aleatório (%)</div>
+            <div class="panel-sub">Média móvel de 5 pontos por partidas de RL acumuladas</div>
+          </div>
+          <div class="controls">
+            <div class="seg" role="group" aria-label="Corridas exibidas">
+              <button type="button" id="f1-all" data-set="all" aria-pressed="true">Todas</button>
+              <button type="button" id="f1-ladder" data-set="ladder" aria-pressed="false">Escada 1k–8k</button>
+              <button type="button" id="f1-pair" data-set="pair" aria-pressed="false">Par 8k × 12k</button>
+            </div>
+            <div class="seg" role="group" aria-label="Horizonte">
+              <button type="button" id="f1-h17" data-h="17" aria-pressed="false">Até 17 M</button>
+              <button type="button" id="f1-hall" data-h="all" aria-pressed="true">Completo</button>
+            </div>
+          </div>
+        </div>
+        <div class="legend" id="f1-legend"></div>
+        <div class="chart" id="fig1"></div>
+      </div>
+      <figcaption>
+        <b>Figura 1.</b> Linhas contínuas são a escada do sweep (lr 0,01); tracejadas são a configuração nova
+        (lr 0,001, turn-turn). Depois de 5 M partidas, a escada fica na ordem completa 1k &lt; 2k &lt; 4k &lt; 8k em
+        {{order_share}}% dos marcos; as trocas são só entre vizinhos, a última de 1k × 2k em {{swap_12}} M, de 2k × 4k
+        em {{swap_24}} M e de 4k × 8k em {{swap_48}} M. Na configuração nova, 8k e 12k se sobrepõem do começo ao fim.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="prose">
+      <h2>O ajuste da escada, com o 12k posto nela</h2>
+      <p>
+        Os dois gráficos de referência são reproduzidos exatamente: média de {{late_1k}}, {{late_2k}}, {{late_4k}} e
+        {{late_8k}}% na janela de 16 a 17 M partidas, inclinação de {{slope}} pp por dobra, e vértice da parábola dos
+        máximos em GPI ≈ {{vertex}}.
+      </p>
+      <p>
+        Para pôr o 12k na mesma escala, a análise soma à corrida antiga de 8k a diferença medida entre 12k e 8k na
+        configuração nova (uma “ponte”). O ponto estimado fica em <strong class="num">{{bridge_late}}%</strong>,
+        {{bridge_vs_linear}} pp abaixo dos {{linear_pred}}% que a reta prevê para 12k. O máximo estimado,
+        {{bridge_max}}%, fica ao lado dos {{quad_pred}}% da parábola. Os dois dizem o mesmo: a subida para entre
+        8k e 12k.
+      </p>
+    </div>
+    <figure>
+      <div class="twin">
+        <div class="panel">
+          <div>
+            <div class="panel-title">Média de 16 a 17 M partidas (%)</div>
+            <div class="panel-sub">Ajuste log-linear sobre 1k–8k</div>
+          </div>
+          <div class="chart" id="fig2a"></div>
+        </div>
+        <div class="panel">
+          <div>
+            <div class="panel-title">Máximo observado até 17 M partidas (%)</div>
+            <div class="panel-sub">Ajuste quadrático em log₂(GPI) sobre 1k–8k</div>
+          </div>
+          <div class="chart" id="fig2b"></div>
+        </div>
+      </div>
+      <div class="legend" id="f2-legend"></div>
+      <figcaption>
+        <b>Figura 2.</b> Pontos cheios são medidos; o ponto vazado de 12k é a ponte, com barra de ±{{ruler}} pp.
+        A linha tracejada é a extrapolação do ajuste além de 8k, e o × marca o valor que o ajuste prevê para 12k.
+        Refeitos com os cinco pontos, os ajustes dão {{slope5}} pp por dobra (R² cai para {{r2_5}}) e vértice em
+        GPI ≈ {{vertex5}}.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <div class="prose">
+      <h2>O teste direto: 8k e 12k no mesmo código</h2>
+      <p>
+        O par da configuração nova é a única comparação em que o GPI é a única diferença. Ponto a ponto, 12k menos
+        8k oscila em torno de zero: a média depois de 5 M partidas é {{pair_diff_mean}} pp, e
+        {{pair_inside_n}} dos {{pair_points}} diagnósticos caem dentro da régua.
+      </p>
+    </div>
+    <figure>
+      <div class="panel">
+        <div>
+          <div class="panel-title">GPI 12.000 menos GPI 8.000, configuração nova (pp)</div>
+          <div class="panel-sub">Diferença em cada marco de 100.000 partidas; faixa sombreada = régua de ±{{ruler}} pp</div>
+        </div>
+        <div class="legend" id="f3-legend"></div>
+        <div class="chart" id="fig3"></div>
+      </div>
+      <figcaption>
+        <b>Figura 3.</b> As duas corridas usam o mesmo painel de avaliação, então a diferença cancela a sorte das mãos
+        e sobra só a diferença entre as políticas. A média móvel só passa da faixa em {{roll_out}} marcos isolados,
+        com máximo de {{roll_max}} pp.
+      </figcaption>
+    </figure>
+    <div class="table-wrap">
+      <table id="pair-table">
+        <thead><tr><th>Métrica</th><th>GPI 8.000</th><th>GPI 12.000</th><th>12k − 8k</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="prose">
+      <h2>Por que o ganho satura</h2>
+      <p>
+        Na escada, o GPI não muda a quantidade de otimização por partida. Os passos do otimizador ficam entre {{steps_lo}} e
+        {{steps_hi}} mil por milhão de partidas em todos os pontos, as 16 épocas rodam sempre (a parada por KL quase nunca
+        dispara) e a KL mediana de cada atualização fica entre {{kl_lo}} e {{kl_hi}} com qualquer GPI. O que o GPI decide é
+        <em>quantas vezes</em> a política anda e <em>quantas partidas</em> sustentam cada passo.
+      </p>
+      <p>
+        De 1k para 8k, a política anda {{upd_ratio}} vezes menos, mas cada passo é estimado com {{upd_ratio}} vezes mais partidas.
+        A oscilação entre diagnósticos consecutivos cai quase pela metade, de {{osc_1k}} para {{osc_8k}} pp. Isso é
+        consistente com passos menos ruidosos. Uma leitura possível para a saturação: o ruído de cada passo cai com
+        a raiz do tamanho do buffer, enquanto o número de passos cai na proporção direta, então o ganho por dobra
+        tem de encolher em algum ponto.
+      </p>
+      <p>
+        Na configuração nova esse ponto já chegou em 8k: com lr 0,001 a KL por atualização é
+        {{kl_ratio}} vezes menor ({{kl_new}}) e a oscilação já está em {{osc_8k_nova}} pp. Aumentar o buffer para 12k
+        não deixa a curva mais estável ({{osc_12k}} pp), e o nível também não sobe.
+      </p>
+    </div>
+    <div class="table-wrap">
+      <table id="mech-table">
+        <thead>
+          <tr>
+            <th>Corrida</th><th>Atualizações até 17 M</th><th>Partidas por atualização</th>
+            <th>Passos do otimizador por M partidas</th><th>KL máx. mediana por atualização</th>
+            <th>Paradas por KL</th><th>Fração de clip mediana</th><th>Oscilação entre diagnósticos (pp)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="table-note">Estatísticas das iterações até 17 M partidas. Oscilação = desvio-padrão da diferença entre diagnósticos consecutivos ÷ √2, a partir de 5 M partidas. Em 8k e 12k, uma a cada 13 e uma a cada 9 atualizações usa só 4.000 partidas para fechar o marco de 100.000; daí as médias de 7.692 e 11.111.</p>
+  </section>
+
+  <section>
+    <div class="prose">
+      <h2>Limites da leitura</h2>
+    </div>
+    <ol class="limits">
+      <li><strong>Uma semente por ponto.</strong> Não há réplica destas seis corridas. A régua de ±{{ruler}} pp vem das réplicas do sweep, que trocavam de máquina mas não de semente; uma semente nova pode variar mais.</li>
+      <li><strong>A ponte do 12k é estimativa.</strong> Ela supõe que o efeito de ir de 8k para 12k não depende da taxa de aprendizado. Um teste dessa suposição falha: somar ao 8k antigo os ganhos de lr 0,001 ({{add_lr}} pp) e de turn-turn ({{add_tt}} pp), medidos em GPI 2.000, prevê {{add_pred}}% para o 8k novo, e o observado é {{add_obs}}%, um erro de {{add_err}} pp. Os efeitos não se somam, o que sugere que lr menor e GPI maior atuam no mesmo canal. A conclusão sobre 12k se apoia no par direto, não na ponte.</li>
+      <li><strong>O par direto só vale para a configuração nova.</strong> Não há 12k com lr 0,01, então não dá para dizer se o platô chegaria antes ou depois nesse regime.</li>
+      <li><strong>O máximo observado é uma estatística de extremo.</strong> Ele cresce com o ruído e com o número de diagnósticos; o vértice da parábola descreve os quatro pontos, não localiza um ótimo.</li>
+      <li><strong>O orçamento é de tempo.</strong> Na escada antiga, a vazão não segue o GPI (de {{thr_lo}} a {{thr_hi}} M partidas por hora de RL) e a máquina era compartilhada, então a comparação é feita por partidas. No código novo, 12k processa {{thr_ratio}}% mais partidas por hora que 8k e fecha as 5 h com {{games_12k}} M partidas contra {{games_8k}} M, sem ganho de nível.</li>
+    </ol>
+  </section>
+
+  <section>
+    <div class="prose">
+      <h2>O que isso sugere</h2>
+      <p>
+        Manter GPI 8.000 como padrão. Ir para 12k não compra vitória e só muda a vazão em {{thr_ratio}}%.
+        Se valer o custo de mais 10 h de máquina, repetir o par 8k × 12k com uma segunda semente daria a régua
+        própria desta comparação, e uma corrida de 4k na configuração nova mostraria onde o platô começa com lr 0,001.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <p>Gerado por <code>analysis/analise_gpi/analyze.py</code> e <code>build_page.py</code>, que só leem os diretórios de <code>models/rl/</code>. Janela tardia: diagnósticos brutos entre 16.000.000 e 17.000.000 partidas (11 pontos). Máximo: diagnóstico bruto até 17.000.000. Média móvel: janela final de 5 pontos.</p>
+    <ul id="dirs"></ul>
+  </footer>
+</div>
+
+<script>
+const DATA = /*__DADOS__*/null;
+(function () {
+  "use strict";
+  const NS = "http://www.w3.org/2000/svg";
+  const RULER = DATA.settings.ruler_pp;
+  const SERIES = [
+    { key: "gpi1000", label: "GPI 1.000", color: "--gpi-1", dash: false },
+    { key: "gpi2000", label: "GPI 2.000", color: "--gpi-2", dash: false },
+    { key: "gpi4000", label: "GPI 4.000", color: "--gpi-3", dash: false },
+    { key: "gpi8000", label: "GPI 8.000", color: "--gpi-4", dash: false },
+    { key: "gpi8000_nova", label: "GPI 8.000 · nova", color: "--gpi-4", dash: true },
+    { key: "gpi12000_nova", label: "GPI 12.000 · nova", color: "--gpi-5", dash: true },
+  ];
+  const BY_KEY = Object.fromEntries(SERIES.map((s) => [s.key, s]));
+  const GPI_COLOR = { 1000: "--gpi-1", 2000: "--gpi-2", 4000: "--gpi-3", 8000: "--gpi-4", 12000: "--gpi-5" };
+
+  const nf = (v, d) => v.toLocaleString("pt-BR", { minimumFractionDigits: d, maximumFractionDigits: d });
+  const signed = (v, d) => (v > 0 ? "+" : v < 0 ? "−" : "±") + nf(Math.abs(v), d);
+  const el = (tag, attrs, parent) => {
+    const node = document.createElementNS(NS, tag);
+    for (const k in attrs || {}) node.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(node);
+    return node;
+  };
+  const text = (parent, x, y, content, cls, anchor) => {
+    const t = el("text", { x, y, class: cls, "text-anchor": anchor || "start" }, parent);
+    t.textContent = content;
+    return t;
+  };
+  const keySvg = (color, dash, kind) => {
+    const stroke = `var(${color})`;
+    if (kind === "dot") {
+      return `<svg class="key" viewBox="0 0 22 10" aria-hidden="true"><circle cx="11" cy="5" r="4" style="fill:${stroke}"/></svg>`;
+    }
+    if (kind === "hollow") {
+      return `<svg class="key" viewBox="0 0 22 10" aria-hidden="true"><circle cx="11" cy="5" r="3.6" style="fill:var(--surface);stroke:${stroke};stroke-width:1.8"/></svg>`;
+    }
+    return `<svg class="key" viewBox="0 0 22 10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" style="stroke:${stroke};stroke-width:2.2;stroke-linecap:round${dash ? ";stroke-dasharray:5 3.5" : ""}"/></svg>`;
+  };
+
+  // ------------------------------------------------------------------ tooltip
+  function tooltip(host) {
+    const tip = document.createElement("div");
+    tip.className = "tip";
+    tip.hidden = true;
+    host.appendChild(tip);
+    return {
+      show(html, px, py) {
+        tip.innerHTML = html;
+        tip.hidden = false;
+        const w = tip.offsetWidth, h = tip.offsetHeight, W = host.clientWidth;
+        let left = px + 14;
+        if (left + w > W) left = px - w - 14;
+        tip.style.left = Math.max(0, left) + "px";
+        tip.style.top = Math.max(0, py - h / 2) + "px";
+      },
+      hide() { tip.hidden = true; },
+    };
+  }
+
+  // ------------------------------------------------------------------ frame
+  function frame(host, opt) {
+    host.innerHTML = "";
+    const W = Math.max(300, Math.round(host.clientWidth));
+    const narrow = W < 520;
+    const H = opt.height(narrow);
+    const m = { t: 12, r: narrow ? 10 : 16, b: 44, l: narrow ? 42 : 50 };
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img", "aria-label": opt.aria }, host);
+    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const y = (v) => m.t + ((opt.y1 - v) / (opt.y1 - opt.y0)) * ih;
+    const grid = el("g", { class: "grid" }, svg);
+    const n = Math.round((opt.y1 - opt.y0) / opt.yStep);
+    for (let i = 0; i <= n; i++) {
+      const v = opt.y0 + i * opt.yStep;
+      el("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v) }, grid);
+      text(svg, m.l - 8, y(v) + 4, opt.yFmt(v), "tick", "end");
+    }
+    el("line", { x1: m.l, x2: W - m.r, y1: m.t + ih, y2: m.t + ih, class: "axis" }, svg);
+    text(svg, m.l + iw / 2, H - 6, opt.xTitle, "axis-title", "middle");
+    return { svg, W, H, m, iw, ih, y, narrow };
+  }
+
+  // ------------------------------------------------------------------ line chart
+  function lineChart(host, opt) {
+    const f = frame(host, opt);
+    const x = (v) => f.m.l + ((v - opt.x0) / (opt.x1 - opt.x0)) * f.iw;
+    const xt = Math.round((opt.x1 - opt.x0) / opt.xStep);
+    for (let i = 0; i <= xt; i++) {
+      const v = opt.x0 + i * opt.xStep;
+      text(f.svg, x(v), f.m.t + f.ih + 18, opt.xFmt(v), "tick", "middle");
+    }
+    if (opt.band) {
+      el("rect", { x: f.m.l, width: f.iw, y: f.y(opt.band), height: f.y(-opt.band) - f.y(opt.band), class: "band" }, f.svg);
+      for (const b of [opt.band, -opt.band]) el("line", { x1: f.m.l, x2: f.m.l + f.iw, y1: f.y(b), y2: f.y(b), class: "band-edge" }, f.svg);
+      text(f.svg, f.m.l + f.iw - 4, f.y(opt.band) - 5, `régua ±${nf(opt.band, 2)} pp`, "ann", "end");
+    }
+    if (opt.zero) el("line", { x1: f.m.l, x2: f.m.l + f.iw, y1: f.y(0), y2: f.y(0), class: "zero" }, f.svg);
+
+    const drawn = [];
+    for (const s of opt.series) {
+      const pts = [];
+      for (let i = 0; i < s.x.length; i++) if (s.x[i] <= opt.x1 + 1e-9) pts.push([s.x[i], s.y[i]]);
+      if (!pts.length) continue;
+      const d = pts.map((p, i) => (i ? "L" : "M") + x(p[0]).toFixed(1) + " " + f.y(p[1]).toFixed(1)).join("");
+      const path = el("path", { d, class: s.faint ? "faint" : "series" }, f.svg);
+      path.style.stroke = `var(${s.color})`;
+      if (s.dash) path.style.strokeDasharray = "7 4.5";
+      drawn.push({ s, pts });
+    }
+
+    const cross = el("line", { y1: f.m.t, y2: f.m.t + f.ih, class: "cross", visibility: "hidden" }, f.svg);
+    const dots = drawn.map(({ s }) => {
+      const c = el("circle", { r: s.faint ? 3 : 4, class: "ring", visibility: "hidden" }, f.svg);
+      c.style.fill = `var(${s.color})`;
+      return c;
+    });
+    const tip = tooltip(host);
+    const hit = el("rect", { x: f.m.l, y: f.m.t, width: f.iw, height: f.ih, class: "hit" }, f.svg);
+    const move = (evt) => {
+      const r = f.svg.getBoundingClientRect();
+      const px = ((evt.clientX - r.left) / r.width) * f.W;
+      const xv = opt.x0 + ((px - f.m.l) / f.iw) * (opt.x1 - opt.x0);
+      const rows = [];
+      let gx = null;
+      drawn.forEach(({ s, pts }, k) => {
+        let best = 0;
+        for (let i = 1; i < pts.length; i++) if (Math.abs(pts[i][0] - xv) < Math.abs(pts[best][0] - xv)) best = i;
+        const p = pts[best];
+        if (Math.abs(p[0] - xv) > opt.xStep / 8) { dots[k].setAttribute("visibility", "hidden"); return; }
+        gx = p[0];
+        dots[k].setAttribute("cx", x(p[0]));
+        dots[k].setAttribute("cy", f.y(p[1]));
+        dots[k].setAttribute("visibility", "visible");
+        rows.push({ s, v: p[1] });
+      });
+      if (gx === null) { cross.setAttribute("visibility", "hidden"); tip.hide(); return; }
+      cross.setAttribute("x1", x(gx));
+      cross.setAttribute("x2", x(gx));
+      cross.setAttribute("visibility", "visible");
+      rows.sort((a, b) => b.v - a.v);
+      const html = `<div class="t">${nf(gx, 1)} M partidas</div>` + rows.map(({ s, v }) =>
+        `<div class="r">${keySvg(s.color, s.dash)}<span>${s.label}</span><span class="v">${opt.tipFmt(v)}</span></div>`).join("");
+      const hr = host.getBoundingClientRect();
+      tip.show(html, (x(gx) / f.W) * r.width + (r.left - hr.left), evt.clientY - hr.top);
+    };
+    hit.addEventListener("pointermove", move);
+    hit.addEventListener("pointerdown", move);
+    hit.addEventListener("pointerleave", () => {
+      cross.setAttribute("visibility", "hidden");
+      dots.forEach((d) => d.setAttribute("visibility", "hidden"));
+      tip.hide();
+    });
+  }
+
+  // ------------------------------------------------------------------ figure 1
+  const f1 = { set: "all", horizon: "all" };
+  const SETS = {
+    all: SERIES.map((s) => s.key),
+    ladder: DATA.ladder,
+    pair: DATA.pair,
+  };
+  function renderFig1() {
+    const keys = SETS[f1.set];
+    document.getElementById("f1-legend").innerHTML = keys.map((k) =>
+      `<span>${keySvg(BY_KEY[k].color, BY_KEY[k].dash)}${BY_KEY[k].label}</span>`).join("");
+    const series = keys.map((k) => ({
+      ...BY_KEY[k],
+      x: DATA.runs[k].curve.games_millions,
+      y: DATA.runs[k].curve.rolling,
+    }));
+    const longest = Math.max(...keys.map((k) => DATA.runs[k].curve.games_millions.slice(-1)[0]));
+    const x1 = f1.horizon === "17" ? 17 : Math.ceil(longest / 5) * 5;
+    let lo = Infinity, hi = -Infinity;
+    for (const s of series) for (let i = 0; i < s.x.length; i++) if (s.x[i] <= x1) { lo = Math.min(lo, s.y[i]); hi = Math.max(hi, s.y[i]); }
+    lineChart(document.getElementById("fig1"), {
+      aria: "Curvas de taxa de vitória contra o oponente aleatório por partidas de RL, por GPI",
+      series, x0: 0, x1, xStep: f1.horizon === "17" ? 2.5 : 5,
+      xFmt: (v) => nf(v, v % 1 ? 1 : 0), xTitle: "Partidas de RL acumuladas (milhões)",
+      y0: Math.floor(lo * 2) / 2, y1: Math.ceil(hi * 2) / 2, yStep: 0.5, yFmt: (v) => nf(v, 1),
+      tipFmt: (v) => nf(v, 2) + "%",
+      height: (narrow) => (narrow ? 300 : 400),
+    });
+  }
+  document.querySelectorAll("[data-set]").forEach((b) => b.addEventListener("click", () => {
+    f1.set = b.dataset.set;
+    document.querySelectorAll("[data-set]").forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
+    renderFig1();
+  }));
+  document.querySelectorAll("[data-h]").forEach((b) => b.addEventListener("click", () => {
+    f1.horizon = b.dataset.h;
+    document.querySelectorAll("[data-h]").forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
+    renderFig1();
+  }));
+
+  // ------------------------------------------------------------------ figure 2
+  const TICKS = [1000, 2000, 4000, 8000, 12000, 16000];
+  function fitChart(host, opt) {
+    const f = frame(host, opt);
+    const lx0 = Math.log2(opt.x0), lx1 = Math.log2(opt.x1);
+    const x = (g) => f.m.l + ((Math.log2(g) - lx0) / (lx1 - lx0)) * f.iw;
+    for (const g of TICKS) text(f.svg, x(g), f.m.t + f.ih + 18, g / 1000 + "k", "tick", "middle");
+
+    // fit line: solid inside the fitted range, dashed beyond 8k
+    const sample = (a, b) => {
+      const pts = [];
+      for (let i = 0; i <= 48; i++) {
+        const g = 2 ** (Math.log2(a) + (i / 48) * (Math.log2(b) - Math.log2(a)));
+        pts.push([x(g), f.y(opt.fit(g))]);
+      }
+      return pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join("");
+    };
+    el("path", { d: sample(opt.x0, 8000), class: "fit" }, f.svg);
+    const ext = el("path", { d: sample(8000, opt.x1), class: "fit" }, f.svg);
+    ext.style.strokeDasharray = "5 4";
+
+    if (opt.vertex) {
+      const vx = x(opt.vertex);
+      const vline = el("line", { x1: vx, x2: vx, y1: f.m.t, y2: f.m.t + f.ih, class: "zero" }, f.svg);
+      vline.style.strokeDasharray = "2 3";
+      text(f.svg, vx - 6, f.m.t + f.ih - 8, `vértice ≈ ${nf(opt.vertex, 0)}`, "ann", "end");
+    }
+    if (opt.note) text(f.svg, f.m.l + 6, f.m.t + 14, opt.note, "ann");
+
+    // predicted value at 12k
+    const px = x(12000), py = f.y(opt.fit(12000));
+    const mark = el("path", { d: `M${px - 4} ${py - 4}L${px + 4} ${py + 4}M${px - 4} ${py + 4}L${px + 4} ${py - 4}`, class: "fit" }, f.svg);
+    mark.style.strokeWidth = "1.6";
+
+    const tip = tooltip(host);
+    const hover = (node, html, cx, cy) => {
+      const on = () => {
+        const r = f.svg.getBoundingClientRect(), hr = host.getBoundingClientRect();
+        tip.show(html, (cx / f.W) * r.width + (r.left - hr.left), (cy / f.H) * r.height + (r.top - hr.top));
+      };
+      node.addEventListener("pointerenter", on);
+      node.addEventListener("pointerdown", on);
+      node.addEventListener("pointerleave", () => tip.hide());
+    };
+    const predHit = el("circle", { cx: px, cy: py, r: 10, class: "hit" }, f.svg);
+    hover(predHit, `<div class="t">Previsão do ajuste em 12k</div><div>${nf(opt.fit(12000), 3)}%</div>`, px, py);
+
+    // bridged 12k with ruler whisker
+    const bx = x(12000), by = f.y(opt.bridge);
+    const wk = el("line", { x1: bx, x2: bx, y1: f.y(opt.bridge + RULER), y2: f.y(opt.bridge - RULER), class: "whisker" }, f.svg);
+    wk.style.stroke = "var(--gpi-5)";
+    for (const e of [RULER, -RULER]) {
+      const cap = el("line", { x1: bx - 5, x2: bx + 5, y1: f.y(opt.bridge + e), y2: f.y(opt.bridge + e), class: "whisker" }, f.svg);
+      cap.style.stroke = "var(--gpi-5)";
+    }
+    const hollow = el("circle", { cx: bx, cy: by, r: 5.5 }, f.svg);
+    hollow.style.fill = "var(--surface)";
+    hollow.style.stroke = "var(--gpi-5)";
+    hollow.style.strokeWidth = "2";
+    const bHit = el("circle", { cx: bx, cy: by, r: 14, class: "hit" }, f.svg);
+    hover(bHit, `<div class="t">GPI 12.000 (ponte)</div><div>${nf(opt.bridge, 3)}% ± ${nf(RULER, 2)} pp</div><div class="muted">8k antigo + (12k − 8k na config. nova)</div>`, bx, by);
+
+    for (const p of opt.points) {
+      const cx = x(p.gpi), cy = f.y(p.v);
+      const c = el("circle", { cx, cy, r: 5.5, class: "ring" }, f.svg);
+      c.style.fill = `var(${GPI_COLOR[p.gpi]})`;
+      const hitc = el("circle", { cx, cy, r: 14, class: "hit" }, f.svg);
+      hover(hitc, `<div class="t">GPI ${nf(p.gpi, 0)}</div><div>${nf(p.v, 3)}%</div>`, cx, cy);
+    }
+  }
+  function renderFig2() {
+    const lin = DATA.fits.late_log_linear, quad = DATA.fits.max_quadratic;
+    const ladder = DATA.ladder.map((k) => DATA.runs[k]);
+    const common = { x0: 800, x1: 17000, xTitle: "Partidas por iteração (escala log)", height: (narrow) => (narrow ? 280 : 320) };
+    fitChart(document.getElementById("fig2a"), {
+      ...common,
+      aria: "Média de vitórias entre 16 e 17 milhões de partidas por GPI, com ajuste log-linear",
+      y0: 65.0, y1: 66.2, yStep: 0.2, yFmt: (v) => nf(v, 1),
+      fit: (g) => lin.intercept + lin.slope_pp_per_doubling * Math.log2(g),
+      points: ladder.map((r) => ({ gpi: r.gpi, v: r.late_16_17 })),
+      bridge: DATA.bridge.late_16_17,
+      note: `${signed(lin.slope_pp_per_doubling, 3)} pp por dobra · R² = ${nf(lin.r2, 3)}`,
+    });
+    fitChart(document.getElementById("fig2b"), {
+      ...common,
+      aria: "Máximo de vitórias até 17 milhões de partidas por GPI, com ajuste quadrático",
+      y0: 65.4, y1: 66.4, yStep: 0.2, yFmt: (v) => nf(v, 1),
+      fit: (g) => { const c = quad.coefficients, t = Math.log2(g); return c[0] * t * t + c[1] * t + c[2]; },
+      points: ladder.map((r) => ({ gpi: r.gpi, v: r.max_to_17 })),
+      bridge: DATA.bridge.max_to_17,
+      vertex: quad.vertex_gpi,
+    });
+    document.getElementById("f2-legend").innerHTML = [
+      ...DATA.ladder.map((k) => `<span>${keySvg(GPI_COLOR[DATA.runs[k].gpi], false, "dot")}GPI ${nf(DATA.runs[k].gpi, 0)}</span>`),
+      `<span>${keySvg("--gpi-5", false, "hollow")}GPI 12.000, ponte ± régua</span>`,
+      `<span>${keySvg("--ink-2", false)}ajuste</span>`,
+      `<span>${keySvg("--ink-2", true)}extrapolação</span>`,
+    ].join("");
+  }
+
+  // ------------------------------------------------------------------ figure 3
+  function renderFig3() {
+    const d = DATA.direct_pair.difference_curve;
+    const series = [
+      { key: "raw", label: "diagnóstico", color: "--gpi-5", faint: true, x: d.games_millions, y: d.raw },
+      { key: "roll", label: "média móvel de 5 pontos", color: "--gpi-5", x: d.games_millions, y: d.rolling },
+    ];
+    document.getElementById("f3-legend").innerHTML =
+      `<span>${keySvg("--gpi-5", false)}média móvel de 5 pontos</span>` +
+      `<span><svg class="key" viewBox="0 0 22 10" aria-hidden="true"><line x1="1" y1="5" x2="21" y2="5" style="stroke:var(--gpi-5);stroke-width:1;opacity:.45"/></svg>cada diagnóstico</span>`;
+    lineChart(document.getElementById("fig3"), {
+      aria: "Diferença de vitórias entre GPI 12000 e GPI 8000 na configuração nova, com a régua de 0,22 pp",
+      series,
+      x0: 0, x1: 25, xStep: 5, xFmt: (v) => nf(v, 0), xTitle: "Partidas de RL acumuladas (milhões)",
+      y0: -0.6, y1: 0.6, yStep: 0.2, yFmt: (v) => (Math.abs(v) < 1e-9 ? "0" : signed(v, 1)),
+      tipFmt: (v) => signed(v, 3) + " pp",
+      band: RULER, zero: true,
+      height: (narrow) => (narrow ? 240 : 280),
+    });
+  }
+
+  // ------------------------------------------------------------------ tables
+  function runCell(key) {
+    const s = BY_KEY[key], r = DATA.runs[key];
+    return `<span class="run">${keySvg(s.color, s.dash)}GPI ${nf(r.gpi, 0)}</span>`;
+  }
+  function renderTables() {
+    const order = ["gpi1000", "gpi2000", "gpi4000", "gpi8000", "gpi8000_nova", "gpi12000_nova"];
+    document.querySelector("#runs-table tbody").innerHTML = order.map((k, i) => {
+      const r = DATA.runs[k];
+      return `<tr class="${i === 4 ? "divide" : ""}">
+        <td>${runCell(k)}</td>
+        <td class="txt"><span class="chip ${r.config}">${r.config}</span></td>
+        <td>${nf(r.learning_rate, 3)}</td>
+        <td class="txt"><code>${r.reward_distance_mode}</code></td>
+        <td class="txt"><code>${r.git_commit}</code></td>
+        <td>${nf(r.games_total / 1e6, 1)} M</td>
+        <td>${nf(r.mechanism.updates, 0)}</td>
+        <td>${nf(r.million_games_per_rl_hour, 2)}</td>
+        <td>${nf(r.late_16_17, 3)}%</td>
+        <td>${nf(r.max_to_17, 3)}%</td>
+      </tr>`;
+    }).join("");
+
+    const p = DATA.direct_pair, a = DATA.runs.gpi8000_nova, b = DATA.runs.gpi12000_nova;
+    const row = (label, va, vb, dv, unitA, unitD) =>
+      `<tr><td>${label}</td><td>${va}</td><td>${vb}</td><td><strong>${dv}</strong></td></tr>`;
+    document.querySelector("#pair-table tbody").innerHTML = [
+      row("Média de 16 a 17 M partidas", nf(a.late_16_17, 3) + "%", nf(b.late_16_17, 3) + "%", signed(p.late_16_17_delta, 3) + " pp"),
+      row("Média de 22,2 a 23,2 M partidas", nf(p.end_window_8000, 3) + "%", nf(p.end_window_12000, 3) + "%", signed(p.end_window_delta, 3) + " pp"),
+      row("Máximo até 17 M partidas", nf(a.max_to_17, 3) + "%", nf(b.max_to_17, 3) + "%", signed(p.max_to_17_delta, 3) + " pp"),
+      row("Média sob a curva, 0 a 23,2 M", nf(p.auc_to_end_8000, 3) + "%", nf(p.auc_to_end_12000, 3) + "%", signed(p.auc_to_end_delta, 3) + " pp"),
+      row("Partidas em 5 h", nf(a.games_total / 1e6, 1) + " M", nf(b.games_total / 1e6, 1) + " M", signed((p.games_in_budget_ratio - 1) * 100, 1) + "%"),
+    ].join("");
+
+    document.querySelector("#mech-table tbody").innerHTML = order.map((k, i) => {
+      const r = DATA.runs[k], mm = r.mechanism;
+      return `<tr class="${i === 4 ? "divide" : ""}">
+        <td>${runCell(k)}${r.config === "nova" ? ' <span class="chip nova">nova</span>' : ""}</td>
+        <td>${nf(mm.updates, 0)}</td>
+        <td>${nf(mm.mean_games_per_update, 0)}</td>
+        <td>${nf(mm.optimizer_steps_per_million_games / 1000, 1)} mil</td>
+        <td>${nf(mm.kl_median, 4)}</td>
+        <td>${nf(mm.stopped_by_kl_percent, 1)}%</td>
+        <td>${nf(mm.clip_fraction_median, 3)}</td>
+        <td>${nf(r.oscillation_pp, 3)}</td>
+      </tr>`;
+    }).join("");
+
+    document.getElementById("dirs").innerHTML = order.map((k) => `<li>${BY_KEY[k].label}: <code>${DATA.runs[k].directory}</code></li>`).join("");
+  }
+
+  function renderAll() {
+    renderFig1();
+    renderFig2();
+    renderFig3();
+  }
+  renderTables();
+  renderAll();
+  let lastWidth = document.getElementById("fig1").clientWidth;
+  let pending = null;
+  new ResizeObserver(() => {
+    const w = document.getElementById("fig1").clientWidth;
+    if (Math.abs(w - lastWidth) < 2) return;
+    lastWidth = w;
+    cancelAnimationFrame(pending);
+    pending = requestAnimationFrame(renderAll);
+  }).observe(document.querySelector(".page"));
+})();
+</script>

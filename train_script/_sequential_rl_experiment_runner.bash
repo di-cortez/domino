@@ -625,6 +625,17 @@ EOF
                     command_ref+=(--gpi "$setting")
                     command_ref+=(--bundle-suffix "$(bundle_tail --gpi "$setting")")
                     ;;
+                warmup=*)
+                    # A switch rather than a value: `warmup=on` enables the
+                    # KL-gated learning-rate warmup with its default
+                    # sub-parameters, and nothing else is accepted.
+                    if [[ "$setting" != on ]]; then
+                        echo "Unsupported warmup setting: $setting (use warmup=on)" >&2
+                        return 1
+                    fi
+                    command_ref+=(--warmup-lr)
+                    command_ref+=(--bundle-suffix "$(bundle_tail --warmup-lr true)")
+                    ;;
                 terminal=*)
                     # `a_E,a_B`, in the order the terminal pair is written.
                     command_ref+=(
@@ -691,6 +702,10 @@ EOF
                     entropy=*)
                         command_ref+=(--entropy-coef "$setting")
                         combined_suffix+="_ent${setting}"
+                        ;;
+                    warmup=on)
+                        command_ref+=(--warmup-lr)
+                        combined_suffix+="_warmup"
                         ;;
                     *)
                         echo "Unsupported combined component: $part" >&2

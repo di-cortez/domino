@@ -1,12 +1,53 @@
 # Domino: Neural vs. Heuristic
 
-Two-player domino simulator with a Pygame/OpenGL interface, an exact
-public-information opponent model, heuristic and neural agents, supervised
-training, self-play reinforcement learning, and reproducible diagnostics.
+A two-player domino research project. It pairs a rules engine and an exact
+public-information opponent model with four kinds of player -- random, a
+handcrafted heuristic, a supervised neural policy, and a self-play
+reinforcement-learning policy -- and with the pipeline, experiment scripts and
+diagnostics that train and measure them. A Pygame/OpenGL simulator lets any
+pair of players, humans included, face each other.
 
-All repository content is maintained in English. See
+All repository content is maintained in English. Read
 [`CONTRIBUTING.md`](CONTRIBUTING.md) before changing code, commands, generated
-artifacts, or documentation.
+artifacts, or documentation. Every directory owns a README with its complete
+options and behavior; this page is the overview and points to them.
+
+## The model
+
+The canonical run trains one policy in three stages and monitors it throughout:
+
+1. **Dataset.** The heuristic `StrategicAgent` plays itself; its real
+   decisions become supervised examples
+   ([`training/datagen/`](training/datagen/README.md)).
+2. **Supervised pretraining.** An MLP learns to imitate those decisions, with a
+   5,000-epoch budget that a conservative plateau rule normally ends earlier
+   ([`training/supervised/`](training/supervised/README.md)).
+3. **Self-play RL.** The pretrained policy is refined with masked PPO against an
+   opponent pool, with exact checkpoints and resume
+   ([`training/rl/`](training/rl/README.md)).
+4. **Diagnostics.** The policy plays the random baseline periodically during
+   training, and finite levels end with an all-pairs evaluation of every agent
+   ([`diagnostics/`](diagnostics/README.md)).
+
+Current defaults of a new run on the default `double-six` ruleset:
+
+| Area | Default |
+|---|---|
+| Network | 168 inputs, hidden layers 256 and 128, 56 tile-play actions ([`agents/`](agents/README.md)) |
+| Update | Masked PPO: clip 0.2, 512-decision minibatches, whole-buffer KL stop at 0.015; up to 16 epochs per buffer for `forever`, 4 otherwise |
+| Iteration | 8,000 games per iteration (`--gpi`), learning rate 0.001, entropy coefficient 0 |
+| Advantage | `batch-mean` baseline with whole-buffer normalization; no critic unless `--value-head` |
+| Reward | `G = (1 - eta) G_terminal + eta G_immediate` with `eta` 0.115: terminal ±1 for an empty hand or ±m(pip margin) for a blocked game, discounted by `gamma_f` 0.95; draw/pass events discounted by `gamma_i` 0.90; both clocks count engine turns (`turn-turn`) |
+| Opponents | The `random` bucket; heuristic, recent, medium-term, historical and champion buckets are optional |
+| Monitoring | 100,000 RL-vs-random games every 100,000 RL games |
+| Optional | KL-gated learning-rate warmup (`--warmup-lr`), background monitors (`--async-periodic-diagnostics`) |
+
+Games always produce one winner: an empty hand wins first, and a blocked game
+goes to the fewest pips, then the fewest tiles, then the most recent valid
+play. The reward model, its weights and distance modes, the baselines and
+critics, the warmup and every PPO control are documented in
+[`training/rl/README.md`](training/rl/README.md) and
+[`training/README.md`](training/README.md).
 
 ## Quick setup
 
@@ -21,437 +62,153 @@ python -m pip install numpy pygame PyOpenGL PyOpenGL-accelerate \
 python -m pip install -r requirements-dev.txt
 ```
 
-The project runs on CPU without CuPy. For NVIDIA GPU training, follow
-[`docs/GPU_SETUP.md`](docs/GPU_SETUP.md); dataset workers, rollout workers, and
-diagnostic workers intentionally remain CPU-only.
+Everything runs on CPU without CuPy. For NVIDIA GPU training follow
+[`docs/GPU_SETUP.md`](docs/GPU_SETUP.md); dataset, rollout and diagnostic
+workers stay CPU-only by design.
 
-## Named compact rulesets
-
-Every game-producing entry point accepts one of four closed names through
-`--ruleset`: `double-six` (the unchanged default), `double-five`,
-`double-four`, or `double-three`. Network dimensions shrink with the deck:
-
-| Ruleset | Tiles | Hand | Stock | Input | Default hidden | Output |
-|---|---:|---:|---:|---:|---:|---:|
-| `double-six` | 28 | 7 | 14 | 168 | 256 x 128 | 56 |
-| `double-five` | 21 | 6 | 9 | 130 | 192 x 96 | 42 |
-| `double-four` | 15 | 5 | 5 | 97 | 128 x 64 | 30 |
-| `double-three` | 10 | 4 | 2 | 69 | 96 x 48 | 20 |
-
-The `Input` column is the default layout. `--no-opponent-suit-features` removes
-the trailing exact-model block (`-S` features) and `--opponent-bucket-features`
-appends a 7-wide one-hot of the opponent bucket the agent is facing, so
-double-six ranges over 161, 168, and 175 inputs. Both flags change the input
-size, so checkpoints and supervised assets are not interchangeable across them
-and each non-default regime claims its own asset suffix.
-
-Datasets, encoded caches, checkpoints, canonical runs, and `forever` pointers
-are ruleset-specific. A compact checkpoint cannot be loaded into another
-ruleset and no padding, remapping, or transfer learning is performed. Legacy
-states/artifacts without a ruleset name are interpreted as `double-six` only.
-Compact canonical run directories include the name, for example
-`models/rl/domino_rl_double-four_forever_seed42`; double-six keeps every
-historical default filename.
+## Play
 
 ```bash
-python -m training.pipeline small --ruleset double-three --seed 123
-python -m training.pipeline forever --ruleset double-four
-python -m diagnostics.pairwise --ruleset double-five \
-  --agent heuristic --opponent random --games 1000
+python -m ui.visual_main
 python -m ui.visual_main --ruleset double-four
 ```
 
-Resume reloads and locks the ruleset from the `run_config.json` in the run's
-analysis bundle; start another run to change it. Explicit hidden-width flags remain available and override the
-compact defaults.
+The menu (`M`) assigns `Neural`, `Heuristic`, `Random`, `Human`, or
+`RL (self-play)` to either seat; the neural choices need trained weights in
+`models/`. Controls are in [`ui/README.md`](ui/README.md).
 
-## Run the visual simulator
+## Train
 
-```bash
-source .venv/bin/activate
-python -m ui.visual_main
-```
+`python -m training.pipeline <level>` runs the whole sequence.
+`python -m train_script.run_pipeline` is an equivalent entry point.
 
-The menu (`M`) can assign `Neural`, `Heuristic`, `Random`, `Human`, or
-`RL (self-play)` to either player. Neural and RL selections need
-the corresponding files in `models/`. See [`ui/README.md`](ui/README.md) for
-all controls and interaction rules.
-
-## Train the agents
-
-Run the canonical dataset -> supervised learning -> RL -> diagnostics pipeline:
+| Level | Dataset games | Seed and supervised assets | RL games | Resume |
+|---|---:|---|---:|---|
+| `small` | 10,000 | Fresh seed, run-local | 100,000 | No |
+| `default` | 50,000 | Fresh seed, run-local | 500,000 | No |
+| `big` | 100,000 | Seed 52, reused when compatible | 2,000,000 | Yes |
+| `huge` | 100,000 | Seed 52, reused when compatible | 10,000,000 | Yes |
+| `forever` | 100,000 | Seed 52, reused when compatible | Unbounded | Yes |
 
 ```bash
-python -m training.pipeline default
-# Equivalent compatibility entry point:
-python -m train_script.run_pipeline default
+python -m training.pipeline small                    # quick end-to-end check
+python -m training.pipeline forever --run-name baseline
+python -m training.pipeline forever                  # later starts reload the active run
+python -m training.pipeline forever --resume models/rl/domino_rl_forever_seed52_runbaseline
+python -m training.pipeline --help
 ```
 
-`small` and `default` are isolated quick-run profiles. Without `--seed`, each
-invocation chooses a fresh seed; their dataset and supervised checkpoint live
-inside a unique RL run directory and are never reused. An explicit `--seed`
-still enables a reproducible experiment, but the artifact namespace remains
-new. Supervised training keeps the same maximum of 5,000 epochs and the
-existing conservative early-stop rules.
+A long run locks its complete configuration on its first start. Resuming
+reloads it; a conflicting flag is warned about and ignored, so a different
+experiment needs a new `--run-name`. The first SIGINT/SIGTERM finishes the
+current iteration, publishes a safe checkpoint and exits.
 
-`big`, `huge`, and `forever` are the reusable long-run profiles. They default
-to seed 42 and share the compatible 100,000-game seed-addressed standard
-dataset and supervised checkpoint. Metadata and SHA-256 control reuse;
-incompatible files are refused unless `--rebuild-dataset`,
-`--retrain-supervised`, or `--rebuild-supervised-assets` is explicit.
-
-Pipeline levels differ primarily in exact cumulative RL games:
-
-| Level | Dataset games | Default seed/assets | RL games | Final games/matchup | Periodic RL-vs-random |
-|---|---:|---|---:|---:|---|
-| `small` | 10,000 | Random, run-local | 100,000 | 10,000 | No |
-| `default` | 50,000 | Random, run-local | 500,000 | 10,000 | No |
-| `big` | 100,000 | 42, reusable | 2,000,000 | 1,000,000 | Every 100,000 games |
-| `huge` | 100,000 | 42, reusable | 10,000,000 | 1,000,000 | Every 100,000 games |
-| `forever` | 100,000 | 42, reusable | No limit | None automatically | Every 100,000 games |
-
-GPI is never autotuned. Canonical pipelines and direct
-`training.rl.cli` runs accept `--gpi` from
-`100, 200, 400, 600, 800, 1000, 2000, 4000, 6000, 8000, 10000, 12000`, defaulting to 8,000. Before real games begin, an
-isolated benchmark selects the rollout-worker count and discards its games.
-Training uses masked PPO with decision-sized minibatches (512 target, 256
-minimum, 256 batches maximum per epoch). Direct self-play and the finite canonical profiles retain the
-four-epoch default; `forever` now allows up to 16 epochs. After each complete
-epoch, a whole-buffer KL check stops the update before the next epoch when its
-hard `0.015` limit is exceeded. Pass `--ppo-max-epochs 1` to use one
-full-buffer REINFORCE update per iteration instead; that path does not build a
-PPO buffer or calculate ratios, clipping, KL control, minibatches, or the
-post-update full-buffer PPO evaluation. Opponent snapshots refresh once per
-iteration, so `--gpi` also sets the snapshot cadence, and checkpoint saves do
-not run an extra evaluation matchup.
-
-Pass `--opponent-decision-restarts` on a new run to augment each iteration
-with one continuation from every genuine opponent tile-choice state encountered
-in its normal games. The frozen learner swaps into the opponent seat, the
-source counterpart swaps into the learner seat, and both decision sets feed one
-update. These continuations do not count toward GPI, normal win rates,
-matchmaking, pool cadence, or game-budget progress. Resume restores this choice
-from the run configuration.
-
-`big`, `huge`, and `forever` persist weights, optimizer, RNGs, counters, and
-the opponent pool. `--resume` continues that exact saved run;
-`--resume RUN_DIR` (or `--resume-from RUN_DIR`) selects the same run explicitly
-without creating a fork or extending its target. A first `forever` start
-accepts and locks its complete configuration:
-
-```bash
-python -m training.pipeline big --resume
-python -m training.pipeline huge \
-  --resume models/rl/domino_rl_huge_seed42
-
-python -m training.pipeline forever --seed 42 --gpi 2000 \
-  --ppo-max-epochs 16 --run-name baseline
-# Later starts reload the active run and all locked arguments:
-python -m training.pipeline forever
-```
-
-Start and later resume an unbounded policy-only REINFORCE run with:
-
-```bash
-python -m training.pipeline forever --ppo-max-epochs 1
-python -m training.pipeline forever
-```
-
-The algorithm is part of the exact resume identity and is reloaded
-automatically. Any conflicting training option supplied with resume is warned
-about and ignored. The optional critic is off by default and works with
-both algorithms.
-For PPO actor-critic training:
-
-```bash
-python -m training.pipeline forever --value-head --run-name critic
-python -m training.pipeline forever
-```
-
-### Policy-gradient baseline
-
-`--baseline` selects the only term subtracted from a return before the policy
-gradient. Advantage normalization only rescales, so the baseline alone decides
-what is subtracted:
-
-| Flag | Baseline `b` | Advantage |
-| --- | --- | --- |
-| `--baseline zero` | `0` | `R` |
-| `--baseline 2` | `2` | `R - 2` |
-| `--baseline batch-mean` | `mean(R)` over the iteration buffer | `R - mean(R)` |
-| `--baseline lookup-table` | Fixed expected reward by the two hand sizes | `R - lookup(state)` |
-| `--baseline value-head` | `V(s)`, shared trunk, critic trains it | `R - V(s)` |
-| `--baseline value-head-no-up` | `V(s)`, shared trunk, critic does not train it | `R - V(s)` |
-| `--baseline value-head-own-nn` | `V(s)` from a separate network | `R - V(s)` |
-
-```bash
-python -m training.pipeline forever --baseline zero --run-name no_baseline
-python -m training.pipeline forever --baseline 2 --run-name const2
-python -m training.pipeline forever --baseline lookup-table \
-  --run-name fixed_lookup
-python -m training.pipeline forever --value-head --baseline batch-mean \
-  --run-name critic_trained_not_used
-python -m training.pipeline forever --value-head --baseline value-head-own-nn \
-  --run-name critic_own_network
-```
-
-A constant is spelled as the number itself. **The number is its value, never a
-position in the table**: `--baseline 2` is the constant 2, not `batch-mean`.
-`--baseline 0` is the constant zero, which gives the same gradient as
-`--baseline zero` but stays a distinct, separately auditable request.
-
-The three value-head kinds subtract exactly the same `V(s)` and differ only in
-how the critic is wired: `value-head` lets the critic's loss train the shared
-trunk, `value-head-no-up` stops that loss at the critic head, and
-`value-head-own-nn` gives the critic a network of its own. All three require
-`--value-head`. See
-[`training/README.md`](training/README.md#the-three-critics) for the details.
-
-Leaving the flag unset keeps the behavior that predates it, so the default is
-numerically unchanged: the critic when `--value-head` is on, otherwise the batch
-mean whenever advantage normalization is on and no baseline at all when it is
-off.
-
-#### `batch-mean` versus the previous behavior
-
-`batch-mean` is not a new estimator — it is the name for the baseline the
-project has always used without calling it one. As derived in
-[`ppo_sem_critico.tex`](references/explicacoes/ppo_with_out_critic/ppo_sem_critico.tex),
-the old `normalize_advantages` subtracted the buffer mean and divided by the
-buffer standard deviation in a single step, so the advantage reaching the
-clipped objective was already `(R - mu_B) / (sigma_B + eps)`. The mean was a
-baseline in every mathematical sense; it simply arrived as a side effect of a
-variance-reduction step instead of as a choice.
-
-What changed is that the two operations are factored apart:
-
-```
-before:  advantage = (R - mu_B) / (sigma_B + eps)     # one inseparable step
-after:   advantage = (R - b)    / (sigma   + eps)     # b chosen, then scaled
-```
-
-`--baseline batch-mean` with normalization on is therefore bit-for-bit the
-previous default. The denominator does not move for three of the four kinds
-either: `zero`, `constant` and `batch-mean` subtract the same value from every
-decision, and a standard deviation is invariant under a constant shift, so
-`sigma(R - b)` equals `sigma(R)` exactly. Only `value-head` changes the scale
-too, because `V(s)` differs per decision.
-
-Two combinations that were previously unreachable now are:
-
-- **Centered but unscaled.** Turning normalization off used to remove the
-  centering with it, leaving the raw return. `--baseline batch-mean
-  --no-normalize-advantages` now gives `R - mu_B` without the division.
-- **A zero-variance iteration keeps its offset.** It used to collapse to all
-  zeros because the mean was always removed. It now keeps whatever offset the
-  selected baseline implies — still zero for `batch-mean`, but not for
-  `constant`.
-
-One existing configuration does change numerically. With `--value-head` the
-advantage was `(R - V - mean(R - V)) / sigma(R - V)`; that extra centering was
-an artifact of normalization doing double duty, and the advantage is now
-`(R - V) / sigma(R - V)`.
-
-The critic head and the baseline are independent. `--baseline value-head`
-requires `--value-head`; every other choice may be combined with it, which keeps
-training `V(s)` through the value loss without subtracting it — the combination
-that separates the cost of training the critic from the effect of using it.
-
-The positional pipeline level must come before `--baseline`, because
-`constant` takes its value as a following token. The selected baseline is an
-immutable resume field, reloaded from the saved run configuration like the
-algorithm.
-
-The network defaults to the two ruleset-specific hidden layers in the table
-above (256 and 128 for the default double-six game).
-`--hidden-layers N` selects between 1 and 8 hidden layers, and
-`--hidden1-size` through `--hidden8-size` size them individually. An omitted
-width uses the ruleset default for the first two positions and 128 for every
-later layer,
-and sizing a layer the requested depth does not have is an error. The choice
-applies consistently to the supervised and RL stages:
-
-```bash
-python -m training.pipeline forever --hidden1-size 512 --hidden2-size 256 \
-  --retrain-supervised --run-name wider
-
-python -m training.pipeline forever --hidden-layers 4 \
-  --hidden1-size 512 --hidden4-size 64 \
-  --retrain-supervised --run-name deep
-```
-
-Value-head state and architecture are immutable resume fields.
-
-Regularization is off by default. `--weight-decay [COEFFICIENT]` and
-`--dropout [RATE]` each enable one regularizer for **both** the supervised and
-the RL network; passing a flag without a value uses its default coefficient
-(`0.0001` and `0.1`):
-
-```bash
-python -m training.pipeline big --weight-decay --dropout
-python -m training.pipeline big --weight-decay 0.00005 --dropout 0.2
-```
-
-Both settings join the run identity, so they are locked for `forever` runs like
-every other hyperparameter. Runs and supervised assets created before these
-controls existed keep working: a missing field is read as the disabled value.
-See [`training/utils/README.md`](training/utils/README.md#shared-regularization) for the
-complete behavior, including the PPO ratio caveat when dropout is enabled.
-
-For `forever`, the analysis bundle's `run_config.json` records the full locked configuration and its
-SHA-256, the ruleset, optional run name, supervised origin, and the machine on
-which the run started. A checkpoint must carry the same hash. A conflicting
-training or asset argument on a resume invocation produces a warning, is
-ignored, and the value in `run_config.json` is used. Use a new `--run-name` or
-`--restart-rl` for a distinct experiment. A Git commit change also produces a
-warning but never blocks resume; the original commit remains recorded as the
-run's provenance. `--resume RUN_DIR` is an explicit alias for
-`--resume-from RUN_DIR`.
-
-The `forever` periodic RL-vs-random worker autotune runs once. Its selection is
-stored in `periodic_diagnostic_tuning.json` and reused at every later milestone
-and after resume. A new run started with `--async-periodic-diagnostics`
-instead measures those points in one low-priority background process while RL
-continues; see
-[`diagnostics/README.md`](diagnostics/README.md#asynchronous-monitoring). The RL progress bar reports one `avg_games_s` value computed
-over the full persisted history of the run.
-
-The first SIGINT/SIGTERM finishes the current iteration, publishes a safe
-checkpoint, and exits; `forever` never launches the final all-pairs diagnostic.
-
-Domino games always produce one winner. Empty hand wins first; blocked games
-use fewest pips, then fewest tiles, then the most recent valid tile play among
-the players still tied. Diagnostics therefore report win/loss outcomes and the
-winning-reason distribution, never game-result draws.
-
-Supervised epoch counts are maximum budgets. Training stops earlier by default
-after a conservative repeated-block check confirms that training loss has
-saturated. This training-plateau policy is fixed by documented `TP_*` constants
-in `agents/nn.py`; it is intentionally not a command-line hyperparameter.
-
-Use `python -m training.pipeline --help` for rebuild, resume, worker, device,
-PPO, and diagnostic controls.
-
-Run stages directly when iterating on one component:
+Each stage also runs on its own, which is faster when iterating on one
+component:
 
 ```bash
 python -m training.datagen.generator --workers auto --seed 123
 python -m training.supervised.cli --sl-device auto --sl-seed 123
-python -m training.rl.cli --rl-workers auto --seed 123
 python -m training.rl.cli --fresh-from-sl --rl-workers auto --seed 123
-python -m diagnostics.evaluate --games 10000 --seed 123
 ```
 
-The standalone RL command defaults to
-continuing a compatible RL checkpoint when one exists; `--fresh-from-sl`
-forces a new RL run from the supervised checkpoint. If that checkpoint is
-absent, it instead creates a seeded random policy with the selected ruleset's
-default architecture.
+Every entry point that produces games accepts `--ruleset` with `double-six`
+(the default), `double-five`, `double-four`, or `double-three`. Network sizes
+shrink with the deck, and datasets, checkpoints and runs are never shared
+across rulesets; see the [ruleset contract](training/README.md#ruleset-contract).
 
-## Diagnostics
-
-Evaluate all supported agents against the common random baseline:
+## Evaluate
 
 ```bash
-python -m diagnostics.evaluate
 python -m diagnostics.evaluate --games 5000 --workers auto --seed 123
+python -m diagnostics.pairwise --agent heuristic --opponent random \
+  --games 1000 --seed 123
 ```
 
-Evaluate one matchup:
-
-```bash
-python -m diagnostics.pairwise \
-  --agent heuristic --opponent random --games 1000 --seed 123
-```
-
-Canonical diagnostic agent names are `rl`, `neural`, `heuristic`, and
-`random`. Detailed output schemas and interpretation guidance live in
+Agent names are `rl`, `neural`, `heuristic`, and `random`. Output schemas,
+plots, statistics and the RL progress monitor are described in
 [`diagnostics/README.md`](diagnostics/README.md).
+
+## Experiments
+
+Long comparisons run as wall-clock-budgeted sequences of `forever` runs, one
+point at a time, with graceful stops and exact resume. The shared runners and
+the experiments built on them -- reward-distance grid, opponent buckets,
+baselines, the one-factor sweep and its extension, and the adaptive
+learning-rate search -- are documented in
+[`train_script/README.md`](train_script/README.md). Per-machine wrappers
+(`run_*_<machine>.sh`) carry each machine's time budget; many are kept out of
+Git and shared directly.
+
+Each study of finished runs lives in its own `analysis/<study>/` directory with
+a README describing its question, inputs, commands and outputs, for example
+[`analysis/analise_warmup_lr/`](analysis/analise_warmup_lr/README.md) and
+[`analysis/rl_performance_optimization/`](analysis/rl_performance_optimization/README.md).
 
 ## Generated artifacts
 
-Generated datasets, models, and reports are ignored by Git. Important default
-locations are:
+Datasets, weights, runs and reports are generated and ignored by Git. Do not
+edit them by hand or delete them casually: long runs depend on their numbered
+checkpoints and resume state.
 
 | Path | Contents |
 |---|---|
-| `dataset/supervised_dataset_standard_seed42.jsonl` | Canonical heuristic-labelled real decisions for seed 42. |
-| `dataset/supervised_dataset_standard_seed42.meta.json` | Dataset identity, provenance, and SHA-256. |
-| `dataset/supervised_dataset_standard_seed42.random_manifest.json` | Root seed and NumPy stream-derivation contract for the canonical dataset. |
-| `models/domino_sl_standard_seed42.npz` | Canonical supervised policy. |
-| `models/domino_sl_standard_seed42.meta.json` | Supervised origin, configuration, convergence, and SHA-256. |
-| `models/domino_sl_standard_seed42.random_manifest.json` | Supervised root seed and NumPy stream-derivation contract. |
-| `models/domino_sl_standard_seed42_loss.png` | Canonical training and validation loss curves. |
-| `models/rl/domino_rl_<small-or-default>_seed<seed>_run<id>/supervised/` | Non-reused dataset, cache, supervised checkpoint, metadata, and loss plot for one quick run. |
-| `models/rl/domino_rl_<level>_seed42/` | Complete RL state, milestones, diagnostics, and progress curve. |
-| `diagnostics/results/` | Pairwise, aggregate, experiment, CSV, JSON, XLSX, and plot outputs. |
+| `dataset/supervised_dataset_standard_seed<seed>.jsonl` | Reusable heuristic-labelled decisions, with sibling metadata and random manifest ([`dataset/`](dataset/README.md)) |
+| `models/domino_sl_standard_seed<seed>.npz` | Reusable supervised policy, with metadata, random manifest and loss plot ([`models/`](models/README.md)) |
+| `models/rl/domino_rl_<level>_seed<seed>[_run<name>]/` | One RL run: resume marker and state, checkpoints, opponent pool, archive |
+| `models/rl/.../<date>-<number>_<machine>_<tail>/` | The run's shareable analysis bundle: `run_config.json`, periodic history, progress CSV and plots |
+| `diagnostics/results/` | Evaluation and pairwise reports |
+| `train_script/grid_search_results/<machine>/` | Sequence state, per-attempt logs and experiment summaries |
 
-Do not commit, manually edit, or casually delete generated artifacts. Long
-experiments may depend on their numbered checkpoints and `.resume.npz` state.
+The bundle is named after the run's start date, its number in the experiment
+log shared across machines (`XXX` until filled in, or `--run-ordinal`), the
+machine, and the parameters it moves off the defaults; see
+[`training/README.md`](training/README.md).
 
 ## Tests
 
-Run the complete suite:
-
 ```bash
 python -m pytest -q
-```
-
-Useful focused checks:
-
-```bash
-python tests/test_core.py
-python tests/test_parallel_dataset.py
-python tests/test_parallel_diagnostics.py
-python tests/test_parallel_rl.py
-python ui/test_ui_controller.py
-python -m compileall -q agents diagnostics middleware training ui utils \
-  train_script
-```
-
-Pylint is required after every modification and currently reports without
-blocking:
-
-```bash
 python -m pylint agents benchmarks diagnostics middleware tests train_script \
   training ui utils
-```
-
-Do not use `python -m pylint .`: recursive discovery would also traverse the
-local `.venv` and report on third-party packages, making the check much slower
-and obscuring project findings. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and
-the staged [`Pylint roadmap`](docs/PYLINT_ROADMAP.md).
-
-The headless benchmark verifies both fixed-seed equivalence and throughput:
-
-```bash
 python benchmarks/headless_step_benchmark.py --games 100
 ```
 
+Name the Pylint directories explicitly: `pylint .` would also scan the virtual
+environment. The required checks for each kind of change are in the impact
+matrix of [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Repository map
 
-| Path | Responsibility |
-|---|---|
-| `middleware/` | Rules engine, agent protocol, orchestration, exact opponent inference. |
-| `agents/` | State/action encoding and all gameplay policies. |
-| `training/` | Dataset generation, supervised training, RL, checkpoints, resume. |
-| `diagnostics/` | Evaluation, metrics, reports, plots, and experiment analysis. |
-| `ui/` | Visual simulator, controls, layout, rendering, and controller tests. |
-| `train_script/` | Reproducible Python and shell pipeline entry points. |
-| `utils/` | Resource limits, runtime status, and atomic artifact helpers. |
-| `tests/` | Core, parallelism, pipeline, and regression tests. |
+| Path | Responsibility | README |
+|---|---|---|
+| `middleware/` | Rules engine, rulesets, agent protocol, game orchestration, exact opponent inference | [middleware](middleware/README.md) |
+| `agents/` | State/action encoding, network backends and every player | [agents](agents/README.md) |
+| `training/` | Pipeline levels, run configuration, bundles and stage entry points | [training](training/README.md) |
+| `training/datagen/` | Supervised dataset generation | [datagen](training/datagen/README.md) |
+| `training/supervised/` | Supervised training loop, scheduler and architecture | [supervised](training/supervised/README.md) |
+| `training/rl/` | Self-play RL: PPO, rewards, baselines, warmup, opponent pool, checkpoints, resume | [rl](training/rl/README.md) |
+| `training/utils/` | Seed derivation, shared regularization, encoded-feature contract | [training utils](training/utils/README.md) |
+| `diagnostics/` | Evaluation, RL progress monitor, reports and plots | [diagnostics](diagnostics/README.md) |
+| `train_script/` | Pipeline wrappers and experiment sequence runners | [train_script](train_script/README.md) |
+| `analysis/` | One directory per study of finished runs | one README per study |
+| `ui/` | Visual simulator, controls, layout and rendering | [ui](ui/README.md) |
+| `utils/` | Resource limits, machine identity, runtime status, atomic artifacts, central randomness | [myrandom](utils/myrandom/README.md) |
+| `dataset/`, `models/` | Generated datasets and weights | [dataset](dataset/README.md), [models](models/README.md) |
+| `tests/` | Unit, parallelism, pipeline and regression tests | -- |
+| `benchmarks/` | Headless engine throughput and fixed-seed equivalence | -- |
+| `docs/` | Architecture, GPU setup and the Pylint roadmap | [docs](docs/README.md) |
 
 ## Documentation
 
-Start with [`docs/README.md`](docs/README.md), which indexes architecture,
-setup, contribution rules, and every module README. In particular:
+Start with [`docs/README.md`](docs/README.md), which indexes every guide and
+module README. In particular:
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) explains boundaries and data
-  flow;
-- [`docs/GPU_SETUP.md`](docs/GPU_SETUP.md) covers CUDA/CuPy installation and
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): boundaries and data flow;
+- [`docs/GPU_SETUP.md`](docs/GPU_SETUP.md): CUDA/CuPy installation and
   troubleshooting;
-- [`docs/PYLINT_ROADMAP.md`](docs/PYLINT_ROADMAP.md) records the permissive
-  baseline and staged quality ratchet;
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) defines compatibility, determinism,
-  testing, generated-file, and documentation requirements;
-- [`AGENTS.md`](AGENTS.md) gives short instructions for coding agents.
+- [`docs/PYLINT_ROADMAP.md`](docs/PYLINT_ROADMAP.md): the Pylint baseline and
+  staged ratchet;
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): compatibility, determinism, testing,
+  generated files and documentation ownership;
+- [`AGENTS.md`](AGENTS.md): short instructions for coding agents.

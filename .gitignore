@@ -105,6 +105,8 @@ train_script/run_lr_factor_search_rick_old_notebook.sh
 train_script/_one_factor_ext_points.bash
 
 analysis/analise_baselines_0409/*
+# Built by analysis/analise_gpi/build_page.py from pagina_modelo.html.
+analysis/analise_gpi/pagina.html
 analysis/recompensa_anterior_vs_atual/*
 # LaTeX build artifacts for the expanded-abstract report
 references/resumo_expandido/*.aux

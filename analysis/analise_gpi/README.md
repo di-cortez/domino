@@ -33,7 +33,7 @@ Comandos, a partir da raiz do repositório:
 |---|---|
 | `analyze.py` | Lê as seis corridas e calcula janelas, ajustes, par direto, ponte e mecanismo do PPO |
 | `build_page.py` | Preenche `pagina_modelo.html` com os números e os dados e grava `pagina.html` |
-| `pagina.html` | Página autossuficiente enviada ao orientador |
+| `pagina.html` | Página autossuficiente enviada ao orientador; gerada, fora do Git |
 | `dados_pagina.json` | Tudo o que a página desenha |
 | `analysis_summary.json` | Os mesmos resultados sem as curvas, legível |
 | `curvas_vitoria.csv` | Curvas brutas e média móvel de 5 pontos, formato longo |
